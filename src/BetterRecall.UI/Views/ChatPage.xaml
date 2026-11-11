@@ -1,0 +1,76 @@
+<Page
+    x:Class="BetterRecall.UI.Views.ChatPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:contracts="using:BetterRecall.Contracts"
+    xmlns:views="using:BetterRecall.UI.Views">
+    <Grid>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="260" />
+            <ColumnDefinition Width="*" />
+            <ColumnDefinition x:Name="DetailColumn" Width="Auto" />
+        </Grid.ColumnDefinitions>
+
+        <!-- Left: saved chats sidebar -->
+        <Grid Padding="12,12,12,12" RowSpacing="10" Background="{ThemeResource LayerFillColorDefaultBrush}"
+              BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="0,0,1,0">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <!-- Top: New Chat button -->
+            <Button x:Name="NewChatButton" HorizontalAlignment="Stretch" Click="NewChat_Click">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <FontIcon Glyph="&#xE710;" FontSize="14" />
+                    <TextBlock x:Name="NewChatText" />
+                </StackPanel>
+            </Button>
+
+            <!-- Saved chats list -->
+            <ListView x:Name="SavedList" Grid.Row="1" SelectionMode="Single" SelectionChanged="SavedList_SelectionChanged">
+                <ListView.ItemTemplate>
+                    <DataTemplate x:DataType="contracts:ChatSummary">
+                        <Grid Padding="4,6" RowSpacing="2" ContextRequested="Chat_ContextRequested" Tag="{x:Bind}">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <TextBlock Text="{x:Bind Title}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                            <TextBlock Grid.Row="1" Text="{x:Bind views:ChatPage.FormatTime(Updated)}"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        </Grid>
+                    </DataTemplate>
+                </ListView.ItemTemplate>
+            </ListView>
+
+            <!-- Bottom: Delete all chats -->
+            <Button x:Name="DeleteAllButton" Grid.Row="2" HorizontalAlignment="Stretch" Click="DeleteAll_Click">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <FontIcon Glyph="&#xE74D;" FontSize="14" />
+                    <TextBlock x:Name="DeleteAllText" />
+                </StackPanel>
+            </Button>
+        </Grid>
+
+        <!-- Middle: ChatView -->
+        <views:ChatView x:Name="ChatControl" Grid.Column="1" />
+
+        <!-- Right: DetailPane with close button -->
+        <Grid x:Name="DetailHost" Grid.Column="2" Width="380" Visibility="Collapsed"
+              Background="{ThemeResource LayerFillColorDefaultBrush}"
+              BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1,0,0,0">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+            <Button HorizontalAlignment="Right" VerticalAlignment="Center" Margin="8,8,8,0" Padding="8,4"
+                    x:Name="CloseDetailButton" Background="Transparent" BorderThickness="0" Click="CloseDetail_Click">
+                <FontIcon Glyph="&#xE711;" FontSize="14" />
+            </Button>
+            <views:DetailPane x:Name="Detail" Grid.Row="1" />
+        </Grid>
+    </Grid>
+</Page>

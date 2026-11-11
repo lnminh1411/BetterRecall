@@ -42,6 +42,22 @@ public sealed class AiSettings
     public string Provider { get; set; } = "gemini"; // gemini | openai-compatible | claude
     public string Endpoint { get; set; } = "";        // empty = the provider's official endpoint; https, or http on loopback
     public string Model { get; set; } = "";           // empty = the provider default (AiDefaults)
+    public string Share { get; set; } = "textImages"; // chat: textImages | text | metadata (AiShare)
+    public int ChatMaxHits { get; set; } = 8;         // captures the chat may share per search call, 1..20
+    public int ChatMaxImages { get; set; } = 3;       // redacted images per search call, 0..8
+    public int DailyRequests { get; set; } = 200;     // local budget, requests per local day; 0 = no limit
+    public long DailyTokens { get; set; } = 500_000;  // local budget, tokens per local day; 0 = no limit
+    public bool ChatHistory { get; set; } = true;     // save chats in the encrypted store; turning it off deletes them
+}
+
+/// <summary>ai.share: what a chat may send about a capture. Each level includes the one below.</summary>
+public static class AiShare
+{
+    public const string Metadata = "metadata";        // time, kind, app, site
+    public const string Text = "text";                // + title and text snippet, redacted
+    public const string TextImages = "textImages";    // + redacted images (only when a redactor that redacts images exists)
+    public static readonly string[] All = [TextImages, Text, Metadata];
+    public static int Rank(string? share) => share switch { Metadata => 0, Text => 1, TextImages => 2, _ => -1 };
 }
 
 /// <summary>Provider defaults for cloud describe (checked against the providers' docs 2026-11-11).</summary>

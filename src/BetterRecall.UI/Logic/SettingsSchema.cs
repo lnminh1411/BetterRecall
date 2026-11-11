@@ -174,6 +174,12 @@ public static partial class SettingsSchema
         new("ai.provider", "ai", SettingType.Choice, Choices: [.. BetterRecall.Contracts.AiDefaults.Providers], EnabledWhenKey: "ai.enabled", EnabledWhenValue: "true"),
         new("ai.model", "ai", SettingType.Text, Pattern: "^$|^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,127}$", EnabledWhenKey: "ai.enabled", EnabledWhenValue: "true"),
         new("ai.endpoint", "ai", SettingType.Text, Pattern: @"^$|^https://\S+$|^http://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(/\S*)?$", EnabledWhenKey: "ai.enabled", EnabledWhenValue: "true"),
+        new("ai.share", "ai", SettingType.Choice, Choices: [.. BetterRecall.Contracts.AiShare.All], EnabledWhenKey: "ai.enabled", EnabledWhenValue: "true"),
+        new("ai.chatMaxHits", "ai", SettingType.Int, 1, 20, EnabledWhenKey: "ai.enabled", EnabledWhenValue: "true"),
+        new("ai.chatMaxImages", "ai", SettingType.Int, 0, 8, EnabledWhenKey: "ai.enabled", EnabledWhenValue: "true"),
+        new("ai.dailyRequests", "ai", SettingType.Int, 0, 100000, EnabledWhenKey: "ai.enabled", EnabledWhenValue: "true"),
+        new("ai.dailyTokens", "ai", SettingType.Int, 0, 1000000000, EnabledWhenKey: "ai.enabled", EnabledWhenValue: "true"),
+        new("ai.chatHistory", "ai", SettingType.Bool, EnabledWhenKey: "ai.enabled", EnabledWhenValue: "true"),
     ];
 
     public static SettingDescriptor? Find(string key) => All.FirstOrDefault(d => string.Equals(d.Key, key, StringComparison.OrdinalIgnoreCase));

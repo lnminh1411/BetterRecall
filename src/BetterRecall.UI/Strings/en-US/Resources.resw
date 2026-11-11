@@ -748,4 +748,58 @@
   <data name="Replays_PlayerName" xml:space="preserve"><value>Replay of {0}</value></data>
   <data name="Replays_PlayerClose" xml:space="preserve"><value>Close</value></data>
   <data name="Replays_OpenExternal" xml:space="preserve"><value>Open in default player</value></data>
+  <data name="Nav_Chat.Content" xml:space="preserve"><value>Ask</value></data>
+  <data name="Launcher_AskToggle.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve"><value>Ask with cloud AI</value></data>
+  <data name="Launcher_AskToggle.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve"><value>Ask with cloud AI</value></data>
+  <data name="S_ai_share" xml:space="preserve"><value>Capture details to share</value></data>
+  <data name="S_ai_share_D" xml:space="preserve"><value>What a chat may send about a capture. Sensitive details are redacted; an image is sent only after on-screen text reading has checked it.</value></data>
+  <data name="S_ai_share_textImages" xml:space="preserve"><value>Text and redacted images</value></data>
+  <data name="S_ai_share_text" xml:space="preserve"><value>Text only (redacted)</value></data>
+  <data name="S_ai_share_metadata" xml:space="preserve"><value>Time, app and site only</value></data>
+  <data name="S_ai_chatMaxHits" xml:space="preserve"><value>Maximum captures per search</value></data>
+  <data name="S_ai_chatMaxHits_D" xml:space="preserve"><value>Captures the chat may share per search call (1 to 20).</value></data>
+  <data name="S_ai_chatMaxImages" xml:space="preserve"><value>Maximum images per search</value></data>
+  <data name="S_ai_chatMaxImages_D" xml:space="preserve"><value>Redacted images the chat may share per search call (0 to 8).</value></data>
+  <data name="S_ai_dailyRequests" xml:space="preserve"><value>Daily request limit</value></data>
+  <data name="S_ai_dailyRequests_D" xml:space="preserve"><value>0 means no limit; BetterRecall warns at 80% and stops at 100%.</value></data>
+  <data name="S_ai_dailyTokens" xml:space="preserve"><value>Daily token limit</value></data>
+  <data name="S_ai_dailyTokens_D" xml:space="preserve"><value>0 means no limit; BetterRecall warns at 80% and stops at 100%.</value></data>
+  <data name="S_ai_chatHistory" xml:space="preserve"><value>Save chat history</value></data>
+  <data name="S_ai_chatHistory_D" xml:space="preserve"><value>Keep chats in the encrypted store. Turning it off deletes saved chats.</value></data>
+  <data name="Chat_LocalNote" xml:space="preserve"><value>The AI endpoint is on this PC: questions and captures stay on this PC.</value></data>
+  <data name="Chat_RetryAt" xml:space="preserve"><value>Try again after {0}</value></data>
+  <data name="Chat_TryAgain" xml:space="preserve"><value>Try again</value></data>
+  <data name="Chat_ApprovalTitle" xml:space="preserve"><value>Share these captures with {0}?</value></data>
+  <data name="Chat_ApprovalBody" xml:space="preserve"><value>Only what is listed below is sent, for this chat only. Untick anything you do not want to share.</value></data>
+  <data name="Chat_AllowChat" xml:space="preserve"><value>Allow for this chat</value></data>
+  <data name="Chat_DontShare" xml:space="preserve"><value>Don't share</value></data>
+  <data name="Chat_InputPlaceholder" xml:space="preserve"><value>Ask about anything you saw or heard...</value></data>
+  <data name="Chat_Send" xml:space="preserve"><value>Send</value></data>
+  <data name="Chat_Stop" xml:space="preserve"><value>Stop</value></data>
+  <data name="Chat_Usage" xml:space="preserve"><value>Today: {0} of {1} requests, {2} of {3} tokens</value></data>
+  <data name="Chat_NoLimit" xml:space="preserve"><value>no limit</value></data>
+  <data name="Chat_Off" xml:space="preserve"><value>Cloud chat is off. Turning it on ends BetterRecall's no-network guarantee.</value></data>
+  <data name="Chat_OpenSettings" xml:space="preserve"><value>Open AI settings</value></data>
+  <data name="Chat_New" xml:space="preserve"><value>New chat</value></data>
+  <data name="Chat_Rename" xml:space="preserve"><value>Rename</value></data>
+  <data name="Chat_RenameTitle" xml:space="preserve"><value>Rename chat</value></data>
+  <data name="Chat_Delete" xml:space="preserve"><value>Delete</value></data>
+  <data name="Chat_DeleteConfirm" xml:space="preserve"><value>Delete this chat? This cannot be undone.</value></data>
+  <data name="Chat_DeleteAll" xml:space="preserve"><value>Delete all chats</value></data>
+  <data name="Chat_DeleteAllConfirm" xml:space="preserve"><value>Delete all chats? This cannot be undone.</value></data>
+  <data name="Chat_CloseDetail" xml:space="preserve"><value>Close detail</value></data>
+  <data name="Chat_Sources" xml:space="preserve"><value>Sources</value></data>
+  <data name="Chat_Empty" xml:space="preserve"><value>Ask anything about your past activity.</value></data>
+  <data name="Chat_ErrAuth" xml:space="preserve"><value>Authentication failed</value></data>
+  <data name="Chat_ErrQuota" xml:space="preserve"><value>Quota exceeded</value></data>
+  <data name="Chat_ErrRate" xml:space="preserve"><value>Rate limit reached</value></data>
+  <data name="Chat_ErrOverloaded" xml:space="preserve"><value>Service overloaded</value></data>
+  <data name="Chat_ErrContext" xml:space="preserve"><value>Context limit exceeded</value></data>
+  <data name="Chat_ErrModel" xml:space="preserve"><value>Model error</value></data>
+  <data name="Chat_ErrOffline" xml:space="preserve"><value>Provider unreachable</value></data>
+  <data name="Chat_ErrTimeout" xml:space="preserve"><value>Request timed out</value></data>
+  <data name="Chat_ErrBudget" xml:space="preserve"><value>Daily budget reached</value></data>
+  <data name="Chat_ErrRefused" xml:space="preserve"><value>Request refused</value></data>
+  <data name="Chat_ErrGeneric" xml:space="preserve"><value>Chat error</value></data>
+  <data name="Chat_Searching" xml:space="preserve"><value>Searching your history for "{0}"</value></data>
 </root>

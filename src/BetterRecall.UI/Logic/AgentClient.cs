@@ -109,6 +109,53 @@ public sealed class AgentClient(string pipeName, IServerTrust trust, TimeSpan? c
         return result;
     }
 
+    /// <summary>
+    /// A request with a multi-line reply (chat). Each line is passed to onLine; onLine returns true for the line that
+    /// ends the reply. An error envelope always ends it. Returns the last line's result. Cancelling drops the connection,
+    /// which also cancels the request on the agent.
+    /// </summary>
+    public async Task<AgentResult> StreamAsync(string line, Func<AgentResult, bool> onLine, CancellationToken ct = default)
+    {
+        if (Encoding.UTF8.GetByteCount(line) > LineProtocol.MaxRequestBytes)
+            return AgentResult.Fail(AgentErrorKind.Server, LineProtocol.TooLongError);
+        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        AgentResult result;
+        try
+        {
+            if (_conn is null)
+            {
+                var (c, err) = await AgentConnection.ConnectAsync(pipeName, trust, _timeout, ct).ConfigureAwait(false);
+                if (c is null) { result = AgentResult.Fail(err); goto done; }
+                _conn = c;
+            }
+            try
+            {
+                await _conn.WriteLineAsync(line, ct).ConfigureAwait(false);
+                while (true)
+                {
+                    var response = await _conn.ReadLineAsync(ct).ConfigureAwait(false);
+                    if (response is null) { await DropAsync().ConfigureAwait(false); result = AgentResult.Fail(AgentErrorKind.NotRunning); break; }
+                    result = Parse(response);
+                    if (!result.Ok || onLine(result)) break;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                await DropAsync().ConfigureAwait(false);
+                throw;
+            }
+            catch (Exception ex) when (ex is IOException or ObjectDisposedException or InvalidOperationException)
+            {
+                await DropAsync().ConfigureAwait(false);
+                result = AgentResult.Fail(AgentErrorKind.NotRunning);
+            }
+        done:;
+        }
+        finally { _gate.Release(); }
+        ResponseClassified?.Invoke(result.Kind);
+        return result;
+    }
+
     private async Task<AgentResult> SendLockedAsync(string line, CancellationToken ct)
     {
         if (_conn is null)

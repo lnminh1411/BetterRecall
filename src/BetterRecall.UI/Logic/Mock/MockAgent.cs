@@ -46,6 +46,10 @@ public sealed class MockAgent
     private DateTimeOffset _passwordBlockedUntil;
     private bool _aiKeySet = true;
     private readonly Dictionary<string, (string Id, DateTimeOffset Expires)> _describeTokens = [];
+    private readonly Dictionary<string, (ChatSummary Summary, List<ChatMessage> Messages)> _savedChats = [];
+    private readonly HashSet<string> _approvedChats = [];
+    private readonly Dictionary<string, (string? ChatId, string Question, List<ChatApprovalItem> Items)> _pendingApprovals = [];
+    private int _mockChatCounter;
 
     public const string WrongPassphrase = "wrong";
 
@@ -175,6 +179,18 @@ public sealed class MockAgent
             _audit.Add(new AuditEntry(now.AddMinutes(-i * 37), pipe, 4000 + rnd.Next(30000), image, verb, verb == "search" ? rnd.Next(0, 11) : 1,
                 verb == "search" ? Convert.ToHexString(SHA256.HashData(BitConverter.GetBytes(i))).ToLowerInvariant() : ""));
         }
+
+        // Seed sample chat
+        var sampleId = "mc_sample_tokyo";
+        var sampleScreenRows = _rows.Where(r => r.Meta.Kind == CaptureKind.Screen).Take(2).ToList();
+        var sampleSources = sampleScreenRows.Select(r => new ChatSource(
+            r.Meta.Id, r.Meta.Ts, r.Meta.Kind, r.Meta.App, r.Meta.Title, r.Meta.Site, r.Meta.ReplayId, r.Meta.ReplayOffsetMs)).ToList();
+        var sampleUser = new ChatMessage(1, now.AddHours(-2), "user", "When is my flight to Tokyo?");
+        var sampleAssistant = new ChatMessage(2, now.AddHours(-2).AddMinutes(1), "assistant",
+            "Your flight to Tokyo (JL005) departs at 11:20 AM based on your confirmation [S1].", sampleSources);
+        var sampleSummary = new ChatSummary(sampleId, "Flight to Tokyo", now.AddHours(-2), now.AddHours(-2).AddMinutes(1), 2);
+        _savedChats[sampleId] = (sampleSummary, [sampleUser, sampleAssistant]);
+        _approvedChats.Add(sampleId);
     }
 
     // ---------------- dispatcher ----------------
@@ -182,11 +198,320 @@ public sealed class MockAgent
     private static readonly string[] Verbs =
         ["ping", "version", "help", "status", "search", "get", "thumb", "subscribe", "pause", "resume", "purge",
          "unlock", "lock", "consent", "settings", "timeline", "keyframe", "replay", "panic", "audit", "bench", "facets", "history",
-         "password", "ai", "describe"];
+         "password", "ai", "describe", "chat"];
 
-    private static readonly HashSet<string> DataVerbs = ["search", "get", "thumb", "keyframe", "timeline", "audit", "replay list", "replay export", "facets", "history", "describe"];
+    private static readonly HashSet<string> DataVerbs = ["search", "get", "thumb", "keyframe", "timeline", "audit", "replay list", "replay export", "facets", "history", "describe", "chat"];
 
     public bool IsLocked { get { lock (_lock) return _locked; } }
+
+    /// <summary>Request lines answered with several lines (chat send / approve / deny).</summary>
+    public static bool IsStreamLine(string line)
+    {
+        var p = line.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        return p.Length >= 2 && p[0].Equals("chat", StringComparison.OrdinalIgnoreCase) && p[1].ToLowerInvariant() is "send" or "approve" or "deny";
+    }
+
+    /// <summary>Writes the reply lines of a stream line. Never throws except for cancellation.</summary>
+    public async Task StreamAsync(string line, Func<string, Task> write, CancellationToken ct = default)
+    {
+        try { await ChatStreamAsync(line.Trim(), write, ct); }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception) { await write(Envelope.Error(AgentErrors.Internal)); }
+    }
+
+    private string ChatVerb(string[] args, string rest)
+    {
+        if (args.Length == 0) return Envelope.Error("Usage: chat list | chat get <id> | chat rename <json> | chat delete <id> | chat clear");
+        var sub = args[0].ToLowerInvariant();
+        lock (_lock)
+        {
+            switch (sub)
+            {
+                case "list" when args.Length == 1:
+                {
+                    var items = _savedChats.Values.Select(v => v.Summary).OrderByDescending(s => s.Updated).ToList();
+                    return Items(items, ContractsJson.Default.ItemsReplyChatSummary);
+                }
+                case "get" when args.Length == 2:
+                {
+                    var id = args[1];
+                    if (!_savedChats.TryGetValue(id, out var entry)) return Envelope.Error(AgentErrors.NotFound);
+                    bool approved = _approvedChats.Contains(id);
+                    return Envelope.Ok(new ChatDetail(entry.Summary, entry.Messages, approved), ContractsJson.Default.ChatDetail);
+                }
+                case "rename" when rest.Length > "rename".Length:
+                {
+                    var json = rest["rename".Length..].Trim();
+                    JsonObject? o;
+                    try { o = JsonNode.Parse(json) as JsonObject ?? throw new JsonException(); }
+                    catch (JsonException) { return Envelope.Error(AgentErrors.InvalidJson); }
+                    var id = o["id"]?.GetValue<string>();
+                    var title = o["title"]?.GetValue<string>();
+                    if (string.IsNullOrEmpty(id) || title is null) return Envelope.Error(AgentErrors.InvalidJson);
+                    if (!_savedChats.TryGetValue(id, out var entry)) return Envelope.Error(AgentErrors.NotFound);
+                    var updated = entry.Summary with { Title = title, Updated = Now };
+                    _savedChats[id] = (updated, entry.Messages);
+                    return Envelope.Ok("null");
+                }
+                case "delete" when args.Length == 2:
+                {
+                    var id = args[1];
+                    if (!_savedChats.Remove(id)) return Envelope.Error(AgentErrors.NotFound);
+                    _approvedChats.Remove(id);
+                    return Envelope.Ok("null");
+                }
+                case "clear" when args.Length == 1:
+                {
+                    _savedChats.Clear();
+                    _approvedChats.Clear();
+                    return Envelope.Ok("null");
+                }
+                default:
+                    return Envelope.Error("Usage: chat list | chat get <id> | chat rename <json> | chat delete <id> | chat clear");
+            }
+        }
+    }
+
+    private async Task ChatStreamAsync(string line, Func<string, Task> write, CancellationToken ct)
+    {
+        bool locked;
+        lock (_lock)
+        {
+            ExpireUnlock();
+            locked = _locked && Bool("security.requireUnlock");
+        }
+        if (locked)
+        {
+            await write(Envelope.Error(AgentErrors.StoreLocked));
+            return;
+        }
+
+        if (!Bool("ai.enabled"))
+        {
+            await write(Envelope.Error(AgentErrors.AiOff));
+            return;
+        }
+
+        var parts = line.Split(' ', 3);
+        var sub = parts.Length > 1 ? parts[1].ToLowerInvariant() : "";
+        var rest = parts.Length > 2 ? parts[2].Trim() : "";
+
+        async Task EmitAsync(ChatEvent evt)
+        {
+            var json = JsonSerializer.Serialize(evt, ContractsJson.Default.ChatEvent);
+            await write(Envelope.Ok(json));
+            if (SlowVerbDelay > TimeSpan.Zero) await Task.Delay(SlowVerbDelay / 4, ct);
+        }
+
+        switch (sub)
+        {
+            case "send":
+            {
+                JsonObject? o;
+                try { o = JsonNode.Parse(rest) as JsonObject ?? throw new JsonException(); }
+                catch (JsonException) { await write(Envelope.Error(AgentErrors.InvalidJson)); return; }
+
+                var chatId = o["chat"]?.GetValue<string>();
+                var text = o["text"]?.GetValue<string>() ?? "";
+                if (string.IsNullOrEmpty(chatId))
+                    chatId = "mc_" + Interlocked.Increment(ref _mockChatCounter);
+
+                await EmitAsync(new ChatEvent("start", ChatId: chatId));
+
+                var qLower = text.ToLowerInvariant();
+                if (qLower.Contains("quota error"))
+                {
+                    await EmitAsync(new ChatEvent("error", Code: "quota", Text: "Your provider quota or credit is used up. Check the plan or billing with the provider; retrying will not help."));
+                    return;
+                }
+                if (qLower.Contains("rate limit"))
+                {
+                    await EmitAsync(new ChatEvent("error", Code: "rate", Text: "The provider's rate limit was reached. Try again in 30 s.", RetryAt: Now.AddSeconds(30)));
+                    return;
+                }
+                if (qLower.Contains("budget"))
+                {
+                    await EmitAsync(new ChatEvent("error", Code: "budget", Text: "Today's cloud budget is used up (200 of 200 requests). It resets at midnight, or raise the limit in Settings > AI."));
+                    return;
+                }
+
+                await EmitAsync(new ChatEvent("search", Query: text));
+
+                bool approved;
+                lock (_lock) approved = _approvedChats.Contains(chatId);
+                if (!approved)
+                {
+                    var words = text.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                    List<Row> rows;
+                    lock (_lock)
+                    {
+                        rows = _rows.Where(r => r.Meta.Kind == CaptureKind.Screen &&
+                            words.Any(w => r.Meta.Title.Contains(w, StringComparison.OrdinalIgnoreCase) || r.Meta.App.Contains(w, StringComparison.OrdinalIgnoreCase))).Take(3).ToList();
+                        if (rows.Count < 3)
+                        {
+                            var more = _rows.Where(r => r.Meta.Kind == CaptureKind.Screen && !rows.Contains(r)).Take(3 - rows.Count);
+                            rows.AddRange(more);
+                        }
+                    }
+
+                    var items = new List<ChatApprovalItem>();
+                    for (int i = 0; i < rows.Count; i++)
+                    {
+                        var r = rows[i];
+                        var refId = "S" + (i + 1).ToString(CultureInfo.InvariantCulture);
+                        var textLine = $"[{refId}] {r.Meta.Ts.ToLocalTime():yyyy-MM-dd HH:mm zzz} | screen | app: {r.Meta.App}" +
+                                       (string.IsNullOrEmpty(r.Meta.Site) ? "" : $" | site: {r.Meta.Site}") +
+                                       $"\n  title: {r.Meta.Title}";
+                        byte[]? png = i < 2 ? Render(r.Meta, 160, 90) : null;
+                        items.Add(new ChatApprovalItem(r.Meta.Id, r.Meta.Ts, CaptureKind.Screen, r.Meta.App, r.Meta.Title, r.Meta.Site, textLine, i < 2 ? "image/png" : null, png));
+                    }
+
+                    var token = Guid.NewGuid().ToString("N")[..16];
+                    lock (_lock)
+                    {
+                        _pendingApprovals[token] = (chatId, text, items);
+                    }
+                    await EmitAsync(new ChatEvent("approval", ChatId: chatId, Token: token, Items: items, Share: "textImages"));
+                    return;
+                }
+
+                await AnswerTurnAsync(chatId, text, null, null, EmitAsync, ct);
+                break;
+            }
+
+            case "approve":
+            {
+                JsonObject? o;
+                try { o = JsonNode.Parse(rest) as JsonObject ?? throw new JsonException(); }
+                catch (JsonException) { await write(Envelope.Error(AgentErrors.InvalidJson)); return; }
+
+                var token = o["token"]?.GetValue<string>();
+                if (string.IsNullOrEmpty(token)) { await write(Envelope.Error(AgentErrors.InvalidJson)); return; }
+
+                (string? ChatId, string Question, List<ChatApprovalItem> Items) pending;
+                bool found;
+                lock (_lock)
+                {
+                    found = _pendingApprovals.Remove(token, out pending);
+                    if (found && pending.ChatId is not null)
+                        _approvedChats.Add(pending.ChatId);
+                }
+                if (!found)
+                {
+                    await EmitAsync(new ChatEvent("error", Code: "token", Text: "Invalid or expired token."));
+                    return;
+                }
+                await EmitAsync(new ChatEvent("start", ChatId: pending.ChatId));
+
+                var remove = o["remove"] is JsonArray arr
+                    ? arr.Select(n => n?.GetValue<string>()).OfType<string>().ToHashSet(StringComparer.Ordinal)
+                    : [];
+
+                await AnswerTurnAsync(pending.ChatId ?? "mc_1", pending.Question, pending.Items, remove, EmitAsync, ct);
+                break;
+            }
+
+            case "deny":
+            {
+                var token = rest.Trim();
+                (string? ChatId, string Question, List<ChatApprovalItem> Items) pending;
+                bool found;
+                lock (_lock)
+                {
+                    found = _pendingApprovals.Remove(token, out pending);
+                }
+                if (!found)
+                {
+                    await EmitAsync(new ChatEvent("error", Code: "token", Text: "Invalid or expired token."));
+                    return;
+                }
+                await EmitAsync(new ChatEvent("start", ChatId: pending.ChatId));
+
+                var answer = "Nothing was shared, so no captures were consulted.";
+                var words = answer.Split(' ');
+                for (int i = 0; i < words.Length; i++)
+                {
+                    var w = words[i] + (i < words.Length - 1 ? " " : "");
+                    await EmitAsync(new ChatEvent("text", Text: w));
+                }
+
+                var today = Now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+                var usage = new AiUsage(today, 12, 48211, 200, 500000);
+                await EmitAsync(new ChatEvent("done", Usage: usage));
+
+                lock (_lock)
+                {
+                    var chatId = pending.ChatId ?? "mc_1";
+                    (ChatSummary Summary, List<ChatMessage> Messages) existing = _savedChats.TryGetValue(chatId, out var entry)
+                        ? entry
+                        : (new ChatSummary(chatId, pending.Question.Length > 30 ? pending.Question[..30] + "..." : pending.Question, Now, Now, 0), new List<ChatMessage>());
+                    int nextSeq = existing.Messages.Count + 1;
+                    var uMsg = new ChatMessage(nextSeq, Now, "user", pending.Question);
+                    var aMsg = new ChatMessage(nextSeq + 1, Now, "assistant", answer, []);
+                    var msgs = new List<ChatMessage>(existing.Messages) { uMsg, aMsg };
+                    var summary = existing.Summary with { Messages = msgs.Count, Updated = Now };
+                    _savedChats[chatId] = (summary, msgs);
+                }
+                break;
+            }
+
+            default:
+                await write(Envelope.Error("Usage: chat send <json> | chat approve <json> | chat deny <token>"));
+                break;
+        }
+    }
+
+    private async Task AnswerTurnAsync(
+        string chatId, string question, List<ChatApprovalItem>? items, HashSet<string>? removeIds,
+        Func<ChatEvent, Task> emit, CancellationToken ct)
+    {
+        var qLower = question.ToLowerInvariant();
+        if (qLower.Contains("quota warning"))
+        {
+            await emit(new ChatEvent("warning", Code: "ratelimit", Text: "Provider rate limit almost used up: 3 of 50 requests left in the current window."));
+        }
+
+        var answer = "Based on your recent activity in [S1], here is the information you requested.";
+        var words = answer.Split(' ');
+        for (int i = 0; i < words.Length; i++)
+        {
+            var w = words[i] + (i < words.Length - 1 ? " " : "");
+            await emit(new ChatEvent("text", Text: w));
+        }
+
+        List<ChatSource> sources;
+        if (items is not null)
+        {
+            var remaining = items.Where(it => removeIds == null || !removeIds.Contains(it.Id)).ToList();
+            sources = remaining.Select(it => new ChatSource(it.Id, it.Ts, it.Kind, it.App, it.Title, it.Site)).ToList();
+        }
+        else
+        {
+            lock (_lock)
+            {
+                var matching = _rows.Where(r => r.Meta.Kind == CaptureKind.Screen).Take(2).ToList();
+                sources = matching.Select(r => new ChatSource(r.Meta.Id, r.Meta.Ts, r.Meta.Kind, r.Meta.App, r.Meta.Title, r.Meta.Site, r.Meta.ReplayId, r.Meta.ReplayOffsetMs)).ToList();
+            }
+        }
+
+        await emit(new ChatEvent("sources", Sources: sources));
+        var today = Now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        var usage = new AiUsage(today, 12, 48211, 200, 500000);
+        await emit(new ChatEvent("done", Usage: usage));
+
+        lock (_lock)
+        {
+            (ChatSummary Summary, List<ChatMessage> Messages) existing = _savedChats.TryGetValue(chatId, out var entry)
+                ? entry
+                : (new ChatSummary(chatId, question.Length > 30 ? question[..30] + "..." : question, Now, Now, 0), new List<ChatMessage>());
+            int nextSeq = existing.Messages.Count + 1;
+            var uMsg = new ChatMessage(nextSeq, Now, "user", question);
+            var aMsg = new ChatMessage(nextSeq + 1, Now, "assistant", answer, sources);
+            var msgs = new List<ChatMessage>(existing.Messages) { uMsg, aMsg };
+            var summary = existing.Summary with { Messages = msgs.Count, Updated = Now };
+            _savedChats[chatId] = (summary, msgs);
+        }
+    }
 
     /// <summary>One request line in, one response line out. Never throws.</summary>
     public async Task<string> HandleAsync(string line, CancellationToken ct = default)
@@ -274,6 +599,7 @@ public sealed class MockAgent
             case "password": return PasswordVerb(rest);
             case "ai": return AiVerb(rest);
             case "describe": return await DescribeAsync(args, ct);
+            case "chat": return ChatVerb(args, rest);
             case "audit":
             {
                 int limit = 100;
@@ -620,7 +946,9 @@ public sealed class MockAgent
         var model = SettingsSchema.Get(_settings, "ai.model")?.GetValue<string>() ?? "";
         var endpoint = SettingsSchema.Get(_settings, "ai.endpoint")?.GetValue<string>() ?? "";
         var ai = new AiSettings { Provider = provider, Model = model, Endpoint = endpoint };
-        return new AiStatus(Bool("ai.enabled"), _aiKeySet, provider, AiDefaults.EffectiveModel(ai), AiDefaults.EffectiveEndpoint(ai));
+        var today = Now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        var usage = new AiUsage(today, 12, 48211, 200, 500000);
+        return new AiStatus(Bool("ai.enabled"), _aiKeySet, provider, AiDefaults.EffectiveModel(ai), AiDefaults.EffectiveEndpoint(ai), usage, false);
     }
 
     private string AiVerb(string rest)

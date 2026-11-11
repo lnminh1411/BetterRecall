@@ -21,6 +21,9 @@ internal sealed class DescribeRedactor(IKeyframeReader reader, Func<Settings> se
 {
     private const int Quality = 90;
 
+    /// <summary>Cloud chat may send images this redactor returned with Redacted set (it really checked them).</summary>
+    public bool RedactsImages => true;
+
     public async Task<OutgoingImage> RedactAsync(string captureId, OutgoingImage image, CancellationToken ct)
     {
         var s = settings();
