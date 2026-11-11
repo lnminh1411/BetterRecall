@@ -13,9 +13,9 @@ namespace BetterRecall.Core.Ai;
 public sealed record OutgoingImage(byte[] Bytes, string Mime, int Width, int Height, bool Redacted);
 
 /// <summary>
-/// The one hook cloud describe calls before a preview is shown and sent. Until redaction exists (v0.2 batch 3) the
-/// pass-through below is used; batch 3 swaps it for its redactor in CoreHostImpl.StartPipes (one line), and from then on
-/// only the redacted copy is previewed and sent.
+/// The one hook cloud describe calls before a preview is shown and sent. The agent sets its redactor
+/// (CoreHostImpl.DescribeRedactor: OCR + privacy.redact* on the outgoing image); without one the pass-through below is
+/// used and the preview says the image is not redacted.
 /// </summary>
 public interface IDescribeRedactor
 {

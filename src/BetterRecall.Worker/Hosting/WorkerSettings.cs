@@ -7,7 +7,7 @@ namespace BetterRecall.Worker.Hosting;
 
 /// <summary>The worker's view of settings.json: inference.* (gpuAdapter included), index.dim, audio.language, governance.ecoQos,
 /// security.memoryIsolation, log.level, and the NSFW gate's privacy.nsfwFilter / nsfwDetector / nsfwDevice /
-/// nsfwGpuAdapter. Out-of-range values fall back to defaults (Core validates the file). Read once at start: a change
+/// nsfwGpuAdapter, and ocr.enabled / engine / languages / device. Out-of-range values fall back to defaults (Core validates the file). Read once at start: a change
 /// takes effect when the agent next starts the worker (after the idle exit, inference.idleExitS).</summary>
 public sealed record WorkerSettings(
     bool Fake,
@@ -32,6 +32,16 @@ public sealed record WorkerSettings(
     /// <summary>inference.gpuAdapter: "auto" or part of a GPU name (<see cref="Inference.GpuSelection.Resolve"/>);
     /// used when Device is gpu.</summary>
     public string GpuAdapter { get; init; } = "auto";
+    /// <summary>ocr.enabled: hello loads the OCR engine so its device is known up front.</summary>
+    public bool OcrEnabled { get; init; } = true;
+    /// <summary>ocr.engine: onnx | windows.</summary>
+    public string OcrEngine { get; init; } = "onnx";
+    /// <summary>ocr.languages: "auto" or comma-separated codes.</summary>
+    public string OcrLanguages { get; init; } = "auto";
+    /// <summary>ocr.device: auto | npu | igpu | gpu | cpu (<see cref="Inference.NsfwDevicePlan"/> slots; auto skips graphics cards).</summary>
+    public string OcrDevice { get; init; } = "auto";
+
+    public static readonly string[] OcrDevices = ["auto", "npu", "igpu", "gpu", "cpu"];
 
     public static readonly int[] Dims = [768, 512, 256];
     public static readonly int[] TokenBudgets = [70, 140, 280];
@@ -72,6 +82,11 @@ public sealed record WorkerSettings(
         if (adapter.Length is 0 or > 128) adapter = "auto";
         string gpuAdapter = inf.GpuAdapter?.Trim() ?? "";
         if (gpuAdapter.Length is 0 or > 128) gpuAdapter = "auto";
+        var ocr = s.Ocr ?? new OcrSettings();
+        string ocrEngine = ocr.Engine == "windows" ? "windows" : "onnx";
+        string ocrDevice = (ocr.Device ?? "auto").Trim().ToLowerInvariant();
+        if (Array.IndexOf(OcrDevices, ocrDevice) < 0) ocrDevice = "auto";
+        string ocrLanguages = string.IsNullOrWhiteSpace(ocr.Languages) || ocr.Languages.Length > 128 ? "auto" : ocr.Languages.Trim();
         return new WorkerSettings(
             inf.Fake, device, modelDir, tokens, idle, dim, lang,
             s.Governance?.EcoQos ?? true,
@@ -83,6 +98,10 @@ public sealed record WorkerSettings(
             NsfwDevice = nsfwDevice,
             NsfwGpuAdapter = adapter,
             GpuAdapter = gpuAdapter,
+            OcrEnabled = ocr.Enabled,
+            OcrEngine = ocrEngine,
+            OcrLanguages = ocrLanguages,
+            OcrDevice = ocrDevice,
         };
     }
 }

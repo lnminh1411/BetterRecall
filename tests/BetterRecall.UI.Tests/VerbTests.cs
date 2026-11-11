@@ -25,12 +25,24 @@ public class VerbTests
     }
 
     [Fact]
+    public async Task Screen_ocr_text_is_a_text_match_with_its_snippet()
+    {
+        await using var h = new MockHarness();
+        var r = await h.Api.SearchAsync(new SearchQuery("blockers", 20));
+        Assert.True(r.Ok, r.Error);
+        var hit = r.Value!.Results.First(x => x.TextMatch);
+        Assert.Equal("Daily standup | Microsoft Teams", hit.Title);
+        Assert.Contains("Blockers: none", hit.Snippet);
+    }
+
+    [Fact]
     public async Task Search_Get_Thumb_Keyframe()
     {
         await using var h = new MockHarness();
-        var r = await h.Api.SearchAsync(new SearchQuery("invoice", 5));
+        // 20, not 5: depending on the clock the newest 5 "invoice" hits can all be audio transcripts.
+        var r = await h.Api.SearchAsync(new SearchQuery("invoice", 20));
         Assert.True(r.Ok, r.Error);
-        Assert.InRange(r.Value!.Results.Count, 1, 5);
+        Assert.InRange(r.Value!.Results.Count, 1, 20);
         var hit = r.Value.Results.First(x => x.Kind == CaptureKind.Screen && x.HasThumb);
         Assert.Contains("invoice", (hit.Title + hit.Snippet).ToLowerInvariant());
 

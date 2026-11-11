@@ -1033,7 +1033,8 @@ public sealed partial class CommandProcessor
                 if (img != null && !SendableMimes.Contains(img.Mime)) img = await _d.Thumbnailer.GetThumbAsync(id, 1280, ct).ConfigureAwait(false);
                 if (img == null) return Err(ErrNoImage);
                 var outgoing = new Ai.OutgoingImage(img.Bytes, img.Mime, img.Width, img.Height, false);
-                outgoing = await (_d.Redactor ?? new Ai.PassThroughRedactor()).RedactAsync(id, outgoing, ct).ConfigureAwait(false);
+                try { outgoing = await (_d.Redactor ?? new Ai.PassThroughRedactor()).RedactAsync(id, outgoing, ct).ConfigureAwait(false); }
+                catch (Ai.DescribeException ex) { Audit(s, "describe preview", 0, ""); return Err(ex.Message); }
                 while (s.DescribeTokens.Count >= 4) s.DescribeTokens.Remove(s.DescribeTokens.MinBy(kv => kv.Value.Expires).Key);
                 var token = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(16));
                 s.DescribeTokens[token] = new DescribeTicket(id, outgoing, now.AddSeconds(120));

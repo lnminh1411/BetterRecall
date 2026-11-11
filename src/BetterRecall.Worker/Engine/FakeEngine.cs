@@ -69,6 +69,14 @@ public sealed class FakeEngine : IWorkerEngine
 
     public BenchResult Bench() => new("CPU", [new BenchDevice("CPU", "fake", true, 0, 0, 1.0, null)]);
 
+    /// <summary>One line "fake ocr WxH" at the top left, 10 px per character; entities: none.</summary>
+    public OcrResult Ocr(ImageInput image, bool entities)
+    {
+        var text = string.Create(CultureInfo.InvariantCulture, $"fake ocr {image.Width}x{image.Height}");
+        var cuts = Enumerable.Range(0, text.Length + 1).Select(i => 8 + i * 10).ToArray();
+        return new OcrResult([new OcrLine(text, 8, 8, text.Length * 10, 16, 1f, cuts, entities ? [] : null)], "fake", 0);
+    }
+
     public void Dispose() { }
 
     internal static IEnumerable<string> Words(string text)

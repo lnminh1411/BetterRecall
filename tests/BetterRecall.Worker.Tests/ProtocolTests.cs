@@ -264,6 +264,7 @@ public class ProtocolTests
         public float[] EmbedText(string text, TextKind kind) => throw new InvalidOperationException("boom");
         public TranscribeResult Transcribe(float[] pcm, string source, string language) => throw new ModelNotInstalledException("whisper-large-v3-turbo");
         public BenchResult Bench() => throw new DeviceFailedException("NPU compile failed.");
+        public OcrResult Ocr(ImageInput image, bool entities) => throw new ModelNotInstalledException("ocr");
         public void Dispose() { }
     }
 }

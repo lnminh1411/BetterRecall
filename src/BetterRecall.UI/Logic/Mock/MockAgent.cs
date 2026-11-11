@@ -96,6 +96,17 @@ public sealed class MockAgent
         : title.EndsWith("Google Flights", StringComparison.Ordinal) ? "google.com"
         : title.EndsWith("GitHub", StringComparison.Ordinal) ? "github.com" : "";
 
+    /// <summary>Demo OCR text for some screens, as stored: redacted values are already gone (the card number after
+    /// "Pay by card:"). Other screens have no text, so get returns the title.</summary>
+    private static readonly Dictionary<string, string> ScreenTexts = new()
+    {
+        ["Acme invoice 4471 - Gmail"] = "Inbox\nAcme Billing\nInvoice 4471\nAmount due: 1,240.00 EUR\nDue date: 30 November 2026\nPay by card:\nReply Forward",
+        ["Quarterly planning - Google Docs"] = "Quarterly planning\nGoals: ship replay export, settings search and text recognition\nOwner: design team\nReview on Friday",
+        ["Flights Hanoi to Tokyo - Google Flights"] = "Hanoi (HAN) to Tokyo (NRT)\nDeparture 14 Dec\nVietnam Airlines 6 h 05 min 412 USD\nJapan Airlines 5 h 50 min 455 USD",
+        ["Budget 2026.xlsx - Excel"] = "Budget 2026\nCategory Q1 Q2 Q3 Q4\nHosting 1200 1200 1300 1300\nTravel 800 400 950 600\nTotal",
+        ["Daily standup | Microsoft Teams"] = "Daily standup\nYesterday: fixed the timeline paging test\nToday: text recognition settings page\nBlockers: none",
+    };
+
     private static readonly string[] Transcripts =
     [
         "Let's move the release to Friday and ship the replay buffer first.",
@@ -129,7 +140,7 @@ public sealed class MockAgent
                     var (app, titles) = Apps[rnd.Next(Apps.Length)];
                     var title = titles[rnd.Next(titles.Length)];
                     _rows.Add(new Row(new CaptureMeta($"f_{n++:D6}", t, CaptureKind.Screen, app, title, rnd.Next(2), 0, rnd.Next(20) != 0, rnd.Next(30) != 0,
-                        app == "chrome.exe" ? SiteOf(title) : ""), title));
+                        app == "chrome.exe" ? SiteOf(title) : ""), ScreenTexts.GetValueOrDefault(title, title)));
                 }
             }
             t = t.AddSeconds(rnd.Next(60, 420));
@@ -427,7 +438,10 @@ public sealed class MockAgent
                 if (matched == 0 && !visual) continue;
                 float score = visual ? 0.4f + (uint)StableHash(m.Id) % 20 / 100f
                     : (float)Math.Round(0.45 + 0.5 * matched / tokens.Length - (Now - m.Ts).TotalDays * 0.02, 3);
-                var snippet = r.Text.Length > 300 ? r.Text[..300] : r.Text;
+                // Screens snippet the title unless a word is only in the OCR text (as the real store does).
+                var title = m.Title.ToLowerInvariant();
+                var shown = m.Kind == CaptureKind.Screen && (r.Text == m.Title || tokens.Any(title.Contains) || !tokens.Any(r.Text.ToLowerInvariant().Contains)) ? m.Title : r.Text;
+                var snippet = shown.Length > 300 ? shown[..300] : shown;
                 hits.Add(new SearchHit(m.Id, m.Ts, m.Kind, m.App, m.Title, Math.Clamp(score, 0, 1), snippet, m.HasThumb,
                     m.Kind == CaptureKind.Audio ? m.DurationMs / 1000 : null,
                     Math.Clamp(score, 0, 1), matched > 0, matched == 0 && score < 0.5f, m.Site, m.ReplayId, m.ReplayOffsetMs));

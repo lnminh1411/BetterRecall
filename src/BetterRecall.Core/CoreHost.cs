@@ -31,6 +31,9 @@ public sealed class CoreHostImpl : ICoreHost
     private PipeManager? _pipes;
     private IThumbnailer? _thumbs;
 
+    /// <summary>Cloud describe redactor, set by the agent before StartPipes (OCR + privacy.redact* on the outgoing image).</summary>
+    public Ai.IDescribeRedactor? DescribeRedactor { get; set; }
+
     public CoreHostImpl(CoreHostOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -98,8 +101,8 @@ public sealed class CoreHostImpl : ICoreHost
             Password = new UnlockPassword(_options.Home),
             AiKey = new Ai.ApiKeyStore(_options.Home),
             Describer = new Ai.CloudDescriber(),
-            // Redaction hook for cloud describe: v0.2 batch 3 replaces this with its redactor.
-            Redactor = new Ai.PassThroughRedactor(),
+            // Redaction hook for cloud describe: the agent's keyframe redactor when set, else pass-through (preview says not redacted).
+            Redactor = DescribeRedactor ?? new Ai.PassThroughRedactor(),
         });
         _pipes = new PipeManager(_settings, processor, _options.InstallDir, () => _store);
         _pipes.ClientsChanged += n => ClientsChanged?.Invoke(n);

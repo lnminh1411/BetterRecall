@@ -12,6 +12,10 @@ public static class ModelCatalog
     public const string Vad = "silero-vad";
     public const string Nsfw = "nsfw-classifier";
     public const string NsfwDetector = "nsfw-detector";
+    public const string Ocr = "ocr";
+    public const string Ner = "ner";
+    /// <summary>Name in "Model not installed" when ocr.engine is windows and no Windows OCR language is installed.</summary>
+    public const string WindowsOcr = "windows-ocr";
 
     public const string VadFile = "silero_vad.onnx";
 

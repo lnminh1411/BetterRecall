@@ -317,6 +317,9 @@ public sealed partial class SettingsStore : ISettingsStore
         ("ipc.idleTimeoutS", s => Range(s.Ipc.IdleTimeoutS, 10, 3600)),
         ("log.level", s => In(s.Log.Level, "debug", "info", "warn", "error")),
         ("ui.theme", s => In(s.Ui.Theme, "system", "light", "dark")),
+        ("ocr.engine", s => In(s.Ocr.Engine, "onnx", "windows")),
+        ("ocr.languages", s => ValidOcrLanguages(s.Ocr.Languages)),
+        ("ocr.device", s => In(s.Ocr.Device, "auto", "npu", "igpu", "gpu", "cpu")),
         ("replay.sampleSeconds", s => Range(s.Replay.SampleSeconds, 2, 60)),
         ("security.unlockMethod", s => In(s.Security.UnlockMethod, "hello", "password")),
         ("ai.provider", s => In(s.Ai.Provider, AiDefaults.Providers)),
@@ -328,6 +331,18 @@ public sealed partial class SettingsStore : ISettingsStore
         ("ai.dailyRequests", s => Range(s.Ai.DailyRequests, 0, 100_000)),
         ("ai.dailyTokens", s => s.Ai.DailyTokens >= 0 && s.Ai.DailyTokens <= 1_000_000_000),
     ];
+
+    [GeneratedRegex("^[a-z]{2,3}(-[A-Za-z]{2,4})?$")]
+    private static partial Regex OcrLanguageRegex();
+
+    /// <summary>"auto", or 1 to 16 comma-separated language codes ("en", "vi", "zh-Hant").</summary>
+    internal static bool ValidOcrLanguages(string? v)
+    {
+        if (v == "auto") return true;
+        if (string.IsNullOrWhiteSpace(v) || v.Length > 128) return false;
+        var parts = v.Split(',', StringSplitOptions.TrimEntries);
+        return parts.Length <= 16 && parts.All(p => OcrLanguageRegex().IsMatch(p));
+    }
 
     [GeneratedRegex("^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,127}$")]
     private static partial Regex AiModelRegex();
@@ -359,6 +374,7 @@ public sealed partial class SettingsStore : ISettingsStore
         if (s.Mcp == null) return "mcp";
         if (s.Log == null) return "log";
         if (s.Ui == null) return "ui";
+        if (s.Ocr == null) return "ocr";
         if (s.Ai == null) return "ai";
         foreach (var (key, ok) in Rules)
         {

@@ -25,6 +25,7 @@ internal sealed class GuardrailService : IDisposable
     public event Action<WindowInfo?>? ForegroundChanged;
     public double LastScanMs { get; private set; }
     public double LastBadgeMs { get; private set; }
+    public double LastPasswordMs { get; private set; }
 
     public GuardrailService(Func<Settings> settings, Func<bool> sessionLocked, Func<IReadOnlyList<(int, RECT)>> monitors, string installDir)
     {
@@ -53,6 +54,7 @@ internal sealed class GuardrailService : IDisposable
     {
         Ole.CoInitializeEx(0, Ole.COINIT_MULTITHREADED);
         BrowserBadgeDetector? badge = null;
+        PasswordFieldProbe? passwords = null;
         nint lastFg = -1;
         try
         {
@@ -84,7 +86,18 @@ internal sealed class GuardrailService : IDisposable
                     // A private browser window found through the badge is masked in the replay as well.
                     if (badgeResult == BadgeResult.Private && fg is not null && WindowInspector.TryGetBounds(fg.Hwnd, out var fr))
                         masks = [.. masks, fr];
-                    Volatile.Write(ref _snapshot, new GuardSnapshot(Environment.TickCount64, fg, decision, badgeResult, scan.AnyAffinity, masks, scan.PerMonitor, site));
+                    RECT[]? secrets = null;
+                    if (s.Privacy.RedactPasswords && fg is not null && decision.Allow)
+                    {
+                        if (passwords is null)
+                        {
+                            try { passwords = new PasswordFieldProbe(); }
+                            catch (Exception ex) { Log.Warn("UI Automation unavailable for password fields", ex); }
+                        }
+                        secrets = passwords?.Find(fg.Hwnd);
+                        LastPasswordMs = passwords?.LastMs ?? 0;
+                    }
+                    Volatile.Write(ref _snapshot, new GuardSnapshot(Environment.TickCount64, fg, decision, badgeResult, scan.AnyAffinity, masks, scan.PerMonitor, site, secrets));
                     if (fg?.Hwnd != lastFg)
                     {
                         lastFg = fg?.Hwnd ?? 0;
@@ -98,6 +111,7 @@ internal sealed class GuardrailService : IDisposable
         finally
         {
             badge?.Dispose();
+            passwords?.Dispose();
             Ole.CoUninitialize();
         }
     }
