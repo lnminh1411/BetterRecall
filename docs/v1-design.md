@@ -17,7 +17,7 @@ Written 2026-11-10. `docs\design.md` is the user's design. This file turns it in
 | Thumbnails | Never made at capture time. The agent makes a preview from the stored keyframe when the UI asks for it and keeps it in a RAM cache only |
 | Retention | 30 days by default |
 | Hardware use on the dev PC | NPU: EmbeddingGemma 2, Whisper, (SigLIP 2 fallback), NSFW gate. iGPU: AV1 encode; NSFW gate only when the NPU fails. RX 6600 and RTX 3050: untouched unless the NSFW gate falls back to a graphics card (`privacy.nsfwDevice`). CPU: VAD, NSFW gate as the last fallback, light preprocessing |
-| Network | No-network guarantee: BetterRecall makes no network connections while cloud describe (section 6.1, `ai.enabled`, off by default) is off. Turning it on ends the guarantee for that user until it is turned off again. Each image is sent only when the user confirms it in a dialog, with an audit entry per send |
+| Network | No-network guarantee: BetterRecall makes no network connections while cloud AI (sections 6.1 and 6.2, `ai.enabled`, off by default) is off. Turning it on ends the guarantee for that user until it is turned off again. Describe sends an image only when the user confirms it in a dialog; chat sends captures only after the user allows them for that chat. Every request has an audit entry |
 | Security | Every protection is a setting, on by default: own windows excluded from capture (`WDA_EXCLUDEFROMCAPTURE`), Windows Hello read gate, memory isolation, NSFW gate, panic flush (section 6) |
 | Phase 1 | Dev builds on the developer's PC: Core Ultra 7 265K (NPU 3720, Arc iGPU), RX 6600 + RTX 3050, Windows 11 build 29704, .NET SDK 10.0.403 |
 
@@ -55,7 +55,7 @@ Data dir `%LOCALAPPDATA%\BetterRecall\` (env `BETTERRECALL_HOME` overrides):
 
 ```
 settings.json           plain JSON, no secrets
-store.db                encrypted SQLite: captures, vectors, transcripts, audit, pending jobs
+store.db                encrypted SQLite: captures, vectors, transcripts, audit, pending jobs, saved chats, daily cloud usage
 keyframes\YYYY-MM.db    encrypted SQLite, one per month, keyframe images only
 replays\*.mp4.enc       exported replay clips, AES-256-GCM
 keys\datakey.bin        wrapped 256-bit data key
@@ -153,10 +153,17 @@ UI-only verbs:
 | `password` | `PasswordStatus` `{"set","helloAvailable","retryAfterS"}` | Unlock password state |
 | `password set <json>` | `null` | `{"current":"...","new":"..."}`. `current` is needed when a password exists. The first password needs the read gate open, `security.requireUnlock` off, or no Windows Hello on the PC. New password 6 to 256 characters, not only spaces. Errors `Wrong password.`, `Password must be 6 to 256 characters.` |
 | `password clear <json>` | `null` | `{"current":"..."}`. Refused while `security.unlockMethod` is password: `Password in use (config security.unlockMethod).` |
-| `ai` | `AiStatus` `{"enabled","keySet","provider","model","endpoint"}` | Effective model and endpoint (defaults filled in). Never the key |
+| `ai` | `AiStatus` `{"enabled","keySet","provider","model","endpoint","usage","local"}` | Effective model and endpoint (defaults filled in). `usage` = `AiUsage` `{"day","requests","tokens","requestLimit","tokenLimit"}` for today (local day); `local` is true when the endpoint is a loopback address. Never the key |
 | `ai setkey <key>` / `ai clearkey` | `AiStatus` | Key: printable ASCII without spaces, at most 4,096 characters (`Invalid API key.`). Stored DPAPI-encrypted in `keys\ai-key.bin`; clear overwrites, then deletes the file |
 | `describe preview <id>` | `DescribePreview` `{"token","provider","model","endpoint","mime","width","height","redacted","base64"}` | The exact image that would be sent (stored keyframe; re-encoded through the thumbnailer at width 1280 when the provider cannot take its format), after `IDescribeRedactor`. Token valid 120 s, single use, at most 4 open per connection. Errors `Cloud describe is off (config ai.enabled).`, `API key not set.`, `No image to describe.` |
 | `describe send <token>` | `DescribeResult` `{"text","provider","model","tookMs"}` | Sends the previewed image (section 6.1). Long-running. Audit `describe <provider>` with the image SHA-256 and count 1 (ok) or 0 (failed). Errors `Invalid or expired token.`, `Provider unreachable.`, `Provider timed out.`, `Provider error (HTTP <n>): <message>` (key scrubbed) |
+| `chat list` | `{"items":[ChatSummary...]}` | Saved chats `{"id","title","created","updated","messages"}`, newest first, at most 200 (plus unsaved ones while `ai.chatHistory` is off) |
+| `chat get <id>` | `ChatDetail` `{"chat","messages","approved"}` | Messages `{"seq","ts","role","text","sources"}`; `approved` says whether this chat may send captures without asking at the current `ai.share` |
+| `chat rename <json>` / `chat delete <id>` / `chat clear` | `null` | `{"id","title"}`, title trimmed to 120 characters. Delete and clear are audited (`chat delete`, `chat clear`) |
+| `chat send <json>` | stream of `ChatEvent` lines | `{"chat":"<id>" or absent for a new chat,"text":"..."}`, 1 to 4,000 characters. Long-running. One `{"ok":true,"data":ChatEvent}` line per event, ending with `done`, `approval` or `error` (section 6.2) |
+| `chat approve <json>` / `chat deny <token>` | stream of `ChatEvent` lines | `{"token","remove":["<capture id>"...]}`: "Allow for this chat" without the removed items, then the turn continues. Deny: the model is told the user declined and answers without captures. Token valid 10 minutes, single use |
+
+`ChatEvent` `{"type","chatId","text","token","query","sources","items","share","code","retryAt","usage"}`, fields present by type: `start` (chatId), `search` (query), `text` (text: a piece of the answer), `warning` (code `budget`, `ratelimit`, `retry`, `truncated` or `rounds`; text), `approval` (chatId, token, share, items `ChatApprovalItem` `{"id","ts","kind","app","title","site","text","imageMime","image"}` with `text` the exact text that would be sent and `image` base64, text = a note such as "images unavailable"), `sources` (`ChatSource` `{"id","ts","kind","app","title","site","replayId","replayOffsetMs"}`), `done` (usage), `error` (code `auth`, `forbidden`, `model`, `context`, `quota`, `rate`, `overloaded`, `server`, `offline`, `timeout`, `budget`, `refused`, `bad_request`, `token`, `busy`, `not_found` or `locked`; text; retryAt when the provider said when to try again). Errors found before a turn starts (`Cloud describe is off (config ai.enabled).`, `API key not set.`, `Store is locked.`, `Invalid JSON.`) are one ordinary error line.
 
 Argument rules: `unlock <passphrase>`, `replay export <id> <path>` (the path), `settings set <json>` and `search <text>` take the rest of the line as one argument, spaces included, no quoting. Error strings added for UI verbs: `Wrong passphrase.` (passphrase unlock failed), `Unlock required.` (`purge all` without an unlock in the last 60 s). Reply shapes are the Contracts records `ItemsReply<T>`, `UnlockReply`, `PurgeConfirmReply`, `VersionReply`. Enums serialise lowercase (`screen`, `audio`, `hybrid`, `text`, `vector`); `ThumbData` carries the image in the field `base64`. Long replies: read with `LineReader` (buffered), not `LineProtocol.ReadLineAsync`.
 
@@ -168,7 +175,7 @@ Hotkey grammar (agent parser and UI recorder): modifiers `Ctrl`, `Alt`, `Shift`,
 
 `search` kind filter also takes `replay`; a hit and `get` of a replay frame carry `replayId` and `replayOffsetMs`.
 
-Data verbs (`search`, `get`, `thumb`, `keyframe`, `timeline`, `audit`, `replay list`, `replay export`, `facets`, `history`, `describe`) answer `Store is locked.` while `security.requireUnlock` is true and the read gate is closed.
+Data verbs (`search`, `get`, `thumb`, `keyframe`, `timeline`, `audit`, `replay list`, `replay export`, `facets`, `history`, `describe`, `chat`) answer `Store is locked.` while `security.requireUnlock` is true and the read gate is closed.
 
 ## 6. Security and privacy
 
@@ -232,6 +239,36 @@ Redaction: the image goes through `IDescribeRedactor` before the preview. Until 
 | `claude` | `POST {endpoint}/v1/messages`, `max_tokens` 1024, content = `image` (base64 source) + `text` | `x-api-key`, `anthropic-version: 2026-10-21` | `https://api.anthropic.com`, `claude-haiku-5-5` |
 
 API shapes checked against the providers' docs on 2026-11-11. Claude and OpenAI take JPEG, PNG, GIF and WebP; other keyframe formats are re-encoded first.
+
+### 6.2 Cloud chat
+
+Uses the cloud describe settings, key and warning (section 6.1); `chat` answers `Cloud describe is off (config ai.enabled).` while it is off. UI: the Ask toggle next to the search box swaps the results for a chat, and the Ask page in the main window keeps saved chats. Both need the read gate like the other data views. The UI never sees the key; every request goes from the agent (Core `ChatService`, `ProviderHttp`).
+
+The model gets one tool, `search_history` (query, from, to, app, site, kind), which runs the agent's own hybrid search. At most 3 searches per model step and 5 model calls per question. `ChatShareGate` is the only code that decides what of a hit may be sent, by `ai.share`:
+
+| `ai.share` | Sent per hit (`ai.chatMaxHits` hits per search) |
+|---|---|
+| `metadata` | `[S1]` reference, local time, kind, app, site, replay offset |
+| `text` | plus title and up to 400 characters of OCR or transcript text, both through the text redactor |
+| `textImages` (default) | plus, for up to `ai.chatMaxImages` screen hits, a 768 px thumbnail, only from an image redactor that really redacts (`IDescribeRedactor.RedactsImages`) and only when it returns the image marked redacted. Until batch 3 merges there is none, so the approval and the model are told images are unavailable and only text is sent |
+
+An unknown share value counts as `metadata`. The text redactor (`BasicTextRedactor`) masks e-mail addresses, URL paths and queries (the host stays), labelled secrets (`password:`, `pin=`, `api key:` and similar), IBANs, runs of 8 or more digits that are not dates, and token-like strings of 24 or more letters and digits, as `[redacted]`. Over-redacting is the intended failure.
+
+Approval: the first time a chat wants to send captures the turn stops with an `approval` event listing the exact text (and image) of each item. The user can untick items, then "Allow for this chat" (`chat approve`) or "Don't share" (`chat deny`). An allowed chat sends later searches without asking, at the same or a lower share level; a new chat, a higher share level, an agent restart or a panic asks again. Answers cite `[S1]` and end with a `sources` event; source cards open the detail view.
+
+Requests by provider (streamed over SSE, tools in each provider's own format, checked against the providers' docs on 2026-11-12):
+
+| Provider | Request | Tool round trip |
+|---|---|---|
+| `gemini` | `POST {endpoint}/v1beta/models/{model}:streamGenerateContent?alt=sse`, `systemInstruction`, `tools.functionDeclarations`, `maxOutputTokens` 4096 | `functionCall` parts (the `thoughtSignature` goes back unchanged), results as `functionResponse` parts with images as `inlineData` |
+| `openai-compatible` | `POST {endpoint}/chat/completions`, `stream: true` with usage, `tools` of type function | `tool_calls` deltas joined by index, results as `role: tool` messages; images in a following user message |
+| `claude` | `POST {endpoint}/v1/messages`, `stream: true`, `max_tokens` 4096, `tools` | `tool_use` blocks (`input_json_delta` joined), results as `tool_result` blocks with image blocks inside; thinking blocks go back unchanged |
+
+Transcripts are kept per chat in the provider's own format. When the provider or model changes, the next question starts a new transcript with a short recap of the earlier messages.
+
+Errors and quota (`ProviderErrors`): 429 that is not a quota or billing error, 5xx and 529 are retried at most twice, waiting what `Retry-After` or Gemini `RetryInfo` says (else 1 s, then 2 s) and never more than 20 s; a longer wait fails at once with the time to try again. Each retry shows a warning. OpenAI `insufficient_quota` and spend limits, Claude `billing_error`, Gemini `RESOURCE_EXHAUSTED` without a retry delay and HTTP 402 say the quota or credit is used up. 401, 403, 404, context too long, offline, a 90 s wait for headers and a 5 minute stream each get a plain message; error text from the provider is shown with the key replaced by `***`. `anthropic-ratelimit-*` and `x-ratelimit-*` headers below 10% left give a warning. Local budget: before each request the agent checks today's counts (`ai_usage` table, local day, 60 days kept) against `ai.dailyRequests` and `ai.dailyTokens`; at 80% it warns once per question, at 100% it stops before sending. A failed question leaves the chat as it was.
+
+Audit: one entry per provider request, verb `chat <provider>`, count = captures sent with that request, SHA-256 of the transcript sent. Saved chats (tables `chats`, `chat_messages`) are encrypted with the store; `ai.chatHistory` off keeps chats in agent memory only and deletes saved ones. `purge all` and panic delete all chats; `purge last` and `purge range` delete chats with a message in that window.
 
 ## 7. Performance
 
@@ -319,6 +356,12 @@ etrieval`): right screens 0.68-0.80, wrong or off-topic up to 0.61 |
 | `ai.provider` | `gemini` | `gemini`, `openai-compatible`, `claude` |
 | `ai.endpoint` | empty (provider default) | `https://` URL, or `http://` to a loopback host; no user info, query or fragment; at most 512 characters |
 | `ai.model` | empty (provider default) | 1 to 128 of letters, digits, `. _ : / @ -`, starting with a letter or digit |
+| `ai.share` | `textImages` | what a chat may send per capture: `textImages`, `text`, `metadata` (section 6.2) |
+| `ai.chatMaxHits` | 8 (range 1 to 20) | captures per chat search |
+| `ai.chatMaxImages` | 3 (range 0 to 8) | redacted images per chat search |
+| `ai.dailyRequests` | 200 (range 0 to 100,000) | cloud requests per local day; 0 = no limit. Warning at 80%, stop at 100% |
+| `ai.dailyTokens` | 500,000 (range 0 to 1,000,000,000) | cloud tokens (input + output) per local day; 0 = no limit |
+| `ai.chatHistory` | true | keep chats in `store.db`; turning it off deletes saved chats |
 | `log.level` | `info` | `debug`, `info`, `warn`, `error` |
 
 ## 9. Build
