@@ -82,7 +82,9 @@ public sealed partial class DangerZonePage : Page, IDataPage
     {
         AllStart.Visibility = Visibility.Collapsed;
         AllConfirm.Visibility = Visibility.Visible;
-        AllPass.Visibility = UnlockLogic.UsesPassphrase(Services.Current.KeyProtection) ? Visibility.Visible : Visibility.Collapsed;
+        var mode = Services.Current.UnlockMode;
+        AllPass.Visibility = mode != UnlockMode.Hello ? Visibility.Visible : Visibility.Collapsed;
+        AllPass.PlaceholderText = Loc.Get(mode == UnlockMode.Password ? "Unlock_PasswordHint" : "Unlock_PassphraseHint");
         AllPhrase.Text = "";
         AllPhrase.Focus(FocusState.Programmatic);
     }

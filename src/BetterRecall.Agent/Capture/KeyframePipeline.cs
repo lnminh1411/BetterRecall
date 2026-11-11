@@ -31,6 +31,9 @@ internal sealed class KeyframePipeline : IAsyncDisposable
     public double EncodeMsTotal, HashMsTotal, GrabMsTotal;
     public double LastEncodeMs;
 
+    /// <summary>Receives replay samples (ReplaySample requests). Null: samples are dropped.</summary>
+    public Replay.ReplaySampler? Sampler { get; set; }
+
     public KeyframePipeline(Func<IStore?> store, Func<Settings> settings, Action<CaptureMeta> stored)
     {
         _store = store;
@@ -83,6 +86,23 @@ internal sealed class KeyframePipeline : IAsyncDisposable
         var s = _settings();
         var store = _store();
         if (store is null) return;
+        string format = s.Keyframes.Format == "jpeg" ? "jpeg" : "webp";
+        int quality = Math.Clamp(s.Keyframes.Quality, 30, 95);
+        byte[]? sampleBytes = null;
+        if (g.Request.ReplaySample && Sampler is { } sampler)
+        {
+            sampleBytes = ImageCodec.EncodeBgra(g.Pixels, g.Width, g.Height, g.Stride, format, quality);
+            var rq = g.Request;
+            sampler.Add(new Replay.ReplaySampler.Sample(rq.Ts, g.Monitor, rq.App, GuardrailPolicy.FilterTitle(rq.Title, s.Privacy), rq.Site,
+                g.Width, g.Height, sampleBytes, ImageCodec.Mime(format)), Math.Clamp(s.Replay.Seconds, 15, 600) + 10);
+        }
+        try { ProcessKeyframe(g, s, store, format, quality, sampleBytes); }
+        finally { if (sampleBytes is not null) Array.Clear(sampleBytes); }
+    }
+
+    private unsafe void ProcessKeyframe(KeyframeGrab g, Settings s, IStore store, string format, int quality, byte[]? encoded)
+    {
+        if (!g.Request.Keyframe) return;
         DedupFilter dedup;
         lock (_dedup)
         {
@@ -97,8 +117,7 @@ internal sealed class KeyframePipeline : IAsyncDisposable
             return;
         }
         sw.Restart();
-        string format = s.Keyframes.Format == "jpeg" ? "jpeg" : "webp";
-        byte[] bytes = ImageCodec.EncodeBgra(g.Pixels, g.Width, g.Height, g.Stride, format, Math.Clamp(s.Keyframes.Quality, 30, 95));
+        byte[] bytes = encoded?.ToArray() ?? ImageCodec.EncodeBgra(g.Pixels, g.Width, g.Height, g.Stride, format, quality);
         LastEncodeMs = sw.Elapsed.TotalMilliseconds;
         EncodeMsTotal += LastEncodeMs;
         var req = g.Request;

@@ -41,6 +41,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
     private readonly WorkerClient _worker;
     private readonly Thumbnailer _thumbs;
     private readonly LoopbackHub _loopback = new();
+    private readonly ReplaySampler _sampler = new();
     private readonly SemaphoreSlim _benchLock = new(1, 1);
     private readonly CancellationTokenSource _cts = new();
     private MessageWindow? _window;
@@ -107,7 +108,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         var encLuid = GpuDevices.Adapters().FirstOrDefault(a => a.VendorId == GpuDevices.VendorIntel)?.Luid;
         _probe = new SystemProbe(encLuid is null ? null : GpuDevices.PdhLuidToken(encLuid.Value));
         _scheduler = new EmbeddingScheduler(() => Store, () => S, _worker, ProbeLoad, () => _pause.Has("consent") || _pause.Has("keylocked"));
-        _pipeline = new KeyframePipeline(() => Store, () => S, OnCaptureStored);
+        _pipeline = new KeyframePipeline(() => Store, () => S, OnCaptureStored) { Sampler = _sampler };
         _guard = new GuardrailService(() => S, () => _sessionLocked, () => _capture?.MonitorBounds() ?? [], _opt.InstallDir);
         _guard.ForegroundChanged += _ => _capture?.OnForegroundChanged();
         _window.ForegroundChanged += () => _guard?.OnForegroundEvent();
@@ -457,6 +458,13 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         return ok;
     }
 
+    /// <summary>Core verified the unlock password (or the data-key passphrase): open the gate without Hello.</summary>
+    public void OpenReadGate()
+    {
+        _gate.Open(S.Security.UnlockTimeoutMin);
+        RaiseStatus(force: true);
+    }
+
     public void Lock()
     {
         _gate.Close();
@@ -493,19 +501,46 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         long bytes = new FileInfo(path).Length;
         Log.Info($"replay saved: {durationMs} ms, {bytes / 1024} KiB, encrypted={encrypted}, {sw.ElapsedMilliseconds} ms");
         if (S.Replay.Notify) _window?.Notify("Replay saved", $"Last {durationMs / 1000} s saved. Click to open the replay list.");
+        IndexReplayFrames(id, ts, durationMs);
         return new ReplayClip(id, ts, durationMs, bytes, encrypted, path);
+    }
+
+    /// <summary>replay.searchable: the sampled frames of the saved clip go into the store as kind replay (id + offset).</summary>
+    private void IndexReplayFrames(string id, DateTimeOffset end, int durationMs)
+    {
+        var s = S;
+        if (!s.Replay.Searchable || Store is not { } store) return;
+        var start = end - TimeSpan.FromMilliseconds(durationMs);
+        var samples = _sampler.Take(start, end, Math.Clamp(s.Replay.SampleSeconds, 2, 60));
+        int n = 0;
+        try
+        {
+            foreach (var f in ReplaySampler.ToFrames(id, start, durationMs, samples))
+            {
+                try { store.AddReplayFrame(f); n++; }
+                finally { Array.Clear(f.Image); }
+            }
+        }
+        catch (Exception ex) { Log.Warn("replay frames", ex); }
+        if (n > 0) _scheduler?.Signal();
+        Log.Info($"replay {id}: {n} frames queued for search");
     }
 
     public IReadOnlyList<ReplayClip> ListReplays() => _replays?.List() ?? [];
 
     public Task ExportReplayAsync(string id, string path, CancellationToken ct) => _replays!.ExportAsync(id, path, ct);
 
-    public void DeleteReplay(string id) => _replays!.Delete(id);
+    public void DeleteReplay(string id)
+    {
+        _replays!.Delete(id);
+        try { Store?.DeleteReplayFrames(id); } catch (Exception ex) { Log.Warn("replay frames delete", ex); }
+    }
 
     public void Panic()
     {
         var sw = Stopwatch.StartNew();
         _capture?.Panic();
+        _sampler.Clear();
         _scheduler?.Clear();
         _thumbs.ClearCache();
         _systemAudio?.Clear();

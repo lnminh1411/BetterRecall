@@ -32,6 +32,16 @@ public static class AgentErrors
     public const string Internal = "Internal error.";
     public const string ClientNotAllowed = "Client not allowed.";
     public const string InvalidJson = "Invalid JSON.";
+    public const string WrongPassword = "Wrong password.";
+    public const string NoPassword = "No unlock password is set.";
+    public const string PasswordRule = "Password must be 6 to 256 characters.";
+    public const string PasswordInUse = "Password in use (config security.unlockMethod).";
+    public const string AiOff = "Cloud describe is off (config ai.enabled).";
+    public const string NoApiKey = "API key not set.";
+    public const string ApiKeyRule = "Invalid API key.";
+    public const string NoImage = "No image to describe.";
+    public const string ProviderUnreachable = "Provider unreachable.";
+    public const string ProviderTimeout = "Provider timed out.";
 
     /// <summary>"Invalid capture.intervalMs." gives "capture.intervalMs"; anything else gives null.</summary>
     public static string? InvalidKey(string? error)

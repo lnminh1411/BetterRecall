@@ -43,7 +43,7 @@ public static partial class SettingsSchema
 {
     /// <summary>Navigation order of the settings groups. Resource "G_" + id.</summary>
     public static readonly string[] Groups =
-        ["appearance", "capture", "keyframes", "replay", "audio", "privacy", "index", "inference", "governance", "security", "ipc", "retention", "log"];   // hotkeys: own Shortcuts page
+        ["appearance", "capture", "keyframes", "replay", "audio", "privacy", "index", "inference", "governance", "security", "ipc", "retention", "log", "ai"];   // hotkeys: own Shortcuts page
 
     public static readonly IReadOnlyList<SettingDescriptor> All =
     [
@@ -153,6 +153,14 @@ public static partial class SettingsSchema
         new("ui.theme", "appearance", SettingType.Choice, Choices: ["system", "light", "dark"]),
         new("ui.searchAlwaysOnTop", "appearance", SettingType.Bool),
         new("ui.startMinimized", "appearance", SettingType.Bool),
+
+        new("replay.searchable", "replay", SettingType.Bool),
+        new("replay.sampleSeconds", "replay", SettingType.Int, 2, 60, EnabledWhenKey: "replay.searchable", EnabledWhenValue: "true"),
+        new("security.unlockMethod", "security", SettingType.Choice, Choices: ["hello", "password"], WarningKey: "W_security_unlockMethod"),
+        new("ai.enabled", "ai", SettingType.Bool, WarningKey: "W_ai_enabled"),
+        new("ai.provider", "ai", SettingType.Choice, Choices: [.. BetterRecall.Contracts.AiDefaults.Providers], EnabledWhenKey: "ai.enabled", EnabledWhenValue: "true"),
+        new("ai.model", "ai", SettingType.Text, Pattern: "^$|^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,127}$", EnabledWhenKey: "ai.enabled", EnabledWhenValue: "true"),
+        new("ai.endpoint", "ai", SettingType.Text, Pattern: @"^$|^https://\S+$|^http://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(/\S*)?$", EnabledWhenKey: "ai.enabled", EnabledWhenValue: "true"),
     ];
 
     public static SettingDescriptor? Find(string key) => All.FirstOrDefault(d => string.Equals(d.Key, key, StringComparison.OrdinalIgnoreCase));

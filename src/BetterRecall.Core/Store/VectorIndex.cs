@@ -7,7 +7,7 @@ using System.Runtime.Intrinsics;
 
 namespace BetterRecall.Core.Store;
 
-/// <summary>Filter for the first-stage scan. AppId / SiteId -1 means any; -2 matches nothing. KindMask bit 0 screen, bit 1 audio.</summary>
+/// <summary>Filter for the first-stage scan. AppId / SiteId -1 means any; -2 matches nothing. KindMask bit 0 screen, bit 1 audio, bit 2 replay.</summary>
 public readonly record struct VectorFilter(long FromMs, long ToMs, int KindMask, int AppId, int SiteId = -1)
 {
     public static readonly VectorFilter All = new(long.MinValue, long.MaxValue, 3, -1);

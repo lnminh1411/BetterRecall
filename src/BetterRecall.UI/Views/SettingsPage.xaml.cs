@@ -77,6 +77,14 @@ public sealed partial class SettingsPage : Page
         }
 
         if (_group == "inference") Cards.Children.Add(BenchCard());
+        if (_group == "security") Cards.Children.Add(SecretCards.PasswordCard(this));
+        if (_group == "ai")
+        {
+            Cards.Children.Insert(1, new InfoBar { IsOpen = true, IsClosable = false, Severity = InfoBarSeverity.Informational, Title = Loc.Get("Ai_NoteTitle"), Message = Loc.Get("Ai_Note") });
+            if (NetworkGuarantee.IsOff(Editor.Original))   // saved on: the guarantee is gone until it is turned off
+                Cards.Children.Insert(1, new InfoBar { IsOpen = true, IsClosable = false, Severity = InfoBarSeverity.Warning, Title = Loc.Get(NetworkGuarantee.OffLineKey) });
+            Cards.Children.Add(SecretCards.ApiKeyCard(this));
+        }
         UpdateState();
     }
 
@@ -143,7 +151,20 @@ public sealed partial class SettingsPage : Page
             case SettingType.Bool:
             {
                 var t = new ToggleSwitch { IsOn = value?.GetValue<bool>() == true, OnContent = Loc.Get("Common_On"), OffContent = Loc.Get("Common_Off"), MinWidth = 0 };
-                t.Toggled += (_, _) => Editor.Set(d.Key, t.IsOn);
+                bool reverting = false;
+                t.Toggled += async (_, _) =>
+                {
+                    if (reverting) return;
+                    if (NetworkGuarantee.NeedsConfirm(d.Key, t.IsOn, NetworkGuarantee.IsOff(Editor.Original))
+                        && !await SecretCards.ConfirmCloudAsync(XamlRoot, Editor.Working))
+                    {
+                        reverting = true;
+                        t.IsOn = false;   // Cancel leaves it off
+                        reverting = false;
+                        return;
+                    }
+                    Editor.Set(d.Key, t.IsOn);
+                };
                 return t;
             }
 

@@ -95,6 +95,11 @@ public sealed class CoreHostImpl : ICoreHost
             PurgeAll = PurgeAllAsync,
             Blobs = _blobs,
             Home = _options.Home,
+            Password = new UnlockPassword(_options.Home),
+            AiKey = new Ai.ApiKeyStore(_options.Home),
+            Describer = new Ai.CloudDescriber(),
+            // Redaction hook for cloud describe: v0.2 batch 3 replaces this with its redactor.
+            Redactor = new Ai.PassThroughRedactor(),
         });
         _pipes = new PipeManager(_settings, processor, _options.InstallDir, () => _store);
         _pipes.ClientsChanged += n => ClientsChanged?.Invoke(n);

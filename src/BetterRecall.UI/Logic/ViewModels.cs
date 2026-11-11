@@ -23,6 +23,10 @@ public sealed class CaptureItem : ObservableObject
     public bool IsWeak { get; init; }
     /// <summary>Browser host the capture was taken on, empty when unknown.</summary>
     public string Site { get; init; } = "";
+    /// <summary>Kind replay: the saved replay this frame comes from and its position in it.</summary>
+    public string? ReplayId { get; init; }
+    public int? ReplayOffsetMs { get; init; }
+    public bool IsReplay => Kind == CaptureKind.Replay && ReplayId is not null;
     /// <summary>Search hit found by keyword (title, app, transcript) rather than by the vector alone.</summary>
     public bool TextMatch { get; init; }
     /// <summary>Search text that found this hit (card header "Found ...").</summary>
@@ -40,7 +44,7 @@ public sealed class CaptureItem : ObservableObject
     /// <summary>First letter of the badge text, for the round app mark.</summary>
     public string BadgeInitial => BadgeText.Length > 0 ? char.ToUpperInvariant(BadgeText[0]).ToString() : "?";
     public bool HasSite => Site.Length > 0;
-    public bool HasImage => Kind == CaptureKind.Screen && HasThumb;
+    public bool HasImage => Kind != CaptureKind.Audio && HasThumb;
 
     public static string AppName(string app) =>
         app.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? app[..^4] : app;
@@ -55,13 +59,14 @@ public sealed class CaptureItem : ObservableObject
     public static CaptureItem From(SearchHit h, string query = "") => new()
     {
         Id = h.Id, Ts = h.Ts, Kind = h.Kind, App = h.App, Title = h.Title, Snippet = h.Snippet, HasThumb = h.HasThumb, DurationS = h.DurationS, IsWeak = h.Weak,
-        Site = h.Site ?? "", TextMatch = h.TextMatch, Query = query,
+        Site = h.Site ?? "", TextMatch = h.TextMatch, Query = query, ReplayId = h.ReplayId, ReplayOffsetMs = h.ReplayOffsetMs,
     };
 
     public static CaptureItem From(CaptureMeta m) => new()
     {
         Id = m.Id, Ts = m.Ts, Kind = m.Kind, App = m.App, Title = m.Title, HasThumb = m.HasThumb,
         DurationS = m.DurationMs > 0 ? (int)Math.Round(m.DurationMs / 1000.0) : null, Site = m.Site ?? "",
+        ReplayId = m.ReplayId, ReplayOffsetMs = m.ReplayOffsetMs,
     };
 }
 
@@ -110,9 +115,14 @@ public sealed class ResultGroup : ObservableCollection<CaptureItem>
 
 public static class ResultGroups
 {
-    /// <summary>Audio transcripts are Audio matches; screen hits found by keyword are Text matches, by the vector only Visual matches.</summary>
-    public static ResultGroupKind KindOf(CaptureKind kind, bool textMatch) =>
-        kind == CaptureKind.Audio ? ResultGroupKind.Audio : textMatch ? ResultGroupKind.Text : ResultGroupKind.Visual;
+    /// <summary>Audio transcripts are Audio matches, frames of saved replays Replay matches; screen hits found by keyword
+    /// are Text matches, by the vector only Visual matches.</summary>
+    public static ResultGroupKind KindOf(CaptureKind kind, bool textMatch) => kind switch
+    {
+        CaptureKind.Audio => ResultGroupKind.Audio,
+        CaptureKind.Replay => ResultGroupKind.Replay,
+        _ => textMatch ? ResultGroupKind.Text : ResultGroupKind.Visual,
+    };
 
     /// <summary>Non-empty sections in display order; rank order kept inside each section.</summary>
     public static List<ResultGroup> Build(IEnumerable<CaptureItem> items) =>
@@ -346,6 +356,17 @@ public sealed class SearchViewModel : ObservableObject
         AgentErrors.WrongPassphrase => new LocalizedText("Err_WrongPassphrase"),
         AgentErrors.UnlockRequired => new LocalizedText("Err_UnlockRequired"),
         AgentErrors.InvalidToken => new LocalizedText("Err_InvalidToken"),
+        AgentErrors.WrongPassword => new LocalizedText("Err_WrongPassword"),
+        AgentErrors.NoPassword => new LocalizedText("Err_NoPassword"),
+        AgentErrors.PasswordRule => new LocalizedText("Err_PasswordRule"),
+        AgentErrors.PasswordInUse => new LocalizedText("Err_PasswordInUse"),
+        AgentErrors.AiOff => new LocalizedText("Err_AiOff"),
+        AgentErrors.NoApiKey => new LocalizedText("Err_NoApiKey"),
+        AgentErrors.ApiKeyRule => new LocalizedText("Err_ApiKeyRule"),
+        AgentErrors.NoImage => new LocalizedText("Err_NoImage"),
+        AgentErrors.ProviderUnreachable => new LocalizedText("Err_ProviderUnreachable"),
+        AgentErrors.ProviderTimeout => new LocalizedText("Err_ProviderTimeout"),
+        _ when UnlockLogic.RetryAfter(error) is { } wait => new LocalizedText("Err_TooManyTries", wait),
         AgentErrors.Internal or null => new LocalizedText("Err_Internal"),
         _ when AgentErrors.InvalidKey(error) is { } key => new LocalizedText("Err_InvalidKey", key),
         _ => new LocalizedText("Err_Raw", error),
@@ -387,7 +408,7 @@ public sealed class DetailViewModel(AgentApi api) : ObservableObject
             Message = SearchViewModel.ErrorText(detail.Kind, detail.Error);
             Failed?.Invoke(detail.Kind);
         }
-        if (item.Kind == CaptureKind.Screen && item.HasThumb && detail.Kind != AgentErrorKind.Locked)
+        if (item.Kind != CaptureKind.Audio && item.HasThumb && detail.Kind != AgentErrorKind.Locked)
         {
             var kf = await api.KeyframeAsync(item.Id, ct);
             if (seq != _seq) return;
@@ -529,10 +550,47 @@ public static class StatusText
     }
 }
 
-/// <summary>Unlock screen logic. Passphrase mode comes from security.keyProtection.</summary>
+/// <summary>Unlock screen logic. Passphrase mode comes from security.keyProtection, password mode from security.unlockMethod.</summary>
 public static class UnlockLogic
 {
     public static bool UsesPassphrase(string? keyProtection) => string.Equals(keyProtection, "passphrase", StringComparison.OrdinalIgnoreCase);
+    public static bool UsesPassword(string? unlockMethod) => string.Equals(unlockMethod, "password", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Which box the unlock screen shows. A passphrase-wrapped key that is not loaded yet always asks for the
+    /// passphrase first; otherwise the unlock method decides.</summary>
+    public static UnlockMode Mode(string? keyProtection, string? unlockMethod, bool keyNeedsPassphrase) =>
+        keyNeedsPassphrase && UsesPassphrase(keyProtection) ? UnlockMode.Passphrase
+        : UsesPassword(unlockMethod) ? UnlockMode.Password
+        : UsesPassphrase(keyProtection) ? UnlockMode.Passphrase
+        : UnlockMode.Hello;
+
+    /// <summary>"Too many attempts. Try again in 30 s." gives 30, anything else null.</summary>
+    public static int? RetryAfter(string? error)
+    {
+        const string prefix = "Too many attempts. Try again in ";
+        if (error is null || !error.StartsWith(prefix, StringComparison.Ordinal) || !error.EndsWith(" s.", StringComparison.Ordinal)) return null;
+        return int.TryParse(error[prefix.Length..^3], System.Globalization.NumberStyles.None, CultureInfo.InvariantCulture, out var n) ? n : null;
+    }
+}
+
+public enum UnlockMode { Hello, Passphrase, Password }
+
+/// <summary>Replay matches: "open replay at 1:23".</summary>
+public static class ReplayLink
+{
+    /// <summary>Main-window page argument for a replay at an offset: "replays:&lt;id&gt;@&lt;ms&gt;".</summary>
+    public static string Page(string replayId, int offsetMs) => "replays:" + replayId + "@" + Math.Max(0, offsetMs).ToString(CultureInfo.InvariantCulture);
+
+    /// <summary>Parses the part after "replays:"; null when it is not an id@offset pair.</summary>
+    public static (string Id, int OffsetMs)? Parse(string? arg)
+    {
+        if (string.IsNullOrEmpty(arg)) return null;
+        int at = arg.LastIndexOf('@');
+        if (at <= 0 || at == arg.Length - 1) return null;
+        if (!int.TryParse(arg[(at + 1)..], System.Globalization.NumberStyles.None, CultureInfo.InvariantCulture, out var ms)) return null;
+        var id = arg[..at];
+        return id.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_' or '.') ? (id, ms) : null;
+    }
 }
 
 /// <summary>Danger-zone flows.</summary>
