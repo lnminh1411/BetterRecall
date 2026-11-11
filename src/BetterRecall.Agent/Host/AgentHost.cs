@@ -56,7 +56,8 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
     private ReplayLibrary? _replays;
     private TranscriptSource? _systemAudio, _micAudio;
     private Transcriber? _transcriber;
-    private Timer? _statusTimer, _maintenanceTimer;
+    private Timer? _statusTimer, _maintenanceTimer, _storageTimer;
+    private StorageGuard? _storage;
     private bool _sessionLocked;
     private bool _captureStarted;
     private bool _lateIsolationDone;
@@ -128,6 +129,8 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         _scheduler.Start();
         _statusTimer = new Timer(_ => StatusTick(), null, 1000, 1000);
         _maintenanceTimer = new Timer(_ => Maintenance(), null, TimeSpan.FromHours(1), TimeSpan.FromHours(1));
+        _storage = new StorageGuard(() => Store, () => S, () => StorageGuard.FreeBytesOf(_opt.Home));
+        _storageTimer = new Timer(_ => StorageCheck(), null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(30));
         if (_opt.Autostart)
         {
             try { StartupRegistration.Register(_opt.InstallDir); } catch (Exception ex) { Log.Warn("startup registration", ex); }
@@ -170,6 +173,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         }
         _capture = new CaptureService(() => S, KeyframesPaused, ReplayPaused, _guard!, _pipeline!, _loopback, lockMem, _redactions);
         _capture.Start();
+        ImageCodec.Preload();
         SyncAudioSources();
         // ACG goes last: give the capture threads time to load drivers, encoders and the audio stack.
         _ = Task.Run(async () =>
@@ -254,6 +258,44 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
             SyncAudioSources();
             RaiseStatus(force: true);
         });
+        if (!StorageEqual(old.Storage, s.Storage)) _ = Task.Run(StorageCheck);
+    }
+
+    private static bool StorageEqual(StorageSettings a, StorageSettings b) =>
+        a.MinFreeGb == b.MinFreeGb && a.MaxGb == b.MaxGb && a.Overwrite == b.Overwrite;
+
+    private readonly object _storageGate = new();
+
+    /// <summary>storage.minFreeGb / maxGb / overwrite: pause with reason "storage" (tray balloon once) or make room.</summary>
+    private void StorageCheck()
+    {
+        if (!Monitor.TryEnter(_storageGate)) return;
+        try
+        {
+            if (_storage is null || Store is null) return;
+            var d = _storage.Check();
+            if (d.Deleted > 0) { _statsCache = default; Log.Info($"storage: {d.Deleted} captures deleted to make room"); }
+            if (d.Pause && !_pause.Has("storage"))
+            {
+                _pause.Set("storage");
+                Log.Warn($"capture paused: storage ({d.Why})");
+            }
+            else if (!d.Pause && _pause.Has("storage"))
+            {
+                _pause.Clear("storage");
+                Log.Info("capture resumed: storage back within limits");
+            }
+            if (d.Notify)
+            {
+                var st = S.Storage;
+                _window?.Notify("BetterRecall paused", d.Why == "disk"
+                    ? $"Less than {st.MinFreeGb} GB free on the data drive. Capture is paused until there is room."
+                    : $"Stored captures reached {st.MaxGb} GB. Capture is paused; raise the limit or turn on overwrite.");
+            }
+            RaiseStatus(force: false);
+        }
+        catch (Exception ex) { Log.Warn("storage check", ex); }
+        finally { Monitor.Exit(_storageGate); }
     }
 
     private static bool HotkeysEqual(HotkeySettings a, HotkeySettings b) =>
@@ -367,13 +409,22 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
     private string StatusLine()
     {
         var (reason, until) = _pause.Current();
-        if (reason is null) return _captureStarted ? "Capturing" : "Starting";
+        if (reason is null)
+        {
+            if (!_captureStarted) return "Starting";
+            // Keyframe CPU budget: say so while frames are encoded cheaper or wait for budget.
+            var b = _pipeline?.Budget;
+            return b is { } bb && (bb.Level != EncodeLevel.Normal || bb.Waiting > 0)
+                ? $"Capturing (keyframes: CPU budget, {bb.Level.ToString().ToLowerInvariant()}{(bb.Waiting > 0 ? $", {bb.Waiting} waiting" : "")})"
+                : "Capturing";
+        }
         return reason switch
         {
             "consent" => "Waiting for consent",
             "keylocked" => "Locked: enter passphrase",
             "lock" => "Paused: session locked",
             "fullscreen" => "Paused: fullscreen",
+            "storage" => "Paused: storage limit",
             _ => until is { } u ? $"Paused until {u.ToLocalTime():HH:mm}" : "Paused",
         };
     }
@@ -396,6 +447,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
             var sw = Stopwatch.StartNew();
             store.RunMaintenance(S);
             Log.Info($"maintenance done in {sw.ElapsedMilliseconds} ms");
+            StorageCheck();
         }
         catch (Exception ex) { Log.Warn("maintenance", ex); }
     }
@@ -601,6 +653,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         _cts.Cancel();
         if (_statusTimer is not null) await _statusTimer.DisposeAsync().ConfigureAwait(false);
         if (_maintenanceTimer is not null) await _maintenanceTimer.DisposeAsync().ConfigureAwait(false);
+        if (_storageTimer is not null) await _storageTimer.DisposeAsync().ConfigureAwait(false);
         try { await _core.StopPipesAsync().ConfigureAwait(false); } catch (Exception ex) { Log.Warn("stop pipes", ex); }
         if (_capture is not null) await _capture.DisposeAsync().ConfigureAwait(false);
         _systemAudio?.Dispose();

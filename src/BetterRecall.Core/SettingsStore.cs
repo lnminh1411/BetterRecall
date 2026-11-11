@@ -73,7 +73,7 @@ public sealed partial class SettingsStore : ISettingsStore
     /// <summary>Applies each known key of obj over the defaults, skipping keys that do not parse or validate.</summary>
     private static Settings LoadLenient(JsonObject obj, out bool changed)
     {
-        changed = false;
+        changed = MigrateLegacy(obj);
         var schema = (JsonObject)JsonSerializer.SerializeToNode(new Settings(), ContractsJson.Default.Settings)!;
         var merged = (JsonObject)schema.DeepClone();
         foreach (var (section, sectionNode) in obj)
@@ -105,6 +105,25 @@ public sealed partial class SettingsStore : ISettingsStore
             changed = true;
         }
         return result;
+    }
+
+    /// <summary>
+    /// Files written before 0.2 batch 2 carry keyframes.maxGb: it moves to storage.maxGb, and the old defaults
+    /// capture.dirtyMinPercent 0.5 and keyframes.format webp move to the new ones (15, avif). Values the user
+    /// changed stay. True when the file needs rewriting.
+    /// </summary>
+    internal static bool MigrateLegacy(JsonObject obj)
+    {
+        if (obj["keyframes"] is not JsonObject kf || !kf.ContainsKey("maxGb")) return false;
+        var old = kf["maxGb"]?.DeepClone();
+        kf.Remove("maxGb");
+        if (obj["storage"] is not JsonObject st) obj["storage"] = st = new JsonObject();
+        if (!st.ContainsKey("maxGb") && old is not null) st["maxGb"] = old;
+        if (kf["format"] is JsonValue f && f.TryGetValue<string>(out var fs) && fs == "webp") kf["format"] = "avif";
+        if (obj["capture"] is JsonObject cap && cap["dirtyMinPercent"] is JsonValue d && d.TryGetValue<double>(out var dv) && dv == 0.5)
+            cap["dirtyMinPercent"] = 15.0;
+        Log.Info("settings: keyframes.maxGb moved to storage.maxGb");
+        return true;
     }
 
     private static Settings? TryDeserialize(JsonObject node)
@@ -263,9 +282,8 @@ public sealed partial class SettingsStore : ISettingsStore
         ("capture.maxWidth", s => Range(s.Capture.MaxWidth, 640, 3840)),
         ("capture.dhashThreshold", s => Range(s.Capture.DhashThreshold, 0, 32)),
         ("capture.dirtyMinPercent", s => Range(s.Capture.DirtyMinPercent, 0, 100)),
-        ("keyframes.format", s => In(s.Keyframes.Format, "webp", "jpeg")),
+        ("keyframes.format", s => In(s.Keyframes.Format, "avif", "webp", "jxl", "jpeg")),
         ("keyframes.quality", s => Range(s.Keyframes.Quality, 30, 95)),
-        ("keyframes.maxGb", s => Range(s.Keyframes.MaxGb, 1, 2000)),
         ("keyframes.thumbCacheMb", s => Range(s.Keyframes.ThumbCacheMb, 8, 1024)),
         ("replay.seconds", s => Range(s.Replay.Seconds, 15, 600)),
         ("replay.fps", s => ReplaySettings.FpsChoices.Contains(s.Replay.Fps)),
@@ -325,6 +343,10 @@ public sealed partial class SettingsStore : ISettingsStore
         ("ai.provider", s => In(s.Ai.Provider, AiDefaults.Providers)),
         ("ai.endpoint", s => s.Ai.Endpoint != null && (s.Ai.Endpoint.Length == 0 || ValidAiEndpoint(s.Ai.Endpoint))),
         ("ai.model", s => s.Ai.Model != null && (s.Ai.Model.Length == 0 || AiModelRegex().IsMatch(s.Ai.Model))),
+        ("retention.progressiveAfterDays", s => Range(s.Retention.ProgressiveAfterDays, 0, 3650)),
+        ("retention.progressiveOverDays", s => Range(s.Retention.ProgressiveOverDays, 1, 3650)),
+        ("storage.minFreeGb", s => Range(s.Storage.MinFreeGb, 0, 10000)),
+        ("storage.maxGb", s => Range(s.Storage.MaxGb, 1, 20000)),
         ("ai.share", s => In(s.Ai.Share, AiShare.All)),
         ("ai.chatMaxHits", s => Range(s.Ai.ChatMaxHits, 1, 20)),
         ("ai.chatMaxImages", s => Range(s.Ai.ChatMaxImages, 0, 8)),
@@ -376,6 +398,7 @@ public sealed partial class SettingsStore : ISettingsStore
         if (s.Ui == null) return "ui";
         if (s.Ocr == null) return "ocr";
         if (s.Ai == null) return "ai";
+        if (s.Storage == null) return "storage";
         foreach (var (key, ok) in Rules)
         {
             bool pass;

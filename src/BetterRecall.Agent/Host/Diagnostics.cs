@@ -54,9 +54,11 @@ internal static class Diagnostics
         if (host.Pipeline is { } kp)
         {
             double enc = kp.Kept == 0 ? 0 : kp.EncodeMsTotal / kp.Kept;
-            sb.AppendLine($"keyframes kept {kp.Kept}, similar {kp.SkippedSimilar}, dropped {kp.Dropped}, failed {kp.Failed}, encode avg {enc:F1} ms");
+            var b = kp.Budget;
+            sb.AppendLine($"keyframes kept {kp.Kept}, similar {kp.SkippedSimilar}, dropped {kp.Dropped}, failed {kp.Failed}, encode avg {enc:F1} ms, encode CPU {kp.EncodeCpuMsTotal:F0} ms");
+            sb.AppendLine($"keyframe CPU budget: last 10 s {b.Last10Percent:F2} %, last 60 s {b.Last60Percent:F2} %, level {b.Level}, waiting {b.Waiting}, deferred {kp.BudgetDeferred}, webp {kp.BudgetWebP}, dropped {kp.BudgetDropped} ({kp.Encoder})");
             double ocr = kp.OcrRead == 0 ? 0 : kp.OcrMsTotal / kp.OcrRead;
-            sb.AppendLine($"ocr read {kp.OcrRead}, failed {kp.OcrFailed}, unavailable {kp.OcrUnavailable}, avg {ocr:F0} ms; redacted spans {kp.RedactedSpans}, dropped unchecked {kp.RedactDropped}");
+            sb.AppendLine($"ocr read {kp.OcrRead}, failed {kp.OcrFailed}, unavailable {kp.OcrUnavailable}, avg {ocr:F0} ms, agent CPU {kp.OcrCpuMsTotal:F0} ms (not in the encode budget); redacted spans {kp.RedactedSpans}, dropped unchecked {kp.RedactDropped}");
         }
         if (host.Scheduler is { } sc) sb.AppendLine($"scheduler: {sc.LastDecision}, processed {sc.Processed}, nsfw {sc.Dropped}, queued {sc.Queued}");
         if (host.Guard is { } g) sb.AppendLine($"guard scan {g.LastScanMs:F2} ms, badge {g.LastBadgeMs:F1} ms, password fields {g.LastPasswordMs:F1} ms");

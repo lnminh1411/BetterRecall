@@ -343,6 +343,25 @@ internal static unsafe partial class Win32
     [return: MarshalAs(UnmanagedType.Bool)]
     public static partial bool SetProcessInformation(nint process, int infoClass, void* info, uint size);
 
+    [LibraryImport("kernel32.dll")]
+    public static partial nint GetCurrentThread();
+
+    /// <summary>THREAD_POWER_THROTTLING_STATE has the same layout as the process one (Version, ControlMask, StateMask).</summary>
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool SetThreadInformation(nint thread, int infoClass, void* info, uint size);
+
+    public const int ThreadPowerThrottling = 3;
+
+    /// <summary>Times in 100 ns units (FILETIME as ulong).</summary>
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool GetThreadTimes(nint thread, out ulong creation, out ulong exit, out ulong kernel, out ulong user);
+
+    /// <summary>CPU time (kernel + user) of the calling thread in ms.</summary>
+    public static double CurrentThreadCpuMs() =>
+        GetThreadTimes(GetCurrentThread(), out _, out _, out ulong k, out ulong u) ? (k + u) / 10_000.0 : 0;
+
     public const int ProcessPowerThrottling = 4;
     public const uint PROCESS_POWER_THROTTLING_CURRENT_VERSION = 1;
     public const uint PROCESS_POWER_THROTTLING_EXECUTION_SPEED = 1;

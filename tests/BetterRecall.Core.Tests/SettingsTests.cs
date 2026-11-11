@@ -48,7 +48,6 @@ public class SettingsTests
     [InlineData("{\"capture\":{\"monitors\":[-1]}}", "Invalid capture.monitors.")]
     [InlineData("{\"keyframes\":{\"format\":\"png\"}}", "Invalid keyframes.format.")]
     [InlineData("{\"keyframes\":{\"quality\":29}}", "Invalid keyframes.quality.")]
-    [InlineData("{\"keyframes\":{\"maxGb\":0}}", "Invalid keyframes.maxGb.")]
     [InlineData("{\"keyframes\":{\"thumbCacheMb\":1025}}", "Invalid keyframes.thumbCacheMb.")]
     [InlineData("{\"replay\":{\"seconds\":14}}", "Invalid replay.seconds.")]
     [InlineData("{\"replay\":{\"fps\":61}}", "Invalid replay.fps.")]

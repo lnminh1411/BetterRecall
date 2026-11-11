@@ -184,4 +184,11 @@ internal sealed class FakeThumbs : IThumbnailer
     public Task<ThumbData?> GetThumbAsync(string id, int width, CancellationToken ct)
         => Task.FromResult(id == "missing" ? null : new ThumbData(id, "image/webp", width, width * 9 / 16, [1, 2, 3]));
     public void ClearCache() => Cleared++;
+    public List<string> Transcodes = [];
+    public ThumbData Transcode(ThumbData keyframe, string target)
+    {
+        Transcodes.Add(keyframe.Mime + ">" + target);
+        return target == "ui" && keyframe.Mime == "image/avif" ? keyframe with { Mime = "image/webp", Bytes = [9, 9] }
+            : target == "jpeg" ? keyframe with { Mime = "image/jpeg", Bytes = [0xFF, 0xD8] } : keyframe;
+    }
 }

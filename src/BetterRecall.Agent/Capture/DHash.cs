@@ -48,46 +48,40 @@ internal static class DHash
     public static int Distance(ulong a, ulong b) => BitOperations.PopCount(a ^ b);
 }
 
-internal enum DedupVerdict { Keep, SkipNoFrame, SkipDirtyArea, SkipSimilar }
-
-/// <summary>Cheapest test first: no new frame, small dirty area, then dHash Hamming distance.</summary>
+/// <summary>Per-monitor state of the last stored keyframe: dHash, app + title context and the change map.</summary>
 internal sealed class DedupFilter
 {
     private ulong? _lastHash;
     private string? _lastContext;
+    private ChangeMap? _lastMap;
 
     public ulong? LastHash => _lastHash;
 
-    /// <summary>Stage 1 and 2, before any GPU readback.</summary>
-    public DedupVerdict PreCheck(bool anyFrameSinceLastKept, double dirtyPercent, double dirtyMinPercent, bool contextChanged)
-    {
-        if (_lastHash is null) return DedupVerdict.Keep;
-        if (contextChanged) return DedupVerdict.Keep;
-        if (!anyFrameSinceLastKept) return DedupVerdict.SkipNoFrame;
-        if (dirtyPercent < dirtyMinPercent) return DedupVerdict.SkipDirtyArea;
-        return DedupVerdict.Keep;
-    }
-
-    /// <summary>Stage 3 after the small readback. context is app plus title; a change always keeps.</summary>
-    public DedupVerdict HashCheck(ulong hash, int threshold, string context)
-    {
-        bool contextChanged = _lastContext is not null && !string.Equals(_lastContext, context, StringComparison.Ordinal);
-        if (_lastHash is ulong last && !contextChanged && DHash.Distance(last, hash) < threshold)
-            return DedupVerdict.SkipSimilar;
-        return DedupVerdict.Keep;
-    }
-
     public bool ContextDiffers(string context) => _lastContext is not null && !string.Equals(_lastContext, context, StringComparison.Ordinal);
 
-    public void Accept(ulong hash, string context)
+    /// <summary>Change of a new grab against the last stored keyframe and the smart-capture decision.</summary>
+    public (KeepReason Reason, ChangeResult Change) Decide(ChangeMap map, ulong hash, KeyframeRequest req, int dhashThreshold, double dirtyMinPercent)
+    {
+        var change = ChangeMap.Compare(_lastMap, map);
+        int distance = _lastHash is ulong last ? DHash.Distance(last, hash) : 64;
+        var reason = CapturePolicy.Decide(req.Force, req.Trigger, ContextDiffers(req.Context), change, distance, dhashThreshold, dirtyMinPercent);
+        return (reason, change);
+    }
+
+    /// <summary>The grab was stored: it becomes the reference. Takes ownership of map.</summary>
+    public void Accept(ulong hash, string context, ChangeMap map)
     {
         _lastHash = hash;
         _lastContext = context;
+        _lastMap?.Clear();
+        _lastMap = map;
     }
 
     public void Reset()
     {
         _lastHash = null;
         _lastContext = null;
+        _lastMap?.Clear();
+        _lastMap = null;
     }
 }

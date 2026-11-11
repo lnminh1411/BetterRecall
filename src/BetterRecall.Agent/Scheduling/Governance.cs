@@ -52,6 +52,18 @@ internal static class Governance
         if (idlePriority) Win32.SetPriorityClass(process, Win32.IDLE_PRIORITY_CLASS);
         return ok;
     }
+
+    /// <summary>EcoQoS for the calling thread only (keyframe encoding): Windows may run it on efficient cores at low clocks.</summary>
+    public static unsafe bool ApplyEcoQosToCurrentThread()
+    {
+        var state = new PROCESS_POWER_THROTTLING_STATE
+        {
+            Version = Win32.PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+            ControlMask = Win32.PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+            StateMask = Win32.PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        };
+        return Win32.SetThreadInformation(Win32.GetCurrentThread(), Win32.ThreadPowerThrottling, &state, (uint)sizeof(PROCESS_POWER_THROTTLING_STATE));
+    }
 }
 
 /// <summary>Samples system load for governance. Not thread-safe; one owner.</summary>

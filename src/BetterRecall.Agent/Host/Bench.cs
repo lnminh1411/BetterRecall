@@ -501,6 +501,7 @@ internal sealed class AgentBenchTarget : IBenchTarget
 
             double totalEncodeMs = 0;
             int encodeCount = 0;
+            string keyframeEncoder = "";
             lock (grabLock)
             {
                 foreach (var grab in collectedGrabs)
@@ -510,7 +511,9 @@ internal sealed class AgentBenchTarget : IBenchTarget
                         long t0 = Stopwatch.GetTimestamp();
                         unsafe
                         {
-                            _ = ImageCodec.EncodeBgra(grab.Pixels, grab.Width, grab.Height, grab.Stride, settings.Keyframes.Format, settings.Keyframes.Quality);
+                            var (bytes, format, _, _) = KeyframeEncoder.Encode(grab.Pixels, grab.Width, grab.Height, grab.Stride, settings, EncodeLevel.Normal);
+                            Array.Clear(bytes);
+                            keyframeEncoder = KeyframeEncoder.Describe(format, EncodeLevel.Normal);
                         }
                         totalEncodeMs += (Stopwatch.GetTimestamp() - t0) * 1000.0 / Stopwatch.Frequency;
                         encodeCount++;
@@ -571,7 +574,7 @@ internal sealed class AgentBenchTarget : IBenchTarget
                 }
             }
 
-            return new CaptureBench(tickMs, keyframeEncodeMs, crossAdapterMs);
+            return new CaptureBench(tickMs, keyframeEncodeMs, crossAdapterMs, keyframeEncoder);
         }
         finally
         {

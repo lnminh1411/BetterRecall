@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) BetterRecall contributors
+using BetterRecall.Agent.Capture;
 using BetterRecall.Agent.Util;
 using BetterRecall.Agent.Worker;
 using BetterRecall.Contracts;
@@ -136,7 +137,16 @@ internal sealed class EmbeddingScheduler : IAsyncDisposable
             if (job.Image is null || job.ImageMime is null) { store.FailEmbedding(job.Id, "no image"); return; }
             double? nsfw = s.Privacy.NsfwFilter ? s.Privacy.NsfwThreshold : null;
             double? detector = s.Privacy.NsfwFilter && s.Privacy.NsfwDetector ? s.Privacy.NsfwDetectorThreshold : null;
-            var r = await _worker.EmbedImageAsync(job.Image, job.ImageMime, nsfw, s.Privacy.NsfwGrid, detector, ct).ConfigureAwait(false);
+            ImageEmbedResult r;
+            if (ImageCodec.CommonlyDecodable(job.ImageMime))
+                r = await _worker.EmbedImageAsync(job.Image, job.ImageMime, nsfw, s.Privacy.NsfwGrid, detector, ct).ConfigureAwait(false);
+            else
+            {
+                // AVIF / JPEG XL: the worker reads raw BGRA instead.
+                var (px, w, h) = ImageCodec.DecodeBgra(job.Image, job.ImageMime);
+                try { r = await _worker.EmbedBgraAsync(px, w, h, nsfw, s.Privacy.NsfwGrid, detector, ct).ConfigureAwait(false); }
+                finally { Array.Clear(px); }
+            }
             if (r.DroppedNsfw)
             {
                 store.DropCapture(job.Id, "nsfw");

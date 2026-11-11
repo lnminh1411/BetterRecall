@@ -12,6 +12,7 @@ public sealed class Settings
     public ReplaySettings Replay { get; set; } = new();
     public IndexSettings Index { get; set; } = new();
     public RetentionSettings Retention { get; set; } = new();
+    public StorageSettings Storage { get; set; } = new();
     public AudioSettings Audio { get; set; } = new();
     public PrivacySettings Privacy { get; set; } = new();
     public InferenceSettings Inference { get; set; } = new();
@@ -101,7 +102,9 @@ public sealed class CaptureSettings
     public int[] Monitors { get; set; } = [];
     public int MaxWidth { get; set; } = 1280;
     public int DhashThreshold { get; set; } = 6;
-    public double DirtyMinPercent { get; set; } = 0.5;
+    /// <summary>Change score (percent of the screen, text-like areas count 5x) against the previous stored keyframe
+    /// that a timed capture needs. Event triggers and window switches skip it.</summary>
+    public double DirtyMinPercent { get; set; } = 15;
     public bool EventTriggers { get; set; } = true;
     public bool PauseOnFullscreen { get; set; } = true;
 }
@@ -109,9 +112,8 @@ public sealed class CaptureSettings
 public sealed class KeyframeSettings
 {
     public bool Enabled { get; set; } = true;          // persist keyframe images
-    public string Format { get; set; } = "webp";       // webp | jpeg
+    public string Format { get; set; } = "avif";       // avif | webp | jxl | jpeg (avif and jxl fall back to webp when their codec is missing)
     public int Quality { get; set; } = 75;
-    public int MaxGb { get; set; } = 20;
     public int ThumbCacheMb { get; set; } = 64;        // RAM-only preview cache in the agent
 }
 
@@ -149,7 +151,16 @@ public sealed class IndexSettings
 
 public sealed class RetentionSettings
 {
-    public int Days { get; set; } = 30;
+    public int Days { get; set; } = 30;                 // hard limit: everything older is deleted
+    public int ProgressiveAfterDays { get; set; } = 7;  // 0 = off; from this age, thin captures (smallest change first)
+    public int ProgressiveOverDays { get; set; } = 30;  // over this many days the thinning reaches window/app switches only
+}
+
+public sealed class StorageSettings
+{
+    public int MinFreeGb { get; set; } = 25;            // 0 = off; below it capture pauses (reason storage) or, with overwrite, old captures go
+    public int MaxGb { get; set; } = 20;                // store.db + keyframes, live data; replaces keyframes.maxGb
+    public bool Overwrite { get; set; }                 // delete oldest captures (progressive order) instead of pausing
 }
 
 public sealed class AudioSettings

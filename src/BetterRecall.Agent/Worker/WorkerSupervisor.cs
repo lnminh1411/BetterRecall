@@ -89,6 +89,8 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
     }
 
     public bool IsRunning => _conn is { IsClosed: false };
+    /// <summary>Process id of the last started worker (0 before the first start).</summary>
+    public int Pid => _pid;
     public int Failures => _failures;
 
     public static PipeSecurity CreatePipeSecurity()

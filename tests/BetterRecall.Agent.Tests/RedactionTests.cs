@@ -206,6 +206,7 @@ public class KeyframeRedactionTests
 
     private static async Task<(FakeStore Store, KeyframePipeline Pipe)> Run(Settings s, IKeyframeReader reader, RedactionMasks masks, KeyframeGrab grab, int expectStored)
     {
+        s.Keyframes.Format = "webp";   // the checks decode the stored image with Skia (no AVIF decoder)
         var store = new FakeStore();
         var stored = new ConcurrentQueue<CaptureMeta>();
         var pipe = new KeyframePipeline(() => store, () => s, stored.Enqueue, reader, masks);
@@ -246,6 +247,26 @@ public class KeyframeRedactionTests
         // Replay masks: the same boxes in desktop pixels (2x).
         Assert.Contains(masks.All(), r => r.Left <= 600 && r.Right >= 700 && r.Top <= 300 && r.Bottom >= 340);
         Assert.Equal(3, masks.All().Length);   // field, card digits, hunter2
+    }
+
+    [Fact]
+    public async Task Avif_keyframe_is_encoded_after_redaction()
+    {
+        var s = new Settings();
+        s.Keyframes.Format = "avif";
+        s.Keyframes.Quality = 95;
+        var reader = new FakeReader(() => new OcrResult([Ocr.Line("Card: 4111 1111 1111 1111", 10, 10)], "onnx", 5));
+        var store = new FakeStore();
+        var pipe = new KeyframePipeline(() => store, () => s, _ => { }, reader, new RedactionMasks());
+        pipe.Post(WhiteGrab(400, 200, null));
+        for (int i = 0; i < 400 && pipe.Kept + pipe.RedactDropped + pipe.Failed == 0; i++) await Task.Delay(20);
+        await pipe.DisposeAsync();
+        var cap = Assert.Single(store.Screens.Values);
+        Assert.Equal("image/avif", cap.ImageMime);
+        Assert.Equal("Card:", cap.Text);
+        var (bgra, w, _) = BetterRecall.Agent.Native.Avif.Decode(cap.Image);
+        Assert.True(bgra[(20 * w + 100) * 4 + 2] < 40);    // card digits boxed before the encode
+        Assert.True(bgra[(150 * w + 380) * 4 + 2] > 200);
     }
 
     [Fact]

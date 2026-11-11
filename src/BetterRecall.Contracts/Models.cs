@@ -47,10 +47,24 @@ public sealed record NewScreenCapture(
     int Height,
     ulong DHash,
     byte[] Image,            // keyframe, keyframes.format, capture.maxWidth wide; pending job input
-    string ImageMime,        // image/webp | image/jpeg
+    string ImageMime,        // image/avif | image/webp | image/jxl | image/jpeg
     bool KeepKeyframe,       // false when keyframes.enabled is false: image deleted once the job is done
     string Site = "",        // browser host from the address bar, empty when unknown or privacy.recordSite is off
+    double? Change = null,   // change score vs the previous stored keyframe of the monitor (0-100), null when unknown
+    bool Switch = false,     // first keyframe after a window/app switch (or of the monitor): progressive deletion keeps it.
+                             // Change null and Switch false: unknown, the store derives both from neighbouring rows
     string? Text = null);    // OCR text after redaction (ocr.enabled), null when not read
+
+/// <summary>Store files on disk and the free pages inside them (reused by new rows before the files grow).</summary>
+public sealed record StorageUse(long FileBytes, long FreeBytes)
+{
+    public long LiveBytes => Math.Max(0, FileBytes - FreeBytes);
+}
+
+/// <summary>export: time window and optional app, written as a zip of decrypted images plus captures.json.</summary>
+public sealed record ExportRequest(DateTimeOffset From, DateTimeOffset To, string Path, string? App = null, bool Jpeg = false, bool DryRun = false);
+
+public sealed record ExportResult(int Count, int Images, long Bytes);
 
 /// <summary>Frame sampled from a saved replay, handed from the agent to the store (kind replay).</summary>
 public sealed record NewReplayFrame(
@@ -148,7 +162,7 @@ public sealed record AgentStatus(
     bool Capturing,
     bool Paused,
     DateTimeOffset? PausedUntil,
-    string? PauseReason,     // user | ipc | fullscreen | lock | battery | denylist | consent | keylocked
+    string? PauseReason,     // user | ipc | fullscreen | lock | battery | denylist | consent | keylocked | storage
     bool Locked,
     DateTimeOffset? UnlockedUntil,
     AudioState Audio,
@@ -294,7 +308,8 @@ public sealed record EncoderBench(
     bool Ok, double EncodeMsP95, double CpuPercent, long WorkingSetMb, string? Error,
     string? Resolution = null);   // replay.resolution value that produced this size (native, 1080p, ...)
 
-public sealed record CaptureBench(double TickMs, double KeyframeEncodeMs, double CrossAdapterMs);
+public sealed record CaptureBench(double TickMs, double KeyframeEncodeMs, double CrossAdapterMs,
+    string? KeyframeEncoder = null);   // encoder the keyframe timing used, e.g. "oneVPL AV1 VDENC on Intel(R) Graphics", "libaom (software)"
 
 public sealed record SearchBench(long Rows, double VectorMs, double HybridMs);
 

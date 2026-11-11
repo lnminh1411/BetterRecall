@@ -114,7 +114,7 @@ internal sealed class Thumbnailer : IThumbnailer
                 if (kf is null) return null;
                 try
                 {
-                    var (bytes, w, h) = ImageCodec.ResizeToWebp(kf.Bytes, width, 70);
+                    var (bytes, w, h) = ImageCodec.ResizeToWebp(kf.Bytes, kf.Mime, width, 70);
                     var thumb = new ThumbData(id, "image/webp", w, h, bytes);
                     _cache.Put((id, width), thumb);
                     return thumb;
@@ -126,4 +126,19 @@ internal sealed class Thumbnailer : IThumbnailer
     }
 
     public void ClearCache() => _cache.Clear();
+
+    /// <summary>"ui": AVIF and JPEG XL become WebP (quality 90), others pass through; "jpeg": JPEG (quality 90).
+    /// The input is not cleared: the caller owns it.</summary>
+    public ThumbData Transcode(ThumbData keyframe, string target)
+    {
+        string? to = target switch
+        {
+            "jpeg" when keyframe.Mime != "image/jpeg" => "jpeg",
+            "ui" when !ImageCodec.CommonlyDecodable(keyframe.Mime) => "webp",
+            _ => null,
+        };
+        if (to is null) return keyframe;
+        var (bytes, mime, w, h) = ImageCodec.Transcode(keyframe.Bytes, keyframe.Mime, to, 90);
+        return new ThumbData(keyframe.Id, mime, w, h, bytes);
+    }
 }

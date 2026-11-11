@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) BetterRecall contributors
+using System.Diagnostics;
+using System.Globalization;
 using BetterRecall.Contracts;
 using BetterRecall.UI.Logic;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.Windows.Storage.Pickers;
 
 namespace BetterRecall.UI.Views;
 
@@ -20,6 +23,10 @@ public sealed partial class DangerZonePage : Page, IDataPage
         ToDate.Date = now.Date;
         FromTime.Time = TimeSpan.Zero;
         ToTime.Time = new TimeSpan(now.Hour, now.Minute, 0);
+        ExportFromDate.Date = now.Date;
+        ExportToDate.Date = now.Date;
+        ExportFromTime.Time = TimeSpan.Zero;
+        ExportToTime.Time = new TimeSpan(now.Hour, now.Minute, 0);
         AllPrompt.Text = Loc.Format("Danger_AllPrompt", Loc.Get("Danger_AllPhrase"));
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(AllPhrase, AllPrompt.Text);
     }
@@ -30,7 +37,74 @@ public sealed partial class DangerZonePage : Page, IDataPage
     {
         ResultBar.Severity = sev;
         ResultBar.Message = message;
+        ResultBar.ActionButton = null;
         ResultBar.IsOpen = true;
+    }
+
+    /// <summary>Export: count first, warn that the zip is not encrypted, pick the file, then write it.</summary>
+    private async void Export_Click(object sender, RoutedEventArgs e)
+    {
+        if (ExportFromDate.Date is not { } fd || ExportToDate.Date is not { } td) return;
+        var from = new DateTimeOffset(fd.Date + ExportFromTime.Time, DateTimeOffset.Now.Offset);
+        var to = new DateTimeOffset(td.Date + ExportToTime.Time, DateTimeOffset.Now.Offset);
+        if (from >= to)
+        {
+            Show(InfoBarSeverity.Error, Loc.Get("Danger_RangeInvalid"));
+            return;
+        }
+        var app = ExportApp.Text.Trim();
+        var request = new ExportRequest(from, to, "", app.Length == 0 ? null : app, ExportJpeg.IsChecked == true, DryRun: true);
+        var api = Services.Current.Api;
+        ExportButton.IsEnabled = false;
+        try
+        {
+            var count = await api.ExportAsync(request);
+            if (!count.Ok)
+            {
+                Show(InfoBarSeverity.Error, Loc.Error(count.Kind, count.Error));
+                return;
+            }
+            if (count.Value!.Count == 0)
+            {
+                Show(InfoBarSeverity.Informational, Loc.Get("Danger_ExportNone"));
+                return;
+            }
+            var warn = WindowHelpers.Dialog(XamlRoot, Loc.Get("Danger_ExportWarnTitle"),
+                new TextBlock { Text = Loc.Format("Danger_ExportWarnBody", count.Value.Count, count.Value.Images), TextWrapping = TextWrapping.Wrap },
+                Loc.Get("Danger_ExportContinue"));
+            if (await warn.ShowAsync() != ContentDialogResult.Primary) return;
+
+            var picker = new FileSavePicker(XamlRoot.ContentIslandEnvironment.AppWindowId)
+            {
+                SuggestedFileName = "BetterRecall-export-" + from.ToString("yyyyMMdd-HHmm", CultureInfo.InvariantCulture),
+                SuggestedStartLocation = PickerLocationId.DocumentsLibrary,
+            };
+            picker.FileTypeChoices.Add(Loc.Get("Danger_ExportFileType"), [".zip"]);
+            var picked = await picker.PickSaveFileAsync();
+            if (picked is null || string.IsNullOrEmpty(picked.Path)) return;
+            var path = picked.Path;
+
+            ExportBusy.IsActive = true;
+            var r = await api.ExportAsync(request with { Path = path, DryRun = false });
+            ExportBusy.IsActive = false;
+            if (!r.Ok)
+            {
+                Show(InfoBarSeverity.Error, Loc.Error(r.Kind, r.Error));
+                return;
+            }
+            Show(InfoBarSeverity.Success, Loc.Format("Danger_Exported", r.Value!.Count, path));
+            if (File.Exists(path))
+            {
+                var open = new Button { Content = Loc.Get("Danger_ExportOpen") };
+                open.Click += (_, _) => Process.Start(new ProcessStartInfo("explorer.exe", "/select,\"" + path + "\"") { UseShellExecute = true });
+                ResultBar.ActionButton = open;
+            }
+        }
+        finally
+        {
+            ExportBusy.IsActive = false;
+            ExportButton.IsEnabled = true;
+        }
     }
 
     private async void Panic_Click(object sender, RoutedEventArgs e)

@@ -191,13 +191,13 @@ internal sealed class CaptureService : IAsyncDisposable
             if (due) _lastKeyframeTick = now;
             if (trigger) _lastEventTrigger = now;
             if (sampleDue) _lastSampleTick = now;
-            RequestKeyframes(force: false, keyframe: true, sample: sampleDue);
+            RequestKeyframes(force: false, keyframe: true, sample: sampleDue, trigger: trigger);
         }
         catch (Exception ex) { Log.Warn("capture tick", ex); }
     }
 
     /// <summary>Applies the guardrails and asks each output for a keyframe.</summary>
-    public void RequestKeyframes(bool force, bool keyframe = true, bool sample = false)
+    public void RequestKeyframes(bool force, bool keyframe = true, bool sample = false, bool trigger = false)
     {
         var s = _settings();
         var snap = _guard.Current();
@@ -217,7 +217,10 @@ internal sealed class CaptureService : IAsyncDisposable
                 string site = w is not null && snap.Foreground is { } f && f.Hwnd == w.Hwnd ? snap.Site : "";
                 var bounds = new RECT(o.Info.Left, o.Info.Top, o.Info.Left + o.Info.Width, o.Info.Top + o.Info.Height);
                 o.PendingKeyframe = new KeyframeRequest(ts, app, exe, title, app + "\u0001" + title, force,
-                    Math.Clamp(s.Capture.MaxWidth, 640, 3840), Math.Clamp(s.Capture.DirtyMinPercent, 0, 100), site, keyframe, sample,
+                    Math.Clamp(s.Capture.MaxWidth, 640, 3840),
+                    // Pre-grab gate stays at 0.5 % of dirty area since the last grab; the real test
+                    // (capture.dirtyMinPercent against the last stored keyframe) runs in the pipeline.
+                    Math.Min(Math.Clamp(s.Capture.DirtyMinPercent, 0, 100), CapturePolicy.TriggerMinScore), site, keyframe, sample, trigger,
                     s.Privacy.RedactPasswords ? snap.SecretRects : null, bounds);
             }
         }

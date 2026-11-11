@@ -52,23 +52,6 @@ public class DHashTests
         for (int y = 0; y < 80; y++) Array.Copy(a, y * 400, padded, y * stride, 400);
         Assert.Equal(DHash.Compute(a, 100, 80, 400), DHash.Compute(padded, 100, 80, stride));
     }
-
-    [Fact]
-    public void Dedup_stages_run_cheapest_first()
-    {
-        var d = new DedupFilter();
-        Assert.Equal(DedupVerdict.Keep, d.PreCheck(false, 0, 0.5, false)); // nothing kept yet
-        d.Accept(0xFFUL, "app\u0001title");
-        Assert.Equal(DedupVerdict.SkipNoFrame, d.PreCheck(false, 100, 0.5, false));
-        Assert.Equal(DedupVerdict.SkipDirtyArea, d.PreCheck(true, 0.1, 0.5, false));
-        Assert.Equal(DedupVerdict.Keep, d.PreCheck(true, 3, 0.5, false));
-        Assert.Equal(DedupVerdict.Keep, d.PreCheck(false, 0, 0.5, contextChanged: true));
-        Assert.Equal(DedupVerdict.SkipSimilar, d.HashCheck(0xFFUL | 0x100UL, 6, "app\u0001title"));
-        Assert.Equal(DedupVerdict.Keep, d.HashCheck(0xFFFF_FF00UL, 6, "app\u0001title"));
-        Assert.Equal(DedupVerdict.Keep, d.HashCheck(0xFFUL, 6, "app\u0001other title"));
-        d.Reset();
-        Assert.Null(d.LastHash);
-    }
 }
 
 public class GuardrailTests

@@ -6,7 +6,7 @@ namespace BetterRecall.UI.Logic;
 /// Command line. The agent starts the UI with no arguments (search hotkey), --replays (notification click)
 /// or --settings (tray menu).
 /// --page opens a main-window page: home, timeline, replays, danger, audit, consent, or settings:&lt;group&gt;.
-/// --mock runs an in-process fake agent; --mock-locked, --mock-passphrase, --mock-firstrun, --mock-capturable shape it.
+/// --mock runs an in-process fake agent; --mock-locked, --mock-passphrase, --mock-firstrun, --mock-capturable, --mock-storage shape it.
 /// --hidden starts warm without showing a window.
 /// </summary>
 public sealed record AppArgs(
@@ -19,7 +19,8 @@ public sealed record AppArgs(
     bool Hidden = false,
     string? MockQuery = null,
     bool MockMenu = false,
-    bool MockPassword = false)
+    bool MockPassword = false,
+    bool MockStorage = false)
 {
     public static AppArgs Parse(IEnumerable<string> args)
     {
@@ -36,6 +37,7 @@ public sealed record AppArgs(
                 case "--mock-password": a = a with { Mock = true, MockLocked = true, MockPassword = true }; break;   // unlock method password ("wrong" fails)
                 case "--mock-firstrun": a = a with { Mock = true, MockFirstRun = true }; break;
                 case "--mock-capturable": a = a with { Mock = true, MockCapturable = true }; break;
+                case "--mock-storage": a = a with { Mock = true, MockStorage = true }; break;   // capture paused for storage
                 case "--replays": a = a with { Page = "replays" }; break;
                 case "--settings": a = a with { Page = "settings" }; break;
                 case "--hidden": a = a with { Hidden = true }; break;

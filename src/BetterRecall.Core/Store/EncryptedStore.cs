@@ -67,7 +67,7 @@ public sealed partial class EncryptedStore : IStore
 
     // ---------------------------------------------------------------- connections
 
-    private SqliteConnection OpenEncrypted(string path)
+    private SqliteConnection OpenEncrypted(string path, bool incrementalVacuum = false)
     {
         var conn = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Pooling = false, Mode = SqliteOpenMode.ReadWriteCreate }.ToString());
         conn.Open();
@@ -82,6 +82,8 @@ public sealed partial class EncryptedStore : IStore
         try
         {
             Scalar(conn, "SELECT count(*) FROM sqlite_master");
+            // Only takes effect on a new, empty file, and only before WAL mode writes the header.
+            if (incrementalVacuum) Exec(conn, "PRAGMA auto_vacuum=INCREMENTAL");
             Exec(conn, "PRAGMA journal_mode=WAL");
             Exec(conn, "PRAGMA secure_delete=ON");
             Exec(conn, "PRAGMA synchronous=NORMAL");
@@ -160,11 +162,12 @@ public sealed partial class EncryptedStore : IStore
     /// </summary>
     private void Migrate()
     {
-        bool hasSite = false;
+        var cols = new HashSet<string>(StringComparer.Ordinal);
         using (var cmd = Cmd(_w, "SELECT name FROM pragma_table_info('captures')"))
         using (var rd = cmd.ExecuteReader())
-            while (rd.Read()) if (rd.GetString(0) == "site") hasSite = true;
-        if (!hasSite) Exec(_w, "ALTER TABLE captures ADD COLUMN site TEXT NOT NULL DEFAULT ''");
+            while (rd.Read()) cols.Add(rd.GetString(0));
+        if (!cols.Contains("site")) Exec(_w, "ALTER TABLE captures ADD COLUMN site TEXT NOT NULL DEFAULT ''");
+        MigrateStorage(cols);
         Exec(_w, """
             CREATE INDEX IF NOT EXISTS ix_captures_site ON captures(site, ts);
             CREATE TABLE IF NOT EXISTS search_history(q TEXT PRIMARY KEY, ts INTEGER NOT NULL);
@@ -184,7 +187,8 @@ public sealed partial class EncryptedStore : IStore
         if (_kf.TryGetValue(month, out var c)) return c;
         var path = KfPath(month);
         if (!create && !File.Exists(path)) return null;
-        c = OpenEncrypted(path);
+        // New month files free deleted pages with incremental_vacuum (no temp copy, works on a nearly full disk).
+        c = OpenEncrypted(path, incrementalVacuum: !File.Exists(path));
         Exec(c, "CREATE TABLE IF NOT EXISTS kf(rid INTEGER PRIMARY KEY, mime TEXT NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL, data BLOB NOT NULL)");
         _kf[month] = c;
         return c;
@@ -368,9 +372,9 @@ public sealed partial class EncryptedStore : IStore
             using (var tx = _w.BeginTransaction())
             {
                 rid = (long)Scalar(_w, """
-                    INSERT INTO captures(id, ts, kind, app, app_lc, exe, title, text, monitor, width, height, dhash, duration_ms, state, has_keyframe, keep_keyframe, kf_month, site)
-                    VALUES($id, $ts, 0, $app, $applc, $exe, $title, $text, $mon, $w, $h, $dh, 0, 0, 1, $keep, $month, $site) RETURNING rid
-                    """, ("$site", NormalizeSite(c.Site)), ("$text", string.IsNullOrWhiteSpace(c.Text) ? null : c.Text), ("$id", id), ("$ts", ts), ("$app", c.App ?? ""), ("$applc", (c.App ?? "").ToLowerInvariant()), ("$exe", c.ExePath ?? ""),
+                    INSERT INTO captures(id, ts, kind, app, app_lc, exe, title, text, monitor, width, height, dhash, duration_ms, state, has_keyframe, keep_keyframe, kf_month, site, change_pct, is_switch)
+                    VALUES($id, $ts, 0, $app, $applc, $exe, $title, $text, $mon, $w, $h, $dh, 0, 0, 1, $keep, $month, $site, $chg, $sw) RETURNING rid
+                    """, ("$site", NormalizeSite(c.Site)), ("$text", string.IsNullOrWhiteSpace(c.Text) ? null : c.Text), ("$chg", c.Change is double chg ? Math.Clamp(chg, 0, 100) : null), ("$sw", c.Change is null && !c.Switch ? null : c.Switch ? 1 : 0), ("$id", id), ("$ts", ts), ("$app", c.App ?? ""), ("$applc", (c.App ?? "").ToLowerInvariant()), ("$exe", c.ExePath ?? ""),
                     ("$title", c.Title ?? ""), ("$mon", c.Monitor), ("$w", c.Width), ("$h", c.Height), ("$dh", unchecked((long)c.DHash)),
                     ("$keep", c.KeepKeyframe ? 1 : 0), ("$month", month))!;
                 Exec(_w, "INSERT INTO jobs(rid, created) VALUES($rid, $now)", ("$rid", rid), ("$now", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()));
@@ -1170,18 +1174,11 @@ public sealed partial class EncryptedStore : IStore
                     (long)(Scalar(_w, "SELECT count(*) FROM captures WHERE kf_month=$m AND has_keyframe=1", ("$m", m)) ?? 0L) == 0)
                     DeleteKfFile(m);
 
-            // 3. keyframes.maxGb: oldest month file first, then oldest rows of the newest month.
-            long limit = KeyframeLimitOverride ?? (long)settings.Keyframes.MaxGb * 1024 * 1024 * 1024;
-            for (int guard = 0; guard < 64; guard++)
-            {
-                foreach (var c in _kf.Values) { try { Exec(c, "PRAGMA wal_checkpoint(TRUNCATE)"); } catch { } }
-                long total = KeyframeBytes();
-                if (total <= limit) break;
-                var months = KfMonths();
-                if (months.Count == 0) break;
-                if (months.Count > 1) { DropKeyframesOfMonth(months[0]); continue; }
-                DropOldestKeyframes(months[0], fraction: 0.1);
-            }
+            // 3. Progressive thinning (retention.progressive*). storage.maxGb and storage.minFreeGb are the
+            //    agent's storage guard (DeleteForSpace).
+            int thinned = ThinLocked(settings.Retention, DateTimeOffset.UtcNow, cutoff);
+            if (thinned > 0) Log.Info($"maintenance: {thinned} rows thinned");
+            ReleaseFreePagesLocked();
 
             CheckpointLocked();
             lock (_rl)
@@ -1200,50 +1197,7 @@ public sealed partial class EncryptedStore : IStore
         }
     }
 
-    private void DropKeyframesOfMonth(string month)
-    {
-        using (var tx = _w.BeginTransaction())
-        {
-            // Pending rows of that month can no longer be embedded.
-            Exec(_w, "DELETE FROM jobs WHERE rid IN (SELECT rid FROM captures WHERE kf_month=$m AND kind<>1)", ("$m", month));
-            Exec(_w, "UPDATE captures SET state=2 WHERE kf_month=$m AND state=0", ("$m", month));
-            Exec(_w, "UPDATE captures SET has_keyframe=0 WHERE kf_month=$m", ("$m", month));
-            tx.Commit();
-        }
-        DeleteKfFile(month);
-        Log.Info("keyframe size cap: oldest month file removed");
-    }
-
-    private void DropOldestKeyframes(string month, double fraction)
-    {
-        if (Kf(month, false) is not { } kc) return;
-        long count = (long)(Scalar(kc, "SELECT count(*) FROM kf") ?? 0L);
-        if (count == 0) return;
-        int n = (int)Math.Max(1, count * fraction);
-        var rids = new List<long>();
-        using (var cmd = Cmd(_w, "SELECT rid FROM captures WHERE kf_month=$m AND has_keyframe=1 ORDER BY ts LIMIT $n", ("$m", month), ("$n", n)))
-        using (var rd = cmd.ExecuteReader())
-            while (rd.Read()) rids.Add(rd.GetInt64(0));
-        if (rids.Count == 0) return;
-        var list = InList(rids);
-        using (var tx = _w.BeginTransaction())
-        {
-            Exec(_w, $"DELETE FROM jobs WHERE rid IN ({list})");
-            Exec(_w, $"UPDATE captures SET state=2 WHERE rid IN ({list}) AND +state=0");
-            Exec(_w, $"UPDATE captures SET has_keyframe=0 WHERE rid IN ({list})");
-            tx.Commit();
-        }
-        foreach (var r in rids) _inflight.Remove(r);
-        Exec(kc, $"DELETE FROM kf WHERE rid IN ({list})");
-        Exec(kc, "PRAGMA wal_checkpoint(TRUNCATE)");
-        Exec(kc, "VACUUM");
-        Log.Info($"keyframe size cap: {rids.Count} oldest keyframes removed");
-    }
-
     // ---------------------------------------------------------------- test hooks
-
-    /// <summary>Tests only: replaces keyframes.maxGb with a byte count.</summary>
-    internal long? KeyframeLimitOverride { get; set; }
 
     /// <summary>
     /// Tests and benchmarks only: inserts ready screen rows with vectors and FTS entries in one transaction,

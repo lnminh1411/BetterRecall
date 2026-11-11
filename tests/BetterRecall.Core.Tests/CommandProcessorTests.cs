@@ -488,4 +488,44 @@ public sealed class CommandProcessorTests : IDisposable
         Assert.Null(_t.Store.Get(site));
         Assert.NotNull(_t.Store.Get(_id));
     }
+
+    [Fact]
+    public async Task Keyframe_reaches_the_ui_transcoded()
+    {
+        var id = _t.Store.AddScreenCapture(Caps.Screen(DateTimeOffset.UtcNow.AddMinutes(-4)) with { ImageMime = "image/avif" });
+        _t.Store.SetEmbedding(id, Vec.Seeded(2), Vec.Info);
+        var (ok, d, _) = await Call(Ui, "keyframe " + id);
+        Assert.True(ok);
+        Assert.Equal("image/webp", d.GetProperty("mime").GetString());
+        Assert.Contains("image/avif>ui", _thumbs.Transcodes);
+    }
+
+    [Fact]
+    public async Task Export_counts_writes_and_guards()
+    {
+        var from = DateTimeOffset.UtcNow.AddHours(-1).ToString("O");
+        var to = DateTimeOffset.UtcNow.AddMinutes(1).ToString("O");
+        Assert.Equal("Unknown command 'export'.", await Err(Pub, "export {}"));
+        Assert.Equal(CommandProcessor.UsageExport, await Err(Ui, "export"));
+        Assert.Equal("Invalid JSON.", await Err(Ui, "export {nope"));
+        Assert.Equal("Invalid from.", await Err(Ui, $"export {{\"from\":\"{to}\",\"to\":\"{from}\",\"path\":\"\"}}"));
+        Assert.Equal("Invalid path.", await Err(Ui, $"export {{\"from\":\"{from}\",\"to\":\"{to}\",\"path\":\"relative.zip\"}}"));
+
+        var (ok, d, _) = await Call(Ui, $"export {{\"from\":\"{from}\",\"to\":\"{to}\",\"path\":\"\",\"dryRun\":true}}");
+        Assert.True(ok);
+        Assert.Equal(1, d.GetProperty("count").GetInt32());
+        Assert.Equal(1, d.GetProperty("images").GetInt32());
+
+        var path = Path.Combine(_settingsHome.Path, "out.zip");
+        var json = JsonSerializer.Serialize(new ExportRequest(DateTimeOffset.UtcNow.AddHours(-1), DateTimeOffset.UtcNow.AddMinutes(1), path, Jpeg: true), ContractsJson.Default.ExportRequest);
+        (ok, d, _) = await Call(Ui, "export " + json);
+        Assert.True(ok);
+        Assert.Equal(1, d.GetProperty("count").GetInt32());
+        Assert.True(File.Exists(path));
+        Assert.Contains("image/webp>jpeg", _thumbs.Transcodes);
+        Assert.Contains(_t.Store.ReadAudit(5), a => a.Verb == "export" && a.ResultCount == 1);
+
+        _agent.Unlocked = false;
+        Assert.Equal("Store is locked.", await Err(Ui, "export " + json));
+    }
 }
