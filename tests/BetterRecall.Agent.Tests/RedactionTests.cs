@@ -198,7 +198,7 @@ public class KeyframeRedactionTests
 
     private static unsafe KeyframeGrab WhiteGrab(int w, int h, RECT[]? secrets, ulong seed = 0)
     {
-        var req = new KeyframeRequest(DateTimeOffset.UtcNow, "app", @"C:\app.exe", "Title", "ctx" + seed, true, w, 0, "", secrets, new RECT(0, 0, w * 2, h * 2));
+        var req = new KeyframeRequest(DateTimeOffset.UtcNow, "app", @"C:\app.exe", "Title", "ctx" + seed, true, w, 0, "", Secrets: secrets, Bounds: new RECT(0, 0, w * 2, h * 2));
         var g = KeyframeGrab.Alloc(0, req, w, h, 0);
         new Span<byte>(g.Pixels, w * h * 4).Fill(255);
         return g;
@@ -246,6 +246,29 @@ public class KeyframeRedactionTests
         // Replay masks: the same boxes in desktop pixels (2x).
         Assert.Contains(masks.All(), r => r.Left <= 600 && r.Right >= 700 && r.Top <= 300 && r.Bottom >= 340);
         Assert.Equal(3, masks.All().Length);   // field, card digits, hunter2
+    }
+
+    [Fact]
+    public async Task Replay_sample_is_redacted_and_titled_like_a_keyframe()
+    {
+        var s = new Settings();
+        s.Keyframes.Quality = 95;
+        var reader = new FakeReader(() => new OcrResult([Ocr.Line("Card: 4111 1111 1111 1111", 10, 10)], "onnx", 5));
+        var store = new FakeStore();
+        var sampler = new BetterRecall.Agent.Replay.ReplaySampler();
+        var pipe = new KeyframePipeline(() => store, () => s, _ => { }, reader, new RedactionMasks()) { Sampler = sampler };
+        var g = WhiteGrab(400, 200, null);
+        var req = g.Request with { Keyframe = false, ReplaySample = true, Title = "Pay 4111 1111 1111 1111" };
+        var grab = KeyframeGrab.Alloc(0, req, 400, 200, 0);
+        unsafe { new Span<byte>(grab.Pixels, 400 * 200 * 4).Fill(255); }
+        g.Dispose();
+        pipe.Post(grab);
+        for (int i = 0; i < 200 && sampler.Count == 0; i++) await Task.Delay(20);
+        await pipe.DisposeAsync();
+        Assert.Empty(store.Screens);   // sample only: nothing stored as a keyframe
+        var sample = Assert.Single(sampler.Take(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddMinutes(1), 2));
+        Assert.True(Pixel(sample.Bytes, 100, 20).Red < 40);
+        Assert.DoesNotContain("4111", sample.Title);
     }
 
     [Fact]

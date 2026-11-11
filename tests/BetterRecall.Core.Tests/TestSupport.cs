@@ -126,6 +126,7 @@ internal sealed class FakeAgent : IAgentControl
     public bool IsUnlocked => Unlocked;
     public Task<bool> UnlockAsync(CancellationToken ct) { Calls.Add("unlock"); if (UnlockResult) Unlocked = true; return Task.FromResult(UnlockResult); }
     public void Lock() { Calls.Add("lock"); Unlocked = false; }
+    public void OpenReadGate() { Calls.Add("opengate"); Unlocked = true; }
     public void Consent() => Calls.Add("consent");
     public Task<ReplayClip> SaveReplayAsync(CancellationToken ct)
     {

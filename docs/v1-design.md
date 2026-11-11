@@ -10,13 +10,14 @@ Written 2026-11-10. `docs\design.md` is the user's design. This file turns it in
 | Release form | Install layout below, built with `Scripts/dev_build.py`. No MSIX. A single-file release is planned; its launcher is not published yet because the launch flow is changing |
 | Scope of v1 | Everything in `design.md` plus IPC and MCP: replay buffer, keyframe search, audio transcripts, timeline, security options, performance work |
 | Languages | All languages the models support. Nothing hard-coded to one language |
-| Screen text | v1: no OCR, a keyframe is searched through its EmbeddingGemma 2 image vector, plus window title and app name. 0.2.0-dev adds optional on-device OCR (`ocr.enabled`, default on) whose redacted text is searched too (sections 4, 6.1) |
+| Screen text | v1: no OCR, a keyframe is searched through its EmbeddingGemma 2 image vector, plus window title and app name. 0.2.0-dev adds optional on-device OCR (`ocr.enabled`, default on) whose redacted text is searched too (sections 4, 6.2) |
 | Audio | Silero VAD, then Whisper (multilingual, auto-detect), then the transcript is embedded with the text tower and kept as searchable text |
 | Video | RAM-only AV1 ring buffer (`design.md` section 3). Reaches disk only through a replay export |
 | Keyframes | One per monitor every 2 s before de-duplication. Kept encrypted on disk by default, 30 days. `keyframes.enabled` turns persistence off |
 | Thumbnails | Never made at capture time. The agent makes a preview from the stored keyframe when the UI asks for it and keeps it in a RAM cache only |
 | Retention | 30 days by default |
 | Hardware use on the dev PC | NPU: EmbeddingGemma 2, Whisper, (SigLIP 2 fallback), NSFW gate. iGPU: AV1 encode; NSFW gate only when the NPU fails. RX 6600 and RTX 3050: untouched unless the NSFW gate falls back to a graphics card (`privacy.nsfwDevice`). CPU: VAD, NSFW gate as the last fallback, light preprocessing |
+| Network | No-network guarantee: BetterRecall makes no network connections while cloud describe (section 6.1, `ai.enabled`, off by default) is off. Turning it on ends the guarantee for that user until it is turned off again. Each image is sent only when the user confirms it in a dialog, with an audit entry per send |
 | Security | Every protection is a setting, on by default: own windows excluded from capture (`WDA_EXCLUDEFROMCAPTURE`), Windows Hello read gate, memory isolation, NSFW gate, panic flush (section 6) |
 | Phase 1 | Dev builds on the developer's PC: Core Ultra 7 265K (NPU 3720, Arc iGPU), RX 6600 + RTX 3050, Windows 11 build 29704, .NET SDK 10.0.403 |
 
@@ -58,6 +59,8 @@ store.db                encrypted SQLite: captures, vectors, transcripts, audit,
 keyframes\YYYY-MM.db    encrypted SQLite, one per month, keyframe images only
 replays\*.mp4.enc       exported replay clips, AES-256-GCM
 keys\datakey.bin        wrapped 256-bit data key
+keys\unlock.bin         unlock password: Argon2id salt + hash and the failed-try counter, never the password (security.unlockMethod password)
+keys\ai-key.bin         cloud describe API key, DPAPI CurrentUser (never in settings.json, never returned by a verb)
 models\                 model files (inference.modelDir overrides)
 cache\compiled\         compiled model blobs, keyed by runtime version, driver version, model hash
 cache\device.json       device benchmark result
@@ -75,12 +78,13 @@ logs\                   rolling logs, never any captured content, title or query
 
 1. Capture (agent). Desktop Duplication per output on the dGPU that drives it. Two consumers per frame:
    - Replay path at `replay.fps` (capped at the highest captured refresh rate): convert to NV12 on the source GPU, cross-adapter copy to the iGPU, with `replay.layout` = `composited` (default) composite every captured monitor into one canvas at its virtual-desktop position (only monitors with new frames are redrawn) and encode it with one encoder; with `perMonitor` encode each monitor separately. `replay.resolution` / `replay.scalePercent` then scale each encoded video, and the encoder maximum always applies (AV1 through oneVPL, then HEVC, then H.264; 1 s closed GOP; `replay.bitrateKbps` for the whole canvas), packets into a RAM ring of `replay.seconds`. Decided 2026-11-10: composited is the default, to meet the CPU and RAM gates; perMonitor stays available. Desktop audio (WASAPI loopback) encoded to AAC into the same ring, timestamps from QPC.
-   - Keyframe path every `capture.intervalMs`: guardrails (section 6), de-duplication (Desktop Duplication timeout, dirty area, dHash), downscale to `capture.maxWidth`, then with `ocr.enabled` the worker `ocr` op reads the downscaled frame (lines, boxes, per-character cuts; names and addresses too when those detectors are on), then redaction (section 6.1) paints black boxes into the frame and removes the redacted words from the text and the window title, then encode once (`keyframes.format`), `IStore.AddScreenCapture` with the redacted text in `captures.text` (FTS indexes it with the title, so on-screen words feed Text matches). The row stays hidden from search until the worker has processed it.
+   - Keyframe path every `capture.intervalMs`: guardrails (section 6), de-duplication (Desktop Duplication timeout, dirty area, dHash), downscale to `capture.maxWidth`, then with `ocr.enabled` the worker `ocr` op reads the downscaled frame (lines, boxes, per-character cuts; names and addresses too when those detectors are on), then redaction (section 6.2) paints black boxes into the frame and removes the redacted words from the text and the window title, then encode once (`keyframes.format`), `IStore.AddScreenCapture` with the redacted text in `captures.text` (FTS indexes it with the title, so on-screen words feed Text matches). The row stays hidden from search until the worker has processed it.
 2. Scheduler (agent): when governance allows (section 7), `IStore.TakePendingEmbeddings`, start the worker if needed, send `embed_image` with the NSFW threshold. A dropped frame calls `IStore.DropCapture(id, "nsfw")`. Otherwise `IStore.SetEmbedding`. When `keyframes.enabled` is false the store deletes the image once the job is done.
 3. Audio (agent): loopback and microphone per `audio.*`, an energy pre-gate, segments of at most `audio.maxSegmentS` cut at silence, `transcribe` to the worker. Speech is stored with `IStore.AddAudioCapture` and gets an `embed_text` document job.
 4. Search: a pipe client sends `search`. Core's command processor gets the query vector from `IQueryEmbedder` (agent, `embed_text` kind `query`), then calls `IStore.Search`.
 5. Preview: the UI sends `thumb <id> [width]`. Core calls `IThumbnailer` (agent), which reads the keyframe with `IStore.GetKeyframe`, resizes, encodes WebP, caches it in a RAM LRU (`keyframes.thumbCacheMb`) and returns it.
 6. Instant replay: `hotkeys.replay` (or the UI `replay save` verb) saves the last `replay.seconds` (default 120) to disk, then shows a notification (`replay.notify`). The agent cuts the ring at a keyframe boundary into fragmented MP4 without re-encoding, then writes `replays\<ts>.mp4.enc` through `IBlobCipher` (or a plain MP4 in `replay.exportDir` when `replay.encryptExports` is false).
+7. Replay matches (`replay.searchable`): while the replay buffer runs, every `replay.sampleSeconds` (default 5) the keyframe grab of each monitor is also kept encoded in a RAM ring (`ReplaySampler`), even when the keyframe itself is skipped (no change, paused keyframes, fullscreen). Samples pass the same guardrails and title filter as keyframes. On save, the samples inside the clip (plus, per monitor, the last earlier sample when a still screen gave none in the first interval) become capture rows of kind `replay` (`IStore.AddReplayFrame`: id prefix `r`, keyframe kept, link table `replay_frames(rid, replay_id, offset_ms)`), queued for the worker like screen rows. They show in search (Replay matches) but not in the timeline. Deleting a replay deletes its rows; panic and lock clear the ring. Redaction (batch 3) applies to these frames when it lands.
 
 ## 4. Worker protocol
 
@@ -130,7 +134,7 @@ UI-only verbs:
 
 | Verb | `data` | Notes |
 |---|---|---|
-| `unlock` or `unlock <passphrase>` | `{"unlocked":true,"until":"<ISO>"}` | Agent shows Windows Hello. In passphrase mode the passphrase is the argument. Error `Unlock cancelled.` |
+| `unlock` or `unlock <passphrase>` | `{"unlocked":true,"until":"<ISO>"}` | Agent shows Windows Hello. In passphrase mode the passphrase is the argument. With `security.unlockMethod` password the argument is the unlock password (no Hello prompt); while the data key still waits for its passphrase, the argument is that passphrase and also opens the gate. Errors `Unlock cancelled.`, `Wrong password.`, `No unlock password is set.`, `Too many attempts. Try again in <n> s.` |
 | `lock` | `null` | |
 | `consent` | `null` | Sets `capture.consented`. Nothing is captured before it |
 | `settings get` | `Settings` | |
@@ -149,16 +153,25 @@ UI-only verbs:
 | `history` | `{"items":[HistoryEntry...]}` | Saved searches, newest first, at most `privacy.searchHistoryMax`. Empty while `privacy.searchHistory` is off |
 | `history add <text>` | `null` | The UI saves a search when the user commits to it (Enter, opening a result, closing the launcher on results), not on every keystroke. Ignored while history is off |
 | `history delete <text>` / `history clear` | `null` | |
+| `password` | `PasswordStatus` `{"set","helloAvailable","retryAfterS"}` | Unlock password state |
+| `password set <json>` | `null` | `{"current":"...","new":"..."}`. `current` is needed when a password exists. The first password needs the read gate open, `security.requireUnlock` off, or no Windows Hello on the PC. New password 6 to 256 characters, not only spaces. Errors `Wrong password.`, `Password must be 6 to 256 characters.` |
+| `password clear <json>` | `null` | `{"current":"..."}`. Refused while `security.unlockMethod` is password: `Password in use (config security.unlockMethod).` |
+| `ai` | `AiStatus` `{"enabled","keySet","provider","model","endpoint"}` | Effective model and endpoint (defaults filled in). Never the key |
+| `ai setkey <key>` / `ai clearkey` | `AiStatus` | Key: printable ASCII without spaces, at most 4,096 characters (`Invalid API key.`). Stored DPAPI-encrypted in `keys\ai-key.bin`; clear overwrites, then deletes the file |
+| `describe preview <id>` | `DescribePreview` `{"token","provider","model","endpoint","mime","width","height","redacted","base64"}` | The exact image that would be sent (stored keyframe; re-encoded through the thumbnailer at width 1280 when the provider cannot take its format), after `IDescribeRedactor`. Token valid 120 s, single use, at most 4 open per connection. Errors `Cloud describe is off (config ai.enabled).`, `API key not set.`, `No image to describe.` |
+| `describe send <token>` | `DescribeResult` `{"text","provider","model","tookMs"}` | Sends the previewed image (section 6.1). Long-running. Audit `describe <provider>` with the image SHA-256 and count 1 (ok) or 0 (failed). Errors `Invalid or expired token.`, `Provider unreachable.`, `Provider timed out.`, `Provider error (HTTP <n>): <message>` (key scrubbed) |
 
 Argument rules: `unlock <passphrase>`, `replay export <id> <path>` (the path), `settings set <json>` and `search <text>` take the rest of the line as one argument, spaces included, no quoting. Error strings added for UI verbs: `Wrong passphrase.` (passphrase unlock failed), `Unlock required.` (`purge all` without an unlock in the last 60 s). Reply shapes are the Contracts records `ItemsReply<T>`, `UnlockReply`, `PurgeConfirmReply`, `VersionReply`. Enums serialise lowercase (`screen`, `audio`, `hybrid`, `text`, `vector`); `ThumbData` carries the image in the field `base64`. Long replies: read with `LineReader` (buffered), not `LineProtocol.ReadLineAsync`.
 
 Showing the launcher: when the UI is already running, the agent sets the auto-reset event `PipeNames.ShowLauncherEvent` instead of starting a second UI process. The UI waits on it and shows the launcher. The agent starts the UI exe only when the event does not exist.
 
-Hotkey grammar (agent parser and UI recorder): modifiers `Ctrl`, `Alt`, `Shift`, `Win` joined with `+`, then one key: `A`-`Z`, `0`-`9`, `F1`-`F24`, `NumPad0`-`NumPad9`, `Space`, `PageUp`, `PageDown`, `Home`, `End`, `Left`, `Up`, `Right`, `Down`, `Insert`, `Delete`, `Pause`, `PrintScreen`, or one of `` ; = , - . / ` [ \ ] ' ``.
+Hotkey grammar (agent parser and UI recorder): modifiers `Ctrl`, `Alt`, `Shift`, `Win` joined with `+`, then one key: `A`-`Z`, `0`-`9`, `F1`-`F24`, `NumPad0`-`NumPad9`, `Space`, `PageUp`, `PageDown`, `Home`, `End`, `Left`, `Up`, `Right`, `Down`, `Insert`, `Delete`, `Pause`, `PrintScreen`, or one of `` ; = , - . / ` [ \ ] ' ``. An empty string means the action has no shortcut. No two actions may share a combination (`settings set` answers `Invalid hotkeys.<action>.`). The agent re-registers every hotkey when one changes and lists the actions whose `RegisterHotKey` failed (combination held by Windows or another app) in `status` as `hotkeysFailed`; the UI Shortcuts page shows a warning on those rows and, before saving a new combination, probes it with its own `RegisterHotKey` / `UnregisterHotKey`.
 
 `search` JSON also takes `"site":"<host>"` (normalised: lower case, no `www.`); hits carry `site`. `purge` takes two more scopes on every pipe that allows purge: `purge id <id>` (one capture, the launcher's Delete) and `purge site <host>` (the launcher's "Delete all from <site>"). A `purge last` or `purge range` also deletes saved searches typed in that window.
 
-Data verbs (`search`, `get`, `thumb`, `keyframe`, `timeline`, `audit`, `replay list`, `replay export`, `facets`, `history`) answer `Store is locked.` while `security.requireUnlock` is true and the read gate is closed.
+`search` kind filter also takes `replay`; a hit and `get` of a replay frame carry `replayId` and `replayOffsetMs`.
+
+Data verbs (`search`, `get`, `thumb`, `keyframe`, `timeline`, `audit`, `replay list`, `replay export`, `facets`, `history`, `describe`) answer `Store is locked.` while `security.requireUnlock` is true and the read gate is closed.
 
 ## 6. Security and privacy
 
@@ -173,6 +186,8 @@ Keys: a random 256-bit data key encrypts `store.db`, the keyframe files (SQLite3
 
 Windows Hello is the read gate the agent enforces: data verbs work only for `security.unlockTimeoutMin` after `unlock`, and the gate closes on session lock. This stops disk theft and other accounts. It does not stop malware running as the same user. The settings page says so.
 
+`security.unlockMethod` password replaces Hello at the gate, for PCs without Hello or users who prefer it. The password is a gate check only; it does not encrypt anything. `keys\unlock.bin` holds `BRU1`, the Argon2id parameters (64 MiB, 3 passes, 4 lanes, reusing the `KeyVault` Argon2id code), a 16-byte salt, the 32-byte hash, the failed-try count and the lock-out end, written atomically. Verify is constant-time. Five wrong tries are free, then each wrong try locks the gate for 30 s, doubling to at most 900 s; the count survives agent restarts and resets on success. The password is never logged, stored or audited (audit `unlock password`, count 1 or 0). The unlock panel shows a password box with a "less secure than Windows Hello" note. Set, change and remove from Settings > Security.
+
 | Setting | Default | Effect |
 |---|---|---|
 | `security.excludeOwnWindows` | true | UI calls `SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)` on every window |
@@ -181,6 +196,7 @@ Windows Hello is the read gate the agent enforces: data verbs work only for `sec
 | `security.lockOnSessionLock` | true | |
 | `security.memoryIsolation` | true | Agent and worker: process DACL denying `PROCESS_VM_READ`, `PROCESS_VM_WRITE`, `PROCESS_CREATE_THREAD`, `PROCESS_DUP_HANDLE` to all but SYSTEM; mitigation policies (agent: dynamic code prohibited, it is Native AOT; worker: child processes blocked; both: image loads limited to the install dir and System32, strict handle checks); replay ring and key buffers in native memory, `VirtualLock`ed after `SetProcessWorkingSetSizeEx`; key buffers wrapped with `CryptProtectMemory` when idle; `WerAddExcludedApplication` for all BetterRecall exes. UI: the same process DACL and WER exclusion |
 | `security.keyProtection` | `auto` | Table above |
+| `security.unlockMethod` | `hello` | `hello` or `password`. `password` is refused until a password is set (`No unlock password is set.`) |
 
 Guardrails (agent), checked on every foreground change and again at each keyframe:
 
@@ -214,7 +230,21 @@ Guardrails (agent), checked on every foreground change and again at each keyfram
 
 Window titles go through the deny lists before they are stored (`design.md` note 14).
 
-### 6.1 Redaction
+### 6.1 Cloud describe (opt-in network use)
+
+The only feature that talks to the network. Off by default (`ai.enabled`). The no-network guarantee holds only while it is off. Switching it on (Settings > AI, or a Home switch if one is added) first shows a danger dialog, Cancel the default, whose first line says the guarantee ends and names the provider; Cancel leaves it off. While it is saved on, the AI settings group and the Home status line show "No-network guarantee off: cloud describe is on." Switching it off needs no dialog and the line goes away (`NetworkGuarantee` in the UI). Flow: detail pane Describe, then `describe preview`, then a dialog with provider, model, endpoint and the image to be sent, then `describe send` only when the user clicks Send. The token from the preview is the only way to send, so no verb sends an image the user has not seen. The agent (Core `CloudDescriber`, `HttpClient`, no redirects, 90 s timeout) posts the image with a fixed prompt and returns the text; nothing is stored except the audit entry.
+
+Redaction: the image goes through `IDescribeRedactor` before the preview. `CoreHost.StartPipes` wires the agent's keyframe redactor (section 6.2): the stored keyframe is already redacted, and the agent runs OCR and the redaction detectors on it again with the current settings before it leaves the PC; if OCR fails while a text detector is on, describe fails instead of sending an unchecked image. With OCR off or not installed the stored image goes out as is and the preview says it was not checked.
+
+| Provider | Request | Key header | Default endpoint, model |
+|---|---|---|---|
+| `gemini` | `POST {endpoint}/v1beta/models/{model}:generateContent`, `contents[0].parts` = text + `inlineData` | `x-goog-api-key` | `https://generativelanguage.googleapis.com`, `gemini-3.8-flash` |
+| `openai-compatible` | `POST {endpoint}/chat/completions`, user message content = `text` + `image_url` data URL | `Authorization: Bearer` (omitted when no key is set, for local servers) | `https://api.openai.com/v1`, `gpt-6-luna` |
+| `claude` | `POST {endpoint}/v1/messages`, `max_tokens` 1024, content = `image` (base64 source) + `text` | `x-api-key`, `anthropic-version: 2026-10-21` | `https://api.anthropic.com`, `claude-opus-5-5` |
+
+API shapes checked against the providers' docs on 2026-11-11. Claude and OpenAI take JPEG, PNG, GIF and WebP; other keyframe formats are re-encoded first.
+
+### 6.2 Redaction
 
 Runs in the agent before encrypt and store, on each kept keyframe. Input: the OCR lines of the downscaled frame (text detectors need `ocr.enabled`; password boxes do not) and the password boxes mapped into keyframe pixels. Each detector finds character spans; the per-character cuts from the OCR give a box per span (2 px padding), boxes merge, and the agent paints them solid black into the frame before encoding. The redacted characters are removed from the stored text, and the window title gets the same string detectors. Fail policy: when OCR fails for a passing reason (timeout, device error) while any text detector is on, the keyframe is dropped (`dropped unchecked` in diagnostics), never stored unchecked; when the OCR model is not installed (or the Windows OCR language is missing) keyframes are stored without text and a warning is logged every 10 minutes; with no text detector on, a failed read only means no text.
 
@@ -275,6 +305,8 @@ Vector search needs no ANN library at v1 sizes: 30 days of 2 s keyframes after d
 | `replay.encryptExports` | true | |
 | `replay.exportDir` | empty (`<data>\replays`) | path, used when exports are not encrypted |
 | `replay.notify` | true | Windows notification after a save; clicking it opens the UI replay list |
+| `replay.searchable` | true | sample saved replays for search (section 3, step 7) |
+| `replay.sampleSeconds` | 5 | 2 to 60 |
 | `retention.days` | 30 | 1 to 3650 |
 | `audio.system` | false | system audio transcripts |
 | `audio.mic` | false | microphone transcripts |
@@ -303,7 +335,17 @@ etrieval`): right screens 0.68-0.80, wrong or off-topic up to 0.61 |
 | `hotkeys.pause` | `Ctrl+Alt+P` | |
 | `hotkeys.replay` | `Ctrl+Alt+R` | |
 | `hotkeys.panic` | `Ctrl+Alt+Shift+X` | |
+| `hotkeys.timeline` | empty | opens the main window on the timeline |
+| `hotkeys.home` | empty | opens the main window on Home |
+| `hotkeys.lock` | empty | locks the history (same as the `lock` verb) |
+| `ui.theme` | `system` | `system`, `light`, `dark` |
+| `ui.searchAlwaysOnTop` | true | search window topmost while shown |
+| `ui.startMinimized` | true | agent start shows only the tray icon; off also opens the main window on Home |
 | `ipc.*`, `mcp.enabled` | `research.md` 7.2 | |
+| `ai.enabled` | false | cloud describe (section 6.1) |
+| `ai.provider` | `gemini` | `gemini`, `openai-compatible`, `claude` |
+| `ai.endpoint` | empty (provider default) | `https://` URL, or `http://` to a loopback host; no user info, query or fragment; at most 512 characters |
+| `ai.model` | empty (provider default) | 1 to 128 of letters, digits, `. _ : / @ -`, starting with a letter or digit |
 | `log.level` | `info` | `debug`, `info`, `warn`, `error` |
 
 ## 9. Build

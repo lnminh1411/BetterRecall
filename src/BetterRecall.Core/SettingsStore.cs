@@ -224,6 +224,17 @@ public sealed partial class SettingsStore : ISettingsStore
     [GeneratedRegex("^[a-z]{2,3}$")]
     private static partial Regex LanguageRegex();
 
+    internal static string[] AllHotkeys(HotkeySettings h) => [h.Search, h.Pause, h.Replay, h.Panic, h.Timeline, h.Home, h.Lock];
+
+    /// <summary>Empty (not assigned), or a valid combination no other action uses.</summary>
+    internal static bool HotkeyOk(HotkeySettings h, string? s)
+    {
+        if (s is null) return false;
+        if (s.Length == 0) return true;
+        if (!ValidHotkey(s)) return false;
+        return AllHotkeys(h).Count(o => string.Equals(o?.Trim(), s.Trim(), StringComparison.OrdinalIgnoreCase)) == 1;
+    }
+
     internal static bool ValidHotkey(string? s)
     {
         if (string.IsNullOrWhiteSpace(s)) return false;
@@ -289,10 +300,13 @@ public sealed partial class SettingsStore : ISettingsStore
         ("governance.deferGpuPercent", s => Range(s.Governance.DeferGpuPercent, 10, 100)),
         ("security.unlockTimeoutMin", s => Range(s.Security.UnlockTimeoutMin, 1, 1440)),
         ("security.keyProtection", s => In(s.Security.KeyProtection, "auto", "tpm", "passphrase", "dpapi")),
-        ("hotkeys.search", s => ValidHotkey(s.Hotkeys.Search)),
-        ("hotkeys.pause", s => ValidHotkey(s.Hotkeys.Pause)),
-        ("hotkeys.replay", s => ValidHotkey(s.Hotkeys.Replay)),
-        ("hotkeys.panic", s => ValidHotkey(s.Hotkeys.Panic)),
+        ("hotkeys.search", s => HotkeyOk(s.Hotkeys, s.Hotkeys.Search)),
+        ("hotkeys.pause", s => HotkeyOk(s.Hotkeys, s.Hotkeys.Pause)),
+        ("hotkeys.replay", s => HotkeyOk(s.Hotkeys, s.Hotkeys.Replay)),
+        ("hotkeys.panic", s => HotkeyOk(s.Hotkeys, s.Hotkeys.Panic)),
+        ("hotkeys.timeline", s => HotkeyOk(s.Hotkeys, s.Hotkeys.Timeline)),
+        ("hotkeys.home", s => HotkeyOk(s.Hotkeys, s.Hotkeys.Home)),
+        ("hotkeys.lock", s => HotkeyOk(s.Hotkeys, s.Hotkeys.Lock)),
         ("ipc.pipeName", s => s.Ipc.PipeName != null && PipeNameRegex().IsMatch(PipeNames.Base(s.Ipc.PipeName))),
         ("ipc.allowClients", s => Strings(s.Ipc.AllowClients, IsAbs)),
         ("ipc.maxResults", s => Range(s.Ipc.MaxResults, 1, 200)),
@@ -306,6 +320,11 @@ public sealed partial class SettingsStore : ISettingsStore
         ("ocr.engine", s => In(s.Ocr.Engine, "onnx", "windows")),
         ("ocr.languages", s => ValidOcrLanguages(s.Ocr.Languages)),
         ("ocr.device", s => In(s.Ocr.Device, "auto", "igpu", "gpu", "cpu")),
+        ("replay.sampleSeconds", s => Range(s.Replay.SampleSeconds, 2, 60)),
+        ("security.unlockMethod", s => In(s.Security.UnlockMethod, "hello", "password")),
+        ("ai.provider", s => In(s.Ai.Provider, AiDefaults.Providers)),
+        ("ai.endpoint", s => s.Ai.Endpoint != null && (s.Ai.Endpoint.Length == 0 || ValidAiEndpoint(s.Ai.Endpoint))),
+        ("ai.model", s => s.Ai.Model != null && (s.Ai.Model.Length == 0 || AiModelRegex().IsMatch(s.Ai.Model))),
     ];
 
     [GeneratedRegex("^[a-z]{2,3}(-[A-Za-z]{2,4})?$")]
@@ -318,6 +337,18 @@ public sealed partial class SettingsStore : ISettingsStore
         if (string.IsNullOrWhiteSpace(v) || v.Length > 128) return false;
         var parts = v.Split(',', StringSplitOptions.TrimEntries);
         return parts.Length <= 16 && parts.All(p => OcrLanguageRegex().IsMatch(p));
+    }
+
+    [GeneratedRegex("^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,127}$")]
+    private static partial Regex AiModelRegex();
+
+    /// <summary>Cloud describe endpoint: absolute https URL without user info, query or fragment; plain http only on a loopback host.</summary>
+    public static bool ValidAiEndpoint(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url) || url.Length > 512 || !Uri.TryCreate(url.Trim(), UriKind.Absolute, out var u)) return false;
+        if (u.UserInfo.Length > 0 || u.Query.Length > 0 || u.Fragment.Length > 0) return false;
+        if (u.Scheme == Uri.UriSchemeHttps) return true;
+        return u.Scheme == Uri.UriSchemeHttp && u.IsLoopback;
     }
 
     /// <summary>First invalid key as "section.key", or null when every key is valid.</summary>
@@ -339,6 +370,7 @@ public sealed partial class SettingsStore : ISettingsStore
         if (s.Log == null) return "log";
         if (s.Ui == null) return "ui";
         if (s.Ocr == null) return "ocr";
+        if (s.Ai == null) return "ai";
         foreach (var (key, ok) in Rules)
         {
             bool pass;

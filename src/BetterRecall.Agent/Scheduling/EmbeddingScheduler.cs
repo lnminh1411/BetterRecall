@@ -131,7 +131,7 @@ internal sealed class EmbeddingScheduler : IAsyncDisposable
 
     private async Task ProcessAsync(IStore store, PendingJob job, Settings s, CancellationToken ct)
     {
-        if (job.Kind == CaptureKind.Screen)
+        if (job.Kind != CaptureKind.Audio) // screen and replay frames are images
         {
             if (job.Image is null || job.ImageMime is null) { store.FailEmbedding(job.Id, "no image"); return; }
             double? nsfw = s.Privacy.NsfwFilter ? s.Privacy.NsfwThreshold : null;

@@ -38,6 +38,7 @@ public sealed partial class HomePage : Page
         ("mcp.enabled", "\uE99A"),
     ];
 
+    /// <summary>Always listed; the other actions only when assigned.</summary>
     private static readonly string[] HotkeyNames = ["search", "pause", "replay", "panic"];
 
     private readonly Dictionary<string, ToggleSwitch> _switches = [];
@@ -156,24 +157,15 @@ public sealed partial class HomePage : Page
         _syncing = false;
 
         Shortcuts.Children.Clear();
-        foreach (var name in HotkeyNames)
+        foreach (var name in ShortcutRules.Actions)
         {
+            var keys = ShortcutRules.Get(s.Settings.Original, name);
+            if (keys.Length == 0 && !HotkeyNames.Contains(name)) continue;
             var row = new Grid { MinHeight = 36 };
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             row.Children.Add(new TextBlock { Text = Loc.Get("S_hotkeys_" + name), VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis });
-            var keys = SettingsSchema.Get(s.Settings.Original, "hotkeys." + name)?.GetValue<string>() ?? "";
-            var chips = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4, VerticalAlignment = VerticalAlignment.Center };
-            if (keys.Length == 0)
-                chips.Children.Add(new TextBlock { Text = Loc.Get("Home_NotSet"), Style = St("SecondaryTextStyle") });
-            else
-                foreach (var part in keys.Split('+'))
-                    chips.Children.Add(new Border
-                    {
-                        Style = St("KeyChipStyle"),
-                        Child = new TextBlock { Text = part, Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"] },
-                    });
-            AutomationProperties.SetName(chips, keys.Length == 0 ? Loc.Get("Home_NotSet") : keys);
+            var chips = ShortcutsPage.Chips(keys);
             Grid.SetColumn(chips, 1);
             row.Children.Add(chips);
             Shortcuts.Children.Add(row);
@@ -194,6 +186,7 @@ public sealed partial class HomePage : Page
         {
             var parts = StatusText.Describe(st, DateTimeOffset.UtcNow);
             StateText.Text = string.Join("  ·  ", parts.Take(2).Select(Loc.Text));   // capture state, lock state
+            if (NetworkGuarantee.IsOff(s.Settings.Original)) StateText.Text += "  ·  " + Loc.Get(NetworkGuarantee.OffLineKey);
             StateDot.Style = St(st.Paused ? "DotCautionStyle" : st.Capturing ? "DotSuccessStyle" : "DotNeutralStyle");
         }
 
@@ -228,7 +221,11 @@ public sealed partial class HomePage : Page
         if (_syncing || sender is not ToggleSwitch sw || sw.Tag is not string key || SettingsSchema.Find(key) is not { } d) return;
         var s = Services.Current;
         bool on = sw.IsOn;
-        if (on && d.WarningKey is not null)
+        if (NetworkGuarantee.NeedsConfirm(key, on, NetworkGuarantee.IsOff(s.Settings.Original)))
+        {
+            if (!await SecretCards.ConfirmCloudAsync(XamlRoot, s.Settings.Original)) { SyncSettings(); return; }
+        }
+        else if (on && d.WarningKey is not null)
         {
             var body = new TextBlock { Text = Loc.Get(d.WarningKey), TextWrapping = TextWrapping.Wrap };
             var dialog = WindowHelpers.Dialog(XamlRoot, Loc.Get(d.LabelKey), body, Loc.Get("Home_TurnOn"));
@@ -264,7 +261,7 @@ public sealed partial class HomePage : Page
         if ((await s.Api.LockAsync()).Ok) await s.RefreshStatusAsync();
     }
 
-    private void EditShortcuts_Click(object sender, RoutedEventArgs e) => App.Current.ShowMain("settings:hotkeys");
+    private void EditShortcuts_Click(object sender, RoutedEventArgs e) => App.Current.ShowMain("shortcuts");
 
     /// <summary>Two columns when there is room, else features below the shortcuts.</summary>
     private void Root_SizeChanged(object sender, SizeChangedEventArgs e)

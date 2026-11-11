@@ -23,19 +23,58 @@ public sealed class Settings
     public LogSettings Log { get; set; } = new();
     public UiSettings Ui { get; set; } = new();
     public OcrSettings Ocr { get; set; } = new();
+    public AiSettings Ai { get; set; } = new();
 }
 
 public sealed class OcrSettings
 {
     public bool Enabled { get; set; } = true;          // read the text of each kept keyframe (search + text redaction)
-    public string Engine { get; set; } = "onnx";        // onnx (PaddleOCR PP-OCRv5 models, many scripts) | windows (Windows.Media.Ocr, installed language packs)
+    public string Engine { get; set; } = "onnx";        // onnx (PaddleOCR PP-OCRv6/v5 models, many scripts) | windows (Windows.Media.Ocr, installed language packs)
     public string Languages { get; set; } = "auto";     // auto (Windows display languages) or comma-separated codes like "en,vi,ja"
     public string Device { get; set; } = "auto";        // auto | igpu | gpu | cpu (onnx engine)
+}
+
+/// <summary>Cloud describe: the only feature that sends data off the PC. Off by default; every send needs a
+/// confirmation in the UI. The API key lives DPAPI-encrypted in keys\ai-key.bin, never in settings.json.</summary>
+public sealed class AiSettings
+{
+    public bool Enabled { get; set; }
+    public string Provider { get; set; } = "gemini"; // gemini | openai-compatible | claude
+    public string Endpoint { get; set; } = "";        // empty = the provider's official endpoint; https, or http on loopback
+    public string Model { get; set; } = "";           // empty = the provider default (AiDefaults)
+}
+
+/// <summary>Provider defaults for cloud describe (checked against the providers' docs 2026-11-11).</summary>
+public static class AiDefaults
+{
+    public const string Gemini = "gemini";
+    public const string OpenAi = "openai-compatible";
+    public const string Claude = "claude";
+    public static readonly string[] Providers = [Gemini, OpenAi, Claude];
+
+    public static string Endpoint(string provider) => provider switch
+    {
+        OpenAi => "https://api.openai.com/v1",
+        Claude => "https://api.anthropic.com",
+        _ => "https://generativelanguage.googleapis.com",
+    };
+
+    public static string Model(string provider) => provider switch
+    {
+        OpenAi => "gpt-6-luna",
+        Claude => "claude-opus-5-5",
+        _ => "gemini-3.8-flash",
+    };
+
+    public static string EffectiveEndpoint(AiSettings a) => string.IsNullOrWhiteSpace(a.Endpoint) ? Endpoint(a.Provider) : a.Endpoint.Trim().TrimEnd('/');
+    public static string EffectiveModel(AiSettings a) => string.IsNullOrWhiteSpace(a.Model) ? Model(a.Provider) : a.Model.Trim();
 }
 
 public sealed class UiSettings
 {
     public string Theme { get; set; } = "system"; // system | light | dark (UI windows; the tray icon follows the taskbar)
+    public bool SearchAlwaysOnTop { get; set; } = true;   // search window stays above other windows
+    public bool StartMinimized { get; set; } = true;      // agent start shows only the tray icon; off opens Home
 }
 
 public sealed class CaptureSettings
@@ -79,6 +118,8 @@ public sealed class ReplaySettings
     public bool EncryptExports { get; set; } = true;
     public string ExportDir { get; set; } = "";        // empty = <data>/replays
     public bool Notify { get; set; } = true;           // toast after a save, click opens the UI replay list
+    public bool Searchable { get; set; } = true;       // saved replays: a frame every SampleSeconds goes into search (kind replay)
+    public int SampleSeconds { get; set; } = 5;        // 2..60
 }
 
 public sealed class IndexSettings
@@ -166,6 +207,7 @@ public sealed class SecuritySettings
     public bool MemoryIsolation { get; set; } = true;
     public bool LockOnSessionLock { get; set; } = true;
     public string KeyProtection { get; set; } = "auto"; // auto | tpm | passphrase | dpapi
+    public string UnlockMethod { get; set; } = "hello";  // hello | password (Argon2id hash in keys\unlock.bin)
 }
 
 public sealed class HotkeySettings
@@ -174,6 +216,10 @@ public sealed class HotkeySettings
     public string Pause { get; set; } = "Ctrl+Alt+P";
     public string Replay { get; set; } = "Ctrl+Alt+R";
     public string Panic { get; set; } = "Ctrl+Alt+Shift+X";
+    // Empty = not assigned (any action may be left empty).
+    public string Timeline { get; set; } = "";
+    public string Home { get; set; } = "";
+    public string Lock { get; set; } = "";
 }
 
 public sealed class IpcSettings

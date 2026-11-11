@@ -56,6 +56,9 @@ internal sealed class KeyframePipeline : IAsyncDisposable
     public double EncodeMsTotal, HashMsTotal, GrabMsTotal, OcrMsTotal;
     public double LastEncodeMs, LastOcrMs;
 
+    /// <summary>Receives replay samples (ReplaySample requests), redacted like keyframes. Null: samples are dropped.</summary>
+    public Replay.ReplaySampler? Sampler { get; set; }
+
     public KeyframePipeline(Func<IStore?> store, Func<Settings> settings, Action<CaptureMeta> stored,
         IKeyframeReader? reader = null, RedactionMasks? masks = null)
     {
@@ -113,22 +116,30 @@ internal sealed class KeyframePipeline : IAsyncDisposable
         var s = _settings();
         var store = _store();
         if (store is null) return;
-        DedupFilter dedup;
-        lock (_dedup)
-        {
-            if (!_dedup.TryGetValue(g.Monitor, out dedup!)) _dedup[g.Monitor] = dedup = new DedupFilter();
-        }
-        var sw = Stopwatch.StartNew();
-        ulong hash = DHash.Compute(g.Span, g.Width, g.Height, g.Stride);
-        HashMsTotal += sw.Elapsed.TotalMilliseconds;
-        if (!g.Request.Force && dedup.HashCheck(hash, s.Capture.DhashThreshold, g.Request.Context) == DedupVerdict.SkipSimilar)
-        {
-            Interlocked.Increment(ref SkippedSimilar);
-            return;
-        }
-
-        var red = RedactionOptions.From(s.Privacy);
         var req = g.Request;
+        bool sample = req.ReplaySample && Sampler is not null;
+        bool keep = req.Keyframe;
+        DedupFilter? dedup = null;
+        ulong hash = 0;
+        var sw = Stopwatch.StartNew();
+        if (keep)
+        {
+            lock (_dedup)
+            {
+                if (!_dedup.TryGetValue(g.Monitor, out dedup)) _dedup[g.Monitor] = dedup = new DedupFilter();
+            }
+            hash = DHash.Compute(g.Span, g.Width, g.Height, g.Stride);
+            HashMsTotal += sw.Elapsed.TotalMilliseconds;
+            if (!req.Force && dedup.HashCheck(hash, s.Capture.DhashThreshold, req.Context) == DedupVerdict.SkipSimilar)
+            {
+                Interlocked.Increment(ref SkippedSimilar);
+                keep = false;
+            }
+        }
+        if (!keep && !sample) return;
+
+        // Redaction before anything leaves this method: stored keyframes and replay samples get the same black boxes.
+        var red = RedactionOptions.From(s.Privacy);
         bool hasBounds = req.Bounds.Width > 0 && req.Bounds.Height > 0;
         var secrets = red.Passwords && hasBounds && req.Secrets is { Length: > 0 } sr
             ? RedactionMasks.ToKeyframe(sr, req.Bounds, g.Width, g.Height) : [];
@@ -153,7 +164,7 @@ internal sealed class KeyframePipeline : IAsyncDisposable
             }
             else if (red.AnyText)
             {
-                // Redaction before saving: never store a frame whose text could not be checked.
+                // Never store or sample a frame whose text could not be checked.
                 Interlocked.Increment(ref RedactDropped);
                 Log.Debug($"keyframe dropped: ocr failed ({why})");
                 return;
@@ -167,19 +178,27 @@ internal sealed class KeyframePipeline : IAsyncDisposable
         if (hasBounds) _masks?.Set(g.Monitor, RedactionMasks.ToDesktop(r.Boxes, g.Width, g.Height, req.Bounds));
         Interlocked.Add(ref RedactedSpans, r.Spans);
 
-        sw.Restart();
         string format = s.Keyframes.Format == "jpeg" ? "jpeg" : "webp";
+        sw.Restart();
         byte[] bytes = Encode(g, format, Math.Clamp(s.Keyframes.Quality, 30, 95));
         LastEncodeMs = sw.Elapsed.TotalMilliseconds;
-        EncodeMsTotal += LastEncodeMs;
-        var cap = new NewScreenCapture(req.Ts, req.App, req.ExePath, r.Title, g.Monitor, g.Width, g.Height, hash,
-            bytes, ImageCodec.Mime(format), s.Keyframes.Enabled, req.Site, ocr is null ? null : r.Text);
-        string id;
-        try { id = store.AddScreenCapture(cap); }
+        try
+        {
+            if (sample)
+                Sampler!.Add(new Replay.ReplaySampler.Sample(req.Ts, g.Monitor, req.App, r.Title, req.Site, g.Width, g.Height, bytes, ImageCodec.Mime(format)),
+                    Math.Clamp(s.Replay.Seconds, 15, 600) + 10);
+            if (!keep) return;
+            EncodeMsTotal += LastEncodeMs;
+            var cap = new NewScreenCapture(req.Ts, req.App, req.ExePath, r.Title, g.Monitor, g.Width, g.Height, hash,
+                bytes.ToArray(), ImageCodec.Mime(format), s.Keyframes.Enabled, req.Site, ocr is null ? null : r.Text);
+            string id;
+            try { id = store.AddScreenCapture(cap); }
+            finally { Array.Clear(cap.Image); }
+            dedup!.Accept(hash, req.Context);
+            Interlocked.Increment(ref Kept);
+            _stored(new CaptureMeta(id, req.Ts, CaptureKind.Screen, req.App, r.Title, g.Monitor, 0, s.Keyframes.Enabled, false, req.Site));
+        }
         finally { Array.Clear(bytes); }
-        dedup.Accept(hash, req.Context);
-        Interlocked.Increment(ref Kept);
-        _stored(new CaptureMeta(id, req.Ts, CaptureKind.Screen, req.App, r.Title, g.Monitor, 0, s.Keyframes.Enabled, false, req.Site));
     }
 
     /// <summary>OCR result, or why there is none: permanent (model or Windows OCR language not installed) or passing.</summary>

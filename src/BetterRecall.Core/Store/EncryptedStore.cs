@@ -20,7 +20,12 @@ namespace BetterRecall.Core.Store;
 public sealed partial class EncryptedStore : IStore
 {
     private const int StatePending = 0, StateReady = 1, StateFailed = 2;
-    private const int KindScreen = 0, KindAudio = 1;
+    private const int KindScreen = 0, KindAudio = 1, KindReplay = 2;
+    /// <summary>Every kind bit (VectorFilter.KindMask, FTS filter): screen 1, audio 2, replay 4.</summary>
+    private const int AllKinds = 7;
+
+    private static CaptureKind KindOf(int k) => k switch { KindAudio => CaptureKind.Audio, KindReplay => CaptureKind.Replay, _ => CaptureKind.Screen };
+    private static int KindBit(CaptureKind k) => k switch { CaptureKind.Audio => 2, CaptureKind.Replay => 4, _ => 1 };
     private const int RrfK = 60;
     private const int FtsCandidates = 200;
     private const int VectorScanTop = 400;
@@ -165,6 +170,11 @@ public sealed partial class EncryptedStore : IStore
             CREATE TABLE IF NOT EXISTS search_history(q TEXT PRIMARY KEY, ts INTEGER NOT NULL);
             CREATE INDEX IF NOT EXISTS ix_history_ts ON search_history(ts);
             UPDATE meta SET v='2' WHERE k='schema' AND v='1';
+            """);
+        // 0.2 batch 4: frames sampled from saved replays (captures.kind 2) point at their replay and offset.
+        Exec(_w, """
+            CREATE TABLE IF NOT EXISTS replay_frames(rid INTEGER PRIMARY KEY, replay_id TEXT NOT NULL, offset_ms INTEGER NOT NULL);
+            CREATE INDEX IF NOT EXISTS ix_replay_frames_replay ON replay_frames(replay_id);
             """);
     }
 
@@ -315,7 +325,7 @@ public sealed partial class EncryptedStore : IStore
                     SELECT c.rid, $now FROM captures c LEFT JOIN vectors v ON v.rid = c.rid
                     WHERE c.state = 1
                       AND (v.rid IS NULL OR v.model_id <> $m OR v.revision <> $r)
-                      AND ((c.kind = 0 AND c.has_keyframe = 1) OR (c.kind = 1 AND c.text IS NOT NULL AND c.text <> ''))
+                      AND ((c.kind IN (0, 2) AND c.has_keyframe = 1) OR (c.kind = 1 AND c.text IS NOT NULL AND c.text <> ''))
                     """, ("$now", now), ("$m", info.ModelId), ("$r", info.Revision));
                 tx.Commit();
             }
@@ -380,6 +390,60 @@ public sealed partial class EncryptedStore : IStore
         }
     }
 
+    /// <summary>Frame of a saved replay: a kind-2 row with its keyframe (always kept) plus a replay_frames link.</summary>
+    public string AddReplayFrame(NewReplayFrame f)
+    {
+        ArgumentNullException.ThrowIfNull(f);
+        ArgumentNullException.ThrowIfNull(f.Image);
+        if (string.IsNullOrWhiteSpace(f.ReplayId) || f.ReplayId.Length > 64) throw new ArgumentException("Bad replay id.");
+        lock (_wl)
+        {
+            ThrowIfDisposed();
+            var id = Ids.New('r', f.Ts);
+            long ts = f.Ts.ToUnixTimeMilliseconds();
+            var month = Month(ts);
+            long rid;
+            using (var tx = _w.BeginTransaction())
+            {
+                rid = (long)Scalar(_w, """
+                    INSERT INTO captures(id, ts, kind, app, app_lc, exe, title, monitor, width, height, dhash, duration_ms, state, has_keyframe, keep_keyframe, kf_month, site)
+                    VALUES($id, $ts, 2, $app, $applc, '', $title, $mon, $w, $h, 0, 0, 0, 1, 1, $month, $site) RETURNING rid
+                    """, ("$site", NormalizeSite(f.Site)), ("$id", id), ("$ts", ts), ("$app", f.App ?? ""), ("$applc", (f.App ?? "").ToLowerInvariant()),
+                    ("$title", f.Title ?? ""), ("$mon", f.Monitor), ("$w", f.Width), ("$h", f.Height), ("$month", month))!;
+                Exec(_w, "INSERT INTO replay_frames(rid, replay_id, offset_ms) VALUES($rid, $rep, $off)", ("$rid", rid), ("$rep", f.ReplayId), ("$off", Math.Max(0, f.OffsetMs)));
+                Exec(_w, "INSERT INTO jobs(rid, created) VALUES($rid, $now)", ("$rid", rid), ("$now", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()));
+                tx.Commit();
+            }
+            try
+            {
+                Exec(Kf(month, create: true)!, "INSERT OR REPLACE INTO kf(rid, mime, width, height, data) VALUES($rid, $mime, $w, $h, $data)",
+                    ("$rid", rid), ("$mime", f.ImageMime ?? "image/webp"), ("$w", f.Width), ("$h", f.Height), ("$data", f.Image));
+            }
+            catch
+            {
+                DeleteRowsLocked([rid]);
+                throw;
+            }
+            return id;
+        }
+    }
+
+    public int DeleteReplayFrames(string replayId)
+    {
+        if (string.IsNullOrWhiteSpace(replayId)) return 0;
+        lock (_wl)
+        {
+            ThrowIfDisposed();
+            var rids = new List<long>();
+            using (var cmd = Cmd(_w, "SELECT rid FROM replay_frames WHERE replay_id=$r", ("$r", replayId)))
+            using (var rd = cmd.ExecuteReader())
+                while (rd.Read()) rids.Add(rd.GetInt64(0));
+            int n = DeleteRowsLocked(rids);
+            if (n > 0) Log.Info($"replay deleted: {n} replay frames removed");
+            return n;
+        }
+    }
+
     public string AddAudioCapture(NewAudioCapture c)
     {
         ArgumentNullException.ThrowIfNull(c);
@@ -441,7 +505,7 @@ public sealed partial class EncryptedStore : IStore
                     FailLocked(r.Rid, "keyframe missing");
                     continue;
                 }
-                jobs.Add(new PendingJob(r.Id, CaptureKind.Screen, img.Value.Data, img.Value.Mime, null));
+                jobs.Add(new PendingJob(r.Id, KindOf(r.Kind), img.Value.Data, img.Value.Mime, null));
                 _inflight.Add(r.Rid);
             }
             return jobs;
@@ -565,6 +629,7 @@ public sealed partial class EncryptedStore : IStore
                 Exec(_w, $"DELETE FROM fts WHERE rowid IN ({list})");
                 Exec(_w, $"DELETE FROM vectors WHERE rid IN ({list})");
                 Exec(_w, $"DELETE FROM jobs WHERE rid IN ({list})");
+                Exec(_w, $"DELETE FROM replay_frames WHERE rid IN ({list})");
                 using var del = Cmd(_w, $"DELETE FROM captures WHERE rid IN ({list})");
                 total += del.ExecuteNonQuery();
                 tx.Commit();
@@ -655,7 +720,7 @@ public sealed partial class EncryptedStore : IStore
     // ---------------------------------------------------------------- reads
 
     private CaptureMeta ReadMeta(SqliteDataReader rd)
-        => new(rd.GetString(0), DateTimeOffset.FromUnixTimeMilliseconds(rd.GetInt64(1)), rd.GetInt32(2) == 0 ? CaptureKind.Screen : CaptureKind.Audio,
+        => new(rd.GetString(0), DateTimeOffset.FromUnixTimeMilliseconds(rd.GetInt64(1)), KindOf(rd.GetInt32(2)),
             rd.GetString(3), rd.GetString(4), rd.GetInt32(5), rd.GetInt32(6), rd.GetInt32(7) == 1, !rd.IsDBNull(8), rd.GetString(9));
 
     public IReadOnlyList<CaptureMeta> Timeline(DateTimeOffset from, DateTimeOffset to, int limit)
@@ -667,7 +732,7 @@ public sealed partial class EncryptedStore : IStore
             using var cmd = Cmd(_r, """
                 SELECT c.id, c.ts, c.kind, c.app, c.title, c.monitor, c.duration_ms, c.has_keyframe, v.rid, c.site
                 FROM captures c LEFT JOIN vectors v ON v.rid = c.rid
-                WHERE c.state = 1 AND c.ts >= $from AND c.ts < $to ORDER BY c.ts DESC LIMIT $n
+                WHERE c.state = 1 AND c.ts >= $from AND c.ts < $to AND c.kind <> 2 ORDER BY c.ts DESC LIMIT $n
                 """, ("$from", from.ToUnixTimeMilliseconds()), ("$to", to.ToUnixTimeMilliseconds()), ("$n", limit));
             using var rd = cmd.ExecuteReader();
             var list = new List<CaptureMeta>();
@@ -681,13 +746,17 @@ public sealed partial class EncryptedStore : IStore
         lock (_rl)
         {
             ThrowIfDisposed();
-            using var cmd = Cmd(_r, "SELECT id, ts, kind, app, title, text, has_keyframe, duration_ms, site FROM captures WHERE id=$id AND state=1", ("$id", id));
+            using var cmd = Cmd(_r, """
+                SELECT c.id, c.ts, c.kind, c.app, c.title, c.text, c.has_keyframe, c.duration_ms, c.site, r.replay_id, r.offset_ms
+                FROM captures c LEFT JOIN replay_frames r ON r.rid = c.rid WHERE c.id=$id AND c.state=1
+                """, ("$id", id));
             using var rd = cmd.ExecuteReader();
             if (!rd.Read()) return null;
             bool audio = rd.GetInt32(2) == KindAudio;
-            return new CaptureDetail(rd.GetString(0), DateTimeOffset.FromUnixTimeMilliseconds(rd.GetInt64(1)), audio ? CaptureKind.Audio : CaptureKind.Screen,
-                rd.GetString(3), rd.GetString(4), audio || !rd.IsDBNull(5) && rd.GetString(5).Length > 0 ? (rd.IsDBNull(5) ? "" : rd.GetString(5)) : rd.GetString(4),
-                rd.GetInt32(6) == 1, audio ? (rd.GetInt32(7) + 500) / 1000 : null, rd.GetString(8));
+            return new CaptureDetail(rd.GetString(0), DateTimeOffset.FromUnixTimeMilliseconds(rd.GetInt64(1)), KindOf(rd.GetInt32(2)),
+                rd.GetString(3), rd.GetString(4), audio ? (rd.IsDBNull(5) ? "" : rd.GetString(5)) : !rd.IsDBNull(5) && rd.GetString(5).Length > 0 ? rd.GetString(5) : rd.GetString(4),
+                rd.GetInt32(6) == 1, audio ? (rd.GetInt32(7) + 500) / 1000 : null, rd.GetString(8),
+                rd.IsDBNull(9) ? null : rd.GetString(9), rd.IsDBNull(10) ? null : rd.GetInt32(10));
         }
     }
 
@@ -744,8 +813,8 @@ public sealed partial class EncryptedStore : IStore
         long from = request.From?.ToUnixTimeMilliseconds() ?? long.MinValue;
         long to = request.To?.ToUnixTimeMilliseconds() ?? long.MaxValue;
         int kindMask = 0;
-        if (request.Kind == null || request.Kind.Length == 0) kindMask = 3;
-        else foreach (var k in request.Kind) kindMask |= k == CaptureKind.Screen ? 1 : 2;
+        if (request.Kind == null || request.Kind.Length == 0) kindMask = AllKinds;
+        else foreach (var k in request.Kind) kindMask |= KindBit(k);
         string? appLc = string.IsNullOrWhiteSpace(request.App) ? null : request.App.Trim().ToLowerInvariant();
         string? site = string.IsNullOrWhiteSpace(request.Site) ? null : NormalizeSite(request.Site);
         bool useText = request.Mode != SearchMode.Vector;
@@ -779,14 +848,18 @@ public sealed partial class EncryptedStore : IStore
         var hits = new List<SearchHit>(top.Count);
         if (top.Count > 0)
         {
-            var meta = new Dictionary<long, (string Id, long Ts, int Kind, string App, string Title, string? Text, bool Kf, int Dur, string Site)>();
+            var meta = new Dictionary<long, (string Id, long Ts, int Kind, string App, string Title, string? Text, bool Kf, int Dur, string Site, string? Replay, int? Offset)>();
             lock (_rl)
             {
                 ThrowIfDisposed();
-                using var cmd = Cmd(_r, $"SELECT rid, id, ts, kind, app, title, text, has_keyframe, duration_ms, site FROM captures WHERE rid IN ({InList(top.Select(t => t.Key))}) AND +state=1");
+                using var cmd = Cmd(_r, $"""
+                    SELECT c.rid, c.id, c.ts, c.kind, c.app, c.title, c.text, c.has_keyframe, c.duration_ms, c.site, r.replay_id, r.offset_ms
+                    FROM captures c LEFT JOIN replay_frames r ON r.rid = c.rid WHERE c.rid IN ({InList(top.Select(t => t.Key))}) AND +c.state=1
+                    """);
                 using var rd = cmd.ExecuteReader();
                 while (rd.Read())
-                    meta[rd.GetInt64(0)] = (rd.GetString(1), rd.GetInt64(2), rd.GetInt32(3), rd.GetString(4), rd.GetString(5), rd.IsDBNull(6) ? null : rd.GetString(6), rd.GetInt32(7) == 1, rd.GetInt32(8), rd.GetString(9));
+                    meta[rd.GetInt64(0)] = (rd.GetString(1), rd.GetInt64(2), rd.GetInt32(3), rd.GetString(4), rd.GetString(5), rd.IsDBNull(6) ? null : rd.GetString(6), rd.GetInt32(7) == 1, rd.GetInt32(8), rd.GetString(9),
+                        rd.IsDBNull(10) ? null : rd.GetString(10), rd.IsDBNull(11) ? null : rd.GetInt32(11));
             }
             var tokens = Tokens(request.Q ?? "");
             foreach (var (rid, score) in top)
@@ -794,9 +867,10 @@ public sealed partial class EncryptedStore : IStore
                 if (!meta.TryGetValue(rid, out var m)) continue;
                 bool audio = m.Kind == KindAudio;
                 var snippet = audio ? Snippet(m.Text ?? "", tokens) : ScreenSnippet(m.Title, m.Text, tokens);
-                hits.Add(new SearchHit(m.Id, DateTimeOffset.FromUnixTimeMilliseconds(m.Ts), audio ? CaptureKind.Audio : CaptureKind.Screen, m.App, m.Title,
+                hits.Add(new SearchHit(m.Id, DateTimeOffset.FromUnixTimeMilliseconds(m.Ts), KindOf(m.Kind), m.App, m.Title,
                     (float)Math.Round(Math.Min(1.0, score / norm), 4), snippet, m.Kf && !audio, audio ? (m.Dur + 500) / 1000 : null,
-                    cosById.TryGetValue(rid, out var hc) ? (float)Math.Round(hc, 4) : null, textSet.Contains(rid), Site: m.Site));
+                    cosById.TryGetValue(rid, out var hc) ? (float)Math.Round(hc, 4) : null, textSet.Contains(rid), Site: m.Site,
+                    ReplayId: m.Replay, ReplayOffsetMs: m.Offset));
             }
         }
 
@@ -837,7 +911,7 @@ public sealed partial class EncryptedStore : IStore
     {
         var match = FtsQuery(q);
         if (match == null) return [];
-        bool filtered = from != long.MinValue || to != long.MaxValue || kindMask != 3 || appLc != null || site != null;
+        bool filtered = from != long.MinValue || to != long.MaxValue || kindMask != AllKinds || appLc != null || site != null;
         var ranked = new List<long>();
         lock (_rl)
         {
@@ -853,8 +927,14 @@ public sealed partial class EncryptedStore : IStore
             // Unary + keeps SQLite on the rowid IN list instead of a (state, ts) or app index scan.
             if (from != long.MinValue) { sql.Append(" AND +ts >= $from"); ps.Add(("$from", from)); }
             if (to != long.MaxValue) { sql.Append(" AND +ts < $to"); ps.Add(("$to", to)); }
-            if (kindMask == 1) sql.Append(" AND +kind = 0");
-            else if (kindMask == 2) sql.Append(" AND +kind = 1");
+            if (kindMask != AllKinds)
+            {
+                var kinds = new List<string>(3);
+                if ((kindMask & 1) != 0) kinds.Add("0");
+                if ((kindMask & 2) != 0) kinds.Add("1");
+                if ((kindMask & 4) != 0) kinds.Add("2");
+                sql.Append(" AND +kind IN (").Append(kinds.Count == 0 ? "-1" : string.Join(",", kinds)).Append(')');
+            }
             if (appLc != null) { sql.Append(" AND +app_lc = $app"); ps.Add(("$app", appLc)); }
             if (site != null) { sql.Append(" AND +site = $site"); ps.Add(("$site", site)); }
             var keep = new HashSet<long>();
@@ -1121,7 +1201,7 @@ public sealed partial class EncryptedStore : IStore
         using (var tx = _w.BeginTransaction())
         {
             // Pending rows of that month can no longer be embedded.
-            Exec(_w, "DELETE FROM jobs WHERE rid IN (SELECT rid FROM captures WHERE kf_month=$m AND kind=0)", ("$m", month));
+            Exec(_w, "DELETE FROM jobs WHERE rid IN (SELECT rid FROM captures WHERE kf_month=$m AND kind<>1)", ("$m", month));
             Exec(_w, "UPDATE captures SET state=2 WHERE kf_month=$m AND state=0", ("$m", month));
             Exec(_w, "UPDATE captures SET has_keyframe=0 WHERE kf_month=$m", ("$m", month));
             tx.Commit();

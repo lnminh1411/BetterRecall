@@ -18,10 +18,14 @@ public sealed class ClientSession(PipeKind kind, int pid, string image)
     public string Image { get; } = image;
     internal readonly Queue<DateTimeOffset> SearchTimes = new();
     internal readonly Dictionary<string, PurgeTicket> PurgeTokens = new(StringComparer.Ordinal);
+    internal readonly Dictionary<string, DescribeTicket> DescribeTokens = new(StringComparer.Ordinal);
     public string PipeLabel => Kind switch { PipeKind.Ui => "ui", PipeKind.Mcp => "mcp", _ => "ipc" };
 }
 
 internal sealed record PurgeTicket(PurgeScope? Scope, int Rows, DateTimeOffset Expires);
+
+/// <summary>describe preview: the exact image the confirmed send will use.</summary>
+internal sealed record DescribeTicket(string CaptureId, Ai.OutgoingImage Image, DateTimeOffset Expires);
 
 public enum Subscription { None, Status, Captures }
 
@@ -43,6 +47,13 @@ public sealed class CommandDeps
     public IBlobCipher? Blobs { get; init; }
     /// <summary>Data dir, for DataPaths.BenchReport.</summary>
     public string? Home { get; init; }
+    /// <summary>security.unlockMethod password. Null: password verbs answer "No unlock password is set.".</summary>
+    public Crypto.UnlockPassword? Password { get; init; }
+    /// <summary>Cloud describe key file. Null disables the ai and describe verbs.</summary>
+    public Ai.ApiKeyStore? AiKey { get; init; }
+    public Ai.CloudDescriber? Describer { get; init; }
+    /// <summary>Applied to every image before preview and send. Null means pass-through (no redaction yet).</summary>
+    public Ai.IDescribeRedactor? Redactor { get; init; }
 }
 
 /// <summary>
@@ -84,10 +95,25 @@ public sealed class CommandProcessor
     internal const string ErrUnlockCancelled = "Unlock cancelled.";
     internal const string ErrWrongPassphrase = "Wrong passphrase.";
     internal const string ErrUnlockRequired = "Unlock required.";
+    internal const string UsagePassword = "Usage: password | password set <json> | password clear <json>";
+    internal const string UsageAi = "Usage: ai | ai setkey <key> | ai clearkey";
+    internal const string UsageDescribe = "Usage: describe preview <id> | describe send <token>";
+    internal const string ErrWrongPassword = "Wrong password.";
+    internal const string ErrNoPassword = "No unlock password is set.";
+    internal const string ErrPasswordRule = "Password must be 6 to 256 characters.";
+    internal const string ErrPasswordInUse = "Password in use (config security.unlockMethod).";
+    internal const string ErrTooManyPrefix = "Too many attempts. Try again in ";
+    internal const string ErrAiOff = "Cloud describe is off (config ai.enabled).";
+    internal const string ErrNoApiKey = "API key not set.";
+    internal const string ErrApiKeyRule = "Invalid API key.";
+    internal const string ErrNoImage = "No image to describe.";
+    internal const string ErrProviderUnreachable = "Provider unreachable.";
+    internal const string ErrProviderTimeout = "Provider timed out.";
+    internal static string ErrTooMany(int seconds) => ErrTooManyPrefix + seconds.ToString(CultureInfo.InvariantCulture) + " s.";
 
     private static readonly string[] PublicVerbs = ["ping", "version", "help", "status", "search", "get", "thumb", "subscribe", "pause", "resume", "purge"];
     private static readonly string[] McpVerbs = ["ping", "version", "status", "search", "get"];
-    private static readonly string[] UiOnlyVerbs = ["unlock", "lock", "consent", "settings", "timeline", "keyframe", "replay", "panic", "audit", "bench", "facets", "history"];
+    private static readonly string[] UiOnlyVerbs = ["unlock", "lock", "consent", "settings", "timeline", "keyframe", "replay", "panic", "audit", "bench", "facets", "history", "password", "ai", "describe"];
 
     private readonly CommandDeps _d;
     private DateTimeOffset _lastUnlock = DateTimeOffset.MinValue;
@@ -157,6 +183,7 @@ public sealed class CommandProcessor
     {
         if (kind != PipeKind.Ui) return false;
         var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 3 && parts[0].Equals("describe", StringComparison.OrdinalIgnoreCase) && parts[1].Equals("send", StringComparison.OrdinalIgnoreCase)) return true;
         return parts.Length == 2 && parts[0].Equals("bench", StringComparison.OrdinalIgnoreCase) && parts[1].Equals("full", StringComparison.OrdinalIgnoreCase);
     }
 
@@ -311,7 +338,7 @@ public sealed class CommandProcessor
             case "purge":
                 return await PurgeAsync(s, args, ct).ConfigureAwait(false);
             case "unlock":
-                return await UnlockAsync(RawRest(line), ct).ConfigureAwait(false);
+                return await UnlockAsync(s, RawRest(line), ct).ConfigureAwait(false);
             case "lock":
                 _d.Agent.Lock();
                 return Ok("null");
@@ -337,6 +364,12 @@ public sealed class CommandProcessor
                 return Facets(s, args);
             case "history":
                 return History(s, rest);
+            case "password":
+                return PasswordVerb(s, RawRest(line));
+            case "ai":
+                return AiVerb(s, RawRest(line));
+            case "describe":
+                return await DescribeAsync(s, args, ct).ConfigureAwait(false);
         }
         return Err($"Unknown command '{verbRaw}'.");
     }
@@ -440,6 +473,7 @@ public sealed class CommandProcessor
                             var v = k.ValueKind == JsonValueKind.String ? k.GetString()!.ToLowerInvariant() : null;
                             if (v == "screen") ks.Add(CaptureKind.Screen);
                             else if (v == "audio") ks.Add(CaptureKind.Audio);
+                            else if (v == "replay") ks.Add(CaptureKind.Replay);
                             else return (null, "Invalid kind.");
                         }
                         if (ks.Count == 0) return (null, "Invalid kind.");
@@ -758,13 +792,37 @@ public sealed class CommandProcessor
 
     // ------------------------------------------------------------ UI verbs
 
-    private async Task<Reply> UnlockAsync(string rest, CancellationToken ct)
+    private bool UsesPassword => S.Security.UnlockMethod == "password";
+
+    /// <summary>
+    /// unlock [secret]. Data key still passphrase-wrapped: the secret is the passphrase. Otherwise with
+    /// security.unlockMethod password the secret is the unlock password (rate-limited, no Hello prompt); with hello an
+    /// optional passphrase check comes first, then Windows Hello. With the password method a passphrase that loads the
+    /// key also opens the gate: it is the stronger secret of the two.
+    /// </summary>
+    private async Task<Reply> UnlockAsync(ClientSession s, string rest, CancellationToken ct)
     {
         var keys = _d.Keys;
         bool needPass = keys is Crypto.KeyVault kv ? kv.NeedsPassphrase : (!keys.KeyLoaded && keys.Protection == Crypto.KeyVault.ModePassphrase);
         if (needPass)
         {
             if (rest.Length == 0 || !keys.UnlockWithPassphrase(rest)) return Err(ErrWrongPassphrase);
+            if (UsesPassword) return OpenVerified(s, "unlock passphrase");
+        }
+        else if (UsesPassword)
+        {
+            var pw = _d.Password;
+            var check = pw == null ? Crypto.PasswordCheck.NotSet : pw.Verify(rest);
+            switch (check)
+            {
+                case Crypto.PasswordCheck.NotSet: return Err(ErrNoPassword);
+                case Crypto.PasswordCheck.Throttled: return Err(ErrTooMany(Math.Max(1, pw!.RetryAfterSeconds)));
+                case Crypto.PasswordCheck.Wrong:
+                    Audit(s, "unlock password", 0, "");
+                    int wait = pw!.RetryAfterSeconds;
+                    return Err(wait > 0 ? ErrTooMany(wait) : ErrWrongPassword);
+            }
+            return OpenVerified(s, "unlock password");
         }
         else if (rest.Length > 0 && keys.Protection == Crypto.KeyVault.ModePassphrase && !keys.UnlockWithPassphrase(rest))
         {
@@ -774,6 +832,167 @@ public sealed class CommandProcessor
         _lastUnlock = Now();
         var until = _d.Agent.GetStatus().UnlockedUntil;
         return Ok(JsonSerializer.Serialize(new UnlockReply(true, until), CoreJson.Default.UnlockReply));
+    }
+
+    private Reply OpenVerified(ClientSession s, string what)
+    {
+        _d.Agent.OpenReadGate();
+        _lastUnlock = Now();
+        Audit(s, what, 1, "");
+        var until = _d.Agent.GetStatus().UnlockedUntil;
+        return Ok(JsonSerializer.Serialize(new UnlockReply(true, until), CoreJson.Default.UnlockReply));
+    }
+
+    // ------------------------------------------------------------ unlock password
+
+    private static string? JsonString(JsonElement root, string name) =>
+        root.ValueKind == JsonValueKind.Object && root.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+
+    /// <summary>
+    /// password: status. password set {"current":"...","new":"..."}: current is needed once a password exists; the first
+    /// password needs the read gate open (or security.requireUnlock off, or no Windows Hello on this PC, so a user without
+    /// Hello is not locked out). password clear {"current":"..."}: refused while security.unlockMethod is password.
+    /// Wrong current passwords count toward the same rate limit as unlock.
+    /// </summary>
+    private Reply PasswordVerb(ClientSession s, string rest)
+    {
+        var pw = _d.Password;
+        var (sub, json) = SplitVerb(rest);
+        switch (sub.ToLowerInvariant())
+        {
+            case "" when json.Length == 0:
+                return Ok(JsonSerializer.Serialize(new PasswordStatus(pw?.IsSet == true, _d.Keys.HelloAvailable, pw?.RetryAfterSeconds ?? 0), CoreJson.Default.PasswordStatus));
+            case "set" when json.Length > 0:
+            case "clear" when json.Length > 0:
+            {
+                if (pw == null) return Err(ErrNoPassword);
+                JsonDocument doc;
+                try { doc = JsonDocument.Parse(json); }
+                catch (JsonException) { return Err(ErrJson); }
+                using (doc)
+                {
+                    var root = doc.RootElement;
+                    if (root.ValueKind != JsonValueKind.Object) return Err(ErrJson);
+                    bool clear = sub.Equals("clear", StringComparison.OrdinalIgnoreCase);
+                    if (pw.IsSet)
+                    {
+                        switch (pw.Verify(JsonString(root, "current")))
+                        {
+                            case Crypto.PasswordCheck.Throttled: return Err(ErrTooMany(Math.Max(1, pw.RetryAfterSeconds)));
+                            case Crypto.PasswordCheck.Wrong:
+                                Audit(s, "password " + (clear ? "clear" : "set"), 0, "");
+                                int wait = pw.RetryAfterSeconds;
+                                return Err(wait > 0 ? ErrTooMany(wait) : ErrWrongPassword);
+                        }
+                    }
+                    else if (clear) return Err(ErrNoPassword);
+                    else if (S.Security.RequireUnlock && !_d.Agent.IsUnlocked && _d.Keys.HelloAvailable) return Err(ErrUnlockRequired);
+                    if (clear)
+                    {
+                        if (UsesPassword) return Err(ErrPasswordInUse);
+                        pw.Clear();
+                        Audit(s, "password clear", 1, "");
+                        return Ok("null");
+                    }
+                    var next = JsonString(root, "new");
+                    if (!Crypto.UnlockPassword.ValidNew(next)) return Err(ErrPasswordRule);
+                    pw.Set(next!);
+                    Audit(s, "password set", 1, "");
+                    return Ok("null");
+                }
+            }
+        }
+        return Err(UsagePassword);
+    }
+
+    // ------------------------------------------------------------ cloud describe
+
+    private AiStatus AiState()
+    {
+        var a = S.Ai;
+        return new AiStatus(a.Enabled, _d.AiKey?.IsSet == true, a.Provider, AiDefaults.EffectiveModel(a), AiDefaults.EffectiveEndpoint(a));
+    }
+
+    /// <summary>ai: status (never the key). ai setkey &lt;key&gt; stores the key DPAPI-encrypted; ai clearkey deletes it.</summary>
+    private Reply AiVerb(ClientSession s, string rest)
+    {
+        var store = _d.AiKey;
+        var (sub, tail) = SplitVerb(rest);
+        switch (sub.ToLowerInvariant())
+        {
+            case "" when tail.Length == 0:
+                return Ok(JsonSerializer.Serialize(AiState(), CoreJson.Default.AiStatus));
+            case "setkey" when tail.Length > 0:
+                if (store == null) return Err(ErrAiOff);
+                if (!Ai.ApiKeyStore.Valid(tail)) return Err(ErrApiKeyRule);
+                store.Set(tail);
+                Audit(s, "ai setkey", 1, "");
+                return Ok(JsonSerializer.Serialize(AiState(), CoreJson.Default.AiStatus));
+            case "clearkey" when tail.Length == 0:
+                store?.Clear();
+                Audit(s, "ai clearkey", 1, "");
+                return Ok(JsonSerializer.Serialize(AiState(), CoreJson.Default.AiStatus));
+        }
+        return Err(UsageAi);
+    }
+
+    private static readonly string[] SendableMimes = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+
+    /// <summary>
+    /// describe preview &lt;id&gt;: the image after the redactor, plus a 120 s token. describe send &lt;token&gt;: sends exactly that
+    /// image to the provider and returns its text. Nothing leaves the PC without the token, so the UI's confirmation
+    /// dialog (provider, model, preview) always comes first. Every send gets an audit entry (verb "describe &lt;provider&gt;",
+    /// SHA-256 of the image sent, count 1 on success, 0 on failure).
+    /// </summary>
+    private async Task<Reply> DescribeAsync(ClientSession s, string[] args, CancellationToken ct)
+    {
+        if (args.Length != 2) return Err(UsageDescribe);
+        var ai = S.Ai;
+        if (!ai.Enabled || _d.AiKey == null || _d.Describer == null) return Err(ErrAiOff);
+        bool keyNeeded = ai.Provider != AiDefaults.OpenAi;
+        var now = Now();
+        foreach (var k in s.DescribeTokens.Where(kv => kv.Value.Expires <= now).Select(kv => kv.Key).ToList()) s.DescribeTokens.Remove(k);
+        switch (args[0].ToLowerInvariant())
+        {
+            case "preview":
+            {
+                if (keyNeeded && !_d.AiKey.IsSet) return Err(ErrNoApiKey);
+                if (IsLocked(s.Kind)) return Err(ErrLocked);
+                var id = args[1];
+                ThumbData? img = _d.Store()!.GetKeyframe(id);
+                if (img != null && !SendableMimes.Contains(img.Mime)) img = await _d.Thumbnailer.GetThumbAsync(id, 1280, ct).ConfigureAwait(false);
+                if (img == null) return Err(ErrNoImage);
+                var outgoing = new Ai.OutgoingImage(img.Bytes, img.Mime, img.Width, img.Height, false);
+                try { outgoing = await (_d.Redactor ?? new Ai.PassThroughRedactor()).RedactAsync(id, outgoing, ct).ConfigureAwait(false); }
+                catch (Ai.DescribeException ex) { Audit(s, "describe preview", 0, ""); return Err(ex.Message); }
+                while (s.DescribeTokens.Count >= 4) s.DescribeTokens.Remove(s.DescribeTokens.MinBy(kv => kv.Value.Expires).Key);
+                var token = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(16));
+                s.DescribeTokens[token] = new DescribeTicket(id, outgoing, now.AddSeconds(120));
+                Audit(s, "describe preview", 1, "");
+                return Ok(JsonSerializer.Serialize(new DescribePreview(token, ai.Provider, AiDefaults.EffectiveModel(ai), AiDefaults.EffectiveEndpoint(ai),
+                    outgoing.Mime, outgoing.Width, outgoing.Height, outgoing.Redacted, outgoing.Bytes), CoreJson.Default.DescribePreview));
+            }
+            case "send":
+            {
+                if (!s.DescribeTokens.Remove(args[1], out var ticket) || ticket.Expires <= now) return Err(ErrToken);
+                if (IsLocked(s.Kind)) return Err(ErrLocked);
+                var key = _d.AiKey.Read();
+                if (keyNeeded && key == null) return Err(ErrNoApiKey);
+                var verb = "describe " + ai.Provider;
+                var sha = Convert.ToHexStringLower(SHA256.HashData(ticket.Image.Bytes));
+                try
+                {
+                    var result = await _d.Describer.DescribeAsync(ai, key, ticket.Image, ct).ConfigureAwait(false);
+                    Audit(s, verb, 1, sha);
+                    return Ok(JsonSerializer.Serialize(result, CoreJson.Default.DescribeResult));
+                }
+                catch (Ai.DescribeException ex) { Audit(s, verb, 0, sha); return Err(ex.Message); }
+                catch (HttpRequestException ex) { Audit(s, verb, 0, sha); Log.Warn($"cloud describe: {ex.HttpRequestError}"); return Err(ErrProviderUnreachable); }
+                catch (TaskCanceledException) when (!ct.IsCancellationRequested) { Audit(s, verb, 0, sha); return Err(ErrProviderTimeout); }
+                finally { key = null; }
+            }
+        }
+        return Err(UsageDescribe);
     }
 
     private Reply Settings(string rest)
@@ -789,6 +1008,10 @@ public sealed class CommandProcessor
                 catch (JsonException) { return Err(ErrJson); }
                 using (doc)
                 {
+                    // The password method needs a password first, or nobody could unlock.
+                    if (doc.RootElement.ValueKind == JsonValueKind.Object && doc.RootElement.TryGetProperty("security", out var sec)
+                        && JsonString(sec, "unlockMethod") == "password" && _d.Password?.IsSet != true)
+                        return Err(ErrNoPassword);
                     var error = _d.Settings.TryUpdate(doc.RootElement);
                     if (error != null) return Err(error);
                 }
