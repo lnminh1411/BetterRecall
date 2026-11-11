@@ -60,8 +60,10 @@ public sealed class CommandProcessor
     internal const string UsageSearch = "Usage: search <text> | search <json>";
     internal const string UsageGet = "Usage: get <id>";
     internal const string UsagePause = "Usage: pause [seconds]";
-    internal const string UsagePurge = "Usage: purge last <seconds> | purge range <from> <to> | purge app <name> | purge confirm <token>";
-    internal const string UsagePurgeUi = "Usage: purge last <seconds> | purge range <from> <to> | purge app <name> | purge all | purge confirm <token>";
+    internal const string UsagePurge = "Usage: purge last <seconds> | purge range <from> <to> | purge app <name> | purge site <host> | purge id <id> | purge confirm <token>";
+    internal const string UsagePurgeUi = "Usage: purge last <seconds> | purge range <from> <to> | purge app <name> | purge site <host> | purge id <id> | purge all | purge confirm <token>";
+    internal const string UsageFacets = "Usage: facets [<from> <to>]";
+    internal const string UsageHistory = "Usage: history | history add <text> | history delete <text> | history clear";
     internal const string UsageSubscribe = "Usage: subscribe [captures]";
     internal const string UsageThumb = "Usage: thumb <id> [width]";
     internal const string UsageKeyframe = "Usage: keyframe <id>";
@@ -85,7 +87,7 @@ public sealed class CommandProcessor
 
     private static readonly string[] PublicVerbs = ["ping", "version", "help", "status", "search", "get", "thumb", "subscribe", "pause", "resume", "purge"];
     private static readonly string[] McpVerbs = ["ping", "version", "status", "search", "get"];
-    private static readonly string[] UiOnlyVerbs = ["unlock", "lock", "consent", "settings", "timeline", "keyframe", "replay", "panic", "audit", "bench"];
+    private static readonly string[] UiOnlyVerbs = ["unlock", "lock", "consent", "settings", "timeline", "keyframe", "replay", "panic", "audit", "bench", "facets", "history"];
 
     private readonly CommandDeps _d;
     private DateTimeOffset _lastUnlock = DateTimeOffset.MinValue;
@@ -331,6 +333,10 @@ public sealed class CommandProcessor
                 return await ReplayAsync(s, rest, ct).ConfigureAwait(false);
             case "audit":
                 return AuditVerb(s, args);
+            case "facets":
+                return Facets(s, args);
+            case "history":
+                return History(s, rest);
         }
         return Err($"Unknown command '{verbRaw}'.");
     }
@@ -395,7 +401,7 @@ public sealed class CommandProcessor
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object) return (null, ErrJson);
             string? q = null; int limit = defaultLimit; DateTimeOffset? from = null, to = null; string? app = null;
-            CaptureKind[]? kinds = null; var mode = SearchMode.Hybrid;
+            CaptureKind[]? kinds = null; var mode = SearchMode.Hybrid; string? site = null;
             foreach (var p in root.EnumerateObject())
             {
                 switch (p.Name)
@@ -421,6 +427,11 @@ public sealed class CommandProcessor
                         if (p.Value.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(p.Value.GetString()) || p.Value.GetString()!.Length > 260) return (null, "Invalid app.");
                         app = p.Value.GetString()!.Trim();
                         break;
+                    case "site":
+                        if (p.Value.ValueKind == JsonValueKind.Null) break;
+                        if (p.Value.ValueKind != JsonValueKind.String || Store.EncryptedStore.NormalizeSite(p.Value.GetString()).Length == 0) return (null, "Invalid site.");
+                        site = Store.EncryptedStore.NormalizeSite(p.Value.GetString());
+                        break;
                     case "kind":
                         if (p.Value.ValueKind != JsonValueKind.Array) return (null, "Invalid kind.");
                         var ks = new List<CaptureKind>();
@@ -445,7 +456,7 @@ public sealed class CommandProcessor
             }
             if (q == null || q.Length is < 1 or > 1024) return (null, "Invalid q.");
             if (from != null && to != null && from >= to) return (null, "Invalid from.");
-            return (new SearchRequest(q, limit, from, to, app, kinds, mode), null);
+            return (new SearchRequest(q, limit, from, to, app, kinds, mode, site), null);
         }
     }
 
@@ -594,6 +605,49 @@ public sealed class CommandProcessor
         return Ok(JsonSerializer.Serialize(new ItemsReply<AuditEntry>(items), CoreJson.Default.ItemsReplyAuditEntry));
     }
 
+    private Reply Facets(ClientSession s, string[] args)
+    {
+        DateTimeOffset? from = null, to = null;
+        if (args.Length == 2)
+        {
+            if (!TryIso(args[0], out var f) || !TryIso(args[1], out var t)) return Err(UsageFacets);
+            if (f >= t) return Err("Invalid from.");
+            from = f; to = t;
+        }
+        else if (args.Length != 0) return Err(UsageFacets);
+        if (IsLocked(s.Kind)) return Err(ErrLocked);
+        var r = _d.Store()!.Facets(from, to, 30);
+        return Ok(JsonSerializer.Serialize(r, CoreJson.Default.FacetsReply));
+    }
+
+    /// <summary>
+    /// Saved searches (privacy.searchHistory), UI pipe only. The UI adds a search when the user commits to it
+    /// (Enter, opening a result), not on every keystroke. Off: list is empty and add does nothing.
+    /// </summary>
+    private Reply History(ClientSession s, string rest)
+    {
+        var (sub, text) = SplitVerb(rest);
+        if (IsLocked(s.Kind)) return Err(ErrLocked);
+        var store = _d.Store()!;
+        var p = S.Privacy;
+        switch (sub.ToLowerInvariant())
+        {
+            case "" :
+                IReadOnlyList<HistoryEntry> items = p.SearchHistory ? store.History(Math.Clamp(p.SearchHistoryMax, 10, 1000)) : [];
+                return Ok(JsonSerializer.Serialize(new ItemsReply<HistoryEntry>(items), CoreJson.Default.ItemsReplyHistoryEntry));
+            case "add" when text.Trim().Length is > 0 and <= 1024:
+                if (p.SearchHistory) store.AddHistory(text.Trim(), Now(), Math.Clamp(p.SearchHistoryMax, 10, 1000));
+                return Ok("null");
+            case "delete" when text.Trim().Length > 0:
+                store.DeleteHistory(text.Trim());
+                return Ok("null");
+            case "clear" when text.Length == 0:
+                store.DeleteHistory(null);
+                return Ok("null");
+        }
+        return Err(UsageHistory);
+    }
+
     // ------------------------------------------------------------ subscribe, pause
 
     private Reply Subscribe(ClientSession s, string[] args)
@@ -685,6 +739,14 @@ public sealed class CommandProcessor
                 if (args.Length < 2) return Err(usage);
                 scope = PurgeScope.ForApp(string.Join(' ', args.Skip(1)));
                 break;
+            case "site":
+                if (args.Length != 2 || Store.EncryptedStore.NormalizeSite(args[1]).Length == 0) return Err(usage);
+                scope = PurgeScope.ForSite(args[1]);
+                break;
+            case "id":
+                if (args.Length != 2 || args[1].Length > 64) return Err(usage);
+                scope = PurgeScope.ForId(args[1]);
+                break;
             default:
                 return Err(usage);
         }
@@ -730,6 +792,9 @@ public sealed class CommandProcessor
                     var error = _d.Settings.TryUpdate(doc.RootElement);
                     if (error != null) return Err(error);
                 }
+                // Turning search history off forgets what was saved.
+                if (!S.Privacy.SearchHistory)
+                    try { _d.Store()?.DeleteHistory(null); } catch (Exception ex) { Log.Warn("history clear failed", ex); }
                 return Ok(JsonSerializer.Serialize(S, CoreJson.Default.Settings));
         }
         return Err(UsageSettings);

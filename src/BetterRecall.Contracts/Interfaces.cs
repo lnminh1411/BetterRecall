@@ -46,10 +46,22 @@ public interface IStore : IDisposable
 
     /// <summary>wal_checkpoint(TRUNCATE) on every open database (panic flush).</summary>
     void Checkpoint() { }
+
+    /// <summary>Top apps and sites among searchable rows in [from, to), most rows first.</summary>
+    FacetsReply Facets(DateTimeOffset? from, DateTimeOffset? to, int limit) => new([], []);
+
+    /// <summary>Saved searches, newest first.</summary>
+    IReadOnlyList<HistoryEntry> History(int limit) => [];
+    /// <summary>Saves or bumps a search; keeps the newest max entries.</summary>
+    void AddHistory(string q, DateTimeOffset ts, int max) { }
+    /// <summary>Removes one saved search, or all of them when q is null. Returns rows removed.</summary>
+    int DeleteHistory(string? q) => 0;
 }
 
-public sealed record PurgeScope(string Kind, DateTimeOffset? From = null, DateTimeOffset? To = null, string? App = null)
+public sealed record PurgeScope(string Kind, DateTimeOffset? From = null, DateTimeOffset? To = null, string? App = null, string? Site = null, string? Id = null)
 {
+    public static PurgeScope ForSite(string site) => new("site", Site: site);
+    public static PurgeScope ForId(string id) => new("id", Id: id);
     public static PurgeScope Last(TimeSpan span) => new("last", DateTimeOffset.UtcNow - span, DateTimeOffset.UtcNow);
     public static PurgeScope Range(DateTimeOffset from, DateTimeOffset to) => new("range", from, to);
     public static PurgeScope ForApp(string app) => new("app", App: app);

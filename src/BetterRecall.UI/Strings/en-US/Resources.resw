@@ -555,4 +555,49 @@
   <data name="W_mcp_enabled" xml:space="preserve"><value>Turning this on lets the connected AI assistant search your history. If the assistant uses a cloud model, it sends the results it reads to its provider. BetterRecall itself still makes no network connections.</value></data>
   <data name="W_replay_encryptExports" xml:space="preserve"><value>When off, saved replays are written as plain MP4 files that anyone with access to the folder can watch.</value></data>
   <data name="W_security_requireUnlock" xml:space="preserve"><value>When off, anyone using your signed-in session can search your history without Windows Hello.</value></data>
+  <data name="Launcher_AppFilter.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve"><value>App filter</value></data>
+  <data name="Launcher_SiteFilter.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve"><value>Website filter</value></data>
+  <data name="Launcher_AppAll" xml:space="preserve"><value>All apps</value></data>
+  <data name="Launcher_SiteAll" xml:space="preserve"><value>All websites</value></data>
+  <data name="Facet_Item" xml:space="preserve"><value>{0} ({1})</value></data>
+  <data name="Group_Text" xml:space="preserve"><value>Text matches</value></data>
+  <data name="Group_Visual" xml:space="preserve"><value>Visual matches</value></data>
+  <data name="Group_Audio" xml:space="preserve"><value>Audio matches</value></data>
+  <data name="Group_Replay" xml:space="preserve"><value>Replay matches</value></data>
+  <data name="Group_ShowAll" xml:space="preserve"><value>Show all ({0})</value></data>
+  <data name="Card_Found.Text" xml:space="preserve"><value>Found </value></data>
+  <data name="Card_More.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve"><value>More options</value></data>
+  <data name="Card_More.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve"><value>More options</value></data>
+  <data name="Card_Copied" xml:space="preserve"><value>Copied. It stays out of clipboard history.</value></data>
+  <data name="Card_Saved" xml:space="preserve"><value>Saved {0}. The file is not encrypted.</value></data>
+  <data name="Card_Deleted" xml:space="preserve"><value>Deleted {0} captures.</value></data>
+  <data name="Rel_Now" xml:space="preserve"><value>just now</value></data>
+  <data name="Rel_Minutes" xml:space="preserve"><value>{0}m ago</value></data>
+  <data name="Rel_Hours" xml:space="preserve"><value>{0}h ago</value></data>
+  <data name="Rel_Days" xml:space="preserve"><value>{0}d ago</value></data>
+  <data name="Rel_Date" xml:space="preserve"><value>{0}</value></data>
+  <data name="Menu_CopyImage" xml:space="preserve"><value>Copy image</value></data>
+  <data name="Menu_CopyText" xml:space="preserve"><value>Copy text</value></data>
+  <data name="Menu_SaveAs" xml:space="preserve"><value>Save as…</value></data>
+  <data name="Menu_Delete" xml:space="preserve"><value>Delete</value></data>
+  <data name="Menu_DeleteFrom" xml:space="preserve"><value>Delete all from {0}</value></data>
+  <data name="Delete_OneTitle" xml:space="preserve"><value>Delete this capture?</value></data>
+  <data name="Delete_OneBody" xml:space="preserve"><value>It is removed from the store and from search. This cannot be undone.</value></data>
+  <data name="Delete_ManyTitle" xml:space="preserve"><value>Delete all of them?</value></data>
+  <data name="Delete_ManyBody" xml:space="preserve"><value>{0} captures from {1} will be deleted from the store and from search. This cannot be undone.</value></data>
+  <data name="Delete_Confirm" xml:space="preserve"><value>Delete</value></data>
+  <data name="Save_Png" xml:space="preserve"><value>PNG image</value></data>
+  <data name="Save_Text" xml:space="preserve"><value>Text</value></data>
+  <data name="Search_CountOnly" xml:space="preserve"><value>{0} results</value></data>
+  <data name="History_Title.Text" xml:space="preserve"><value>Recent searches</value></data>
+  <data name="History_Clear.Content" xml:space="preserve"><value>Clear history</value></data>
+  <data name="History_List.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve"><value>Recent searches</value></data>
+  <data name="History_Delete.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve"><value>Remove from history</value></data>
+  <data name="History_Delete.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve"><value>Remove from history</value></data>
+  <data name="S_privacy_recordSite" xml:space="preserve"><value>Record the website</value></data>
+  <data name="S_privacy_recordSite_D" xml:space="preserve"><value>Store the site of browser captures (host name only, like github.com), read from the address bar of Chromium browsers. Used by the website filter.</value></data>
+  <data name="S_privacy_searchHistory" xml:space="preserve"><value>Search history</value></data>
+  <data name="S_privacy_searchHistory_D" xml:space="preserve"><value>Keep your searches in the encrypted store and show them as recent searches. Turning it off deletes them.</value></data>
+  <data name="S_privacy_searchHistoryMax" xml:space="preserve"><value>Searches to keep</value></data>
+  <data name="S_privacy_searchHistoryMax_D" xml:space="preserve"><value>Older searches are forgotten.</value></data>
 </root>

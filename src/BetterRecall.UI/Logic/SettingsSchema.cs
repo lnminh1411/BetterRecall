@@ -97,6 +97,9 @@ public static partial class SettingsSchema
         new("privacy.nsfwDevice", "privacy", SettingType.Choice, Choices: ["auto", "npu", "igpu", "gpu", "cpu"]),
         new("privacy.nsfwGpuAdapter", "privacy", SettingType.Adapter, EnabledWhenKey: "privacy.nsfwDevice", EnabledWhenValue: "gpu"),
         new("privacy.panicPurgeMinutes", "privacy", SettingType.Int, 0, 1440),
+        new("privacy.recordSite", "privacy", SettingType.Bool),
+        new("privacy.searchHistory", "privacy", SettingType.Bool),
+        new("privacy.searchHistoryMax", "privacy", SettingType.Int, 10, 1000, EnabledWhenKey: "privacy.searchHistory", EnabledWhenValue: "true"),
 
         new("index.dim", "index", SettingType.IntChoice, Choices: ["768", "512", "256"], WarningKey: "W_index_dim"),
         new("index.weakMatchBelow", "index", SettingType.Double, 0, 1),

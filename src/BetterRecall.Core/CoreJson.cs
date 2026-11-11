@@ -40,6 +40,8 @@ public sealed record CaptureEvent(string Id, DateTimeOffset Ts, CaptureKind Kind
 [JsonSerializable(typeof(ThumbData))]
 [JsonSerializable(typeof(UnlockReply))]
 [JsonSerializable(typeof(PurgeConfirmReply))]
+[JsonSerializable(typeof(FacetsReply))]
+[JsonSerializable(typeof(ItemsReply<HistoryEntry>))]
 [JsonSerializable(typeof(SubscribedStatus))]
 [JsonSerializable(typeof(SubscribedCaptures))]
 [JsonSerializable(typeof(CaptureEvent))]

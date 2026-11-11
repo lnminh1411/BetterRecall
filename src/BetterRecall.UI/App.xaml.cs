@@ -68,7 +68,7 @@ public partial class App : Application
     private void Handle(AppArgs a, bool firstLaunch)
     {
         if (a.Page is not null) ShowMain(a.Page);
-        else if (!a.Hidden) _launcher!.ShowLauncher(a.Mock ? a.MockQuery : null);
+        else if (!a.Hidden) _launcher!.ShowLauncher(a.Mock ? a.MockQuery : null, a.Mock && a.MockMenu);
     }
 
     public void ShowLauncher() => _launcher?.ShowLauncher();

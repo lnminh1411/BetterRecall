@@ -17,7 +17,8 @@ public sealed record SearchQuery(
     DateTimeOffset? To = null,
     string? App = null,
     CaptureKind? Kind = null,
-    SearchMode Mode = SearchMode.Hybrid);
+    SearchMode Mode = SearchMode.Hybrid,
+    string? Site = null);
 
 /// <summary>Parsers for every verb's data. Return null on a shape mismatch.</summary>
 public static class Responses
@@ -45,6 +46,8 @@ public static class Responses
     public static List<CaptureMeta> Timeline(JsonElement d) => Items(d, ContractsJson.Default.ItemsReplyCaptureMeta);
     public static List<ReplayClip> Replays(JsonElement d) => Items(d, ContractsJson.Default.ItemsReplyReplayClip);
     public static List<AuditEntry> Audit(JsonElement d) => Items(d, ContractsJson.Default.ItemsReplyAuditEntry);
+    public static List<HistoryEntry> History(JsonElement d) => Items(d, ContractsJson.Default.ItemsReplyHistoryEntry);
+    public static FacetsReply Facets(JsonElement d) => d.Deserialize(ContractsJson.Default.FacetsReply) ?? throw new JsonException();
 
     private static List<T> Items<T>(JsonElement d, System.Text.Json.Serialization.Metadata.JsonTypeInfo<ItemsReply<T>> info) =>
         d.ValueKind == JsonValueKind.Object && d.Deserialize(info)?.Items is { } items ? items.ToList() : throw new JsonException("items missing");
@@ -85,6 +88,7 @@ public sealed class AgentApi(IAgentClient client)
             if (q.From is { } f) w.WriteString("from", Iso(f));
             if (q.To is { } t) w.WriteString("to", Iso(t));
             if (!string.IsNullOrWhiteSpace(q.App)) w.WriteString("app", q.App.Trim());
+            if (!string.IsNullOrWhiteSpace(q.Site)) w.WriteString("site", q.Site.Trim());
             if (q.Kind is { } k)
             {
                 w.WriteStartArray("kind");
@@ -154,6 +158,26 @@ public sealed class AgentApi(IAgentClient client)
 
     public async Task<AgentResult<PurgeConfirmReply>> PurgeAppAsync(string app, CancellationToken ct = default) =>
         (await client.SendAsync("purge app " + app.Trim(), ct)).As(Responses.Purge);
+
+    public async Task<AgentResult<PurgeConfirmReply>> PurgeIdAsync(string id, CancellationToken ct = default) =>
+        (await client.SendAsync("purge id " + id.Trim(), ct)).As(Responses.Purge);
+
+    public async Task<AgentResult<PurgeConfirmReply>> PurgeSiteAsync(string site, CancellationToken ct = default) =>
+        (await client.SendAsync("purge site " + site.Trim(), ct)).As(Responses.Purge);
+
+    /// <summary>Top apps and sites; both bounds or neither.</summary>
+    public async Task<AgentResult<FacetsReply>> FacetsAsync(DateTimeOffset? from, DateTimeOffset? to, CancellationToken ct = default) =>
+        (await client.SendAsync(from is { } f && to is { } t ? $"facets {Iso(f)} {Iso(t)}" : "facets", ct)).As(Responses.Facets);
+
+    public async Task<AgentResult<List<HistoryEntry>>> HistoryAsync(CancellationToken ct = default) =>
+        (await client.SendAsync("history", ct)).As(Responses.History);
+
+    public Task<AgentResult> HistoryAddAsync(string q, CancellationToken ct = default) => client.SendAsync("history add " + OneLine(q), ct);
+    public Task<AgentResult> HistoryDeleteAsync(string q, CancellationToken ct = default) => client.SendAsync("history delete " + OneLine(q), ct);
+    public Task<AgentResult> HistoryClearAsync(CancellationToken ct = default) => client.SendAsync("history clear", ct);
+
+    /// <summary>Request lines end at a newline: a query with line breaks is sent as one line.</summary>
+    public static string OneLine(string s) => string.Join(' ', s.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)).Trim();
 
     public async Task<AgentResult<PurgeConfirmReply>> PurgeAllAsync(CancellationToken ct = default) =>
         (await client.SendAsync("purge all", ct)).As(Responses.Purge);

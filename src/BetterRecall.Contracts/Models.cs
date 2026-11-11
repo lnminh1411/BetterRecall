@@ -29,7 +29,8 @@ public sealed record CaptureMeta(
     int Monitor,
     int DurationMs,
     bool HasThumb,
-    bool Embedded);
+    bool Embedded,
+    string Site = "");       // browser host (no scheme, path or query), empty when unknown
 
 /// <summary>Screen capture handed from the agent to the store. Thumb is WebP bytes or null.</summary>
 public sealed record NewScreenCapture(
@@ -43,7 +44,8 @@ public sealed record NewScreenCapture(
     ulong DHash,
     byte[] Image,            // keyframe, keyframes.format, capture.maxWidth wide; pending job input
     string ImageMime,        // image/webp | image/jpeg
-    bool KeepKeyframe);      // false when keyframes.enabled is false: image deleted once the job is done
+    bool KeepKeyframe,       // false when keyframes.enabled is false: image deleted once the job is done
+    string Site = "");       // browser host from the address bar, empty when unknown or privacy.recordSite is off
 
 /// <summary>Speech segment after transcription.</summary>
 public sealed record NewAudioCapture(
@@ -71,7 +73,8 @@ public sealed record SearchRequest(
     DateTimeOffset? To = null,
     string? App = null,
     CaptureKind[]? Kind = null,
-    SearchMode Mode = SearchMode.Hybrid);
+    SearchMode Mode = SearchMode.Hybrid,
+    string? Site = null);
 
 public sealed record SearchHit(
     string Id,
@@ -85,7 +88,8 @@ public sealed record SearchHit(
     int? DurationS,
     float? Cosine = null,     // query-to-capture cosine when the hit was in the vector candidates
     bool TextMatch = false,   // found by keyword search (title, app, transcript)
-    bool Weak = false);       // no keyword match and Cosine below index.weakMatchBelow: show it, label it weak
+    bool Weak = false,        // no keyword match and Cosine below index.weakMatchBelow: show it, label it weak
+    string Site = "");
 
 public sealed record SearchResponse(int Count, bool Truncated, long TookMs, IReadOnlyList<SearchHit> Results);
 
@@ -98,7 +102,8 @@ public sealed record CaptureDetail(
     string Title,
     string Text,
     bool HasThumb,
-    int? DurationS);
+    int? DurationS,
+    string Site = "");
 
 /// <summary>Bytes serialise as the JSON field "base64" (research.md 7.6).</summary>
 public sealed record ThumbData(string Id, string Mime, int Width, int Height, [property: JsonPropertyName("base64")] byte[] Bytes);
@@ -142,6 +147,15 @@ public sealed record PurgeResult(int Purged);
 
 /// <summary>{"items":[...]} replies (timeline, audit, replay list).</summary>
 public sealed record ItemsReply<T>(IReadOnlyList<T> Items);
+
+/// <summary>One app or site with its number of searchable captures.</summary>
+public sealed record FacetCount(string Name, int Count);
+
+/// <summary>facets: top apps and browser sites in a time window, most captures first.</summary>
+public sealed record FacetsReply(IReadOnlyList<FacetCount> Apps, IReadOnlyList<FacetCount> Sites);
+
+/// <summary>One saved search (privacy.searchHistory). Stored only in the encrypted store.</summary>
+public sealed record HistoryEntry(string Q, DateTimeOffset Ts);
 
 public sealed record UnlockReply(bool Unlocked, DateTimeOffset? Until);
 

@@ -10,12 +10,14 @@ namespace BetterRecall.Agent.Guardrails;
 /// UI Automation lookup of the private-window badge in Chromium toolbars (Chrome "Incognito", Edge "InPrivate",
 /// Brave "Private"). Raw IUIAutomation vtable calls, Native AOT safe. Best effort: names are localised and differ
 /// per browser version. Results are cached per window handle. Must run on a COM-initialised (MTA) thread.
+/// Also reads the address bar (first Edit control in the toolbar) for the site of a capture: host only.
 /// </summary>
 internal sealed unsafe class BrowserBadgeDetector : IDisposable
 {
     private static readonly Guid CLSID_CUIAutomation = new("ff48dba4-60ef-4201-aa87-54103eef594e");
     private static readonly Guid IID_IUIAutomation = new("30cbe57d-d9d0-452a-ab13-7ac5ac4825ee");
     private const int UIA_NamePropertyId = 30005, UIA_ControlTypePropertyId = 30003, UIA_ToolBarControlTypeId = 50021;
+    private const int UIA_EditControlTypeId = 50004, UIA_ValueValuePropertyId = 30045;
     private const int TreeScope_Descendants = 4;
 
     /// <summary>Accessible names of the private-mode badge. English plus common localisations.</summary>
@@ -28,7 +30,9 @@ internal sealed unsafe class BrowserBadgeDetector : IDisposable
     private nint _uia;
     private nint _badgeCondition;
     private nint _toolbarCondition;
+    private nint _editCondition;
     private readonly Dictionary<nint, (BadgeResult Result, long At)> _cache = new();
+    private readonly Dictionary<nint, (string Site, long At)> _sites = new();
 
     public double LastCheckMs { get; private set; }
 
@@ -36,6 +40,7 @@ internal sealed unsafe class BrowserBadgeDetector : IDisposable
     {
         _uia = Ole.Create(CLSID_CUIAutomation, IID_IUIAutomation);
         _toolbarCondition = PropertyCondition(UIA_ControlTypePropertyId, VARIANT.Int32(UIA_ToolBarControlTypeId));
+        _editCondition = PropertyCondition(UIA_ControlTypePropertyId, VARIANT.Int32(UIA_EditControlTypeId));
         nint cond = 0;
         foreach (var name in BadgeNames)
         {
@@ -89,6 +94,47 @@ internal sealed unsafe class BrowserBadgeDetector : IDisposable
         }
     }
 
+    /// <summary>Host in the address bar of a Chromium window, cached for 1.5 s per window. Empty when unknown.</summary>
+    public string ReadSite(nint hwnd)
+    {
+        long now = Environment.TickCount64;
+        if (_sites.TryGetValue(hwnd, out var c) && now - c.At < 1500) return c.Site;
+        var site = ProbeSite(hwnd);
+        if (_sites.Count > 256) _sites.Clear();
+        _sites[hwnd] = (site, now);
+        return site;
+    }
+
+    private string ProbeSite(nint hwnd)
+    {
+        nint root = 0, toolbar = 0, edit = 0;
+        VARIANT v = default;
+        try
+        {
+            var fromHandle = (delegate* unmanaged[Stdcall]<nint, nint, nint*, int>)Ole.Slot(_uia, 6);
+            if (fromHandle(_uia, hwnd, &root) < 0 || root == 0) return "";
+            var findFirst = (delegate* unmanaged[Stdcall]<nint, int, nint, nint*, int>)Ole.Slot(root, 5);
+            if (findFirst(root, TreeScope_Descendants, _toolbarCondition, &toolbar) < 0 || toolbar == 0) return "";
+            var findInToolbar = (delegate* unmanaged[Stdcall]<nint, int, nint, nint*, int>)Ole.Slot(toolbar, 5);
+            if (findInToolbar(toolbar, TreeScope_Descendants, _editCondition, &edit) < 0 || edit == 0) return "";
+            var getValue = (delegate* unmanaged[Stdcall]<nint, int, VARIANT*, int>)Ole.Slot(edit, 10);   // GetCurrentPropertyValue
+            if (getValue(edit, UIA_ValueValuePropertyId, &v) < 0 || v.vt != VARIANT.VT_BSTR || v.ptr == 0) return "";
+            return GuardrailPolicy.SiteFromAddress(System.Runtime.InteropServices.Marshal.PtrToStringBSTR(v.ptr));
+        }
+        catch (Exception ex)
+        {
+            Log.Debug($"uia site read failed: 0x{ex.HResult:X8}");
+            return "";
+        }
+        finally
+        {
+            Ole.VariantClear(&v);
+            Ole.Release(edit);
+            Ole.Release(toolbar);
+            Ole.Release(root);
+        }
+    }
+
     private nint PropertyCondition(int propertyId, VARIANT value)
     {
         var fn = (delegate* unmanaged[Stdcall]<nint, int, VARIANT, nint*, int>)Ole.Slot(_uia, 23);
@@ -118,7 +164,8 @@ internal sealed unsafe class BrowserBadgeDetector : IDisposable
     {
         Ole.Release(_badgeCondition);
         Ole.Release(_toolbarCondition);
+        Ole.Release(_editCondition);
         Ole.Release(_uia);
-        _badgeCondition = _toolbarCondition = _uia = 0;
+        _badgeCondition = _toolbarCondition = _editCondition = _uia = 0;
     }
 }

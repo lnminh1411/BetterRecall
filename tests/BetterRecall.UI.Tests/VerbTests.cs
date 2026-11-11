@@ -225,4 +225,34 @@ public class VerbTests
         var status = await got.Task.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Equal("user", status.PauseReason);
     }
+
+    [Fact]
+    public async Task Facets_site_filter_history_and_purge_id()
+    {
+        await using var h = new MockHarness();
+        var f = await h.Api.FacetsAsync(null, null);
+        Assert.True(f.Ok, f.Error);
+        Assert.Contains(f.Value!.Apps, a => a.Name == "chrome.exe" && a.Count > 0);
+        Assert.Contains(f.Value.Sites, s => s.Name == "github.com");
+
+        var r = await h.Api.SearchAsync(new SearchQuery("pull request", 50, Site: "github.com"));
+        Assert.True(r.Ok, r.Error);
+        Assert.NotEmpty(r.Value!.Results);
+        Assert.All(r.Value.Results, x => Assert.Equal("github.com", x.Site));
+
+        var hist = await h.Api.HistoryAsync();
+        Assert.True(hist.Ok);
+        Assert.Equal("acme invoice", hist.Value![0].Q);
+        Assert.True((await h.Api.HistoryAddAsync("line one\nline two")).Ok);
+        Assert.Equal("line one line two", (await h.Api.HistoryAsync()).Value![0].Q);
+        Assert.True((await h.Api.HistoryDeleteAsync("line one line two")).Ok);
+        Assert.True((await h.Api.HistoryClearAsync()).Ok);
+        Assert.Empty((await h.Api.HistoryAsync()).Value!);
+
+        var id = r.Value.Results[0].Id;
+        var p = await h.Api.PurgeIdAsync(id);
+        Assert.Equal(1, p.Value!.Rows);
+        Assert.True((await h.Api.PurgeConfirmAsync(p.Value.Confirm)).Ok);
+        Assert.False((await h.Api.GetAsync(id)).Ok);
+    }
 }

@@ -16,7 +16,8 @@ internal sealed record GuardSnapshot(
     BadgeResult Badge,
     bool AnyAffinity,
     RECT[] MaskRects,
-    IReadOnlyDictionary<int, MonitorTop> PerMonitor)
+    IReadOnlyDictionary<int, MonitorTop> PerMonitor,
+    string Site = "")         // host in the foreground browser's address bar (privacy.recordSite), else empty
 {
     public static readonly GuardSnapshot Closed = new(0, null, GuardDecision.Deny(GuardReason.NoForeground), BadgeResult.NotChecked, false, [], new Dictionary<int, MonitorTop>());
 }

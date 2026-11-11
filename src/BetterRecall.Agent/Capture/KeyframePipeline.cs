@@ -104,13 +104,13 @@ internal sealed class KeyframePipeline : IAsyncDisposable
         var req = g.Request;
         var title = GuardrailPolicy.FilterTitle(req.Title, s.Privacy);
         var cap = new NewScreenCapture(req.Ts, req.App, req.ExePath, title, g.Monitor, g.Width, g.Height, hash,
-            bytes, ImageCodec.Mime(format), s.Keyframes.Enabled);
+            bytes, ImageCodec.Mime(format), s.Keyframes.Enabled, req.Site);
         string id;
         try { id = store.AddScreenCapture(cap); }
         finally { Array.Clear(bytes); }
         dedup.Accept(hash, req.Context);
         Interlocked.Increment(ref Kept);
-        _stored(new CaptureMeta(id, req.Ts, CaptureKind.Screen, req.App, title, g.Monitor, 0, s.Keyframes.Enabled, false));
+        _stored(new CaptureMeta(id, req.Ts, CaptureKind.Screen, req.App, title, g.Monitor, 0, s.Keyframes.Enabled, false, req.Site));
     }
 
     public async ValueTask DisposeAsync()

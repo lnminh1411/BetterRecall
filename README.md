@@ -1,3 +1,5 @@
+**[AI Content Warning: AI Agents was used to assist with coding]**
+
 <p align="center"><img src="docs/images/banner.png" alt="BetterRecall: search everything you have seen and heard" /></p>
 
 BetterRecall is a local alternative to Windows Recall. It keeps an encrypted history of your screen, and of speech it hears, and lets you search it in your own words: "the invoice from Acme", "that flight to Tokyo", "what was said in standup". Images and text are embedded on your NPU or GPU with EmbeddingGemma 2. The history stays on your PC, encrypted with a key held by the TPM behind Windows Hello. BetterRecall itself makes no network connections.

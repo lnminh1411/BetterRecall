@@ -23,6 +23,7 @@ public sealed record MockOptions(
 public sealed class MockAgent
 {
     private sealed record Row(CaptureMeta Meta, string Text);
+    private readonly List<HistoryEntry> _history = [];
 
     private readonly object _lock = new();
     private readonly List<Row> _rows = [];
@@ -79,6 +80,14 @@ public sealed class MockAgent
         ("Spotify.exe", ["Spotify Premium"]),
     ];
 
+    /// <summary>Browser host for a demo browser title (what the agent reads from the address bar).</summary>
+    private static string SiteOf(string title) =>
+        title.EndsWith("Gmail", StringComparison.Ordinal) ? "mail.google.com"
+        : title.EndsWith("Google Docs", StringComparison.Ordinal) ? "docs.google.com"
+        : title.EndsWith("Microsoft Learn", StringComparison.Ordinal) ? "learn.microsoft.com"
+        : title.EndsWith("Google Flights", StringComparison.Ordinal) ? "google.com"
+        : title.EndsWith("GitHub", StringComparison.Ordinal) ? "github.com" : "";
+
     private static readonly string[] Transcripts =
     [
         "Let's move the release to Friday and ship the replay buffer first.",
@@ -111,12 +120,15 @@ public sealed class MockAgent
                 {
                     var (app, titles) = Apps[rnd.Next(Apps.Length)];
                     var title = titles[rnd.Next(titles.Length)];
-                    _rows.Add(new Row(new CaptureMeta($"f_{n++:D6}", t, CaptureKind.Screen, app, title, rnd.Next(2), 0, rnd.Next(20) != 0, rnd.Next(30) != 0), title));
+                    _rows.Add(new Row(new CaptureMeta($"f_{n++:D6}", t, CaptureKind.Screen, app, title, rnd.Next(2), 0, rnd.Next(20) != 0, rnd.Next(30) != 0,
+                        app == "chrome.exe" ? SiteOf(title) : ""), title));
                 }
             }
             t = t.AddSeconds(rnd.Next(60, 420));
         }
         _rows.Sort((a, b) => b.Meta.Ts.CompareTo(a.Meta.Ts));
+        foreach (var (q, h) in new[] { ("acme invoice", 2), ("flight to tokyo", 5), ("standup notes", 26), ("budget 2026", 49) })
+            _history.Add(new HistoryEntry(q, now.AddHours(-h)));
 
         for (int i = 0; i < 4; i++)
         {
@@ -140,9 +152,9 @@ public sealed class MockAgent
 
     private static readonly string[] Verbs =
         ["ping", "version", "help", "status", "search", "get", "thumb", "subscribe", "pause", "resume", "purge",
-         "unlock", "lock", "consent", "settings", "timeline", "keyframe", "replay", "panic", "audit", "bench"];
+         "unlock", "lock", "consent", "settings", "timeline", "keyframe", "replay", "panic", "audit", "bench", "facets", "history"];
 
-    private static readonly HashSet<string> DataVerbs = ["search", "get", "thumb", "keyframe", "timeline", "audit", "replay list", "replay export"];
+    private static readonly HashSet<string> DataVerbs = ["search", "get", "thumb", "keyframe", "timeline", "audit", "replay list", "replay export", "facets", "history"];
 
     public bool IsLocked { get { lock (_lock) return _locked; } }
 
@@ -227,6 +239,8 @@ public sealed class MockAgent
                 StatusChanged?.Invoke();
                 return Envelope.Ok("null");
             case "purge": return Purge(args);
+            case "facets": return Facets(args);
+            case "history": return History(rest);
             case "audit":
             {
                 int limit = 100;
@@ -321,7 +335,7 @@ public sealed class MockAgent
         string q;
         int limit = 10;
         DateTimeOffset? from = null, to = null;
-        string? app = null;
+        string? app = null, site = null;
         HashSet<CaptureKind>? kinds = null;
         if (rest[0] == '{')
         {
@@ -335,6 +349,7 @@ public sealed class MockAgent
             if (o["to"] is { } t) { if (!DateTimeOffset.TryParse(t.GetValue<string>(), CultureInfo.InvariantCulture, out var v)) return Envelope.Error("Invalid to."); to = v; }
             if (from is not null && to is not null && from >= to) return Envelope.Error("Invalid from.");
             app = o["app"]?.GetValue<string>();
+            site = o["site"]?.GetValue<string>();
             if (o["kind"] is JsonArray ka)
             {
                 kinds = [];
@@ -362,16 +377,20 @@ public sealed class MockAgent
                 if (from is { } f && m.Ts < f) continue;
                 if (to is { } t && m.Ts >= t) continue;
                 if (app is not null && !m.App.Equals(app, StringComparison.OrdinalIgnoreCase)) continue;
+                if (site is not null && !m.Site.Equals(site, StringComparison.OrdinalIgnoreCase)) continue;
                 if (kinds is not null && !kinds.Contains(m.Kind)) continue;
                 if (!m.Embedded) continue;
                 var hay = (m.Title + " " + m.App + " " + r.Text).ToLowerInvariant();
                 int matched = tokens.Count(hay.Contains);
-                if (matched == 0) continue;
-                float score = (float)Math.Round(0.45 + 0.5 * matched / tokens.Length - (Now - m.Ts).TotalDays * 0.02, 3);
+                // Demo stand-in for vector-only hits: a stable few screens per query show up as Visual matches.
+                bool visual = matched == 0 && m.Kind == CaptureKind.Screen && m.HasThumb && (uint)StableHash(m.Id + "|" + q.ToLowerInvariant()) % 23 == 0;
+                if (matched == 0 && !visual) continue;
+                float score = visual ? 0.4f + (uint)StableHash(m.Id) % 20 / 100f
+                    : (float)Math.Round(0.45 + 0.5 * matched / tokens.Length - (Now - m.Ts).TotalDays * 0.02, 3);
                 var snippet = r.Text.Length > 300 ? r.Text[..300] : r.Text;
                 hits.Add(new SearchHit(m.Id, m.Ts, m.Kind, m.App, m.Title, Math.Clamp(score, 0, 1), snippet, m.HasThumb,
                     m.Kind == CaptureKind.Audio ? m.DurationMs / 1000 : null,
-                    Math.Clamp(score, 0, 1), matched > 0, matched == 0 && score < 0.65f));
+                    Math.Clamp(score, 0, 1), matched > 0, matched == 0 && score < 0.5f, m.Site));
             }
             hits = hits.OrderByDescending(h => h.Score).ThenByDescending(h => h.Ts).ToList();
             Audit("search", Math.Min(hits.Count, limit), q);
@@ -390,7 +409,7 @@ public sealed class MockAgent
             Audit("get", 1);
             var m = r.Meta;
             return Envelope.Ok(new CaptureDetail(m.Id, m.Ts, m.Kind, m.App, m.Title, r.Text, m.HasThumb,
-                m.Kind == CaptureKind.Audio ? m.DurationMs / 1000 : null), ContractsJson.Default.CaptureDetail);
+                m.Kind == CaptureKind.Audio ? m.DurationMs / 1000 : null, m.Site), ContractsJson.Default.CaptureDetail);
         }
     }
 
@@ -596,6 +615,12 @@ public sealed class MockAgent
                 case "app" when args.Length >= 2:
                     scope = PurgeScope.ForApp(string.Join(' ', args.Skip(1)));
                     break;
+                case "site" when args.Length == 2:
+                    scope = PurgeScope.ForSite(args[1]);
+                    break;
+                case "id" when args.Length == 2:
+                    scope = PurgeScope.ForId(args[1]);
+                    break;
                 case "all" when args.Length == 1:
                     if (Now - _lastUnlock > TimeSpan.FromSeconds(60)) return Envelope.Error(AgentErrors.UnlockRequired);
                     scope = null;
@@ -620,9 +645,63 @@ public sealed class MockAgent
         }
     }
 
+    private string Facets(string[] args)
+    {
+        DateTimeOffset? from = null, to = null;
+        if (args.Length == 2)
+        {
+            if (!DateTimeOffset.TryParse(args[0], CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var f)
+                || !DateTimeOffset.TryParse(args[1], CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var t)) return Envelope.Error("Usage: facets [<from> <to>]");
+            from = f; to = t;
+        }
+        else if (args.Length != 0) return Envelope.Error("Usage: facets [<from> <to>]");
+        lock (_lock)
+        {
+            var rows = _rows.Where(r => r.Meta.Embedded && (from is null || r.Meta.Ts >= from) && (to is null || r.Meta.Ts < to)).Select(r => r.Meta).ToList();
+            var apps = rows.Where(m => m.App.Length > 0).GroupBy(m => m.App, StringComparer.OrdinalIgnoreCase)
+                .Select(g => new FacetCount(g.Key, g.Count())).OrderByDescending(f => f.Count).ThenBy(f => f.Name).Take(30).ToList();
+            var sites = rows.Where(m => m.Site.Length > 0).GroupBy(m => m.Site, StringComparer.OrdinalIgnoreCase)
+                .Select(g => new FacetCount(g.Key, g.Count())).OrderByDescending(f => f.Count).ThenBy(f => f.Name).Take(30).ToList();
+            return Envelope.Ok(new FacetsReply(apps, sites), ContractsJson.Default.FacetsReply);
+        }
+    }
+
+    private string History(string rest)
+    {
+        int sp = rest.IndexOf(' ');
+        var sub = (sp < 0 ? rest : rest[..sp]).ToLowerInvariant();
+        var text = sp < 0 ? "" : rest[(sp + 1)..].Trim();
+        lock (_lock)
+        {
+            bool on = Bool("privacy.searchHistory");
+            if (!on) _history.Clear();
+            switch (sub)
+            {
+                case "":
+                    return Items(_history.OrderByDescending(h => h.Ts).ToList(), ContractsJson.Default.ItemsReplyHistoryEntry);
+                case "add" when text.Length > 0:
+                    if (on)
+                    {
+                        _history.RemoveAll(h => h.Q == text);
+                        _history.Add(new HistoryEntry(text, Now));
+                    }
+                    return Envelope.Ok("null");
+                case "delete" when text.Length > 0:
+                    _history.RemoveAll(h => h.Q == text);
+                    return Envelope.Ok("null");
+                case "clear" when text.Length == 0:
+                    _history.Clear();
+                    return Envelope.Ok("null");
+            }
+        }
+        return Envelope.Error("Usage: history | history add <text> | history delete <text> | history clear");
+    }
+
     private static bool Matches(PurgeScope s, CaptureMeta m) => s.Kind switch
     {
         "app" => m.App.Equals(s.App, StringComparison.OrdinalIgnoreCase),
+        "site" => m.Site.Length > 0 && m.Site.Equals(s.Site, StringComparison.OrdinalIgnoreCase),
+        "id" => m.Id == s.Id,
         _ => m.Ts >= s.From && m.Ts < s.To,
     };
 }

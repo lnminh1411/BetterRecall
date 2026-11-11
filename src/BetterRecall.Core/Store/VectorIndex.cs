@@ -7,8 +7,8 @@ using System.Runtime.Intrinsics;
 
 namespace BetterRecall.Core.Store;
 
-/// <summary>Filter for the first-stage scan. AppId -1 means any app; KindMask bit 0 screen, bit 1 audio.</summary>
-public readonly record struct VectorFilter(long FromMs, long ToMs, int KindMask, int AppId)
+/// <summary>Filter for the first-stage scan. AppId / SiteId -1 means any; -2 matches nothing. KindMask bit 0 screen, bit 1 audio.</summary>
+public readonly record struct VectorFilter(long FromMs, long ToMs, int KindMask, int AppId, int SiteId = -1)
 {
     public static readonly VectorFilter All = new(long.MinValue, long.MaxValue, 3, -1);
 }
@@ -20,12 +20,13 @@ public readonly record struct VectorCandidate(long Rid, int Distance, int Dim);
 public interface IVectorIndex
 {
     int Count { get; }
-    void Upsert(long rid, ReadOnlySpan<float> vector, long tsMs, int kind, string appLower);
+    void Upsert(long rid, ReadOnlySpan<float> vector, long tsMs, int kind, string appLower, string site = "");
     void Remove(long rid);
     void Clear();
     /// <summary>Top-N rows by Hamming distance between sign bits; each row compared over min(query dim, row dim).</summary>
     IReadOnlyList<VectorCandidate> Scan(ReadOnlySpan<float> query, VectorFilter filter, int topN);
     int AppId(string appLower);
+    int SiteId(string site) => -2;
 }
 
 /// <summary>
@@ -43,6 +44,7 @@ public sealed class BinaryVectorIndex : IVectorIndex
         public long[] Rid = new long[1024];
         public byte[] Kind = new byte[1024];
         public int[] App = new int[1024];
+        public int[] Site = new int[1024];
         public bool[] Alive = new bool[1024];
         public int Count;
         public int Dead;
@@ -55,6 +57,7 @@ public sealed class BinaryVectorIndex : IVectorIndex
             Array.Resize(ref Rid, cap);
             Array.Resize(ref Kind, cap);
             Array.Resize(ref App, cap);
+            Array.Resize(ref Site, cap);
             Array.Resize(ref Alive, cap);
         }
     }
@@ -63,6 +66,7 @@ public sealed class BinaryVectorIndex : IVectorIndex
     private readonly Dictionary<int, Segment> _segments = [];
     private readonly Dictionary<long, (Segment Seg, int Slot)> _where = [];
     private readonly Dictionary<string, int> _apps = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, int> _sites = new(StringComparer.Ordinal);
 
     public int Count { get { _lock.EnterReadLock(); try { return _where.Count; } finally { _lock.ExitReadLock(); } } }
 
@@ -70,6 +74,13 @@ public sealed class BinaryVectorIndex : IVectorIndex
     {
         _lock.EnterReadLock();
         try { return _apps.TryGetValue(appLower, out var id) ? id : -2; }
+        finally { _lock.ExitReadLock(); }
+    }
+
+    public int SiteId(string site)
+    {
+        _lock.EnterReadLock();
+        try { return _sites.TryGetValue(site, out var id) ? id : -2; }
         finally { _lock.ExitReadLock(); }
     }
 
@@ -88,16 +99,16 @@ public sealed class BinaryVectorIndex : IVectorIndex
         return MemoryMarshal.AsBytes(words.AsSpan()).ToArray();
     }
 
-    public void Upsert(long rid, ReadOnlySpan<float> vector, long tsMs, int kind, string appLower)
+    public void Upsert(long rid, ReadOnlySpan<float> vector, long tsMs, int kind, string appLower, string site = "")
     {
         int words = (vector.Length + 63) / 64;
         Span<ulong> bits = words <= 64 ? stackalloc ulong[words] : new ulong[words];
         SignBits(vector, bits);
-        UpsertBits(rid, bits, vector.Length, tsMs, kind, appLower);
+        UpsertBits(rid, bits, vector.Length, tsMs, kind, appLower, site);
     }
 
     /// <summary>Adds a row from its stored binary copy (load path, no float vector needed).</summary>
-    public void UpsertBits(long rid, ReadOnlySpan<ulong> bits, int dim, long tsMs, int kind, string appLower)
+    public void UpsertBits(long rid, ReadOnlySpan<ulong> bits, int dim, long tsMs, int kind, string appLower, string site = "")
     {
         _lock.EnterWriteLock();
         try
@@ -112,6 +123,8 @@ public sealed class BinaryVectorIndex : IVectorIndex
             seg.Kind[slot] = (byte)(1 << kind);
             if (!_apps.TryGetValue(appLower, out var app)) _apps[appLower] = app = _apps.Count;
             seg.App[slot] = app;
+            if (!_sites.TryGetValue(site, out var st)) _sites[site] = st = _sites.Count;
+            seg.Site[slot] = st;
             seg.Alive[slot] = true;
             _where[rid] = (seg, slot);
         }
@@ -146,6 +159,7 @@ public sealed class BinaryVectorIndex : IVectorIndex
                 seg.Rid[dst] = seg.Rid[src];
                 seg.Kind[dst] = seg.Kind[src];
                 seg.App[dst] = seg.App[src];
+                seg.Site[dst] = seg.Site[src];
                 seg.Alive[dst] = true;
                 _where[seg.Rid[dst]] = (seg, dst);
             }
@@ -159,13 +173,13 @@ public sealed class BinaryVectorIndex : IVectorIndex
     public void Clear()
     {
         _lock.EnterWriteLock();
-        try { _segments.Clear(); _where.Clear(); _apps.Clear(); }
+        try { _segments.Clear(); _where.Clear(); _apps.Clear(); _sites.Clear(); }
         finally { _lock.ExitWriteLock(); }
     }
 
     public IReadOnlyList<VectorCandidate> Scan(ReadOnlySpan<float> query, VectorFilter filter, int topN)
     {
-        if (topN <= 0 || query.Length == 0 || filter.AppId == -2) return [];
+        if (topN <= 0 || query.Length == 0 || filter.AppId == -2 || filter.SiteId == -2) return [];
         int qWords = (query.Length + 63) / 64;
         var q = new ulong[qWords];
         SignBits(query, q);
@@ -197,6 +211,7 @@ public sealed class BinaryVectorIndex : IVectorIndex
         var ts = seg.Ts;
         var kind = seg.Kind;
         var app = seg.App;
+        var site = seg.Site;
         var alive = seg.Alive;
         int worst = int.MaxValue;
         if (heap.Count == topN && heap.TryPeek(out var top, out _)) worst = top.Distance;
@@ -211,6 +226,7 @@ public sealed class BinaryVectorIndex : IVectorIndex
             if (t < f.FromMs || t >= f.ToMs) continue;
             if ((kind[i] & f.KindMask) == 0) continue;
             if (f.AppId >= 0 && app[i] != f.AppId) continue;
+            if (f.SiteId >= 0 && site[i] != f.SiteId) continue;
             ref ulong row = ref Unsafe.Add(ref bRef, i * w);
             int d = Hamming(ref row, ref qRef, fullWords);
             if (tailBits != 0) d += BitOperations.PopCount((Unsafe.Add(ref row, fullWords) ^ Unsafe.Add(ref qRef, fullWords)) & tailMask);

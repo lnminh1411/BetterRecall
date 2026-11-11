@@ -279,6 +279,7 @@ public sealed partial class SettingsStore : ISettingsStore
         ("privacy.nsfwDevice", s => In(s.Privacy.NsfwDevice, "auto", "npu", "igpu", "gpu", "cpu")),
         ("privacy.nsfwGpuAdapter", s => s.Privacy.NsfwGpuAdapter is { Length: > 0 and <= 128 } a && !string.IsNullOrWhiteSpace(a)),
         ("privacy.panicPurgeMinutes", s => Range(s.Privacy.PanicPurgeMinutes, 0, 1440)),
+        ("privacy.searchHistoryMax", s => Range(s.Privacy.SearchHistoryMax, 10, 1000)),
         ("inference.device", s => In(s.Inference.Device, "auto", "npu", "gpu", "cpu")),
         ("inference.gpuAdapter", s => s.Inference.GpuAdapter is { Length: > 0 and <= 128 } a && !string.IsNullOrWhiteSpace(a)),
         ("inference.modelDir", s => AbsOrEmpty(s.Inference.ModelDir)),

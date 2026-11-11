@@ -289,7 +289,7 @@ public sealed class CommandProcessorTests : IDisposable
         Set("{\"ipc\":{\"allowControl\":true}}");
         Assert.Equal("Purge is off (config ipc.allowPurge).", await Err(Pub, "purge last 60"));
         Set("{\"ipc\":{\"allowPurge\":true}}");
-        const string usage = "Usage: purge last <seconds> | purge range <from> <to> | purge app <name> | purge confirm <token>";
+        const string usage = "Usage: purge last <seconds> | purge range <from> <to> | purge app <name> | purge site <host> | purge id <id> | purge confirm <token>";
         Assert.Equal(usage, await Err(Pub, "purge"));
         Assert.Equal(usage, await Err(Pub, "purge last x"));
         Assert.Equal(usage, await Err(Pub, "purge range x y"));
@@ -437,5 +437,55 @@ public sealed class CommandProcessorTests : IDisposable
         _t.Store.Dispose(); // every store call now throws ObjectDisposedException
         Assert.Equal("Internal error.", await Err(Pub, "get " + _id));
         _t.Reopen();
+    }
+
+    [Fact]
+    public async Task History_verbs_follow_the_setting_and_are_ui_only()
+    {
+        Assert.Equal("Unknown command 'history'.", await Err(Pub, "history"));
+        Assert.True((await Call(Ui, "unlock")).Ok);
+        Assert.True((await Call(Ui, "history add acme invoice")).Ok);
+        Assert.True((await Call(Ui, "history add tokyo")).Ok);
+        var (ok, d, _) = await Call(Ui, "history");
+        Assert.True(ok);
+        Assert.Equal(2, d.GetProperty("items").GetArrayLength());
+        Assert.True((await Call(Ui, "history delete tokyo")).Ok);
+        Assert.Equal("acme invoice", (await Call(Ui, "history")).Data.GetProperty("items")[0].GetProperty("q").GetString());
+        Assert.Equal("Usage: history | history add <text> | history delete <text> | history clear", await Err(Ui, "history add"));
+        Assert.Equal("Usage: history | history add <text> | history delete <text> | history clear", await Err(Ui, "history clear x"));
+
+        // Off: saved searches are deleted, nothing new is saved, the list is empty.
+        Assert.True((await Call(Ui, "settings set {\"privacy\":{\"searchHistory\":false}}")).Ok);
+        Assert.Empty(_t.Store.History(10));
+        Assert.True((await Call(Ui, "history add standup")).Ok);
+        Assert.Equal(0, (await Call(Ui, "history")).Data.GetProperty("items").GetArrayLength());
+        Assert.Empty(_t.Store.History(10));
+    }
+
+    [Fact]
+    public async Task Facets_and_site_search_and_purge_id()
+    {
+        var site = _t.Store.AddScreenCapture(Caps.Screen(DateTimeOffset.UtcNow.AddMinutes(-4), "chrome.exe", "Acme portal") with { Site = "acme.com" });
+        _t.Store.SetEmbedding(site, Vec.Seeded(2), Vec.Info);
+        Assert.True((await Call(Ui, "unlock")).Ok);
+        var (ok, d, _) = await Call(Ui, "facets");
+        Assert.True(ok);
+        Assert.Equal("chrome.exe", d.GetProperty("apps")[0].GetProperty("name").GetString());
+        Assert.Equal(2, d.GetProperty("apps")[0].GetProperty("count").GetInt32());
+        Assert.Equal("acme.com", d.GetProperty("sites")[0].GetProperty("name").GetString());
+        Assert.Equal("Usage: facets [<from> <to>]", await Err(Ui, "facets x"));
+        Assert.Equal("Unknown command 'facets'.", await Err(Pub, "facets"));
+
+        (ok, d, _) = await Call(Ui, "search {\"q\":\"acme\",\"mode\":\"text\",\"site\":\"www.acme.com\"}");
+        Assert.True(ok);
+        Assert.Equal(1, d.GetProperty("count").GetInt32());
+        Assert.Equal("acme.com", d.GetProperty("results")[0].GetProperty("site").GetString());
+        Assert.Equal("Invalid site.", await Err(Ui, "search {\"q\":\"acme\",\"site\":\"not a host\"}"));
+
+        (ok, d, _) = await Call(Ui, "purge id " + site);
+        Assert.Equal(1, d.GetProperty("rows").GetInt32());
+        Assert.True((await Call(Ui, "purge confirm " + d.GetProperty("confirm").GetString())).Ok);
+        Assert.Null(_t.Store.Get(site));
+        Assert.NotNull(_t.Store.Get(_id));
     }
 }

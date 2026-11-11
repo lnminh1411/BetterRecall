@@ -46,6 +46,73 @@ public class ViewModelTests
         Assert.Null(vm.BuildQuery());
     }
 
+    private static SearchHit Hit(string id, CaptureKind kind, bool text, string app = "chrome.exe", string site = "") =>
+        new(id, DateTimeOffset.UtcNow, kind, app, "t " + id, 0.5f, "", kind == CaptureKind.Screen, null, 0.5f, text, false, site);
+
+    [Fact]
+    public void Results_split_into_text_visual_audio_sections_in_rank_order()
+    {
+        var items = new[]
+        {
+            Hit("v1", CaptureKind.Screen, false), Hit("t1", CaptureKind.Screen, true), Hit("a1", CaptureKind.Audio, true),
+            Hit("t2", CaptureKind.Screen, true), Hit("a2", CaptureKind.Audio, false),
+        }.Select(h => CaptureItem.From(h, "q"));
+        var groups = ResultGroups.Build(items);
+        Assert.Equal([ResultGroupKind.Text, ResultGroupKind.Visual, ResultGroupKind.Audio], groups.Select(g => g.Kind));
+        Assert.Equal(["t1", "t2"], groups[0].Select(i => i.Id));
+        Assert.Equal(["a1", "a2"], groups[2].Select(i => i.Id));
+        Assert.Equal("q", groups[0][0].Query);
+    }
+
+    [Fact]
+    public void Sections_preview_one_row_and_show_all()
+    {
+        var g = new ResultGroup(ResultGroupKind.Text, Enumerable.Range(0, 20).Select(i => CaptureItem.From(Hit("t" + i, CaptureKind.Screen, true))).ToList());
+        Assert.Equal(ResultGroup.Preview, g.Count);
+        Assert.True(g.HasMore);
+        Assert.True(g.RemoveWhere(i => i.Id is "t0" or "t15"));
+        Assert.Equal(18, g.Total);
+        Assert.Equal(ResultGroup.Preview, g.Count);
+        Assert.Equal("t1", g[0].Id);
+        g.ShowAll();
+        Assert.Equal(18, g.Count);
+        Assert.False(g.HasMore);
+    }
+
+    [Fact]
+    public async Task Search_builds_sections_and_delete_removes_from_them()
+    {
+        var hits = new[] { Hit("t1", CaptureKind.Screen, true, site: "github.com"), Hit("v1", CaptureKind.Screen, false, site: "github.com"), Hit("a1", CaptureKind.Audio, true, "teams.exe") };
+        var json = System.Text.Json.JsonSerializer.Serialize(new SearchResponse(3, false, 5, hits), ContractsJson.Default.SearchResponse);
+        var client = new ScriptedClient(_ => Task.FromResult(AgentResult.Success(System.Text.Json.JsonDocument.Parse(json).RootElement)));
+        var vm = new SearchViewModel(new AgentApi(client)) { Query = "acme", Site = "github.com" };
+        await vm.SearchNowAsync();
+        Assert.Contains("\"site\":\"github.com\"", client.Lines[0]);
+        Assert.Equal(3, vm.Groups.Count);
+        Assert.Equal(["t1", "v1", "a1"], vm.Results.Select(i => i.Id));
+        Assert.Equal(0, vm.SelectedIndex);
+        vm.SelectedIndex = 2;
+        Assert.Equal(2, vm.RemoveWhere(i => i.Site == "github.com"));
+        Assert.Single(vm.Groups);
+        Assert.Equal(["a1"], vm.Results.Select(i => i.Id));
+        Assert.Equal(0, vm.SelectedIndex);   // the selected hit kept its selection
+    }
+
+    [Fact]
+    public void Relative_time_and_badge()
+    {
+        var now = new DateTimeOffset(2026, 11, 11, 12, 0, 0, TimeSpan.Zero);
+        Assert.Equal("Rel_Now", RelativeTime.Of(now.AddSeconds(-20), now).Key);
+        Assert.Equal(new object?[] { 5 }, RelativeTime.Of(now.AddMinutes(-5), now).Args);
+        Assert.Equal("Rel_Hours", RelativeTime.Of(now.AddHours(-3), now).Key);
+        Assert.Equal("Rel_Days", RelativeTime.Of(now.AddDays(-6), now).Key);
+        Assert.Equal("Rel_Date", RelativeTime.Of(now.AddDays(-40), now).Key);
+        var web = CaptureItem.From(Hit("x", CaptureKind.Screen, true, "chrome.exe", "github.com"));
+        Assert.Equal("github.com", web.BadgeText);
+        Assert.Equal("G", web.BadgeInitial);
+        Assert.Equal("Code", CaptureItem.From(Hit("y", CaptureKind.Screen, true, "Code.exe")).BadgeText);
+    }
+
     [Fact]
     public void RangeBounds_Today_StartsAtLocalMidnight()
     {

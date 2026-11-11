@@ -61,7 +61,7 @@ internal sealed class GuardrailService : IDisposable
                 try
                 {
                     var s = _settings();
-                    if (s.Privacy.BrowserBadgeDetection && badge is null)
+                    if ((s.Privacy.BrowserBadgeDetection || s.Privacy.RecordSite) && badge is null)
                     {
                         try { badge = new BrowserBadgeDetector(); }
                         catch (Exception ex) { Log.Warn("UI Automation unavailable", ex); }
@@ -76,12 +76,15 @@ internal sealed class GuardrailService : IDisposable
                         badgeResult = badge?.Check(fg.Hwnd) ?? BadgeResult.CheckFailed;
                         LastBadgeMs = badge?.LastCheckMs ?? 0;
                     }
+                    string site = "";
+                    if (fg is not null && s.Privacy.RecordSite && badgeResult != BadgeResult.Private && badge is not null && GuardrailPolicy.IsChromiumBrowser(fg.ProcessName))
+                        site = badge.ReadSite(fg.Hwnd);
                     var decision = GuardrailPolicy.Evaluate(fg, s.Privacy, _sessionLocked(), scan.AnyAffinity, badgeResult);
                     var masks = scan.Masks;
                     // A private browser window found through the badge is masked in the replay as well.
                     if (badgeResult == BadgeResult.Private && fg is not null && WindowInspector.TryGetBounds(fg.Hwnd, out var fr))
                         masks = [.. masks, fr];
-                    Volatile.Write(ref _snapshot, new GuardSnapshot(Environment.TickCount64, fg, decision, badgeResult, scan.AnyAffinity, masks, scan.PerMonitor));
+                    Volatile.Write(ref _snapshot, new GuardSnapshot(Environment.TickCount64, fg, decision, badgeResult, scan.AnyAffinity, masks, scan.PerMonitor, site));
                     if (fg?.Hwnd != lastFg)
                     {
                         lastFg = fg?.Hwnd ?? 0;

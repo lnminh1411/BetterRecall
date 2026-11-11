@@ -35,6 +35,31 @@ internal static class Images
             return null;
         }
     }
+
+    /// <summary>Re-encodes stored image bytes (WebP, JPEG, PNG) as PNG for the clipboard and Save as. In memory only.</summary>
+    public static async Task<byte[]?> ToPngAsync(byte[] bytes)
+    {
+        try
+        {
+            using var src = new InMemoryRandomAccessStream();
+            await src.WriteAsync(bytes.AsBuffer());
+            src.Seek(0);
+            var dec = await Windows.Graphics.Imaging.BitmapDecoder.CreateAsync(src);
+            using var bmp = await dec.GetSoftwareBitmapAsync(Windows.Graphics.Imaging.BitmapPixelFormat.Bgra8, Windows.Graphics.Imaging.BitmapAlphaMode.Premultiplied);
+            using var dst = new InMemoryRandomAccessStream();
+            var enc = await Windows.Graphics.Imaging.BitmapEncoder.CreateAsync(Windows.Graphics.Imaging.BitmapEncoder.PngEncoderId, dst);
+            enc.SetSoftwareBitmap(bmp);
+            await enc.FlushAsync();
+            var outBytes = new byte[dst.Size];
+            dst.Seek(0);
+            await dst.ReadAsync(outBytes.AsBuffer(), (uint)dst.Size, InputStreamOptions.None);
+            return outBytes;
+        }
+        catch
+        {
+            return null;
+        }
+    }
 }
 
 /// <summary>

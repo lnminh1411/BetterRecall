@@ -345,4 +345,118 @@ public class StoreTests
         AddReady(t.Store, T0, "C# NEAR(x) title", Vec.Seeded(1));
         Assert.Single(Find(t.Store, "NEAR( \" OR", mode: SearchMode.Text).Results);
     }
+
+    private static string AddSite(EncryptedStore s, DateTimeOffset ts, string title, float[] v, string site, string app = "chrome.exe")
+    {
+        var id = s.AddScreenCapture(Caps.Screen(ts, app, title) with { Site = site });
+        s.TakePendingEmbeddings(10);
+        s.SetEmbedding(id, v, Vec.Info);
+        return id;
+    }
+
+    [Fact]
+    public void Site_is_stored_normalised_and_filters_text_and_vector_search()
+    {
+        using var t = new TempStore();
+        var gh = AddSite(t.Store, T0, "Pull request 12 - review", Vec.Seeded(1), "WWW.GitHub.com");
+        var gl = AddSite(t.Store, T0.AddMinutes(1), "Merge request 12 - review", Vec.Seeded(2), "gitlab.com");
+        AddReady(t.Store, T0.AddMinutes(2), "review notes", Vec.Seeded(3), "Code.exe");
+        Assert.Equal("github.com", t.Store.Get(gh)!.Site);
+        Assert.Equal("github.com", t.Store.Timeline(T0.AddMinutes(-1), T0.AddMinutes(5), 10).Single(m => m.Id == gh).Site);
+
+        var text = t.Store.Search(new SearchRequest("review", 50, Mode: SearchMode.Text, Site: "github.com"), [], 50, 1 << 20);
+        Assert.Equal([gh], text.Results.Select(h => h.Id));
+        Assert.Equal("github.com", text.Results[0].Site);
+        var vec = t.Store.Search(new SearchRequest("x", 50, Mode: SearchMode.Vector, Site: "gitlab.com"), Vec.Seeded(1), 50, 1 << 20);
+        Assert.Equal([gl], vec.Results.Select(h => h.Id));
+        Assert.Empty(t.Store.Search(new SearchRequest("review", 50, Site: "nowhere.org"), Vec.Seeded(1), 50, 1 << 20).Results);
+
+        t.Reopen();   // the vector index is rebuilt from disk with the site
+        vec = t.Store.Search(new SearchRequest("x", 50, Mode: SearchMode.Vector, Site: "github.com"), Vec.Seeded(2), 50, 1 << 20);
+        Assert.Equal([gh], vec.Results.Select(h => h.Id));
+    }
+
+    [Fact]
+    public void Facets_count_apps_and_sites_in_the_window()
+    {
+        using var t = new TempStore();
+        AddSite(t.Store, T0, "a", Vec.Seeded(1), "github.com");
+        AddSite(t.Store, T0.AddMinutes(1), "b", Vec.Seeded(2), "github.com");
+        AddSite(t.Store, T0.AddMinutes(2), "c", Vec.Seeded(3), "gitlab.com");
+        AddReady(t.Store, T0.AddMinutes(3), "d", Vec.Seeded(4), "Code.exe");
+        t.Store.AddAudioCapture(Caps.Audio(T0.AddHours(-30), "old standup", "teams.exe"));
+        var f = t.Store.Facets(null, null, 10);
+        Assert.Equal([("chrome.exe", 3), ("Code.exe", 1), ("teams.exe", 1)], f.Apps.Select(a => (a.Name, a.Count)));
+        Assert.Equal([("github.com", 2), ("gitlab.com", 1)], f.Sites.Select(a => (a.Name, a.Count)));
+        f = t.Store.Facets(T0.AddMinutes(1), T0.AddHours(1), 10);
+        Assert.Equal([("chrome.exe", 2), ("Code.exe", 1)], f.Apps.Select(a => (a.Name, a.Count)));
+        Assert.Single(t.Store.Facets(null, null, 1).Apps);
+    }
+
+    [Fact]
+    public void Purge_by_id_and_site()
+    {
+        using var t = new TempStore();
+        var a = AddSite(t.Store, T0, "a", Vec.Seeded(1), "github.com");
+        var b = AddSite(t.Store, T0.AddMinutes(1), "b", Vec.Seeded(2), "github.com");
+        var c = AddSite(t.Store, T0.AddMinutes(2), "c", Vec.Seeded(3), "gitlab.com");
+        Assert.Equal(1, t.Store.CountPurge(PurgeScope.ForId(a)));
+        Assert.Equal(1, t.Store.Purge(PurgeScope.ForId(a)));
+        Assert.Null(t.Store.Get(a));
+        Assert.Equal(1, t.Store.Purge(PurgeScope.ForSite("WWW.github.com")));
+        Assert.Null(t.Store.Get(b));
+        Assert.NotNull(t.Store.Get(c));
+        Assert.Equal(0, t.Store.Purge(PurgeScope.ForId("s_nope")));
+    }
+
+    [Fact]
+    public void Search_history_is_newest_first_deduplicated_capped_and_encrypted()
+    {
+        using var t = new TempStore();
+        var now = DateTimeOffset.UtcNow;
+        t.Store.AddHistory("acme invoice", now.AddMinutes(-3), 3);
+        t.Store.AddHistory("tokyo flight", now.AddMinutes(-2), 3);
+        t.Store.AddHistory("  acme invoice ", now.AddMinutes(-1), 3);   // bumps, no duplicate
+        Assert.Equal(["acme invoice", "tokyo flight"], t.Store.History(10).Select(h => h.Q));
+        t.Store.AddHistory("standup", now, 3);
+        t.Store.AddHistory("budget", now.AddSeconds(1), 3);
+        Assert.Equal(["budget", "standup", "acme invoice"], t.Store.History(10).Select(h => h.Q));
+        t.Store.Checkpoint();
+        Assert.DoesNotContain("tokyo", Encoding.UTF8.GetString(Raw(DataPaths.StoreDb(t.Home.Path))));
+        Assert.DoesNotContain("budget", Encoding.UTF8.GetString(Raw(DataPaths.StoreDb(t.Home.Path))));
+
+        Assert.Equal(1, t.Store.DeleteHistory("standup"));
+        Assert.Equal(["budget", "acme invoice"], t.Store.History(10).Select(h => h.Q));
+        // A time-window purge forgets searches typed in that window.
+        t.Store.Purge(PurgeScope.Range(now.AddSeconds(-30), now.AddMinutes(1)));
+        Assert.Equal(["acme invoice"], t.Store.History(10).Select(h => h.Q));
+        t.Reopen();
+        Assert.Single(t.Store.History(10));
+        Assert.Equal(1, t.Store.DeleteHistory(null));
+        Assert.Empty(t.Store.History(10));
+    }
+
+    [Fact]
+    public void Schema_1_store_gains_site_and_history_on_open()
+    {
+        using var t = new TempStore();
+        var id = AddReady(t.Store, T0, "Acme invoice", Vec.Seeded(1));
+        t.Store.Dispose();
+        using (var c = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = DataPaths.StoreDb(t.Home.Path), Pooling = false }.ToString()))
+        {
+            c.Open();
+            foreach (var sql in new[] { "PRAGMA cipher='sqlcipher'", "PRAGMA legacy=4", "PRAGMA key=\"x'" + Convert.ToHexString(t.Key) + "'\"",
+                "DROP INDEX ix_captures_site", "ALTER TABLE captures DROP COLUMN site", "DROP TABLE search_history", "UPDATE meta SET v='1' WHERE k='schema'" })
+            {
+                using var cmd = c.CreateCommand();
+                cmd.CommandText = sql;
+                cmd.ExecuteNonQuery();
+            }
+        }
+        t.Reopen();
+        Assert.Equal("", t.Store.Get(id)!.Site);
+        Assert.Single(Find(t.Store, "acme", Vec.Seeded(1)).Results);
+        t.Store.AddHistory("acme", DateTimeOffset.UtcNow, 10);
+        Assert.Single(t.Store.History(10));
+    }
 }

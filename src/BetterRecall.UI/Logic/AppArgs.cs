@@ -17,7 +17,8 @@ public sealed record AppArgs(
     bool MockCapturable = false,
     string? Page = null,
     bool Hidden = false,
-    string? MockQuery = null)
+    string? MockQuery = null,
+    bool MockMenu = false)
 {
     public static AppArgs Parse(IEnumerable<string> args)
     {
@@ -36,6 +37,9 @@ public sealed record AppArgs(
                 case "--replays": a = a with { Page = "replays" }; break;
                 case "--settings": a = a with { Page = "settings" }; break;
                 case "--hidden": a = a with { Hidden = true }; break;
+                case "--mock-menu":    // demo screenshots: open the first result's menu after --mock-query
+                    a = a with { Mock = true, MockMenu = true };
+                    break;
                 case "--mock-query":   // demo screenshots: open search with this query (mock mode only)
                     if (e.MoveNext()) a = a with { Mock = true, MockQuery = e.Current.Trim().Trim('"') };
                     break;

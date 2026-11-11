@@ -57,7 +57,7 @@ public sealed partial class DetailPane : UserControl
             return;
         }
         TitleText.Text = item!.DisplayTitle;
-        AppText.Text = item.App;
+        AppText.Text = item.HasSite ? item.App + "  ·  " + item.Site : item.App;
         TimeText.Text = item.DurationS is { } d && item.IsAudio
             ? Loc.Format("Detail_TimeDuration", item.TimeText, StatusText.FormatDuration(d * 1000))
             : item.TimeText;

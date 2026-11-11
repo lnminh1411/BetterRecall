@@ -113,6 +113,8 @@ public sealed class UtcTimestampConverter : JsonConverter<DateTimeOffset>
 [JsonSerializable(typeof(ItemsReply<ReplayClip>))]
 [JsonSerializable(typeof(UnlockReply))]
 [JsonSerializable(typeof(PurgeConfirmReply))]
+[JsonSerializable(typeof(FacetsReply))]
+[JsonSerializable(typeof(ItemsReply<HistoryEntry>))]
 [JsonSerializable(typeof(VersionReply))]
 [JsonSerializable(typeof(List<ReplayClip>))]
 [JsonSerializable(typeof(WorkerHello))]

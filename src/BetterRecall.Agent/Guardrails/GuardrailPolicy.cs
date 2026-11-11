@@ -39,6 +39,28 @@ internal static class GuardrailPolicy
         "chrome.exe", "msedge.exe", "brave.exe", "vivaldi.exe", "opera.exe", "opera_gx.exe", "chromium.exe", "arc.exe", "thorium.exe",
     ];
 
+    /// <summary>
+    /// Host shown in a browser address bar ("github.com/x", "https://www.example.org/a?b"), lower case, without "www.".
+    /// Empty for typed search text, browser pages (chrome://, edge://), files and anything that is not http(s).
+    /// Only the host is kept: no path, query or fragment.
+    /// </summary>
+    public static string SiteFromAddress(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return "";
+        var t = text.Trim();
+        if (t.Length > 2048 || t.Any(char.IsWhiteSpace)) return "";
+        int scheme = t.IndexOf("://", StringComparison.Ordinal);
+        if (scheme < 0)
+        {
+            if (t.Contains(':') && !System.Text.RegularExpressions.Regex.IsMatch(t, @"^[^/:]+:\d+(/|$)")) return "";   // about:blank, mailto:x
+            t = "https://" + t;
+        }
+        if (!Uri.TryCreate(t, UriKind.Absolute, out var u) || (u.Scheme != Uri.UriSchemeHttp && u.Scheme != Uri.UriSchemeHttps)) return "";
+        var host = u.IdnHost.ToLowerInvariant();
+        if (host.StartsWith("www.", StringComparison.Ordinal)) host = host[4..];
+        return host.Contains('.') || host == "localhost" ? host : "";
+    }
+
     public static bool IsChromiumBrowser(string processName) =>
         Browsers.Any(b => string.Equals(b, processName, StringComparison.OrdinalIgnoreCase));
 

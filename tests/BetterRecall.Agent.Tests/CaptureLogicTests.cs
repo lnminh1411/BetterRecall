@@ -127,6 +127,22 @@ public class GuardrailTests
         Assert.True(GuardrailPolicy.Evaluate(chrome, off, true, true, BadgeResult.CheckFailed).Allow);
     }
 
+    [Theory]
+    [InlineData("github.com/lnminh1411/BetterRecall", "github.com")]
+    [InlineData("https://www.Example.org/a?b=c#d", "example.org")]
+    [InlineData("http://localhost:5173/app", "localhost")]
+    [InlineData("localhost:8080", "localhost")]
+    [InlineData("mail.google.com", "mail.google.com")]
+    [InlineData("acme invoice 4471", "")]
+    [InlineData("chrome://settings", "")]
+    [InlineData("edge://newtab", "")]
+    [InlineData("file:///C:/x.pdf", "")]
+    [InlineData("about:blank", "")]
+    [InlineData("invoice", "")]
+    [InlineData("", "")]
+    public void Site_from_address_bar_keeps_the_host_only(string text, string site) =>
+        Assert.Equal(site, GuardrailPolicy.SiteFromAddress(text));
+
     [Fact]
     public void Deny_list_wins_over_later_checks()
     {

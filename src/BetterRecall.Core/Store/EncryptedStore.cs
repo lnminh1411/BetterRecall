@@ -138,6 +138,7 @@ public sealed partial class EncryptedStore : IStore
             CREATE INDEX IF NOT EXISTS ix_audit_ts ON audit(ts);
             """);
         Exec(_w, "INSERT OR IGNORE INTO meta(k, v) VALUES('schema', '1')");
+        Migrate();
         _r = OpenEncrypted(path);
         Exec(_r, "PRAGMA query_only=ON");
         Exec(_r, "PRAGMA cache_size=-8192");
@@ -146,6 +147,25 @@ public sealed partial class EncryptedStore : IStore
         Exec(_rv, "PRAGMA cache_size=-16384"); // keeps the vectors B-tree interior pages decrypted in RAM
         _space = ReadSpace();
         LoadIndex();
+    }
+
+    /// <summary>
+    /// Schema 2 (0.2.0): captures.site (browser host) and the search_history table. ADD COLUMN with a constant
+    /// default rewrites no rows, so it is instant on large stores.
+    /// </summary>
+    private void Migrate()
+    {
+        bool hasSite = false;
+        using (var cmd = Cmd(_w, "SELECT name FROM pragma_table_info('captures')"))
+        using (var rd = cmd.ExecuteReader())
+            while (rd.Read()) if (rd.GetString(0) == "site") hasSite = true;
+        if (!hasSite) Exec(_w, "ALTER TABLE captures ADD COLUMN site TEXT NOT NULL DEFAULT ''");
+        Exec(_w, """
+            CREATE INDEX IF NOT EXISTS ix_captures_site ON captures(site, ts);
+            CREATE TABLE IF NOT EXISTS search_history(q TEXT PRIMARY KEY, ts INTEGER NOT NULL);
+            CREATE INDEX IF NOT EXISTS ix_history_ts ON search_history(ts);
+            UPDATE meta SET v='2' WHERE k='schema' AND v='1';
+            """);
     }
 
     private SqliteConnection? Kf(string month, bool create)
@@ -247,7 +267,7 @@ public sealed partial class EncryptedStore : IStore
         if (_space == null) return;
         var sw = Stopwatch.StartNew();
         using var cmd = Cmd(_w, """
-            SELECT v.rid, v.dim, v.bin, c.ts, c.kind, c.app_lc FROM vectors v JOIN captures c ON c.rid = v.rid
+            SELECT v.rid, v.dim, v.bin, c.ts, c.kind, c.app_lc, c.site FROM vectors v JOIN captures c ON c.rid = v.rid
             WHERE c.state = 1 AND v.model_id = $m AND v.revision = $r
             """, ("$m", _space.ModelId), ("$r", _space.Revision));
         using var rd = cmd.ExecuteReader();
@@ -257,7 +277,7 @@ public sealed partial class EncryptedStore : IStore
         {
             var bin = (byte[])rd.GetValue(2);
             var words = MemoryMarshal.Cast<byte, ulong>(bin);
-            if (bi != null) bi.UpsertBits(rd.GetInt64(0), words, rd.GetInt32(1), rd.GetInt64(3), rd.GetInt32(4), rd.GetString(5));
+            if (bi != null) bi.UpsertBits(rd.GetInt64(0), words, rd.GetInt32(1), rd.GetInt64(3), rd.GetInt32(4), rd.GetString(5), rd.GetString(6));
             n++;
         }
         Log.Info($"vector index loaded: {n} rows in {sw.ElapsedMilliseconds} ms");
@@ -337,9 +357,9 @@ public sealed partial class EncryptedStore : IStore
             using (var tx = _w.BeginTransaction())
             {
                 rid = (long)Scalar(_w, """
-                    INSERT INTO captures(id, ts, kind, app, app_lc, exe, title, monitor, width, height, dhash, duration_ms, state, has_keyframe, keep_keyframe, kf_month)
-                    VALUES($id, $ts, 0, $app, $applc, $exe, $title, $mon, $w, $h, $dh, 0, 0, 1, $keep, $month) RETURNING rid
-                    """, ("$id", id), ("$ts", ts), ("$app", c.App ?? ""), ("$applc", (c.App ?? "").ToLowerInvariant()), ("$exe", c.ExePath ?? ""),
+                    INSERT INTO captures(id, ts, kind, app, app_lc, exe, title, monitor, width, height, dhash, duration_ms, state, has_keyframe, keep_keyframe, kf_month, site)
+                    VALUES($id, $ts, 0, $app, $applc, $exe, $title, $mon, $w, $h, $dh, 0, 0, 1, $keep, $month, $site) RETURNING rid
+                    """, ("$site", NormalizeSite(c.Site)), ("$id", id), ("$ts", ts), ("$app", c.App ?? ""), ("$applc", (c.App ?? "").ToLowerInvariant()), ("$exe", c.ExePath ?? ""),
                     ("$title", c.Title ?? ""), ("$mon", c.Monitor), ("$w", c.Width), ("$h", c.Height), ("$dh", unchecked((long)c.DHash)),
                     ("$keep", c.KeepKeyframe ? 1 : 0), ("$month", month))!;
                 Exec(_w, "INSERT INTO jobs(rid, created) VALUES($rid, $now)", ("$rid", rid), ("$now", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()));
@@ -436,7 +456,7 @@ public sealed partial class EncryptedStore : IStore
         lock (_wl)
         {
             ThrowIfDisposed();
-            using var cmd0 = Cmd(_w, "SELECT rid, state, kind, title, app, text, keep_keyframe, kf_month, ts, app_lc FROM captures WHERE id=$id", ("$id", id));
+            using var cmd0 = Cmd(_w, "SELECT rid, state, kind, title, app, text, keep_keyframe, kf_month, ts, app_lc, site FROM captures WHERE id=$id", ("$id", id));
             using var rd = cmd0.ExecuteReader();
             if (!rd.Read()) { Log.Debug("SetEmbedding for a row that no longer exists"); return; }
             long rid = rd.GetInt64(0);
@@ -447,6 +467,7 @@ public sealed partial class EncryptedStore : IStore
             string? month = rd.IsDBNull(7) ? null : rd.GetString(7);
             long ts = rd.GetInt64(8);
             string appLc = rd.GetString(9);
+            string site = rd.GetString(10);
             rd.Close();
             _inflight.Remove(rid);
             if (state == StateFailed) { Exec(_w, "DELETE FROM jobs WHERE rid=$rid", ("$rid", rid)); return; }
@@ -468,7 +489,7 @@ public sealed partial class EncryptedStore : IStore
             }
             if (kind == KindScreen && !keep && month != null && Kf(month, false) is { } kc)
                 Exec(kc, "DELETE FROM kf WHERE rid=$rid", ("$rid", rid));
-            if (InSpace(info.ModelId, info.Revision)) _index.Upsert(rid, v, ts, kind, appLc);
+            if (InSpace(info.ModelId, info.Revision)) _index.Upsert(rid, v, ts, kind, appLc, site);
             else _index.Remove(rid);
         }
     }
@@ -573,6 +594,16 @@ public sealed partial class EncryptedStore : IStore
                 where = "app_lc = $app";
                 ps.Add(("$app", scope.App.Trim().ToLowerInvariant()));
                 break;
+            case "site":
+                if (string.IsNullOrWhiteSpace(scope.Site)) throw new ArgumentException("Site needed.");
+                where = "site = $site";
+                ps.Add(("$site", NormalizeSite(scope.Site)));
+                break;
+            case "id":
+                if (string.IsNullOrWhiteSpace(scope.Id)) throw new ArgumentException("Id needed.");
+                where = "id = $id";
+                ps.Add(("$id", scope.Id.Trim()));
+                break;
             case "all":
                 where = "1=1";
                 break;
@@ -598,6 +629,10 @@ public sealed partial class EncryptedStore : IStore
         {
             ThrowIfDisposed();
             int n = DeleteRowsLocked(SelectScope(scope));
+            // A time-window purge (panic flush, "delete the last hour") also forgets searches typed in that window.
+            if (scope.Kind is "last" or "range" && scope.From != null && scope.To != null)
+                Exec(_w, "DELETE FROM search_history WHERE ts >= $from AND ts <= $to",
+                    ("$from", scope.From.Value.ToUnixTimeMilliseconds()), ("$to", scope.To.Value.ToUnixTimeMilliseconds()));
             CheckpointLocked();
             Log.Info($"purge ({scope.Kind}) removed {n} rows");
             return n;
@@ -621,7 +656,7 @@ public sealed partial class EncryptedStore : IStore
 
     private CaptureMeta ReadMeta(SqliteDataReader rd)
         => new(rd.GetString(0), DateTimeOffset.FromUnixTimeMilliseconds(rd.GetInt64(1)), rd.GetInt32(2) == 0 ? CaptureKind.Screen : CaptureKind.Audio,
-            rd.GetString(3), rd.GetString(4), rd.GetInt32(5), rd.GetInt32(6), rd.GetInt32(7) == 1, !rd.IsDBNull(8));
+            rd.GetString(3), rd.GetString(4), rd.GetInt32(5), rd.GetInt32(6), rd.GetInt32(7) == 1, !rd.IsDBNull(8), rd.GetString(9));
 
     public IReadOnlyList<CaptureMeta> Timeline(DateTimeOffset from, DateTimeOffset to, int limit)
     {
@@ -630,7 +665,7 @@ public sealed partial class EncryptedStore : IStore
         {
             ThrowIfDisposed();
             using var cmd = Cmd(_r, """
-                SELECT c.id, c.ts, c.kind, c.app, c.title, c.monitor, c.duration_ms, c.has_keyframe, v.rid
+                SELECT c.id, c.ts, c.kind, c.app, c.title, c.monitor, c.duration_ms, c.has_keyframe, v.rid, c.site
                 FROM captures c LEFT JOIN vectors v ON v.rid = c.rid
                 WHERE c.state = 1 AND c.ts >= $from AND c.ts < $to ORDER BY c.ts DESC LIMIT $n
                 """, ("$from", from.ToUnixTimeMilliseconds()), ("$to", to.ToUnixTimeMilliseconds()), ("$n", limit));
@@ -646,13 +681,13 @@ public sealed partial class EncryptedStore : IStore
         lock (_rl)
         {
             ThrowIfDisposed();
-            using var cmd = Cmd(_r, "SELECT id, ts, kind, app, title, text, has_keyframe, duration_ms FROM captures WHERE id=$id AND state=1", ("$id", id));
+            using var cmd = Cmd(_r, "SELECT id, ts, kind, app, title, text, has_keyframe, duration_ms, site FROM captures WHERE id=$id AND state=1", ("$id", id));
             using var rd = cmd.ExecuteReader();
             if (!rd.Read()) return null;
             bool audio = rd.GetInt32(2) == KindAudio;
             return new CaptureDetail(rd.GetString(0), DateTimeOffset.FromUnixTimeMilliseconds(rd.GetInt64(1)), audio ? CaptureKind.Audio : CaptureKind.Screen,
                 rd.GetString(3), rd.GetString(4), audio ? (rd.IsDBNull(5) ? "" : rd.GetString(5)) : rd.GetString(4),
-                rd.GetInt32(6) == 1, audio ? (rd.GetInt32(7) + 500) / 1000 : null);
+                rd.GetInt32(6) == 1, audio ? (rd.GetInt32(7) + 500) / 1000 : null, rd.GetString(8));
         }
     }
 
@@ -712,11 +747,12 @@ public sealed partial class EncryptedStore : IStore
         if (request.Kind == null || request.Kind.Length == 0) kindMask = 3;
         else foreach (var k in request.Kind) kindMask |= k == CaptureKind.Screen ? 1 : 2;
         string? appLc = string.IsNullOrWhiteSpace(request.App) ? null : request.App.Trim().ToLowerInvariant();
+        string? site = string.IsNullOrWhiteSpace(request.Site) ? null : NormalizeSite(request.Site);
         bool useText = request.Mode != SearchMode.Vector;
         bool useVec = request.Mode != SearchMode.Text && queryVector.Length > 0;
 
-        Task<List<long>>? textTask = useText ? Task.Run(() => FtsSearch(request.Q ?? "", from, to, kindMask, appLc)) : null;
-        var vecScored = useVec ? VectorSearch(queryVector, from, to, kindMask, appLc) : [];
+        Task<List<long>>? textTask = useText ? Task.Run(() => FtsSearch(request.Q ?? "", from, to, kindMask, appLc, site)) : null;
+        var vecScored = useVec ? VectorSearch(queryVector, from, to, kindMask, appLc, site) : [];
         var vecRanked = vecScored.Select(v => v.Rid).ToList();
         var cosById = new Dictionary<long, float>(vecScored.Count);
         foreach (var (vr, vc) in vecScored) cosById[vr] = vc;
@@ -743,14 +779,14 @@ public sealed partial class EncryptedStore : IStore
         var hits = new List<SearchHit>(top.Count);
         if (top.Count > 0)
         {
-            var meta = new Dictionary<long, (string Id, long Ts, int Kind, string App, string Title, string? Text, bool Kf, int Dur)>();
+            var meta = new Dictionary<long, (string Id, long Ts, int Kind, string App, string Title, string? Text, bool Kf, int Dur, string Site)>();
             lock (_rl)
             {
                 ThrowIfDisposed();
-                using var cmd = Cmd(_r, $"SELECT rid, id, ts, kind, app, title, text, has_keyframe, duration_ms FROM captures WHERE rid IN ({InList(top.Select(t => t.Key))}) AND +state=1");
+                using var cmd = Cmd(_r, $"SELECT rid, id, ts, kind, app, title, text, has_keyframe, duration_ms, site FROM captures WHERE rid IN ({InList(top.Select(t => t.Key))}) AND +state=1");
                 using var rd = cmd.ExecuteReader();
                 while (rd.Read())
-                    meta[rd.GetInt64(0)] = (rd.GetString(1), rd.GetInt64(2), rd.GetInt32(3), rd.GetString(4), rd.GetString(5), rd.IsDBNull(6) ? null : rd.GetString(6), rd.GetInt32(7) == 1, rd.GetInt32(8));
+                    meta[rd.GetInt64(0)] = (rd.GetString(1), rd.GetInt64(2), rd.GetInt32(3), rd.GetString(4), rd.GetString(5), rd.IsDBNull(6) ? null : rd.GetString(6), rd.GetInt32(7) == 1, rd.GetInt32(8), rd.GetString(9));
             }
             var tokens = Tokens(request.Q ?? "");
             foreach (var (rid, score) in top)
@@ -760,7 +796,7 @@ public sealed partial class EncryptedStore : IStore
                 var snippet = audio ? Snippet(m.Text ?? "", tokens) : Cut(m.Title, SnippetMax);
                 hits.Add(new SearchHit(m.Id, DateTimeOffset.FromUnixTimeMilliseconds(m.Ts), audio ? CaptureKind.Audio : CaptureKind.Screen, m.App, m.Title,
                     (float)Math.Round(Math.Min(1.0, score / norm), 4), snippet, m.Kf && !audio, audio ? (m.Dur + 500) / 1000 : null,
-                    cosById.TryGetValue(rid, out var hc) ? (float)Math.Round(hc, 4) : null, textSet.Contains(rid)));
+                    cosById.TryGetValue(rid, out var hc) ? (float)Math.Round(hc, 4) : null, textSet.Contains(rid), Site: m.Site));
             }
         }
 
@@ -797,11 +833,11 @@ public sealed partial class EncryptedStore : IStore
     /// so no state check is needed. Joining captures inside the MATCH query let SQLite plan from captures and
     /// probe FTS per row (seconds at 250k rows), so it is avoided.
     /// </summary>
-    private List<long> FtsSearch(string q, long from, long to, int kindMask, string? appLc)
+    private List<long> FtsSearch(string q, long from, long to, int kindMask, string? appLc, string? site)
     {
         var match = FtsQuery(q);
         if (match == null) return [];
-        bool filtered = from != long.MinValue || to != long.MaxValue || kindMask != 3 || appLc != null;
+        bool filtered = from != long.MinValue || to != long.MaxValue || kindMask != 3 || appLc != null || site != null;
         var ranked = new List<long>();
         lock (_rl)
         {
@@ -820,6 +856,7 @@ public sealed partial class EncryptedStore : IStore
             if (kindMask == 1) sql.Append(" AND +kind = 0");
             else if (kindMask == 2) sql.Append(" AND +kind = 1");
             if (appLc != null) { sql.Append(" AND +app_lc = $app"); ps.Add(("$app", appLc)); }
+            if (site != null) { sql.Append(" AND +site = $site"); ps.Add(("$site", site)); }
             var keep = new HashSet<long>();
             using (var cmd = Cmd(_r, sql.ToString(), [.. ps]))
             using (var rd = cmd.ExecuteReader())
@@ -828,11 +865,12 @@ public sealed partial class EncryptedStore : IStore
         }
     }
 
-    private List<(long Rid, float Cos)> VectorSearch(ReadOnlySpan<float> q, long from, long to, int kindMask, string? appLc)
+    private List<(long Rid, float Cos)> VectorSearch(ReadOnlySpan<float> q, long from, long to, int kindMask, string? appLc, string? site)
     {
         int appId = appLc == null ? -1 : _index.AppId(appLc);
+        int siteId = site == null ? -1 : _index.SiteId(site);
         var vsw = Stopwatch.StartNew();
-        var cands = _index.Scan(q, new VectorFilter(from, to, kindMask, appId), VectorScanTop);
+        var cands = _index.Scan(q, new VectorFilter(from, to, kindMask, appId, siteId), VectorScanTop);
         LastVectorTimings = $"scan {Ms(vsw.ElapsedTicks)}";
         if (cands.Count == 0) return [];
         var byRid = cands.ToDictionary(c => c.Rid, c => c.Dim);
@@ -853,6 +891,83 @@ public sealed partial class EncryptedStore : IStore
         }
         LastVectorTimings += $" rerank-done {Ms(vsw.ElapsedTicks)}";
         return scored.OrderByDescending(s => s.Cos).Take(VectorKeep).ToList();
+    }
+
+    /// <summary>Lower-case host without "www.", at most 253 characters; anything else becomes empty.</summary>
+    public static string NormalizeSite(string? site)
+    {
+        if (string.IsNullOrWhiteSpace(site)) return "";
+        var s = site.Trim().ToLowerInvariant();
+        if (s.StartsWith("www.", StringComparison.Ordinal)) s = s[4..];
+        return s.Length is > 0 and <= 253 && s.All(c => char.IsAsciiLetterOrDigit(c) || c is '.' or '-' || c > 127) ? s : "";
+    }
+
+    // ---------------------------------------------------------------- facets and search history
+
+    public FacetsReply Facets(DateTimeOffset? from, DateTimeOffset? to, int limit)
+    {
+        limit = Math.Clamp(limit, 1, 200);
+        long f = from?.ToUnixTimeMilliseconds() ?? long.MinValue, t = to?.ToUnixTimeMilliseconds() ?? long.MaxValue;
+        lock (_rl)
+        {
+            ThrowIfDisposed();
+            List<FacetCount> Read(string sql)
+            {
+                var list = new List<FacetCount>();
+                using var cmd = Cmd(_r, sql, ("$from", f), ("$to", t), ("$n", limit));
+                using var rd = cmd.ExecuteReader();
+                while (rd.Read()) list.Add(new FacetCount(rd.GetString(0), rd.GetInt32(1)));
+                return list;
+            }
+            var apps = Read("""
+                SELECT max(app), count(*) AS n FROM captures WHERE state = 1 AND ts >= $from AND ts < $to AND app <> ''
+                GROUP BY app_lc ORDER BY n DESC, 1 LIMIT $n
+                """);
+            var sites = Read("""
+                SELECT site, count(*) AS n FROM captures WHERE state = 1 AND ts >= $from AND ts < $to AND site <> ''
+                GROUP BY site ORDER BY n DESC, 1 LIMIT $n
+                """);
+            return new FacetsReply(apps, sites);
+        }
+    }
+
+    public IReadOnlyList<HistoryEntry> History(int limit)
+    {
+        limit = Math.Clamp(limit, 1, 1000);
+        lock (_rl)
+        {
+            ThrowIfDisposed();
+            using var cmd = Cmd(_r, "SELECT q, ts FROM search_history ORDER BY ts DESC LIMIT $n", ("$n", limit));
+            using var rd = cmd.ExecuteReader();
+            var list = new List<HistoryEntry>();
+            while (rd.Read()) list.Add(new HistoryEntry(rd.GetString(0), DateTimeOffset.FromUnixTimeMilliseconds(rd.GetInt64(1))));
+            return list;
+        }
+    }
+
+    public void AddHistory(string q, DateTimeOffset ts, int max)
+    {
+        q = (q ?? "").Trim();
+        if (q.Length is 0 or > 1024) return;
+        lock (_wl)
+        {
+            ThrowIfDisposed();
+            Exec(_w, "INSERT INTO search_history(q, ts) VALUES($q, $ts) ON CONFLICT(q) DO UPDATE SET ts=excluded.ts",
+                ("$q", q), ("$ts", ts.ToUnixTimeMilliseconds()));
+            Exec(_w, "DELETE FROM search_history WHERE q NOT IN (SELECT q FROM search_history ORDER BY ts DESC LIMIT $n)", ("$n", Math.Max(1, max)));
+        }
+    }
+
+    public int DeleteHistory(string? q)
+    {
+        lock (_wl)
+        {
+            ThrowIfDisposed();
+            using var cmd = q == null ? Cmd(_w, "DELETE FROM search_history") : Cmd(_w, "DELETE FROM search_history WHERE q=$q", ("$q", q.Trim()));
+            int n = cmd.ExecuteNonQuery();
+            if (q == null) CheckpointLocked();
+            return n;
+        }
     }
 
     internal static string Cut(string s, int max) => s.Length <= max ? s : s[..(max - 1)] + "…";

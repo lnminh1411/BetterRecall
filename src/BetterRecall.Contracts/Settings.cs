@@ -116,6 +116,9 @@ public sealed class PrivacySettings
     public string NsfwDevice { get; set; } = "auto";  // auto | npu | igpu | gpu | cpu
     public string NsfwGpuAdapter { get; set; } = "auto"; // DXGI adapter description substring, or auto
     public int PanicPurgeMinutes { get; set; }
+    public bool RecordSite { get; set; } = true;      // store the browser host (address bar, Chromium browsers) with each capture
+    public bool SearchHistory { get; set; } = true;   // keep searches in the encrypted store; turning it off deletes them
+    public int SearchHistoryMax { get; set; } = 100;
 }
 
 public sealed class InferenceSettings

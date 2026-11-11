@@ -188,8 +188,9 @@ internal sealed class CaptureService : IAsyncDisposable
                 string exe = w?.ExePath ?? "";
                 string app = exe.Length == 0 ? "" : Path.GetFileNameWithoutExtension(exe);
                 string title = w?.Title ?? "";
+                string site = w is not null && snap.Foreground is { } f && f.Hwnd == w.Hwnd ? snap.Site : "";
                 o.PendingKeyframe = new KeyframeRequest(ts, app, exe, title, app + "\u0001" + title, force,
-                    Math.Clamp(s.Capture.MaxWidth, 640, 3840), Math.Clamp(s.Capture.DirtyMinPercent, 0, 100));
+                    Math.Clamp(s.Capture.MaxWidth, 640, 3840), Math.Clamp(s.Capture.DirtyMinPercent, 0, 100), site);
             }
         }
     }

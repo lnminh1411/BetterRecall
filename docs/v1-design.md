@@ -142,6 +142,10 @@ UI-only verbs:
 | `purge all` | `{"confirm":"<token>"}`, then `purge confirm <token>` | Needs an unlock in the last 60 s. Destroys the data key and deletes every store, keyframe and replay file |
 | `audit [limit]` | `{"items":[AuditEntry...]}` | |
 | `bench` | `BenchResult` | Forwards to the worker |
+| `facets [<from> <to>]` | `FacetsReply` `{"apps":[{"name","count"}...],"sites":[...]}` | Top 30 apps and browser sites among searchable rows in the window, most rows first; feeds the launcher's app and website filters |
+| `history` | `{"items":[HistoryEntry...]}` | Saved searches, newest first, at most `privacy.searchHistoryMax`. Empty while `privacy.searchHistory` is off |
+| `history add <text>` | `null` | The UI saves a search when the user commits to it (Enter, opening a result, closing the launcher on results), not on every keystroke. Ignored while history is off |
+| `history delete <text>` / `history clear` | `null` | |
 
 Argument rules: `unlock <passphrase>`, `replay export <id> <path>` (the path), `settings set <json>` and `search <text>` take the rest of the line as one argument, spaces included, no quoting. Error strings added for UI verbs: `Wrong passphrase.` (passphrase unlock failed), `Unlock required.` (`purge all` without an unlock in the last 60 s). Reply shapes are the Contracts records `ItemsReply<T>`, `UnlockReply`, `PurgeConfirmReply`, `VersionReply`. Enums serialise lowercase (`screen`, `audio`, `hybrid`, `text`, `vector`); `ThumbData` carries the image in the field `base64`. Long replies: read with `LineReader` (buffered), not `LineProtocol.ReadLineAsync`.
 
@@ -149,7 +153,9 @@ Showing the launcher: when the UI is already running, the agent sets the auto-re
 
 Hotkey grammar (agent parser and UI recorder): modifiers `Ctrl`, `Alt`, `Shift`, `Win` joined with `+`, then one key: `A`-`Z`, `0`-`9`, `F1`-`F24`, `NumPad0`-`NumPad9`, `Space`, `PageUp`, `PageDown`, `Home`, `End`, `Left`, `Up`, `Right`, `Down`, `Insert`, `Delete`, `Pause`, `PrintScreen`, or one of `` ; = , - . / ` [ \ ] ' ``.
 
-Data verbs (`search`, `get`, `thumb`, `keyframe`, `timeline`, `audit`, `replay list`, `replay export`) answer `Store is locked.` while `security.requireUnlock` is true and the read gate is closed.
+`search` JSON also takes `"site":"<host>"` (normalised: lower case, no `www.`); hits carry `site`. `purge` takes two more scopes on every pipe that allows purge: `purge id <id>` (one capture, the launcher's Delete) and `purge site <host>` (the launcher's "Delete all from <site>"). A `purge last` or `purge range` also deletes saved searches typed in that window.
+
+Data verbs (`search`, `get`, `thumb`, `keyframe`, `timeline`, `audit`, `replay list`, `replay export`, `facets`, `history`) answer `Store is locked.` while `security.requireUnlock` is true and the read gate is closed.
 
 ## 6. Security and privacy
 
@@ -191,6 +197,9 @@ Guardrails (agent), checked on every foreground change and again at each keyfram
 | `privacy.nsfwDevice` | `auto` | `auto` (NPU, then integrated GPU, then graphics card, then CPU), `npu`, `igpu`, `gpu`, `cpu`. A specific device falls back to the CPU only |
 | `privacy.nsfwGpuAdapter` | `auto` | graphics card for the gate's DirectML device: part of the DXGI adapter description (case-insensitive), or `auto` = the first adapter that is not software, not the Basic Render Driver and not an Intel iGPU (Intel with under 512 MB dedicated memory) |
 | `privacy.panicPurgeMinutes` | 0 (range 0 to 1440) | panic flush always zeroes RAM (replay ring, queues, thumbnail cache) and runs `wal_checkpoint(TRUNCATE)`; above 0 it also purges that many minutes of rows and keyframes |
+| `privacy.recordSite` | true | for Chromium browsers, UI Automation reads the address bar (first Edit control in the toolbar) on the guardrail thread; only the host is kept (`captures.site`, no path or query), never for a private window |
+| `privacy.searchHistory` | true | saved searches in `store.db` (table `search_history`, encrypted with the store); turning it off deletes them |
+| `privacy.searchHistoryMax` | 100 (range 10 to 1000) | older saved searches are forgotten |
 
 Window titles go through the deny lists before they are stored (`design.md` note 14).
 
