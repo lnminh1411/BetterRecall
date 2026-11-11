@@ -21,7 +21,7 @@ internal static class SecretCards
             Text = Loc.Format(NetworkGuarantee.ConfirmBodyKey, Loc.Get(NetworkGuarantee.ProviderLabelKey(settings))),
             TextWrapping = TextWrapping.Wrap,
         };
-        var dialog = ViewHelpers.Dialog(root, Loc.Get(NetworkGuarantee.ConfirmTitleKey), body, Loc.Get(NetworkGuarantee.ConfirmButtonKey), danger: true);
+        var dialog = WindowHelpers.Dialog(root, Loc.Get(NetworkGuarantee.ConfirmTitleKey), body, Loc.Get(NetworkGuarantee.ConfirmButtonKey), danger: true);
         return await dialog.ShowAsync() == ContentDialogResult.Primary;
     }
 
