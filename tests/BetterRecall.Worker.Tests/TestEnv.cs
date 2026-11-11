@@ -24,11 +24,55 @@ internal static class TestEnv
         }
     }
 
+    private static int _initialized;
+
+    /// <summary>A fresh folder under <see cref="Root"/>. The test host does not run exit handlers, so the first call of
+    /// a run sweeps folders earlier runs left behind once they are 30 minutes old (runs sharing Root take seconds to a few
+    /// minutes). Tests that copy a whole install (~500 MB) use <see cref="Scoped"/> and delete their folder at once.</summary>
     public static string NewDir(string tag)
     {
+        if (Interlocked.Exchange(ref _initialized, 1) == 0) SweepStale(TimeSpan.FromMinutes(30));
         var d = Path.Combine(Root, $"{tag}-{Guid.NewGuid():N}"[..(tag.Length + 13)]);
         Directory.CreateDirectory(d);
         return d;
+    }
+
+    /// <summary>NewDir that is deleted when disposed (best effort: a child process still holding a file leaves it to the sweep).</summary>
+    public static ScopedDir Scoped(string tag) => new(NewDir(tag));
+
+    internal sealed class ScopedDir(string path) : IDisposable
+    {
+        public string Path { get; } = path;
+        public void Dispose() => TryDelete(Path);
+    }
+
+    /// <summary>True for a folder name NewDir makes: "&lt;tag&gt;-" plus 12 hex digits.</summary>
+    internal static bool IsTestDirName(string name)
+    {
+        int dash = name.LastIndexOf('-');
+        return dash > 0 && name.Length - dash - 1 == 12 && name[(dash + 1)..].All(char.IsAsciiHexDigitLower);
+    }
+
+    private static void TryDelete(string d)
+    {
+        try { if (Directory.Exists(d)) Directory.Delete(d, recursive: true); }
+        catch (IOException) { }          // a worker child still holds a file; the stale sweep gets it later
+        catch (UnauthorizedAccessException) { }
+    }
+
+    private static void SweepStale(TimeSpan age)
+    {
+        try
+        {
+            if (!Directory.Exists(Root)) return;
+            var cutoff = DateTime.UtcNow - age;
+            foreach (var d in Directory.EnumerateDirectories(Root))
+            {
+                if (!IsTestDirName(Path.GetFileName(d)) || Directory.GetLastWriteTimeUtc(d) > cutoff) continue;
+                TryDelete(d);
+            }
+        }
+        catch (IOException) { }
     }
 
     public static string Data(string file) => Path.Combine(AppContext.BaseDirectory, "TestData", file);
