@@ -17,11 +17,13 @@ Downloads go to the Hugging Face cache at `%LOCALAPPDATA%\BetterRecall\cache\hf`
 | Silero VAD v6.2.3: `silero_vad.onnx` | `github.com/snakers4/silero-vad` tag `v6.2.3`, `src/silero_vad/data/` | MIT | 2.3 MB | Speech gate before Whisper (CPU) |
 | NSFW classifier: `model.safetensors`, configs (not `optimizer.pt`, `pytorch_model.bin`, the YOLO `.pt`) | `huggingface.co/Falconsai/nsfw_image_detection` @ `96cb0d03` | Apache-2.0 | 345 MB | NSFW gate before embedding (ViT-base/16, labels `normal`/`nsfw`; INT8 on the CPU, FP32 on NPU/GPU) |
 | NSFW detector: `320n.onnx` only | `huggingface.co/deepghs/nudenet_onnx` @ `44956a05` (ONNX of notAI-tech/NudeNet) | AGPL-3.0 (repo tagged Apache-2.0, upstream NudeNet is AGPL-3.0) | 12 MB | Second NSFW model (YOLOv8n body-part detector at 640 px), used as is |
+| PaddleOCR detector + recognisers: `inference.onnx` + `inference.yml` of each repo | `huggingface.co/PaddlePaddle`: `PP-OCRv6_small_det_onnx` @ `28fe5895`, `PP-OCRv6_small_rec_onnx` @ `b8f84f0b` (Chinese, English, Japanese, Latin scripts), PP-OCRv5 mobile rec for `korean` @ `5c6f574b`, `cyrillic` @ `2cef8814`, `arabic` @ `14aaedcd`, `devanagari` @ `251aec19`, `th` @ `1d4adbba`, `el` @ `8152b89d`, `ta` @ `0db89798`, `te` @ `f1197c83` | Apache-2.0 | 96 MB | On-screen text (`ocr.engine` onnx), used as is |
+| PII token classifier: `int8/model_int8.onnx`, `int8/tokenizer.json`, `int8/config.json` | `huggingface.co/Wismut/nym-pii-multilingual-small` @ `4348999c` (mmBERT-small fine-tune) | MIT | 145 MB | Names and street addresses for redaction (`privacy.redactNames`, `redactAddresses`), used as is on the CPU |
 | OpenVINO GenAI 2026.4.1 runtime archive (not a model) | `storage.openvinotoolkit.org/repositories/openvino_genai/packages/2026.4.1/windows/openvino_genai_windows_2026.4.1.0_x86_64.zip` | Apache-2.0 | 254 MB | `openvino_genai_c.dll` for Whisper; staged into `artifacts\native\openvino-genai\` |
 
-Total about 5.3 GB downloaded. Converted output on disk is about 2.5 GB: EmbeddingGemma 2 about 1.3 GB
+Total about 5.5 GB downloaded. Converted output on disk is about 2.5 GB: EmbeddingGemma 2 about 1.3 GB
 (text graph, three vision graphs, bf16 token table), SigLIP 2 about 0.75 GB, Whisper INT8 about 0.85 GB, NSFW INT8
-about 90 MB plus its FP32 graph about 345 MB, NSFW detector 12 MB.
+about 90 MB plus its FP32 graph about 345 MB, NSFW detector 12 MB, OCR 96 MB, NER 145 MB.
 
 None of the repositories is gated. No login or licence click-through is needed.
 
@@ -52,9 +54,11 @@ venv-whisper\Scripts\pip install "optimum-intel[openvino]==2.2.0" openvino==2026
 | `export_whisper.py` | `optimum-cli export openvino --weight-format int8` for GenAI WhisperPipeline; `--tts out.wav` makes an offline SAPI test clip and reports compile time and real-time factor on NPU and CPU | `venv-whisper` |
 | `export_nsfw.py` | ViT to ONNX: dynamic INT8 (per-channel) for the CPU and the FP32 graph for NPU/GPU, FP32 vs INT8 agreement report | `venv` |
 | `export_nsfw_detector.py [--from FILE]` | Verifies the pinned NudeNet `320n.onnx` (size, SHA-256), copies it to `models\nsfw-detector\model.onnx`, checks the output shape, writes the manifest | `venv` |
+| `export_ocr.py` | Verifies the pinned PaddleOCR files (size, SHA-256), copies them to `models\ocr\` as `det.onnx`, `rec-<name>.onnx`, writes each recogniser's dictionary from its `inference.yml` as `dict-<name>.txt` (LF only), and the manifest `ocr` section (DB detector settings, max side 1920, per-recogniser height, classes, languages). Smoke run needs onnxruntime >= 1.20 (the graphs are ONNX IR 10) and is skipped otherwise | `venv` |
+| `export_ner.py` | Verifies the pinned PII model, copies `model.onnx`, `tokenizer.json`, `config.json` to `models\ner\` and writes the manifest `ner` section (input/output names, 512 tokens, BIO labels from `id2label`, which labels count as person and as address). Same smoke-run rule | `venv` |
 | `stage_genai_runtime.py` | Downloads and verifies the GenAI archive, copies `openvino_genai*.dll` and tokenizer DLLs for the worker build | `venv` |
 
-Order: `fetch_models.py`, then the five exports and `export_onnx.py`, then `stage_genai_runtime.py`, then rebuild the worker.
+Order: `fetch_models.py`, then the seven exports and `export_onnx.py`, then `stage_genai_runtime.py`, then rebuild the worker.
 
 ## What is verified, what is not
 
@@ -70,4 +74,11 @@ Order: `fetch_models.py`, then the five exports and `export_onnx.py`, then `stag
   NPU rejects the 280-token graph at inference when it builds that matrix from runtime positions. Whisper INT8 runs on
   NPU and CPU through GenAI (the optimum export warnings "Failed to build model wrapper" and "fun_asr" are harmless).
 - Graph inputs carry exactly one tensor name each (`name_inputs`): the worker reads names with `ov_port_get_any_name`.
+- Verified 2026-11-12 (worker tests with `BR_OCR_MODELS` pointing at a models folder): PaddleOCR on the CPU reads
+  rendered English, Korean, Cyrillic and Japanese lines (about 0.5 s for 1280x400); the NER model finds names and
+  addresses; the C# tokenizer gives the same ids as Python `tokenizers` 0.22. Devices (`BR_OCR_DEVICES=1`, optional
+  `BR_OCR_ONLY=NPU,GPU.0`, test `OcrDeviceTests`): the NPU runs the graphs as static copies per shape (381 ms and 0.1 s
+  CPU time per 1280x720 screen, vs 362 ms and 1.1 s on the CPU); the integrated GPU (OpenVINO and DirectML) and both
+  DirectML graphics cards give the CPU's text. Not verified: real screenshots, Vietnamese tone marks (the PaddleOCR
+  dictionaries lack them; search folds diacritics).
 - Still open: SigLIP 2 lower-casing, NSFW INT8 accuracy on real content (only label agreement with the float model).

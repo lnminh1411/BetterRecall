@@ -203,7 +203,9 @@ public class ViewModelTests
         var hit = (await h.Api.SearchAsync(new SearchQuery("invoice", 20))).Value!.Results.First(x => x.HasThumb && x.Kind == CaptureKind.Screen);
         var vm = new DetailViewModel(h.Api);
         await vm.LoadAsync(CaptureItem.From(hit));
-        Assert.Equal(hit.Title, vm.Text);
+        // Demo OCR text of the invoice screen, with the redacted card number already gone.
+        Assert.Contains("Amount due", vm.Text);
+        Assert.EndsWith("Pay by card:\nReply Forward", vm.Text);
         Assert.NotNull(vm.Image);
         Assert.False(vm.IsBusy);
 

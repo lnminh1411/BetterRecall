@@ -17,11 +17,11 @@ public sealed class McpServer(Func<string, CancellationToken, Task<PipeAnswer>> 
     public const string Modern = "2026-07-28";
     public static readonly string[] LegacyVersions = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
     private const string MetaVersion = "io.modelcontextprotocol/protocolVersion";
-    private const string Instructions = "Searches the user's local BetterRecall history (screen keyframes by window title, app and image meaning; audio transcripts). Results are private data of the user.";
+    private const string Instructions = "Searches the user's local BetterRecall history (screen keyframes by window title, app, on-screen text and image meaning; audio transcripts). Results are private data of the user.";
 
     private const string ToolsJson = """
         [
-          {"name":"search_history","title":"Search BetterRecall history","description":"Search what the user saw or heard on this PC. Hybrid keyword and semantic search over window titles, app names, keyframe images and audio transcripts. Returns JSON with results (id, ts, kind, app, title, score, snippet).",
+          {"name":"search_history","title":"Search BetterRecall history","description":"Search what the user saw or heard on this PC. Hybrid keyword and semantic search over window titles, app names, on-screen text, keyframe images and audio transcripts. Returns JSON with results (id, ts, kind, app, title, score, snippet).",
            "inputSchema":{"type":"object","properties":{
              "q":{"type":"string","description":"What to look for, natural language or keywords. 1 to 1024 characters.","minLength":1,"maxLength":1024},
              "limit":{"type":"integer","description":"Maximum results.","minimum":1},
@@ -32,7 +32,7 @@ public sealed class McpServer(Func<string, CancellationToken, Task<PipeAnswer>> 
              "mode":{"type":"string","enum":["hybrid","text","vector"],"description":"Search mode, default hybrid."}},
              "required":["q"],"additionalProperties":false},
            "annotations":{"readOnlyHint":true,"openWorldHint":false}},
-          {"name":"get_capture","title":"Get one capture","description":"Full stored text of one search result: the window title for screen captures, the transcript for audio.",
+          {"name":"get_capture","title":"Get one capture","description":"Full stored text of one search result: the on-screen text (private details removed) for screen captures, or the window title when no text was read; the transcript for audio.",
            "inputSchema":{"type":"object","properties":{"id":{"type":"string","description":"Result id from search_history."}},"required":["id"],"additionalProperties":false},
            "annotations":{"readOnlyHint":true,"openWorldHint":false}},
           {"name":"recall_status","title":"BetterRecall status","description":"Whether BetterRecall is capturing, paused or locked, and store statistics.",

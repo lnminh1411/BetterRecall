@@ -30,4 +30,8 @@ public interface IWorkerEngine : IDisposable
 
     /// <summary>Re-runs the device benchmark and rewrites cache\device.json.</summary>
     BenchResult Bench();
+
+    /// <summary>Text lines of a screenshot (ocr.engine, ocr.languages, ocr.device). entities: also run the NER model
+    /// and fill each line's person/address spans.</summary>
+    OcrResult Ocr(ImageInput image, bool entities);
 }

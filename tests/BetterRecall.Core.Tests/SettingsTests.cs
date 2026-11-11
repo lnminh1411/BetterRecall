@@ -192,6 +192,27 @@ public class SettingsTests
     }
 
     [Fact]
+    public void Ocr_and_redaction_settings_validate()
+    {
+        using var h = new TempHome(null);
+        var s = SettingsStore.Load(h.Path);
+        Assert.True(s.Current.Ocr.Enabled);
+        Assert.Equal(("onnx", "auto", "auto"), (s.Current.Ocr.Engine, s.Current.Ocr.Languages, s.Current.Ocr.Device));
+        var p = s.Current.Privacy;
+        Assert.True(p.RedactPasswords && p.RedactCards && p.RedactIds && p.RedactBirthDates);
+        Assert.False(p.RedactEmails || p.RedactPhones || p.RedactNames || p.RedactAddresses);
+
+        Assert.Null(s.TryUpdate(JsonDocument.Parse("{\"ocr\":{\"engine\":\"windows\",\"languages\":\"en-US, ja,vi\",\"device\":\"cpu\"}}").RootElement));
+        Assert.Null(s.TryUpdate(JsonDocument.Parse("{\"privacy\":{\"redactEmails\":true,\"redactNames\":true}}").RootElement));
+        Assert.Equal("Invalid ocr.engine.", s.TryUpdate(JsonDocument.Parse("{\"ocr\":{\"engine\":\"tesseract\"}}").RootElement));
+        Assert.Equal("Invalid ocr.languages.", s.TryUpdate(JsonDocument.Parse("{\"ocr\":{\"languages\":\"english\"}}").RootElement));
+        Assert.Equal("Invalid ocr.languages.", s.TryUpdate(JsonDocument.Parse("{\"ocr\":{\"languages\":\"\"}}").RootElement));
+        Assert.Equal("Invalid ocr.device.", s.TryUpdate(JsonDocument.Parse("{\"ocr\":{\"device\":\"tpu\"}}").RootElement));
+        Assert.Equal(("windows", "en-US, ja,vi", "cpu"), (s.Current.Ocr.Engine, s.Current.Ocr.Languages, s.Current.Ocr.Device));
+        Assert.True(s.Current.Privacy.RedactEmails && s.Current.Privacy.RedactNames);
+    }
+
+    [Fact]
     public void Defaults_are_valid() => Assert.Null(SettingsStore.Validate(new Settings()));
 
     [Fact]

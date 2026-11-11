@@ -600,6 +600,39 @@
   <data name="S_privacy_searchHistory_D" xml:space="preserve"><value>Keep your searches in the encrypted store and show them as recent searches. Turning it off deletes them.</value></data>
   <data name="S_privacy_searchHistoryMax" xml:space="preserve"><value>Searches to keep</value></data>
   <data name="S_privacy_searchHistoryMax_D" xml:space="preserve"><value>Older searches are forgotten.</value></data>
+  <data name="S_privacy_redactPasswords" xml:space="preserve"><value>Hide passwords</value></data>
+  <data name="S_privacy_redactPasswords_D" xml:space="preserve"><value>Black out password boxes in the active window and text after labels such as "Password:" in screenshots and replays.</value></data>
+  <data name="S_privacy_redactCards" xml:space="preserve"><value>Hide card numbers</value></data>
+  <data name="S_privacy_redactCards_D" xml:space="preserve"><value>Black out payment card numbers that pass the Luhn check.</value></data>
+  <data name="S_privacy_redactIds" xml:space="preserve"><value>Hide IBANs and ID numbers</value></data>
+  <data name="S_privacy_redactIds_D" xml:space="preserve"><value>Black out IBANs, US social security numbers and numbers after labels such as "ID", "passport" or "tax number".</value></data>
+  <data name="S_privacy_redactBirthDates" xml:space="preserve"><value>Hide birth dates</value></data>
+  <data name="S_privacy_redactBirthDates_D" xml:space="preserve"><value>Black out dates after labels such as "Date of birth".</value></data>
+  <data name="S_privacy_redactEmails" xml:space="preserve"><value>Hide email addresses</value></data>
+  <data name="S_privacy_redactEmails_D" xml:space="preserve"><value>Black out email addresses. Search no longer finds them.</value></data>
+  <data name="S_privacy_redactPhones" xml:space="preserve"><value>Hide phone numbers</value></data>
+  <data name="S_privacy_redactPhones_D" xml:space="preserve"><value>Black out phone numbers.</value></data>
+  <data name="S_privacy_redactNames" xml:space="preserve"><value>Hide people's names</value></data>
+  <data name="S_privacy_redactNames_D" xml:space="preserve"><value>Black out names found by the name detector model. Needs text recognition. Can miss names and hide ordinary words.</value></data>
+  <data name="S_privacy_redactAddresses" xml:space="preserve"><value>Hide street addresses</value></data>
+  <data name="S_privacy_redactAddresses_D" xml:space="preserve"><value>Black out street addresses, postcodes and cities found by the name detector model. Needs text recognition.</value></data>
+  <data name="G_ocr" xml:space="preserve"><value>Text recognition</value></data>
+  <data name="G_ocr_D" xml:space="preserve"><value>Read the text in screenshots so search finds it and private details can be hidden.</value></data>
+  <data name="S_ocr_enabled" xml:space="preserve"><value>Read text in screenshots</value></data>
+  <data name="S_ocr_enabled_D" xml:space="preserve"><value>Each kept screenshot is read on this PC. The text is stored encrypted and found by text search. When off, only window titles are searched and only password boxes are hidden.</value></data>
+  <data name="S_ocr_engine" xml:space="preserve"><value>Engine</value></data>
+  <data name="S_ocr_engine_D" xml:space="preserve"><value>PaddleOCR reads many scripts and needs its model folder. Windows uses the text recognition languages installed in Windows.</value></data>
+  <data name="S_ocr_engine_onnx" xml:space="preserve"><value>PaddleOCR</value></data>
+  <data name="S_ocr_engine_windows" xml:space="preserve"><value>Windows</value></data>
+  <data name="S_ocr_languages" xml:space="preserve"><value>Languages</value></data>
+  <data name="S_ocr_languages_D" xml:space="preserve"><value>"auto" uses your Windows display languages. Or list codes separated by commas, like "en, ja, ru".</value></data>
+  <data name="S_ocr_device" xml:space="preserve"><value>Device</value></data>
+  <data name="S_ocr_device_D" xml:space="preserve"><value>Where PaddleOCR runs. Automatic keeps it off the CPU and your graphics cards when it can. If the chosen device fails, the CPU is used.</value></data>
+  <data name="S_ocr_device_auto" xml:space="preserve"><value>Auto (NPU, then integrated GPU, then CPU)</value></data>
+  <data name="S_ocr_device_npu" xml:space="preserve"><value>NPU</value></data>
+  <data name="S_ocr_device_igpu" xml:space="preserve"><value>Integrated GPU</value></data>
+  <data name="S_ocr_device_gpu" xml:space="preserve"><value>Graphics card</value></data>
+  <data name="S_ocr_device_cpu" xml:space="preserve"><value>CPU</value></data>
   <data name="Nav_Shortcuts.Content" xml:space="preserve"><value>Shortcuts</value></data>
   <data name="Shortcuts_Title.Text" xml:space="preserve"><value>Shortcuts</value></data>
   <data name="Shortcuts_Desc.Text" xml:space="preserve"><value>Global shortcuts work in any app while BetterRecall runs. A shortcut needs Ctrl, Alt or Win.</value></data>
@@ -704,7 +737,7 @@
   <data name="Describe_Body" xml:space="preserve"><value>This image will be sent to {0} (model {1}, {2}). The text that comes back is shown here and not saved.</value></data>
   <data name="Describe_PreviewName" xml:space="preserve"><value>Image that will be sent</value></data>
   <data name="Describe_Redacted" xml:space="preserve"><value>Redaction was applied to this copy.</value></data>
-  <data name="Describe_NotRedacted" xml:space="preserve"><value>Not redacted: this BetterRecall version has no redaction yet, so the image is sent exactly as shown.</value></data>
+  <data name="Describe_NotRedacted" xml:space="preserve"><value>Not checked for private text: text recognition is off or not installed, so the image is sent exactly as shown.</value></data>
   <data name="Describe_Send" xml:space="preserve"><value>Send</value></data>
   <data name="Describe_ResultTitle" xml:space="preserve"><value>Description ({0})</value></data>
   <data name="Replays_MatchTitle" xml:space="preserve"><value>Replay match</value></data>

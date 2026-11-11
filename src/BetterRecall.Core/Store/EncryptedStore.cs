@@ -367,9 +367,9 @@ public sealed partial class EncryptedStore : IStore
             using (var tx = _w.BeginTransaction())
             {
                 rid = (long)Scalar(_w, """
-                    INSERT INTO captures(id, ts, kind, app, app_lc, exe, title, monitor, width, height, dhash, duration_ms, state, has_keyframe, keep_keyframe, kf_month, site)
-                    VALUES($id, $ts, 0, $app, $applc, $exe, $title, $mon, $w, $h, $dh, 0, 0, 1, $keep, $month, $site) RETURNING rid
-                    """, ("$site", NormalizeSite(c.Site)), ("$id", id), ("$ts", ts), ("$app", c.App ?? ""), ("$applc", (c.App ?? "").ToLowerInvariant()), ("$exe", c.ExePath ?? ""),
+                    INSERT INTO captures(id, ts, kind, app, app_lc, exe, title, text, monitor, width, height, dhash, duration_ms, state, has_keyframe, keep_keyframe, kf_month, site)
+                    VALUES($id, $ts, 0, $app, $applc, $exe, $title, $text, $mon, $w, $h, $dh, 0, 0, 1, $keep, $month, $site) RETURNING rid
+                    """, ("$site", NormalizeSite(c.Site)), ("$text", string.IsNullOrWhiteSpace(c.Text) ? null : c.Text), ("$id", id), ("$ts", ts), ("$app", c.App ?? ""), ("$applc", (c.App ?? "").ToLowerInvariant()), ("$exe", c.ExePath ?? ""),
                     ("$title", c.Title ?? ""), ("$mon", c.Monitor), ("$w", c.Width), ("$h", c.Height), ("$dh", unchecked((long)c.DHash)),
                     ("$keep", c.KeepKeyframe ? 1 : 0), ("$month", month))!;
                 Exec(_w, "INSERT INTO jobs(rid, created) VALUES($rid, $now)", ("$rid", rid), ("$now", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()));
@@ -754,7 +754,7 @@ public sealed partial class EncryptedStore : IStore
             if (!rd.Read()) return null;
             bool audio = rd.GetInt32(2) == KindAudio;
             return new CaptureDetail(rd.GetString(0), DateTimeOffset.FromUnixTimeMilliseconds(rd.GetInt64(1)), KindOf(rd.GetInt32(2)),
-                rd.GetString(3), rd.GetString(4), audio ? (rd.IsDBNull(5) ? "" : rd.GetString(5)) : rd.GetString(4),
+                rd.GetString(3), rd.GetString(4), audio ? (rd.IsDBNull(5) ? "" : rd.GetString(5)) : !rd.IsDBNull(5) && rd.GetString(5).Length > 0 ? rd.GetString(5) : rd.GetString(4),
                 rd.GetInt32(6) == 1, audio ? (rd.GetInt32(7) + 500) / 1000 : null, rd.GetString(8),
                 rd.IsDBNull(9) ? null : rd.GetString(9), rd.IsDBNull(10) ? null : rd.GetInt32(10));
         }
@@ -866,7 +866,7 @@ public sealed partial class EncryptedStore : IStore
             {
                 if (!meta.TryGetValue(rid, out var m)) continue;
                 bool audio = m.Kind == KindAudio;
-                var snippet = audio ? Snippet(m.Text ?? "", tokens) : Cut(m.Title, SnippetMax);
+                var snippet = audio ? Snippet(m.Text ?? "", tokens) : ScreenSnippet(m.Title, m.Text, tokens);
                 hits.Add(new SearchHit(m.Id, DateTimeOffset.FromUnixTimeMilliseconds(m.Ts), KindOf(m.Kind), m.App, m.Title,
                     (float)Math.Round(Math.Min(1.0, score / norm), 4), snippet, m.Kf && !audio, audio ? (m.Dur + 500) / 1000 : null,
                     cosById.TryGetValue(rid, out var hc) ? (float)Math.Round(hc, 4) : null, textSet.Contains(rid), Site: m.Site,
@@ -1051,6 +1051,15 @@ public sealed partial class EncryptedStore : IStore
     }
 
     internal static string Cut(string s, int max) => s.Length <= max ? s : s[..(max - 1)] + "…";
+
+    /// <summary>Screen hit: the title, unless a query token appears only in the OCR text; then the text around it.</summary>
+    internal static string ScreenSnippet(string title, string? text, IReadOnlyList<string> tokens)
+    {
+        if (string.IsNullOrEmpty(text) || tokens.Count == 0) return Cut(title, SnippetMax);
+        bool inTitle = tokens.Any(t => title.Contains(t, StringComparison.OrdinalIgnoreCase));
+        bool inText = tokens.Any(t => text.Contains(t, StringComparison.OrdinalIgnoreCase));
+        return inText && !inTitle ? Snippet(text, tokens) : Cut(title, SnippetMax);
+    }
 
     internal static string Snippet(string text, IReadOnlyList<string> tokens)
     {

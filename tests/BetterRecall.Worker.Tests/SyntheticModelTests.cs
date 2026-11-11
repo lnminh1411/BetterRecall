@@ -60,7 +60,7 @@ public class SyntheticModelTests(ITestOutputHelper output)
         Assert.Equal(512, hello.Dim);
         Assert.True(hello.Vad);
         Assert.False(hello.Asr);
-        Assert.Equal(new[] { ModelCatalog.Siglip, ModelCatalog.Whisper, ModelCatalog.NsfwDetector }, hello.Missing);
+        Assert.Equal(new[] { ModelCatalog.Siglip, ModelCatalog.Whisper, ModelCatalog.NsfwDetector, ModelCatalog.Ocr, ModelCatalog.Ner }, hello.Missing);
         Assert.True(File.Exists(BetterRecall.Contracts.DataPaths.DeviceCache(home)));
 
         var (q, qp) = await h.CallAsync(new WorkerRequest(0, "embed_text", Text: "quarterly sales", Kind: "query"));
@@ -157,7 +157,10 @@ public class SyntheticModelTests(ITestOutputHelper output)
         {
             await using var h = await PipeHarness.StartAsync(engine, s);
             var hello = (await h.CallAsync(new WorkerRequest(0, "hello"))).Header.Hello!;
-            Assert.Equal(6, hello.Missing.Length);
+            Assert.Equal(8, hello.Missing.Length);
+            Assert.Null(hello.OcrDevice);
+            Assert.Equal("Model not installed: ocr.",
+                (await h.CallAsync(new WorkerRequest(0, "ocr", Format: "bgra8", Width: 2, Height: 2, Stride: 8), TestEnv.Bgra(2, 2, 1, 2, 3))).Header.Error);
             Assert.Equal("Model not installed: embeddinggemma-2.", (await h.CallAsync(new WorkerRequest(0, "embed_text", Text: "x", Kind: "query"))).Header.Error);
             Assert.Equal("Model not installed: nsfw-classifier.",
                 (await h.CallAsync(new WorkerRequest(0, "embed_image", Format: "bgra8", Width: 2, Height: 2, Stride: 8, Nsfw: 0.8), TestEnv.Bgra(2, 2, 1, 2, 3))).Header.Error);
