@@ -11,8 +11,10 @@ using Vortice.DXGI;
 
 namespace BetterRecall.Agent.Capture;
 
-/// <summary>Keyframe requested by the hub for one output. Metadata is decided before the grab.</summary>
-internal sealed record KeyframeRequest(DateTimeOffset Ts, string App, string ExePath, string Title, string Context, bool Force, int MaxWidth, double DirtyMinPercent, string Site = "");
+/// <summary>Keyframe requested by the hub for one output. Metadata is decided before the grab. Secrets: password
+/// fields (UI Automation) in desktop pixels; Bounds: the output's desktop rectangle (maps desktop to keyframe pixels).</summary>
+internal sealed record KeyframeRequest(DateTimeOffset Ts, string App, string ExePath, string Title, string Context, bool Force, int MaxWidth, double DirtyMinPercent, string Site = "",
+    RECT[]? Secrets = null, RECT Bounds = default);
 
 /// <summary>A grabbed, downscaled BGRA keyframe in native memory, owned by the receiver (Dispose zeroes it).</summary>
 internal sealed unsafe class KeyframeGrab : IDisposable

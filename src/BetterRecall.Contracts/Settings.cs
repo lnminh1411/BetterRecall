@@ -22,6 +22,15 @@ public sealed class Settings
     public McpSettings Mcp { get; set; } = new();
     public LogSettings Log { get; set; } = new();
     public UiSettings Ui { get; set; } = new();
+    public OcrSettings Ocr { get; set; } = new();
+}
+
+public sealed class OcrSettings
+{
+    public bool Enabled { get; set; } = true;          // read the text of each kept keyframe (search + text redaction)
+    public string Engine { get; set; } = "onnx";        // onnx (PaddleOCR PP-OCRv5 models, many scripts) | windows (Windows.Media.Ocr, installed language packs)
+    public string Languages { get; set; } = "auto";     // auto (Windows display languages) or comma-separated codes like "en,vi,ja"
+    public string Device { get; set; } = "auto";        // auto | igpu | gpu | cpu (onnx engine)
 }
 
 public sealed class UiSettings
@@ -119,6 +128,16 @@ public sealed class PrivacySettings
     public bool RecordSite { get; set; } = true;      // store the browser host (address bar, Chromium browsers) with each capture
     public bool SearchHistory { get; set; } = true;   // keep searches in the encrypted store; turning it off deletes them
     public int SearchHistoryMax { get; set; } = 100;
+    // Redaction before a keyframe is stored: black boxes on the image, the words left out of the stored text.
+    // Text detectors need ocr.enabled; password fields come from UI Automation and work without OCR.
+    public bool RedactPasswords { get; set; } = true;    // UIA password fields + text after password-like labels
+    public bool RedactCards { get; set; } = true;        // payment card numbers (Luhn)
+    public bool RedactIds { get; set; } = true;          // IBAN (mod 97) and national id numbers next to id keywords
+    public bool RedactBirthDates { get; set; } = true;   // dates near birth keywords
+    public bool RedactEmails { get; set; }
+    public bool RedactPhones { get; set; }
+    public bool RedactNames { get; set; }                // person names (local NER model)
+    public bool RedactAddresses { get; set; }            // postal addresses (local NER model)
 }
 
 public sealed class InferenceSettings

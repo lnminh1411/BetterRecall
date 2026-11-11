@@ -17,8 +17,11 @@ internal sealed record GuardSnapshot(
     bool AnyAffinity,
     RECT[] MaskRects,
     IReadOnlyDictionary<int, MonitorTop> PerMonitor,
-    string Site = "")         // host in the foreground browser's address bar (privacy.recordSite), else empty
+    string Site = "",         // host in the foreground browser's address bar (privacy.recordSite), else empty
+    RECT[]? Secrets = null)   // password fields of the foreground window, desktop pixels (privacy.redactPasswords)
 {
+    public RECT[] SecretRects => Secrets ?? [];
+
     public static readonly GuardSnapshot Closed = new(0, null, GuardDecision.Deny(GuardReason.NoForeground), BadgeResult.NotChecked, false, [], new Dictionary<int, MonitorTop>());
 }
 

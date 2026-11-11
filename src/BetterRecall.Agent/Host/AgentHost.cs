@@ -38,6 +38,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
     private readonly PauseController _pause = new();
     private readonly WorkerSupervisor _supervisor;
     private readonly WorkerClient _worker;
+    private readonly Privacy.RedactionMasks _redactions = new();
     private readonly Thumbnailer _thumbs;
     private readonly LoopbackHub _loopback = new();
     private readonly SemaphoreSlim _benchLock = new(1, 1);
@@ -106,7 +107,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         var encLuid = GpuDevices.Adapters().FirstOrDefault(a => a.VendorId == GpuDevices.VendorIntel)?.Luid;
         _probe = new SystemProbe(encLuid is null ? null : GpuDevices.PdhLuidToken(encLuid.Value));
         _scheduler = new EmbeddingScheduler(() => Store, () => S, _worker, ProbeLoad, () => _pause.Has("consent") || _pause.Has("keylocked"));
-        _pipeline = new KeyframePipeline(() => Store, () => S, OnCaptureStored);
+        _pipeline = new KeyframePipeline(() => Store, () => S, OnCaptureStored, new WorkerKeyframeReader(_worker), _redactions);
         _guard = new GuardrailService(() => S, () => _sessionLocked, () => _capture?.MonitorBounds() ?? [], _opt.InstallDir);
         _guard.ForegroundChanged += _ => _capture?.OnForegroundChanged();
         _window.ForegroundChanged += () => _guard?.OnForegroundEvent();
@@ -161,7 +162,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
             long ring = (long)s.Replay.BitrateKbps * 1000 / 8 * (s.Replay.Seconds + 2) * 3 + 4L * 1024 * 1024;
             MemoryIsolation.ReserveWorkingSet(ring);
         }
-        _capture = new CaptureService(() => S, KeyframesPaused, ReplayPaused, _guard!, _pipeline!, _loopback, lockMem);
+        _capture = new CaptureService(() => S, KeyframesPaused, ReplayPaused, _guard!, _pipeline!, _loopback, lockMem, _redactions);
         _capture.Start();
         SyncAudioSources();
         // ACG goes last: give the capture threads time to load drivers, encoders and the audio stack.

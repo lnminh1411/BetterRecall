@@ -303,7 +303,22 @@ public sealed partial class SettingsStore : ISettingsStore
         ("ipc.idleTimeoutS", s => Range(s.Ipc.IdleTimeoutS, 10, 3600)),
         ("log.level", s => In(s.Log.Level, "debug", "info", "warn", "error")),
         ("ui.theme", s => In(s.Ui.Theme, "system", "light", "dark")),
+        ("ocr.engine", s => In(s.Ocr.Engine, "onnx", "windows")),
+        ("ocr.languages", s => ValidOcrLanguages(s.Ocr.Languages)),
+        ("ocr.device", s => In(s.Ocr.Device, "auto", "igpu", "gpu", "cpu")),
     ];
+
+    [GeneratedRegex("^[a-z]{2,3}(-[A-Za-z]{2,4})?$")]
+    private static partial Regex OcrLanguageRegex();
+
+    /// <summary>"auto", or 1 to 16 comma-separated language codes ("en", "vi", "zh-Hant").</summary>
+    internal static bool ValidOcrLanguages(string? v)
+    {
+        if (v == "auto") return true;
+        if (string.IsNullOrWhiteSpace(v) || v.Length > 128) return false;
+        var parts = v.Split(',', StringSplitOptions.TrimEntries);
+        return parts.Length <= 16 && parts.All(p => OcrLanguageRegex().IsMatch(p));
+    }
 
     /// <summary>First invalid key as "section.key", or null when every key is valid.</summary>
     public static string? Validate(Settings s)
@@ -323,6 +338,7 @@ public sealed partial class SettingsStore : ISettingsStore
         if (s.Mcp == null) return "mcp";
         if (s.Log == null) return "log";
         if (s.Ui == null) return "ui";
+        if (s.Ocr == null) return "ocr";
         foreach (var (key, ok) in Rules)
         {
             bool pass;

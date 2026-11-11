@@ -10,6 +10,8 @@ using BetterRecall.Worker.Inference;
 using BetterRecall.Worker.Inference.Onnx;
 using BetterRecall.Worker.Inference.OpenVino;
 using BetterRecall.Worker.Models;
+using BetterRecall.Worker.Models.Ner;
+using BetterRecall.Worker.Models.Ocr;
 using BetterRecall.Worker.Protocol;
 using BetterRecall.Worker.Vectors;
 
@@ -35,6 +37,9 @@ public sealed class RealEngine : IWorkerEngine
     private readonly bool _probeDml = true;
     private SileroVad? _vad;
     private WhisperGenAi? _whisper;
+    private PaddleOcr? _ocr;
+    private WindowsOcr? _winOcr;
+    private PiiNer? _ner;
 
     public const string BenchText = "BetterRecall benchmark: quarterly sales spreadsheet, Tabelle mit Umsatzzahlen, bảng doanh thu.";
 
@@ -125,7 +130,21 @@ public sealed class RealEngine : IWorkerEngine
         catch (DeviceFailedException e) { Log.Error($"hello: no usable device: {e.Message}"); }
         bool asr = ModelCatalog.WhisperPresent(_s.ModelDir) && WhisperGenAi.RuntimePresent();
         bool vad = ModelCatalog.VadPath(_s.ModelDir) is not null;
-        return new WorkerHello(1, device, ep, model, rev, dim, asr, vad, missing.ToArray(), PreloadNsfw(missing));
+        return new WorkerHello(1, device, ep, model, rev, dim, asr, vad, missing.ToArray(), PreloadNsfw(missing), PreloadOcr(missing));
+    }
+
+    /// <summary>With ocr.enabled on, loads the OCR engine now so hello reports it ("onnx iGPU", "windows en-US") and
+    /// the first keyframe does not wait for a compile. Never fails hello.</summary>
+    private string? PreloadOcr(List<string> missing)
+    {
+        if (!_s.OcrEnabled) return null;
+        try
+        {
+            if (_s.OcrEngine == "windows") return "windows " + EnsureWindowsOcr().Language;
+            if (missing.Contains(ModelCatalog.Ocr)) return null;
+            return "onnx " + NsfwDevicePlan.Label(EnsureOcr().Device);
+        }
+        catch (WorkerException e) { Log.Warn($"hello: ocr not loaded: {e.Message}"); return null; }
     }
 
     /// <summary>With privacy.nsfwFilter on, loads the NSFW gate now (the detector too when privacy.nsfwDetector is on
@@ -147,6 +166,8 @@ public sealed class RealEngine : IWorkerEngine
         if (ModelCatalog.VadPath(_s.ModelDir) is null) m.Add(ModelCatalog.Vad);
         if (ModelCatalog.Load(_s.ModelDir, ModelCatalog.Nsfw) is null) m.Add(ModelCatalog.Nsfw);
         if (ModelCatalog.Load(_s.ModelDir, ModelCatalog.NsfwDetector) is null) m.Add(ModelCatalog.NsfwDetector);
+        if (ModelCatalog.Load(_s.ModelDir, ModelCatalog.Ocr) is null) m.Add(ModelCatalog.Ocr);
+        if (ModelCatalog.Load(_s.ModelDir, ModelCatalog.Ner) is null) m.Add(ModelCatalog.Ner);
         return m;
     }
 
@@ -448,19 +469,120 @@ public sealed class RealEngine : IWorkerEngine
         return order.Select(d => new NsfwCandidate(d, backends[d], d.Ep == "OpenVINO" ? ovCache : null)).ToList();
     }
 
-    /// <summary>DirectML device on the DXGI adapter chosen by privacy.nsfwGpuAdapter, or null (no DirectML provider,
+    // ---------------- OCR ----------------
+
+    public OcrResult Ocr(ImageInput image, bool entities)
+    {
+        var sw = Stopwatch.StartNew();
+        var rgb = ImagePipeline.Decode(image);
+        OcrLine[] lines;
+        string engine;
+        if (_s.OcrEngine == "windows") { lines = EnsureWindowsOcr().Read(rgb); engine = "windows"; }
+        else { lines = EnsureOcr().Read(rgb); engine = "onnx"; }
+        Array.Clear(rgb.Rgb);
+        if (entities && lines.Length > 0)
+        {
+            var found = EnsureNer().Find(lines.Select(l => l.Text).ToList());
+            lines = lines.Select((l, i) => l with { Entities = found[i] ?? [] }).ToArray();
+        }
+        return new OcrResult(lines, engine, Math.Round(sw.Elapsed.TotalMilliseconds, 2));
+    }
+
+    /// <summary>ocr.languages as codes: the setting's list, or for "auto" the Windows user languages (English added
+    /// when missing, since most UI text has some).</summary>
+    internal IReadOnlyList<string> OcrLanguageCodes()
+    {
+        if (_s.OcrLanguages != "auto")
+            return _s.OcrLanguages.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        var list = new List<string>();
+        try { list.AddRange(Windows.System.UserProfile.GlobalizationPreferences.Languages); }
+        catch (Exception e) when (e is not OutOfMemoryException) { Log.Warn($"ocr: user languages unavailable ({e.GetType().Name})"); }
+        if (!list.Any(l => l.StartsWith("en", StringComparison.OrdinalIgnoreCase))) list.Add("en-US");
+        return list;
+    }
+
+    private WindowsOcr EnsureWindowsOcr()
+        => _winOcr ??= WindowsOcr.TryCreate(OcrLanguageCodes()) ?? throw new ModelNotInstalledException(ModelCatalog.WindowsOcr);
+
+    /// <summary>PaddleOCR on the first ocr.device candidate that loads and passes a warm-up: integrated GPU (OpenVINO),
+    /// graphics card (DirectML, automatic adapter), CPU (ONNX Runtime). No NPU: the graphs have dynamic shapes.</summary>
+    private PaddleOcr EnsureOcr()
+    {
+        if (_ocr is not null) return _ocr;
+        var m = ModelCatalog.Load(_s.ModelDir, ModelCatalog.Ocr) ?? throw new ModelNotInstalledException(ModelCatalog.Ocr);
+        var spec = m.Ocr ?? throw new ModelNotInstalledException(ModelCatalog.Ocr);
+        var codes = OcrLanguageCodes();
+        var recs = OcrMath.PickRecognisers(spec.Rec, codes);
+        Log.Info($"ocr languages [{string.Join(",", codes)}] -> recognisers [{string.Join(",", recs.Select(r => r.Name))}]");
+        string? last = null;
+        foreach (var c in Candidates(_s.OcrDevice, "auto", "ocr", m.Hash, allowNpu: false))
+        {
+            PaddleOcr? ocr = null;
+            var sw = Stopwatch.StartNew();
+            try
+            {
+                ocr = new PaddleOcr(c.Backend, c.Device, m, recs, c.CacheDir);
+                ocr.WarmUp();
+                Log.Info($"ocr on {NsfwDevicePlan.Label(c.Device)} ({c.Device.Ep} {c.Device.Id}), load {sw.ElapsedMilliseconds} ms");
+                return _ocr = ocr;
+            }
+            catch (Exception e) when (e is DeviceFailedException or InvalidDataException or IOException)
+            {
+                ocr?.Dispose();
+                last = e.Message;
+                Log.Warn($"ocr on {NsfwDevicePlan.Label(c.Device)} ({c.Device.Ep} {c.Device.Id}) failed: {e.Message}");
+            }
+        }
+        throw new DeviceFailedException(last is null ? "ocr has no device" : $"ocr failed on every device ({last})");
+    }
+
+    /// <summary>NER on the CPU (ONNX Runtime): a small INT8 graph, run once per keyframe with text.</summary>
+    private PiiNer EnsureNer()
+    {
+        if (_ner is not null) return _ner;
+        var m = ModelCatalog.Load(_s.ModelDir, ModelCatalog.Ner) ?? throw new ModelNotInstalledException(ModelCatalog.Ner);
+        var cpu = CpuOrt.Devices.First(d => d.Kind == DeviceKind.Cpu);
+        var sw = Stopwatch.StartNew();
+        _ner = new PiiNer(CpuOrt, cpu, m);
+        Log.Info($"ner loaded on CPU in {sw.ElapsedMilliseconds} ms");
+        return _ner;
+    }
+
+    /// <summary>Devices for a model loaded like the NSFW gate (<see cref="NsfwDevicePlan"/> order for setting):
+    /// OpenVINO NPU (when allowNpu) and GPUs, the DirectML adapter picked by gpuAdapter, the ONNX Runtime CPU.</summary>
+    private List<NsfwCandidate> Candidates(string setting, string gpuAdapter, string cacheName, string modelHash, bool allowNpu)
+    {
+        var available = new List<DeviceInfo>();
+        var backends = new Dictionary<DeviceInfo, IInferenceBackend>();
+        if (setting is "auto" or "npu" or "igpu" && Main is OpenVinoBackend ov)
+            foreach (var d in ov.Devices.Where(d => d.Kind != DeviceKind.Cpu && (allowNpu || d.Kind != DeviceKind.Npu))) { available.Add(d); backends[d] = ov; }
+        if (_probeDml && setting is "auto" or "gpu" && DmlDevice(gpuAdapter, cacheName) is { } dml) { available.Add(dml); backends[dml] = CpuOrt; }
+        var cpu = CpuOrt.Devices.First(d => d.Kind == DeviceKind.Cpu);
+        available.Add(cpu); backends[cpu] = CpuOrt;
+        var order = NsfwDevicePlan.Order(setting, available);
+        string? ovCache = order.Any(d => d.Ep == "OpenVINO")
+            ? DeviceCache.CompiledDir(DataPaths.CompiledCache(_home), cacheName,
+                new DeviceCacheKey(Main.Name, Main.Version, Main.NpuDriverVersion, modelHash, "", 0).CompiledId)
+            : null;
+        Log.Info($"{cacheName} device order ({setting}): {string.Join(", ", order.Select(d => $"{NsfwDevicePlan.Label(d)} {d.Ep} {d.Id}"))}");
+        return order.Select(d => new NsfwCandidate(d, backends[d], d.Ep == "OpenVINO" ? ovCache : null)).ToList();
+    }
+
+    private DeviceInfo? NsfwDmlDevice() => DmlDevice(_s.NsfwGpuAdapter, "nsfw");
+
+    /// <summary>DirectML device on the DXGI adapter chosen by the adapter setting, or null (no DirectML provider,
     /// no DXGI, or no matching adapter).</summary>
-    private DeviceInfo? NsfwDmlDevice()
+    private DeviceInfo? DmlDevice(string adapterSetting, string what)
     {
         try
         {
             if (!Microsoft.ML.OnnxRuntime.OrtEnv.Instance().GetAvailableProviders().Contains("DmlExecutionProvider")) return null;
         }
-        catch (Exception e) when (e is not OutOfMemoryException) { Log.Warn($"nsfw: ONNX Runtime providers: {e.GetType().Name}"); return null; }
+        catch (Exception e) when (e is not OutOfMemoryException) { Log.Warn($"{what}: ONNX Runtime providers: {e.GetType().Name}"); return null; }
         var adapters = DxgiAdapters.Enumerate();
-        var pick = DxgiAdapters.Pick(_s.NsfwGpuAdapter, adapters);
-        Log.Info($"nsfw: DXGI adapters [{string.Join("; ", adapters.Select(a => $"{a.Index} {a.Description} {a.DedicatedVideoMemory >> 20} MB"))}], " +
-                 $"setting '{_s.NsfwGpuAdapter}' -> {(pick is null ? "none" : pick.Index + " " + pick.Description)}");
+        var pick = DxgiAdapters.Pick(adapterSetting, adapters);
+        Log.Info($"{what}: DXGI adapters [{string.Join("; ", adapters.Select(a => $"{a.Index} {a.Description} {a.DedicatedVideoMemory >> 20} MB"))}], " +
+                 $"setting '{adapterSetting}' -> {(pick is null ? "none" : pick.Index + " " + pick.Description)}");
         return pick is null ? null : new DeviceInfo(DeviceKind.Gpu, $"DML:{pick.Index}", pick.Description, "DirectML");
     }
 
@@ -525,6 +647,8 @@ public sealed class RealEngine : IWorkerEngine
         _nsfw?.Dispose();
         _vad?.Dispose();
         _whisper?.Dispose();
+        _ocr?.Dispose();
+        _ner?.Dispose();
         _main?.Dispose();
         _cpuOrt?.Dispose();
         _gpuOrt?.Dispose();

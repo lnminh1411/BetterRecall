@@ -55,9 +55,11 @@ internal static class Diagnostics
         {
             double enc = kp.Kept == 0 ? 0 : kp.EncodeMsTotal / kp.Kept;
             sb.AppendLine($"keyframes kept {kp.Kept}, similar {kp.SkippedSimilar}, dropped {kp.Dropped}, failed {kp.Failed}, encode avg {enc:F1} ms");
+            double ocr = kp.OcrRead == 0 ? 0 : kp.OcrMsTotal / kp.OcrRead;
+            sb.AppendLine($"ocr read {kp.OcrRead}, failed {kp.OcrFailed}, unavailable {kp.OcrUnavailable}, avg {ocr:F0} ms; redacted spans {kp.RedactedSpans}, dropped unchecked {kp.RedactDropped}");
         }
         if (host.Scheduler is { } sc) sb.AppendLine($"scheduler: {sc.LastDecision}, processed {sc.Processed}, nsfw {sc.Dropped}, queued {sc.Queued}");
-        if (host.Guard is { } g) sb.AppendLine($"guard scan {g.LastScanMs:F2} ms, badge {g.LastBadgeMs:F1} ms");
+        if (host.Guard is { } g) sb.AppendLine($"guard scan {g.LastScanMs:F2} ms, badge {g.LastBadgeMs:F1} ms, password fields {g.LastPasswordMs:F1} ms");
         sb.AppendLine($"worker running {host.Supervisor.IsRunning}, failures {host.Supervisor.Failures}, nsfw device {host.Supervisor.Hello?.NsfwDevice ?? "not loaded"}");
         sb.AppendLine($"isolation applied: {string.Join(", ", MemoryIsolation.Applied)}; skipped: {string.Join(", ", MemoryIsolation.Skipped)}");
         return sb.ToString();
