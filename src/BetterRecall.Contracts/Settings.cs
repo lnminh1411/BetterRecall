@@ -53,7 +53,7 @@ public static class AiDefaults
     public static string Model(string provider) => provider switch
     {
         OpenAi => "gpt-6-luna",
-        Claude => "claude-haiku-5-5",
+        Claude => "claude-opus-5-5",
         _ => "gemini-3.8-flash",
     };
 

@@ -665,7 +665,7 @@
   <data name="S_ai_provider_openai-compatible" xml:space="preserve"><value>OpenAI-compatible</value></data>
   <data name="S_ai_provider_claude" xml:space="preserve"><value>Anthropic Claude</value></data>
   <data name="S_ai_model" xml:space="preserve"><value>Model</value></data>
-  <data name="S_ai_model_D" xml:space="preserve"><value>Model id. Empty uses the provider default (gemini-3.8-flash, gpt-6-luna, claude-haiku-5-5).</value></data>
+  <data name="S_ai_model_D" xml:space="preserve"><value>Model id. Empty uses the provider default (gemini-3.8-flash, gpt-6-luna, claude-opus-5-5).</value></data>
   <data name="S_ai_endpoint" xml:space="preserve"><value>Endpoint</value></data>
   <data name="S_ai_endpoint_D" xml:space="preserve"><value>Empty uses the official endpoint. Must start with https://, or http:// on localhost for a local server.</value></data>
   <data name="AiKey_Title" xml:space="preserve"><value>API key</value></data>

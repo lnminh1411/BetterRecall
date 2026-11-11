@@ -229,7 +229,7 @@ Redaction: the image goes through `IDescribeRedactor` before the preview. Until 
 |---|---|---|---|
 | `gemini` | `POST {endpoint}/v1beta/models/{model}:generateContent`, `contents[0].parts` = text + `inlineData` | `x-goog-api-key` | `https://generativelanguage.googleapis.com`, `gemini-3.8-flash` |
 | `openai-compatible` | `POST {endpoint}/chat/completions`, user message content = `text` + `image_url` data URL | `Authorization: Bearer` (omitted when no key is set, for local servers) | `https://api.openai.com/v1`, `gpt-6-luna` |
-| `claude` | `POST {endpoint}/v1/messages`, `max_tokens` 1024, content = `image` (base64 source) + `text` | `x-api-key`, `anthropic-version: 2026-10-21` | `https://api.anthropic.com`, `claude-haiku-5-5` |
+| `claude` | `POST {endpoint}/v1/messages`, `max_tokens` 1024, content = `image` (base64 source) + `text` | `x-api-key`, `anthropic-version: 2026-10-21` | `https://api.anthropic.com`, `claude-opus-5-5` |
 
 API shapes checked against the providers' docs on 2026-11-11. Claude and OpenAI take JPEG, PNG, GIF and WebP; other keyframe formats are re-encoded first.
 
