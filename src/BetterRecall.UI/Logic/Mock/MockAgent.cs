@@ -177,6 +177,23 @@ public sealed class MockAgent
 
     public bool IsLocked { get { lock (_lock) return _locked; } }
 
+    /// <summary>Request lines answered with several lines (chat send / approve / deny).</summary>
+    public static bool IsStreamLine(string line)
+    {
+        var p = line.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        return p.Length >= 2 && p[0].Equals("chat", StringComparison.OrdinalIgnoreCase) && p[1].ToLowerInvariant() is "send" or "approve" or "deny";
+    }
+
+    /// <summary>Writes the reply lines of a stream line. Never throws except for cancellation.</summary>
+    public async Task StreamAsync(string line, Func<string, Task> write, CancellationToken ct = default)
+    {
+        try { await ChatStreamAsync(line.Trim(), write, ct); }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception) { await write(Envelope.Error(AgentErrors.Internal)); }
+    }
+
+    private Task ChatStreamAsync(string line, Func<string, Task> write, CancellationToken ct) => write(Envelope.Error("Unknown command 'chat'."));
+
     /// <summary>One request line in, one response line out. Never throws.</summary>
     public async Task<string> HandleAsync(string line, CancellationToken ct = default)
     {

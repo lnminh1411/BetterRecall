@@ -243,4 +243,61 @@ public sealed class AgentApi(IAgentClient client)
     /// <summary>Sends the previewed image to the provider. Takes seconds: use a run client, not the shared one.</summary>
     public async Task<AgentResult<DescribeResult>> DescribeSendAsync(string token, CancellationToken ct = default) =>
         (await client.SendAsync("describe send " + token, ct)).As(d => d.Deserialize(ContractsJson.Default.DescribeResult) ?? throw new JsonException());
+
+    // ---------------- cloud chat ----------------
+
+    public async Task<AgentResult<IReadOnlyList<ChatSummary>>> ChatListAsync(CancellationToken ct = default) =>
+        (await client.SendAsync("chat list", ct)).As<IReadOnlyList<ChatSummary>>(d => d.Deserialize(ContractsJson.Default.ItemsReplyChatSummary)?.Items ?? []);
+
+    public async Task<AgentResult<ChatDetail>> ChatGetAsync(string id, CancellationToken ct = default) =>
+        (await client.SendAsync("chat get " + id, ct)).As(d => d.Deserialize(ContractsJson.Default.ChatDetail) ?? throw new JsonException());
+
+    public Task<AgentResult> ChatRenameAsync(string id, string title, CancellationToken ct = default) =>
+        client.SendAsync("chat rename " + Json(w => { w.WriteString("id", id); w.WriteString("title", title); }), ct);
+
+    public Task<AgentResult> ChatDeleteAsync(string id, CancellationToken ct = default) => client.SendAsync("chat delete " + id, ct);
+
+    public Task<AgentResult> ChatClearAsync(CancellationToken ct = default) => client.SendAsync("chat clear", ct);
+
+    public static string ChatSendLine(string? chatId, string text) =>
+        "chat send " + Json(w => { if (chatId is not null) w.WriteString("chat", chatId); w.WriteString("text", text); });
+
+    public static string ChatApproveLine(string token, IEnumerable<string> remove) =>
+        "chat approve " + Json(w =>
+        {
+            w.WriteString("token", token);
+            w.WriteStartArray("remove");
+            foreach (var id in remove) w.WriteStringValue(id);
+            w.WriteEndArray();
+        });
+
+    public static string ChatDenyLine(string token) => "chat deny " + token;
+
+    /// <summary>
+    /// Runs one chat line (ChatSendLine / ChatApproveLine / ChatDenyLine) on a dedicated client (Services.CreateRunClient)
+    /// and passes every event to onEvent as it arrives. Ends at done, approval or error; an error before the turn starts
+    /// comes back as a failed result with no event.
+    /// </summary>
+    public static Task<AgentResult> ChatStreamAsync(AgentClient run, string line, Action<ChatEvent> onEvent, CancellationToken ct = default) =>
+        run.StreamAsync(line, r =>
+        {
+            ChatEvent? e;
+            try { e = r.Data.Deserialize(ContractsJson.Default.ChatEvent); }
+            catch (JsonException) { e = null; }
+            if (e is null) { onEvent(new ChatEvent("error", Code: "protocol", Text: "Bad response.")); return true; }
+            onEvent(e);
+            return e.Type is "done" or "approval" or "error";
+        }, ct);
+
+    private static string Json(Action<Utf8JsonWriter> body)
+    {
+        using var ms = new MemoryStream();
+        using (var w = new Utf8JsonWriter(ms))
+        {
+            w.WriteStartObject();
+            body(w);
+            w.WriteEndObject();
+        }
+        return System.Text.Encoding.UTF8.GetString(ms.ToArray());
+    }
 }
