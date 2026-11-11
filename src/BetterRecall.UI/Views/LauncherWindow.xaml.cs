@@ -47,6 +47,7 @@ public sealed partial class LauncherWindow : Window
         _detail = new DetailViewModel(s.MediaApi);
         Detail.ViewModel = _detail;
         Detail.ModalChanged += open => _modal = Math.Max(0, _modal + (open ? 1 : -1));
+        AskView.SourceInvoked += src => _ = _detail.LoadAsync(ChatViewModel.ToCaptureItem(src));
         GroupsSource.Source = _vm.Groups;
         ResultsGrid.ItemsSource = GroupsSource.View;
         HistoryList.ItemsSource = _vm.History;
@@ -139,9 +140,13 @@ public sealed partial class LauncherWindow : Window
         DropData();
     }
 
-    /// <summary>Everything decrypted leaves memory: results, previews, history, facets, the detail image.</summary>
+    /// <summary>Everything decrypted leaves memory: results, previews, history, facets, the detail image, the Ask chat
+    /// (the next show starts a new chat).</summary>
     private void DropData()
     {
+        AskView.Stop();
+        AskView.ViewModel.Reset();
+        AskToggle.IsChecked = false;
         _vm.ClearResults();
         _vm.History.Clear();
         _detail.Clear();
@@ -199,8 +204,37 @@ public sealed partial class LauncherWindow : Window
     {
         bool emptyQuery = _vm.Query.Trim().Length == 0;
         bool showHistory = emptyQuery && _vm.History.Count > 0 && !Services.Current.Locked;
-        HistoryPanel.Visibility = showHistory ? Visibility.Visible : Visibility.Collapsed;
-        EmptyHint.Visibility = _vm.Results.Count == 0 && !showHistory ? Visibility.Visible : Visibility.Collapsed;
+        HistoryPanel.Visibility = showHistory && !_ask ? Visibility.Visible : Visibility.Collapsed;
+        EmptyHint.Visibility = _vm.Results.Count == 0 && !showHistory && !_ask ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    // ---------------- ask ----------------
+
+    private bool _ask;
+
+    /// <summary>Ask on: the chat replaces filters and results; text already in the box becomes the first question.
+    /// Off: back to search with the same query.</summary>
+    private void AskToggle_Changed(object sender, RoutedEventArgs e)
+    {
+        _ask = AskToggle.IsChecked == true;
+        AskView.Visibility = _ask ? Visibility.Visible : Visibility.Collapsed;
+        ResultsGrid.Visibility = _ask ? Visibility.Collapsed : Visibility.Visible;
+        FilterRow.Visibility = _ask ? Visibility.Collapsed : Visibility.Visible;
+        UpdateEmpty();
+        if (_ask)
+        {
+            _vm.CancelPending();
+            _detail.Clear();
+            var q = SearchBox.Text.Trim();
+            if (q.Length > 0 && AskView.ViewModel.Messages.Count == 0) _ = AskView.SendAsync(q);
+            AskView.FocusInput();
+        }
+        else
+        {
+            AskView.Stop();
+            SearchBox.Focus(FocusState.Programmatic);
+            if (IsShown && !Services.Current.Locked && _vm.Query.Trim().Length > 0) _ = _vm.SearchNowAsync();
+        }
     }
 
     private void FillFacets()
@@ -289,12 +323,24 @@ public sealed partial class LauncherWindow : Window
 
     private void SearchBox_TextChanged(object sender, TextChangedEventArgs e)
     {
+        if (_ask) return;   // the box is a question while Ask is on; Enter sends it
         _vm.Query = SearchBox.Text;
         _ = _vm.ScheduleAsync();
     }
 
     private async void SearchBox_PreviewKeyDown(object sender, KeyRoutedEventArgs e)
     {
+        if (_ask)
+        {
+            if (e.Key == VirtualKey.Enter && SearchBox.Text.Trim().Length > 0)
+            {
+                e.Handled = true;
+                var q = SearchBox.Text;
+                SearchBox.Text = "";
+                await AskView.SendAsync(q);
+            }
+            return;
+        }
         if (e.Key == VirtualKey.Down && _vm.Results.Count > 0)
         {
             e.Handled = true;

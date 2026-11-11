@@ -68,18 +68,23 @@
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
             <TextBox x:Name="SearchBox" x:Uid="Launcher_SearchBox" FontSize="20" Padding="12,8,44,8"
                      TextChanged="SearchBox_TextChanged" PreviewKeyDown="SearchBox_PreviewKeyDown" />
             <ProgressRing x:Name="Busy" IsActive="False" Width="20" Height="20" HorizontalAlignment="Right" Margin="0,0,14,0" IsHitTestVisible="False" />
             <!-- The launcher has no title bar: this and Esc close it; clicking elsewhere hides it too. -->
-            <Button x:Name="CloseButton" Grid.Column="1" VerticalAlignment="Stretch" Width="44" Padding="0"
+            <ToggleButton x:Name="AskToggle" x:Uid="Launcher_AskToggle" Grid.Column="1" VerticalAlignment="Stretch" Width="44" Padding="0"
+                          Checked="AskToggle_Changed" Unchecked="AskToggle_Changed">
+                <FontIcon Glyph="&#xE8BD;" FontSize="16" />
+            </ToggleButton>
+            <Button x:Name="CloseButton" Grid.Column="2" VerticalAlignment="Stretch" Width="44" Padding="0"
                     Background="Transparent" BorderThickness="0" Click="Close_Click">
                 <FontIcon Glyph="&#xE711;" FontSize="14" />
             </Button>
         </Grid>
 
-        <Grid Grid.Row="1" Padding="16,0,16,8" ColumnSpacing="8">
+        <Grid x:Name="FilterRow" Grid.Row="1" Padding="16,0,16,8" ColumnSpacing="8">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="Auto" />
@@ -165,6 +170,7 @@
                     </ListView.ItemTemplate>
                 </ListView>
             </Grid>
+            <views:ChatView x:Name="AskView" Visibility="Collapsed" />
             <Border Grid.Column="1" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1,0,0,0"
                     Background="{ThemeResource LayerFillColorDefaultBrush}">
                 <views:DetailPane x:Name="Detail" />
