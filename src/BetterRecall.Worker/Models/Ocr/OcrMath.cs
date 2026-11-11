@@ -99,12 +99,23 @@ public static class OcrMath
     public static int RecWidth(int w, int h, int height, int maxWidth = 3200)
         => Math.Clamp((int)Math.Ceiling((double)height * w / Math.Max(1, h)), 8, maxWidth);
 
-    /// <summary>Batch tensor [n,3,height,width]: each crop resized to (widths[i], height), BGR, (x/255 - 0.5) / 0.5,
-    /// zero (mid grey) to the right of it.</summary>
-    public static float[] RecTensor(IReadOnlyList<RgbImage> resized, int height, int width)
+    /// <summary>Recogniser widths on accelerators: a crop's width is rounded up to the first bucket, so each recogniser
+    /// sees at most this many shapes (times one batch size).</summary>
+    public static readonly int[] RecBuckets = [256, 512, 768, 1024, 1536, 2048, 3200];
+
+    public static int RecBucket(int width)
+    {
+        foreach (var b in RecBuckets) if (width <= b) return b;
+        return RecBuckets[^1];
+    }
+
+    /// <summary>Batch tensor [batch,3,height,width] (batch defaults to the crop count; extra rows stay zero, mid grey):
+    /// each crop resized to (widths[i], height), BGR, (x/255 - 0.5) / 0.5, zero to the right of it.</summary>
+    public static float[] RecTensor(IReadOnlyList<RgbImage> resized, int height, int width, int batch = 0)
     {
         int plane = height * width;
-        var t = new float[resized.Count * 3 * plane];
+        if (batch < resized.Count) batch = resized.Count;
+        var t = new float[batch * 3 * plane];
         for (int n = 0; n < resized.Count; n++)
         {
             var img = resized[n];

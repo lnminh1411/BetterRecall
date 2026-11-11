@@ -38,10 +38,10 @@ public sealed record WorkerSettings(
     public string OcrEngine { get; init; } = "onnx";
     /// <summary>ocr.languages: "auto" or comma-separated codes.</summary>
     public string OcrLanguages { get; init; } = "auto";
-    /// <summary>ocr.device: auto | igpu | gpu | cpu (<see cref="Inference.NsfwDevicePlan"/> slots without the NPU).</summary>
+    /// <summary>ocr.device: auto | npu | igpu | gpu | cpu (<see cref="Inference.NsfwDevicePlan"/> slots; auto skips graphics cards).</summary>
     public string OcrDevice { get; init; } = "auto";
 
-    public static readonly string[] OcrDevices = ["auto", "igpu", "gpu", "cpu"];
+    public static readonly string[] OcrDevices = ["auto", "npu", "igpu", "gpu", "cpu"];
 
     public static readonly int[] Dims = [768, 512, 256];
     public static readonly int[] TokenBudgets = [70, 140, 280];

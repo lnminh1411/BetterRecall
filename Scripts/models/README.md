@@ -76,6 +76,9 @@ Order: `fetch_models.py`, then the seven exports and `export_onnx.py`, then `sta
 - Graph inputs carry exactly one tensor name each (`name_inputs`): the worker reads names with `ov_port_get_any_name`.
 - Verified 2026-11-12 (worker tests with `BR_OCR_MODELS` pointing at a models folder): PaddleOCR on the CPU reads
   rendered English, Korean, Cyrillic and Japanese lines (about 0.5 s for 1280x400); the NER model finds names and
-  addresses; the C# tokenizer gives the same ids as Python `tokenizers` 0.22. Not verified: OCR on DirectML devices,
-  real screenshots, Vietnamese tone marks (the PaddleOCR dictionaries lack them; search folds diacritics).
+  addresses; the C# tokenizer gives the same ids as Python `tokenizers` 0.22. Devices (`BR_OCR_DEVICES=1`, optional
+  `BR_OCR_ONLY=NPU,GPU.0`, test `OcrDeviceTests`): the NPU runs the graphs as static copies per shape (381 ms and 0.1 s
+  CPU time per 1280x720 screen, vs 362 ms and 1.1 s on the CPU); the integrated GPU (OpenVINO and DirectML) and both
+  DirectML graphics cards give the CPU's text. Not verified: real screenshots, Vietnamese tone marks (the PaddleOCR
+  dictionaries lack them; search folds diacritics).
 - Still open: SigLIP 2 lower-casing, NSFW INT8 accuracy on real content (only label agreement with the float model).

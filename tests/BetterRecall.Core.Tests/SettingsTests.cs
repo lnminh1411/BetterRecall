@@ -207,7 +207,7 @@ public class SettingsTests
         Assert.Equal("Invalid ocr.engine.", s.TryUpdate(JsonDocument.Parse("{\"ocr\":{\"engine\":\"tesseract\"}}").RootElement));
         Assert.Equal("Invalid ocr.languages.", s.TryUpdate(JsonDocument.Parse("{\"ocr\":{\"languages\":\"english\"}}").RootElement));
         Assert.Equal("Invalid ocr.languages.", s.TryUpdate(JsonDocument.Parse("{\"ocr\":{\"languages\":\"\"}}").RootElement));
-        Assert.Equal("Invalid ocr.device.", s.TryUpdate(JsonDocument.Parse("{\"ocr\":{\"device\":\"npu\"}}").RootElement));
+        Assert.Equal("Invalid ocr.device.", s.TryUpdate(JsonDocument.Parse("{\"ocr\":{\"device\":\"tpu\"}}").RootElement));
         Assert.Equal(("windows", "en-US, ja,vi", "cpu"), (s.Current.Ocr.Engine, s.Current.Ocr.Languages, s.Current.Ocr.Device));
         Assert.True(s.Current.Privacy.RedactEmails && s.Current.Privacy.RedactNames);
     }

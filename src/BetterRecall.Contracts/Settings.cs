@@ -31,7 +31,7 @@ public sealed class OcrSettings
     public bool Enabled { get; set; } = true;          // read the text of each kept keyframe (search + text redaction)
     public string Engine { get; set; } = "onnx";        // onnx (PaddleOCR PP-OCRv6/v5 models, many scripts) | windows (Windows.Media.Ocr, installed language packs)
     public string Languages { get; set; } = "auto";     // auto (Windows display languages) or comma-separated codes like "en,vi,ja"
-    public string Device { get; set; } = "auto";        // auto | igpu | gpu | cpu (onnx engine)
+    public string Device { get; set; } = "auto";        // auto (NPU, iGPU, CPU) | npu | igpu | gpu | cpu (onnx engine)
 }
 
 /// <summary>Cloud describe: the only feature that sends data off the PC. Off by default; every send needs a

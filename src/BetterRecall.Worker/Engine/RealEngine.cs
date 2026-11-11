@@ -504,8 +504,9 @@ public sealed class RealEngine : IWorkerEngine
     private WindowsOcr EnsureWindowsOcr()
         => _winOcr ??= WindowsOcr.TryCreate(OcrLanguageCodes()) ?? throw new ModelNotInstalledException(ModelCatalog.WindowsOcr);
 
-    /// <summary>PaddleOCR on the first ocr.device candidate that loads and passes a warm-up: integrated GPU (OpenVINO),
-    /// graphics card (DirectML, automatic adapter), CPU (ONNX Runtime). No NPU: the graphs have dynamic shapes.</summary>
+    /// <summary>PaddleOCR on the first ocr.device candidate that loads and passes a warm-up. auto: NPU (OpenVINO, a static
+    /// copy compiled per input shape), integrated GPU (OpenVINO), CPU (ONNX Runtime); graphics cards (DirectML) only
+    /// when ocr.device is gpu, so OCR leaves the user's GPUs alone.</summary>
     private PaddleOcr EnsureOcr()
     {
         if (_ocr is not null) return _ocr;
@@ -515,7 +516,7 @@ public sealed class RealEngine : IWorkerEngine
         var recs = OcrMath.PickRecognisers(spec.Rec, codes);
         Log.Info($"ocr languages [{string.Join(",", codes)}] -> recognisers [{string.Join(",", recs.Select(r => r.Name))}]");
         string? last = null;
-        foreach (var c in Candidates(_s.OcrDevice, "auto", "ocr", m.Hash, allowNpu: false))
+        foreach (var c in Candidates(_s.OcrDevice, "auto", "ocr", m.Hash, allowNpu: true, autoDiscrete: false))
         {
             PaddleOcr? ocr = null;
             var sw = Stopwatch.StartNew();
@@ -550,13 +551,13 @@ public sealed class RealEngine : IWorkerEngine
 
     /// <summary>Devices for a model loaded like the NSFW gate (<see cref="NsfwDevicePlan"/> order for setting):
     /// OpenVINO NPU (when allowNpu) and GPUs, the DirectML adapter picked by gpuAdapter, the ONNX Runtime CPU.</summary>
-    private List<NsfwCandidate> Candidates(string setting, string gpuAdapter, string cacheName, string modelHash, bool allowNpu)
+    private List<NsfwCandidate> Candidates(string setting, string gpuAdapter, string cacheName, string modelHash, bool allowNpu, bool autoDiscrete = true)
     {
         var available = new List<DeviceInfo>();
         var backends = new Dictionary<DeviceInfo, IInferenceBackend>();
         if (setting is "auto" or "npu" or "igpu" && Main is OpenVinoBackend ov)
             foreach (var d in ov.Devices.Where(d => d.Kind != DeviceKind.Cpu && (allowNpu || d.Kind != DeviceKind.Npu))) { available.Add(d); backends[d] = ov; }
-        if (_probeDml && setting is "auto" or "gpu" && DmlDevice(gpuAdapter, cacheName) is { } dml) { available.Add(dml); backends[dml] = CpuOrt; }
+        if (_probeDml && (setting == "gpu" || setting == "auto" && autoDiscrete) && DmlDevice(gpuAdapter, cacheName) is { } dml) { available.Add(dml); backends[dml] = CpuOrt; }
         var cpu = CpuOrt.Devices.First(d => d.Kind == DeviceKind.Cpu);
         available.Add(cpu); backends[cpu] = CpuOrt;
         var order = NsfwDevicePlan.Order(setting, available);

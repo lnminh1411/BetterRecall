@@ -53,6 +53,26 @@ internal static class TextImages
 public class OcrMathTests
 {
     [Theory]
+    [InlineData(8, 256)]
+    [InlineData(256, 256)]
+    [InlineData(257, 512)]
+    [InlineData(1100, 1536)]
+    [InlineData(3200, 3200)]
+    [InlineData(5000, 3200)]
+    public void Recogniser_widths_round_up_to_few_buckets(int width, int bucket) => Assert.Equal(bucket, OcrMath.RecBucket(width));
+
+    [Fact]
+    public void Recogniser_batch_is_padded_with_mid_grey_rows()
+    {
+        var crop = new RgbImage(4, 2, Enumerable.Repeat((byte)255, 4 * 2 * 3).ToArray());
+        var t = OcrMath.RecTensor([crop], 2, 8, batch: 3);
+        Assert.Equal(3 * 3 * 2 * 8, t.Length);
+        Assert.Equal(1f, t[0]);                                  // white pixel of the real crop
+        Assert.Equal(0f, t[5]);                                  // right of the crop: padding
+        Assert.All(t.AsSpan(3 * 2 * 8).ToArray(), v => Assert.Equal(0f, v));   // rows 2 and 3: padding only
+    }
+
+    [Theory]
     [InlineData(1280, 720, 1920, 1280, 736)]
     [InlineData(3840, 2160, 1920, 1920, 1088)]
     [InlineData(10, 10, 1920, 32, 32)]
@@ -338,63 +358,98 @@ public class OcrDeviceTests(ITestOutputHelper output)
         var img = TextImages.Render(1280, 720, [.. items]);
 
         var cpuOrt = new OnnxBackend(cpuOnly: true);
-        var devices = new List<(IInferenceBackend, DeviceInfo)>();
+        var devices = new List<(IInferenceBackend, DeviceInfo, bool?)>();
         foreach (var a in DxgiAdapters.Enumerate().Where(a => !a.IsSoftware && !a.IsBasicRender))
-            devices.Add((cpuOrt, GpuSelection.Dml(a)));
+            devices.Add((cpuOrt, GpuSelection.Dml(a), null));
         if (OpenVinoBackend.TryCreate() is { } ov)
-            foreach (var d in ov.Devices.Where(d => d.Kind == DeviceKind.Gpu)) devices.Add((ov, d));
-        devices.Add((cpuOrt, cpuOrt.Devices.First(d => d.Kind == DeviceKind.Cpu)));
+            foreach (var d in ov.Devices.Where(d => d.Kind is DeviceKind.Gpu or DeviceKind.Npu)) devices.Add((ov, d, null));
+        var cpuDev = cpuOrt.Devices.First(d => d.Kind == DeviceKind.Cpu);
+        devices.Add((cpuOrt, cpuDev, null));
+        devices.Add((cpuOrt, cpuDev, true));   // CPU with the accelerators' fixed shapes: isolates the padding effect
+        // BR_OCR_ONLY: comma list of device ids to run (e.g. "CPU,NPU,GPU.0"); the CPU always runs as the reference.
+        var only = (Environment.GetEnvironmentVariable("BR_OCR_ONLY") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (only.Length > 0) devices = devices.Where(x => x.Item2.Kind == DeviceKind.Cpu || only.Contains(x.Item2.Id)).ToList();
+        devices = [.. devices.OrderBy(x => x.Item2.Kind == DeviceKind.Cpu && x.Item3 is null ? 0 : 1)];
 
-        string? reference = null;
+        // Varied screens: new line widths and counts, as real keyframes bring. Same set for every device.
+        var rnd = new Random(7);
+        var variedImages = new List<RgbImage>();
+        for (int v = 0; v < 12; v++)
+        {
+            // One line per row, no overlaps: lengths, sizes and positions vary.
+            var vi = new List<(string, int, int, float)>();
+            int y = 10;
+            while (true)
+            {
+                int size = rnd.Next(12, 28);
+                if (y + size + 8 > 710) break;
+                var t0 = sample[rnd.Next(sample.Length)];
+                vi.Add((t0[..rnd.Next(Math.Min(6, t0.Length), t0.Length + 1)], rnd.Next(10, 600), y, size));
+                y += size + rnd.Next(14, 40);
+            }
+            variedImages.Add(TextImages.Render(1280, 720, [.. vi]));
+        }
+
+        List<string>? reference = null;
         var report = new StringBuilder();
-        foreach (var (backend, dev) in devices.OrderBy(x => x.Item2.Kind == DeviceKind.Cpu ? 0 : 1))
+        foreach (var (backend, dev, fixedShapes) in devices)
         {
             var sw = Stopwatch.StartNew();
+            var cache = TestEnv.NewDir("ocrdev");
             try
             {
-                using var ocr = new PaddleOcr(backend, dev, m, recs, TestEnv.NewDir("ocrdev"));
-                ocr.WarmUp();
-                long load = sw.ElapsedMilliseconds;
-                sw.Restart();
-                var first = ocr.Read(img);
-                long firstMs = sw.ElapsedMilliseconds;
-                var times = new List<double>();
-                OcrLine[] lines = first;
-                for (int i = 0; i < 5; i++) { sw.Restart(); lines = ocr.Read(img); times.Add(sw.Elapsed.TotalMilliseconds); }
-                // Varied screens: new line widths and counts, as real keyframes bring.
-                var rnd = new Random(7);
-                var cpu0 = Process.GetCurrentProcess().TotalProcessorTime;
-                var varied = new List<double>();
-                for (int v = 0; v < 12; v++)
+                long load, firstMs, reload;
+                var texts = new List<string>();
+                List<double> cold = [], warm = [];
+                double cpuCold, cpuWarm;
+                int graphs;
+                using (var ocr = new PaddleOcr(backend, dev, m, recs, cache, fixedShapes))
                 {
-                    var vi = new List<(string, int, int, float)>();
-                    int n = rnd.Next(4, 30);
-                    for (int i = 0; i < n; i++)
+                    ocr.WarmUp();
+                    load = sw.ElapsedMilliseconds;
+                    sw.Restart();
+                    texts.Add(string.Join("\n", ocr.Read(img).Select(l => l.Text)));
+                    firstMs = sw.ElapsedMilliseconds;
+                    var cpu0 = Process.GetCurrentProcess().TotalProcessorTime;
+                    foreach (var vimg in variedImages)
                     {
-                        var t0 = sample[rnd.Next(sample.Length)];
-                        vi.Add((t0[..rnd.Next(Math.Min(6, t0.Length), t0.Length + 1)], rnd.Next(10, 700), rnd.Next(5, 690), rnd.Next(12, 30)));
+                        sw.Restart();
+                        texts.Add(string.Join("\n", ocr.Read(vimg).Select(l => l.Text)));
+                        cold.Add(sw.Elapsed.TotalMilliseconds);
                     }
-                    var vimg = TextImages.Render(1280, 720, [.. vi]);
-                    sw.Restart(); ocr.Read(vimg); varied.Add(sw.Elapsed.TotalMilliseconds);
+                    cpuCold = (Process.GetCurrentProcess().TotalProcessorTime - cpu0).TotalMilliseconds / variedImages.Count;
+                    // Second pass over the same screens: every shape is compiled now (steady state).
+                    cpu0 = Process.GetCurrentProcess().TotalProcessorTime;
+                    foreach (var vimg in variedImages) { sw.Restart(); ocr.Read(vimg); warm.Add(sw.Elapsed.TotalMilliseconds); }
+                    cpuWarm = (Process.GetCurrentProcess().TotalProcessorTime - cpu0).TotalMilliseconds / variedImages.Count;
+                    graphs = ocr.CompiledGraphs;
                 }
-                var cpuMs = (Process.GetCurrentProcess().TotalProcessorTime - cpu0).TotalMilliseconds;
-                string text = string.Join("\n", lines.Select(l => l.Text));
-                reference ??= text;
-                report.AppendLine($"    varied 12: mean {varied.Average():F0} ms, max {varied.Max():F0} ms, last 4 mean {varied.TakeLast(4).Average():F0} ms, process cpu {cpuMs / 12:F0} ms per read");
-                int same = lines.Count(l => reference.Split('\n').Contains(l.Text));
-                report.AppendLine($"{dev.Ep} {dev.Id} '{dev.Name}': load {load} ms, first {firstMs} ms, median {times.Order().ElementAt(2):F0} ms, " +
-                    $"lines {lines.Length}, same as CPU {same}/{lines.Length}");
-                if (text != reference)
-                    foreach (var l in lines.Where(l => !reference.Split('\n').Contains(l.Text))) report.AppendLine($"    differs: '{l.Text}'");
+                // A new instance on the same cache: what the next worker start pays.
+                sw.Restart();
+                using (var again = new PaddleOcr(backend, dev, m, recs, cache, fixedShapes)) { again.WarmUp(); again.Read(img); }
+                reload = sw.ElapsedMilliseconds;
+
+                reference ??= texts;
+                int same = texts.Zip(reference).Count(p => p.First == p.Second);
+                report.AppendLine($"{dev.Ep} {dev.Id}{(fixedShapes == true ? " fixed shapes" : "")} '{dev.Name}': load {load} ms, first read {firstMs} ms, graphs {graphs}, reload+read {reload} ms");
+                report.AppendLine($"    varied cold: mean {cold.Average():F0} ms, max {cold.Max():F0} ms, cpu {cpuCold:F0} ms/read; " +
+                    $"warm: mean {warm.Average():F0} ms, max {warm.Max():F0} ms, cpu {cpuWarm:F0} ms/read; screens same as CPU {same}/{texts.Count}");
+                for (int i = 0; i < texts.Count; i++)
+                    if (texts[i] != reference[i])
+                    {
+                        var r = reference[i].Split('\n');
+                        foreach (var l in texts[i].Split('\n').Where(l => !r.Contains(l)).Take(3)) report.AppendLine($"    screen {i} differs: '{l}'");
+                    }
             }
             catch (Exception e)
             {
                 report.AppendLine($"{dev.Ep} {dev.Id} '{dev.Name}': FAILED after {sw.ElapsedMilliseconds} ms: {e.GetType().Name}: {e.Message}");
             }
+            output.WriteLine(report.ToString());
+            var file = Environment.GetEnvironmentVariable("BR_OCR_REPORT");
+            if (!string.IsNullOrEmpty(file)) File.WriteAllText(file, report.ToString());
+            try { Directory.Delete(cache, true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
         }
-        output.WriteLine(report.ToString());
-        var file = Environment.GetEnvironmentVariable("BR_OCR_REPORT");
-        if (!string.IsNullOrEmpty(file)) File.WriteAllText(file, report.ToString());
         Assert.NotNull(reference);
     }
 }

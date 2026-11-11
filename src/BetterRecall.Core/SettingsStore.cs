@@ -319,7 +319,7 @@ public sealed partial class SettingsStore : ISettingsStore
         ("ui.theme", s => In(s.Ui.Theme, "system", "light", "dark")),
         ("ocr.engine", s => In(s.Ocr.Engine, "onnx", "windows")),
         ("ocr.languages", s => ValidOcrLanguages(s.Ocr.Languages)),
-        ("ocr.device", s => In(s.Ocr.Device, "auto", "igpu", "gpu", "cpu")),
+        ("ocr.device", s => In(s.Ocr.Device, "auto", "npu", "igpu", "gpu", "cpu")),
         ("replay.sampleSeconds", s => Range(s.Replay.SampleSeconds, 2, 60)),
         ("security.unlockMethod", s => In(s.Security.UnlockMethod, "hello", "password")),
         ("ai.provider", s => In(s.Ai.Provider, AiDefaults.Providers)),

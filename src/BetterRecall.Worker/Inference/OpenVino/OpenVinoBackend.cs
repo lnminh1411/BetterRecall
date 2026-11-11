@@ -133,7 +133,9 @@ public sealed unsafe class OpenVinoBackend : IInferenceBackend
                 }
             var inputs = Ports(model, input: true);
             var outputs = Ports(model, input: false);
-            if (device.Kind == DeviceKind.Npu && ov_model_is_dynamic(model))
+            // The NPU needs static inputs and outputs. Inner nodes may still look dynamic after a reshape (shape
+            // subgraphs of ONNX exports such as PaddleOCR); the NPU compiler folds those, so only the ports are checked.
+            if (device.Kind == DeviceKind.Npu && inputs.Concat(outputs).Any(p => p.Shape.Any(d => d < 0)))
                 throw new DeviceFailedException("NPU needs a static-shape model");
 
             if (cacheDir is not null) Directory.CreateDirectory(cacheDir);

@@ -112,7 +112,7 @@ public static partial class SettingsSchema
         new("ocr.enabled", "ocr", SettingType.Bool),
         new("ocr.engine", "ocr", SettingType.Choice, Choices: ["onnx", "windows"], EnabledWhenKey: "ocr.enabled", EnabledWhenValue: "true"),
         new("ocr.languages", "ocr", SettingType.Text, Pattern: @"^(auto|[a-z]{2,3}(-[A-Za-z]{2,4})?( *, *[a-z]{2,3}(-[A-Za-z]{2,4})?){0,15})$", EnabledWhenKey: "ocr.enabled", EnabledWhenValue: "true"),
-        new("ocr.device", "ocr", SettingType.Choice, Choices: ["auto", "igpu", "gpu", "cpu"], EnabledWhenKey: "ocr.engine", EnabledWhenValue: "onnx"),
+        new("ocr.device", "ocr", SettingType.Choice, Choices: ["auto", "npu", "igpu", "gpu", "cpu"], EnabledWhenKey: "ocr.engine", EnabledWhenValue: "onnx"),
 
         new("index.dim", "index", SettingType.IntChoice, Choices: ["768", "512", "256"], WarningKey: "W_index_dim"),
         new("index.weakMatchBelow", "index", SettingType.Double, 0, 1),

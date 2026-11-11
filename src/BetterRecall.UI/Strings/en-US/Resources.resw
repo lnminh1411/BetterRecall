@@ -627,8 +627,9 @@
   <data name="S_ocr_languages" xml:space="preserve"><value>Languages</value></data>
   <data name="S_ocr_languages_D" xml:space="preserve"><value>"auto" uses your Windows display languages. Or list codes separated by commas, like "en, ja, ru".</value></data>
   <data name="S_ocr_device" xml:space="preserve"><value>Device</value></data>
-  <data name="S_ocr_device_D" xml:space="preserve"><value>Where PaddleOCR runs. The NPU is not used. If the chosen device fails, the CPU is used.</value></data>
-  <data name="S_ocr_device_auto" xml:space="preserve"><value>Auto (integrated GPU, then graphics card, then CPU)</value></data>
+  <data name="S_ocr_device_D" xml:space="preserve"><value>Where PaddleOCR runs. Automatic keeps it off the CPU and your graphics cards when it can. If the chosen device fails, the CPU is used.</value></data>
+  <data name="S_ocr_device_auto" xml:space="preserve"><value>Auto (NPU, then integrated GPU, then CPU)</value></data>
+  <data name="S_ocr_device_npu" xml:space="preserve"><value>NPU</value></data>
   <data name="S_ocr_device_igpu" xml:space="preserve"><value>Integrated GPU</value></data>
   <data name="S_ocr_device_gpu" xml:space="preserve"><value>Graphics card</value></data>
   <data name="S_ocr_device_cpu" xml:space="preserve"><value>CPU</value></data>
