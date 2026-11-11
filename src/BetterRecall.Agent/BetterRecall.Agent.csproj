@@ -30,6 +30,12 @@
     <None Include="..\..\assets\icons\tray-light.ico" Link="icons\tray-light.ico" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <None Include="native\libvpl.dll" Link="libvpl.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <None Include="native\libvpl.LICENSE.txt" Link="libvpl.LICENSE.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <!-- AVIF (libavif + aom + dav1d) and JPEG XL (libjxl) keyframe codecs, vcpkg builds with a static CRT; see codecs.LICENSE.txt. -->
+    <None Include="native\avif.dll" Link="avif.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Include="native\jxl.dll" Link="jxl.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Include="native\jxl_cms.dll" Link="jxl_cms.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Include="native\jxl_threads.dll" Link="jxl_threads.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Include="native\codecs.LICENSE.txt" Link="codecs.LICENSE.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\BetterRecall.Contracts\BetterRecall.Contracts.csproj" />
