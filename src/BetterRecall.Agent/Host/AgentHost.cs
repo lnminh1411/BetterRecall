@@ -109,7 +109,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         var encLuid = GpuDevices.Adapters().FirstOrDefault(a => a.VendorId == GpuDevices.VendorIntel)?.Luid;
         _probe = new SystemProbe(encLuid is null ? null : GpuDevices.PdhLuidToken(encLuid.Value));
         _scheduler = new EmbeddingScheduler(() => Store, () => S, _worker, ProbeLoad, () => _pause.Has("consent") || _pause.Has("keylocked"));
-        _pipeline = new KeyframePipeline(() => Store, () => S, OnCaptureStored, () => _capture?.Devices) { Sampler = _sampler };
+        _pipeline = new KeyframePipeline(() => Store, () => S, OnCaptureStored) { Sampler = _sampler };
         _guard = new GuardrailService(() => S, () => _sessionLocked, () => _capture?.MonitorBounds() ?? [], _opt.InstallDir);
         _guard.ForegroundChanged += _ => _capture?.OnForegroundChanged();
         _window.ForegroundChanged += () => _guard?.OnForegroundEvent();
@@ -405,7 +405,15 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
     private string StatusLine()
     {
         var (reason, until) = _pause.Current();
-        if (reason is null) return _captureStarted ? "Capturing" : "Starting";
+        if (reason is null)
+        {
+            if (!_captureStarted) return "Starting";
+            // Keyframe CPU budget: say so while frames are encoded cheaper or wait for budget.
+            var b = _pipeline?.Budget;
+            return b is { } bb && (bb.Level != EncodeLevel.Normal || bb.Waiting > 0)
+                ? $"Capturing (keyframes: CPU budget, {bb.Level.ToString().ToLowerInvariant()}{(bb.Waiting > 0 ? $", {bb.Waiting} waiting" : "")})"
+                : "Capturing";
+        }
         return reason switch
         {
             "consent" => "Waiting for consent",

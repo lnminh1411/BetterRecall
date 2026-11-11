@@ -10,319 +10,169 @@ using Xunit.Abstractions;
 
 namespace BetterRecall.Agent.Tests;
 
-public unsafe class HwAvifSpikeTests(ITestOutputHelper output)
+/// <summary>
+/// Keyframe encode cost spike: BR_KF_SPIKE=folder of PNGs (plus code / page / colour-UI renders written to
+/// &lt;dir&gt;/synthetic). Single-threaded libaom presets (speed, tune-content) against WebP and JPEG: size, wall and
+/// CPU ms per frame, PSNR of luma overall and on text blocks, chroma error on coloured pixels. Writes spike.csv and
+/// spike-summary.txt into the folder.
+/// </summary>
+public unsafe class KeyframeCostSpikeTests(ITestOutputHelper output)
 {
+    private const int Runs = 5;
+
+    private sealed record Variant(string Encoder, string Setting, Func<nint, int, int, byte[]> Encode);
+
     [Fact]
-    public void Hw_vs_libaom_spike()
+    public void Keyframe_cost_spike()
     {
-        var dir = Environment.GetEnvironmentVariable("BR_HWAVIF_SPIKE");
+        var dir = Environment.GetEnvironmentVariable("BR_KF_SPIKE");
         if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return;
         if (!Avif.TryLoad()) return;
 
         var repoRoot = FindRepoRoot();
         var syntheticDir = Path.Combine(dir, "synthetic");
         Directory.CreateDirectory(syntheticDir);
+        int[] Ints(string env, string dflt) => (Environment.GetEnvironmentVariable(env) ?? dflt)
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(int.Parse).ToArray();
+        var speeds = Ints("BR_KF_SPIKE_SPEED", "6,7,8,9,10");
+        var qs = Ints("BR_KF_SPIKE_Q", "60,75,90");
+
+        var variants = new List<Variant>();
+        foreach (var q in qs)
+        {
+            variants.Add(new("webp", $"q{q}", (p, w, h) => ImageCodec.EncodeBgra((byte*)p, w, h, w * 4, "webp", q)));
+            variants.Add(new("jpeg", $"q{q}", (p, w, h) => ImageCodec.EncodeBgra((byte*)p, w, h, w * 4, "jpeg", q)));
+            foreach (var sp in speeds)
+                foreach (var tune in new string?[] { null, "screen" })
+                    variants.Add(new("avif", $"s{sp}{(tune is null ? "" : "-screen")}-q{q}", (p, w, h) =>
+                        Avif.Encode((byte*)p, w, h, w * 4, Math.Clamp(q - ImageCodec.AvifQualityOffset, 0, 100), sp, threads: 1, tuneContent: tune)));
+        }
 
         var images = new List<SpikeImage>();
         try
         {
-            // 1. Top-level PNGs in dir
             foreach (var file in Directory.GetFiles(dir, "*.png", SearchOption.TopDirectoryOnly))
             {
                 using var src0 = SKBitmap.Decode(file);
                 if (src0 is null || src0.Width <= 0 || src0.Height <= 0) continue;
-                int w = Math.Min(1280, src0.Width);
-                int h = (int)((long)src0.Height * w / src0.Width);
-                if ((h & 1) != 0) h--;
-                if ((w & 1) != 0) w--;
-                if (w <= 0 || h <= 0) continue;
+                int w = Math.Min(1280, src0.Width) & ~1;
+                int h = (int)((long)src0.Height * w / src0.Width) & ~1;
                 using var src = src0.Resize(new SKImageInfo(w, h, SKColorType.Bgra8888, SKAlphaType.Opaque), new SKSamplingOptions(SKFilterMode.Linear, SKMipmapMode.Linear));
                 if (src is null) continue;
                 var px = new byte[w * h * 4];
                 Marshal.Copy(src.GetPixels(), px, 0, px.Length);
                 images.Add(new SpikeImage(Path.GetFileName(file), w, h, px));
             }
-
-            // 2. Synthetic images
             images.Add(RenderCode(repoRoot, syntheticDir));
             images.Add(RenderPage(repoRoot, syntheticDir));
             images.Add(RenderColourUi(syntheticDir));
 
-            // Encoders and settings
-            var libaomQs = (Environment.GetEnvironmentVariable("BR_HWAVIF_SPIKE_Q") ?? "60,75,90")
-                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                .Select(int.Parse)
-                .ToArray();
-
-            var hwQps = (Environment.GetEnvironmentVariable("BR_HWAVIF_SPIKE_QP") ?? "60,80,100,120,140,160,180")
-                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                .Select(int.Parse)
-                .ToArray();
-
-            using var devices = new GpuDeviceCache();
-            using var hw = HwAvifEncoder.Create(devices, out var why);
-            if (hw is null)
-            {
-                output.WriteLine($"hardware unavailable: {why}");
-            }
-
             var rows = new List<SpikeRow>();
-
+            var proc = Process.GetCurrentProcess();
             foreach (var img in images)
             {
-                // Precompute source metrics
-                int totalPixels = img.Width * img.Height;
-                var srcY = new double[totalPixels];
-                var srcCb = new double[totalPixels];
-                var srcCr = new double[totalPixels];
-                var isTextPixel = new bool[totalPixels];
-                var isChromaPixel = new bool[totalPixels];
-                int chromaCount = 0;
-                int textCount = 0;
-
-                for (int i = 0; i < totalPixels; i++)
+                var src = Prepare(img);
+                foreach (var v in variants)
                 {
-                    int o = i * 4;
-                    byte b = img.Bgra[o];
-                    byte g = img.Bgra[o + 1];
-                    byte r = img.Bgra[o + 2];
-
-                    srcY[i] = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-
-                    int maxRgb = Math.Max(r, Math.Max(g, b));
-                    int minRgb = Math.Min(r, Math.Min(g, b));
-                    if (maxRgb - minRgb >= 60)
-                    {
-                        isChromaPixel[i] = true;
-                        srcCb[i] = -0.1146 * r - 0.3854 * g + 0.5 * b;
-                        srcCr[i] = 0.5 * r - 0.4542 * g - 0.0458 * b;
-                        chromaCount++;
-                    }
-                }
-
-                // 16x16 blocks for text detection
-                for (int by = 0; by < img.Height; by += 16)
-                {
-                    int blockH = Math.Min(16, img.Height - by);
-                    for (int bx = 0; bx < img.Width; bx += 16)
-                    {
-                        int blockW = Math.Min(16, img.Width - bx);
-                        double minY = double.MaxValue;
-                        double maxY = double.MinValue;
-
-                        for (int dy = 0; dy < blockH; dy++)
-                        {
-                            int y = by + dy;
-                            for (int dx = 0; dx < blockW; dx++)
-                            {
-                                int x = bx + dx;
-                                double yVal = srcY[y * img.Width + x];
-                                if (yVal < minY) minY = yVal;
-                                if (yVal > maxY) maxY = yVal;
-                            }
-                        }
-
-                        if (maxY - minY >= 64.0)
-                        {
-                            for (int dy = 0; dy < blockH; dy++)
-                            {
-                                int y = by + dy;
-                                for (int dx = 0; dx < blockW; dx++)
-                                {
-                                    int idx = y * img.Width + (bx + dx);
-                                    isTextPixel[idx] = true;
-                                    textCount++;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // libaom runs
-                foreach (int q in libaomQs)
-                {
-                    string setting = $"q{q}";
-                    var proc = Process.GetCurrentProcess();
+                    byte[] enc;
+                    fixed (byte* p = img.Bgra) enc = v.Encode((nint)p, img.Width, img.Height);   // warm-up
                     proc.Refresh();
-                    var cpuStart = proc.TotalProcessorTime;
+                    var cpu0 = proc.TotalProcessorTime;
                     var sw = Stopwatch.StartNew();
-
-                    byte[]? enc = null;
-                    for (int run = 0; run < 3; run++)
-                    {
-                        fixed (byte* p = img.Bgra)
-                        {
-                            enc = ImageCodec.EncodeBgra(p, img.Width, img.Height, img.Width * 4, "avif", q);
-                        }
-                    }
-
+                    for (int i = 0; i < Runs; i++)
+                        fixed (byte* p = img.Bgra) enc = v.Encode((nint)p, img.Width, img.Height);
                     sw.Stop();
                     proc.Refresh();
-                    var cpuEnd = proc.TotalProcessorTime;
-                    double encodeMs = sw.Elapsed.TotalMilliseconds / 3.0;
-                    double cpuMs = (cpuEnd - cpuStart).TotalMilliseconds / 3.0;
-
-                    if (enc is null) continue;
-
-                    var (dec, dw, dh) = ImageCodec.DecodeBgra(enc, "image/avif");
-                    if (dw != img.Width || dh != img.Height)
-                    {
-                        output.WriteLine($"Decoded size mismatch for {img.Name} {setting}: expected {img.Width}x{img.Height}, got {dw}x{dh}");
-                        Array.Clear(dec);
-                        continue;
-                    }
-
-                    try
-                    {
-                        ComputeMetrics(img.Width, img.Height, srcY, srcCb, srcCr, isTextPixel, isChromaPixel, textCount, chromaCount, dec,
-                            out double psnrY, out double psnrText, out double chromaMad);
-
-                        var row = new SpikeRow(img.Name, img.Width, img.Height, "libaom", setting, 0, enc.Length, encodeMs, cpuMs, psnrY, psnrText, chromaMad);
-                        rows.Add(row);
-                        output.WriteLine(FormatRow(row));
-                    }
-                    finally
-                    {
-                        Array.Clear(dec);
-                    }
-                }
-
-                // hardware runs
-                if (hw is not null && hwQps.Length > 0)
-                {
-                    foreach (int qp in hwQps)
-                    {
-                        string setting = $"qp{qp}";
-                        string? hwErr = null;
-                        byte[]? enc = null;
-
-                        double oldQpAt75 = HwAvifEncoder.QpAt75;
-                        double oldQpPerQuality = HwAvifEncoder.QpPerQuality;
-                        var proc = Process.GetCurrentProcess();
-                        var cpuStart = TimeSpan.Zero;
-                        var sw = new Stopwatch();
-                        try
-                        {
-                            HwAvifEncoder.QpAt75 = qp;
-                            HwAvifEncoder.QpPerQuality = 0;
-                            // Untimed warm-up: every QP opens its own encoder session.
-                            fixed (byte* p = img.Bgra) hw.Encode(p, img.Width, img.Height, img.Width * 4, 75, out _);
-                            proc.Refresh();
-                            cpuStart = proc.TotalProcessorTime;
-                            sw.Start();
-                            for (int run = 0; run < 3; run++)
-                            {
-                                fixed (byte* p = img.Bgra)
-                                {
-                                    enc = hw.Encode(p, img.Width, img.Height, img.Width * 4, 75, out hwErr);
-                                }
-                                if (enc is null) break;
-                            }
-                        }
-                        finally
-                        {
-                            HwAvifEncoder.QpAt75 = oldQpAt75;
-                            HwAvifEncoder.QpPerQuality = oldQpPerQuality;
-                        }
-
-                        sw.Stop();
-                        proc.Refresh();
-                        var cpuEnd = proc.TotalProcessorTime;
-
-                        if (enc is null)
-                        {
-                            output.WriteLine($"hw error on {img.Name} {setting}: {hwErr}");
-                            continue;
-                        }
-
-                        double encodeMs = sw.Elapsed.TotalMilliseconds / 3.0;
-                        double cpuMs = (cpuEnd - cpuStart).TotalMilliseconds / 3.0;
-
-                        var (dec, dw, dh) = ImageCodec.DecodeBgra(enc, "image/avif");
-                        if (dw != img.Width || dh != img.Height)
-                        {
-                            output.WriteLine($"Decoded size mismatch for {img.Name} {setting}: expected {img.Width}x{img.Height}, got {dw}x{dh}");
-                            Array.Clear(dec);
-                            continue;
-                        }
-
-                        try
-                        {
-                            ComputeMetrics(img.Width, img.Height, srcY, srcCb, srcCr, isTextPixel, isChromaPixel, textCount, chromaCount, dec,
-                                out double psnrY, out double psnrText, out double chromaMad);
-
-                            var row = new SpikeRow(img.Name, img.Width, img.Height, "hw", setting, qp, enc.Length, encodeMs, cpuMs, psnrY, psnrText, chromaMad);
-                            rows.Add(row);
-                            output.WriteLine(FormatRow(row));
-                        }
-                        finally
-                        {
-                            Array.Clear(dec);
-                        }
-                    }
+                    double cpuMs = (proc.TotalProcessorTime - cpu0).TotalMilliseconds / Runs;
+                    double wallMs = sw.Elapsed.TotalMilliseconds / Runs;
+                    var (dec, dw, dh) = ImageCodec.DecodeBgra(enc, ImageCodec.Mime(v.Encoder));
+                    if (dw != img.Width || dh != img.Height) { output.WriteLine($"{img.Name} {v.Setting}: decoded {dw}x{dh}"); continue; }
+                    ComputeMetrics(img.Width, img.Height, src.Y, src.Cb, src.Cr, src.Text, src.Chroma, src.TextCount, src.ChromaCount, dec,
+                        out double psnrY, out double psnrText, out double chromaMad);
+                    Array.Clear(dec);
+                    var row = new SpikeRow(img.Name, img.Width, img.Height, v.Encoder, v.Setting, enc.Length, wallMs, cpuMs, psnrY, psnrText, chromaMad);
+                    rows.Add(row);
+                    output.WriteLine(FormatRow(row));
                 }
             }
 
-            // Write CSV
-            var csvLines = new List<string>
-            {
-                "image,width,height,encoder,setting,bytes,encodeMs,cpuMs,psnrY,psnrText,chromaMad"
-            };
-            foreach (var r in rows)
-            {
-                csvLines.Add(FormattableString.Invariant(
-                    $"{r.Image},{r.Width},{r.Height},{r.Encoder},{r.Setting},{r.Bytes},{r.EncodeMs:F2},{r.CpuMs:F2},{r.PsnrY:F2},{r.PsnrText:F2},{r.ChromaMad:F2}"));
-            }
-            File.WriteAllLines(Path.Combine(dir, "spike.csv"), csvLines);
+            File.WriteAllLines(Path.Combine(dir, "spike.csv"),
+                new[] { "image,width,height,encoder,setting,bytes,wallMs,cpuMs,psnrY,psnrText,chromaMad" }.Concat(rows.Select(r => FormattableString.Invariant(
+                    $"{r.Image},{r.Width},{r.Height},{r.Encoder},{r.Setting},{r.Bytes},{r.WallMs:F2},{r.CpuMs:F2},{r.PsnrY:F2},{r.PsnrText:F2},{r.ChromaMad:F2}"))));
 
-            // Summary
-            var summaryLines = new List<string>();
+            // Summary: every AVIF preset at q75 per image, and the smallest WebP / JPEG reaching that preset's text PSNR.
+            var summary = new List<string>();
             foreach (var img in images)
-            {
-                var libaomRows = rows.Where(r => r.Image == img.Name && r.Encoder == "libaom");
-                var hwRows = rows.Where(r => r.Image == img.Name && r.Encoder == "hw").ToList();
-
-                foreach (var libaom in libaomRows)
+                foreach (var a in rows.Where(r => r.Image == img.Name && r.Encoder == "avif" && r.Setting.EndsWith("-q75", StringComparison.Ordinal)))
                 {
-                    var match = hwRows
-                        .Where(h => h.PsnrText >= libaom.PsnrText)
-                        .OrderByDescending(h => h.Qp)
-                        .FirstOrDefault();
-
-                    string line;
-                    if (match is not null)
+                    string Match(string encoder)
                     {
-                        double ratio = (double)match.Bytes / libaom.Bytes;
-                        line = FormattableString.Invariant(
-                            $"MATCH {img.Name} libaom {libaom.Setting}: {libaom.Bytes / 1024.0:F1} KiB text {libaom.PsnrText:F2} chroma {libaom.ChromaMad:F2} | hw {match.Setting}: {match.Bytes / 1024.0:F1} KiB ({ratio:P0} of libaom) text {match.PsnrText:F2} chroma {match.ChromaMad:F2} | enc {libaom.EncodeMs:F0} vs {match.EncodeMs:F0} ms, cpu {libaom.CpuMs:F0} vs {match.CpuMs:F0} ms");
+                        var m = rows.Where(r => r.Image == img.Name && r.Encoder == encoder && r.PsnrText >= a.PsnrText).MinBy(r => r.Bytes);
+                        return m is null ? $"{encoder} none reaches it" : FormattableString.Invariant($"{encoder} {m.Setting} {m.Bytes / 1024.0:F1} KiB ({(double)m.Bytes / a.Bytes:F1}x) cpu {m.CpuMs:F0}");
                     }
-                    else
-                    {
-                        line = FormattableString.Invariant(
-                            $"MATCH {img.Name} libaom {libaom.Setting}: {libaom.Bytes / 1024.0:F1} KiB text {libaom.PsnrText:F2} chroma {libaom.ChromaMad:F2} | no hw setting reaches libaom text PSNR");
-                    }
+                    var line = FormattableString.Invariant(
+                        $"{img.Name} avif {a.Setting}: {a.Bytes / 1024.0:F1} KiB cpu {a.CpuMs:F0} ms wall {a.WallMs:F0} ms text {a.PsnrText:F2} chroma {a.ChromaMad:F2} | {Match("webp")} | {Match("jpeg")}");
                     output.WriteLine(line);
-                    summaryLines.Add(line);
+                    summary.Add(line);
                 }
-            }
-
-            if (summaryLines.Count > 0)
-            {
-                File.AppendAllLines(Path.Combine(dir, "spike-summary.txt"), summaryLines);
-            }
+            File.WriteAllLines(Path.Combine(dir, "spike-summary.txt"), summary);
         }
         finally
         {
-            foreach (var img in images)
+            foreach (var img in images) img.Dispose();
+        }
+    }
+
+    private sealed record Source(double[] Y, double[] Cb, double[] Cr, bool[] Text, bool[] Chroma, int TextCount, int ChromaCount);
+
+    /// <summary>Source luma and chroma, text-like 16x16 blocks (luma range at least 64) and coloured pixels (RGB spread at least 60).</summary>
+    private static Source Prepare(SpikeImage img)
+    {
+        int n = img.Width * img.Height;
+        var y = new double[n];
+        var cb = new double[n];
+        var cr = new double[n];
+        var text = new bool[n];
+        var chroma = new bool[n];
+        int chromaCount = 0, textCount = 0;
+        for (int i = 0; i < n; i++)
+        {
+            int o = i * 4;
+            byte b = img.Bgra[o], g = img.Bgra[o + 1], r = img.Bgra[o + 2];
+            y[i] = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+            if (Math.Max(r, Math.Max(g, b)) - Math.Min(r, Math.Min(g, b)) >= 60)
             {
-                img.Dispose();
+                chroma[i] = true;
+                cb[i] = -0.1146 * r - 0.3854 * g + 0.5 * b;
+                cr[i] = 0.5 * r - 0.4542 * g - 0.0458 * b;
+                chromaCount++;
             }
         }
+        for (int by = 0; by < img.Height; by += 16)
+            for (int bx = 0; bx < img.Width; bx += 16)
+            {
+                int bh = Math.Min(16, img.Height - by), bw = Math.Min(16, img.Width - bx);
+                double min = double.MaxValue, max = double.MinValue;
+                for (int dy = 0; dy < bh; dy++)
+                    for (int dx = 0; dx < bw; dx++)
+                    {
+                        double v = y[(by + dy) * img.Width + bx + dx];
+                        if (v < min) min = v;
+                        if (v > max) max = v;
+                    }
+                if (max - min < 64) continue;
+                for (int dy = 0; dy < bh; dy++)
+                    for (int dx = 0; dx < bw; dx++) { text[(by + dy) * img.Width + bx + dx] = true; textCount++; }
+            }
+        return new Source(y, cb, cr, text, chroma, textCount, chromaCount);
     }
 
     private static string FormatRow(SpikeRow r) =>
         FormattableString.Invariant(
-            $"{r.Image} {r.Width}x{r.Height} {r.Encoder} {r.Setting}: {r.Bytes / 1024.0:F1} KiB, enc {r.EncodeMs:F1} ms, cpu {r.CpuMs:F1} ms, PSNR-Y {r.PsnrY:F2}, text {r.PsnrText:F2}, chroma {r.ChromaMad:F2}");
+            $"{r.Image} {r.Width}x{r.Height} {r.Encoder} {r.Setting}: {r.Bytes / 1024.0:F1} KiB, wall {r.WallMs:F1} ms, cpu {r.CpuMs:F1} ms, PSNR-Y {r.PsnrY:F2}, text {r.PsnrText:F2}, chroma {r.ChromaMad:F2}");
+
+    private sealed record SpikeRow(string Image, int Width, int Height, string Encoder, string Setting, int Bytes,
+        double WallMs, double CpuMs, double PsnrY, double PsnrText, double ChromaMad);
 
     private static void ComputeMetrics(int w, int h, double[] srcY, double[] srcCb, double[] srcCr,
         bool[] isTextPixel, bool[] isChromaPixel, int textCount, int chromaCount, byte[] dec,
@@ -673,19 +523,4 @@ public unsafe class HwAvifSpikeTests(ITestOutputHelper output)
 
         public void Dispose() => Array.Clear(Bgra);
     }
-
-    private sealed record SpikeRow(
-        string Image,
-        int Width,
-        int Height,
-        string Encoder,
-        string Setting,
-        int Qp,
-        int Bytes,
-        double EncodeMs,
-        double CpuMs,
-        double PsnrY,
-        double PsnrText,
-        double ChromaMad
-    );
 }

@@ -30,6 +30,7 @@ internal static unsafe class Avif
     private static delegate* unmanaged<nint, void> _encoderDestroy;
     private static delegate* unmanaged<nint, nint, RwData*, int> _encoderWrite;
     private static delegate* unmanaged<RwData*, void> _rwDataFree;
+    private static delegate* unmanaged<nint, byte*, byte*, int> _setCodecOption;
     private static delegate* unmanaged<nint> _decoderCreate;
     private static delegate* unmanaged<nint, void> _decoderDestroy;
     private static delegate* unmanaged<nint, nint, byte*, nuint, int> _decoderReadMemory;
@@ -62,6 +63,7 @@ internal static unsafe class Avif
                 _encoderDestroy = (delegate* unmanaged<nint, void>)NativeLoader.Get(lib, "avifEncoderDestroy");
                 _encoderWrite = (delegate* unmanaged<nint, nint, RwData*, int>)NativeLoader.Get(lib, "avifEncoderWrite");
                 _rwDataFree = (delegate* unmanaged<RwData*, void>)NativeLoader.Get(lib, "avifRWDataFree");
+                _setCodecOption = (delegate* unmanaged<nint, byte*, byte*, int>)NativeLoader.Get(lib, "avifEncoderSetCodecSpecificOption");
                 _decoderCreate = (delegate* unmanaged<nint>)NativeLoader.Get(lib, "avifDecoderCreate");
                 _decoderDestroy = (delegate* unmanaged<nint, void>)NativeLoader.Get(lib, "avifDecoderDestroy");
                 _decoderReadMemory = (delegate* unmanaged<nint, nint, byte*, nuint, int>)NativeLoader.Get(lib, "avifDecoderReadMemory");
@@ -78,9 +80,12 @@ internal static unsafe class Avif
 
     private static int Threads => Math.Clamp(Environment.ProcessorCount / 2, 1, 4);
 
-    /// <summary>8-bit 4:2:0 AVIF from BGRA (alpha ignored). quality 30..95 is libavif's 0..100 quality; speed 0..10.</summary>
-    public static byte[] Encode(byte* bgra, int width, int height, int stride, int quality, int speed)
+    /// <summary>8-bit 4:2:0 AVIF from BGRA (alpha ignored). quality is libavif's 0..100 quality; speed 0..10.
+    /// threads: 0 = default (half the logical processors, at most 4); 1 keeps all work on the calling thread.
+    /// tuneContent: libaom "tune-content" (default, screen), null leaves libaom's own screen-content detection.</summary>
+    public static byte[] Encode(byte* bgra, int width, int height, int stride, int quality, int speed, int threads = 0, string? tuneContent = null)
     {
+        int t = threads > 0 ? threads : Threads;
         if (!TryLoad()) throw new InvalidOperationException("AVIF codec unavailable.");
         nint image = 0, enc = 0;
         var output = new RwData();
@@ -93,15 +98,16 @@ internal static unsafe class Avif
             _rgbSetDefaults(rgb, image);
             *(int*)(rgb + RgbFormat) = RgbFormatBgra;
             *(int*)(rgb + RgbIgnoreAlpha) = 1;
-            *(int*)(rgb + RgbMaxThreads) = Threads;
+            *(int*)(rgb + RgbMaxThreads) = t;
             *(byte**)(rgb + RgbPixels) = bgra;
             *(uint*)(rgb + RgbRowBytes) = (uint)stride;
             if (_rgbToYuv(image, rgb) != ResultOk) throw new InvalidOperationException("AVIF colour conversion failed.");
             enc = _encoderCreate();
             if (enc == 0) throw new InvalidOperationException("avifEncoderCreate failed.");
-            *(int*)(enc + EncMaxThreads) = Threads;
+            *(int*)(enc + EncMaxThreads) = t;
             *(int*)(enc + EncSpeed) = Math.Clamp(speed, 0, 10);
             *(int*)(enc + EncQuality) = Math.Clamp(quality, 0, 100);
+            if (tuneContent is not null) SetOption(enc, "tune-content", tuneContent);
             if (_encoderWrite(enc, image, &output) != ResultOk || output.Data == null) throw new InvalidOperationException("AVIF encode failed.");
             return new ReadOnlySpan<byte>(output.Data, checked((int)output.Size)).ToArray();
         }
@@ -111,6 +117,16 @@ internal static unsafe class Avif
             if (enc != 0) _encoderDestroy(enc);
             if (image != 0) _imageDestroy(image); // frees the YUV planes (libavif clears nothing; the planes hold a converted copy)
         }
+    }
+
+    private static void SetOption(nint enc, string key, string value)
+    {
+        Span<byte> k = stackalloc byte[64], v = stackalloc byte[64];
+        int kn = System.Text.Encoding.ASCII.GetBytes(key, k), vn = System.Text.Encoding.ASCII.GetBytes(value, v);
+        k[kn] = 0;
+        v[vn] = 0;
+        fixed (byte* kp = k) fixed (byte* vp = v)
+            if (_setCodecOption(enc, kp, vp) != ResultOk) throw new InvalidOperationException($"AVIF option {key}={value} rejected.");
     }
 
     /// <summary>Decodes to BGRA (stride width * 4). The caller clears the pixels after use.</summary>

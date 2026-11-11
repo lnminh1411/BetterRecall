@@ -3,6 +3,8 @@
 using System.Diagnostics;
 using System.Threading.Channels;
 using BetterRecall.Agent.Guardrails;
+using BetterRecall.Agent.Native;
+using BetterRecall.Agent.Scheduling;
 using BetterRecall.Agent.Util;
 using BetterRecall.Contracts;
 
@@ -10,7 +12,8 @@ namespace BetterRecall.Agent.Capture;
 
 /// <summary>
 /// Receives downscaled grabs from the capture threads: smart capture (change map and dHash against the last stored
-/// keyframe, CapturePolicy), encode once (keyframes.format), IStore.AddScreenCapture. Runs on one background task; grabs are zeroed after use.
+/// keyframe, CapturePolicy), then the CPU budget (EncodeGovernor) decides when and how each kept frame is encoded
+/// (KeyframeEncoder), then IStore.AddScreenCapture. Runs on its own below-normal EcoQoS thread; grabs are zeroed after use.
 /// </summary>
 internal sealed class KeyframePipeline : IAsyncDisposable
 {
@@ -23,31 +26,61 @@ internal sealed class KeyframePipeline : IAsyncDisposable
     private readonly Func<Settings> _settings;
     private readonly Action<CaptureMeta> _stored;
     private readonly Dictionary<int, DedupFilter> _dedup = new();
-    private readonly KeyframeEncoder _encoder;
-    private readonly Task _task;
+    private readonly EncodeGovernor<Pending> _governor;
+    private readonly Thread _thread;
     private readonly CancellationTokenSource _cts = new();
+    private string _encoderName = "";
+    private Task<bool>? _wait;
 
     // Measurements.
     public long Kept, SkippedSimilar, Dropped, Failed;
-    public double EncodeMsTotal, HashMsTotal, GrabMsTotal;
+    public double EncodeMsTotal, HashMsTotal, GrabMsTotal, EncodeCpuMsTotal;
     public double LastEncodeMs;
     public ChangeResult LastChange;
 
     /// <summary>Receives replay samples (ReplaySample requests). Null: samples are dropped.</summary>
     public Replay.ReplaySampler? Sampler { get; set; }
 
-    /// <summary>Encoder of the last keyframe (log, status, bench).</summary>
-    public string Encoder => _encoder.Active;
-    public string? HardwareUnavailable => _encoder.HardwareUnavailable;
+    /// <summary>Encoder of the last keyframe, e.g. "libaom speed 7" or "libaom speed 8 (CPU budget)" (log, status, bench).</summary>
+    public string Encoder => _encoderName;
 
-    /// <param name="devices">GPU devices for the AV1 hardware keyframe encoder; null or returning null: software only.</param>
-    public KeyframePipeline(Func<IStore?> store, Func<Settings> settings, Action<CaptureMeta> stored, Func<GpuDeviceCache?>? devices = null)
+    /// <summary>Keyframe encode CPU in the last 10 s and 60 s as a share of all logical processors (Task Manager %).</summary>
+    public (double Last10Percent, double Last60Percent, int Waiting, EncodeLevel Level) Budget
+    {
+        get
+        {
+            lock (_governor)
+            {
+                var (u10, u60) = _governor.Used;
+                double procs = Environment.ProcessorCount;
+                return (u10 / (procs * 10_000) * 100, u60 / (procs * 60_000) * 100, _governor.Waiting, _governor.Level);
+            }
+        }
+    }
+
+    public long BudgetDeferred => _governor.Deferred;
+    public long BudgetDropped => _governor.Dropped;
+    public long BudgetWebP => _governor.WebPFallbacks;
+
+    /// <summary>A kept frame waiting for its encode. Owns the grab.</summary>
+    private sealed class Pending(KeyframeGrab grab, ulong hash, ChangeResult change, KeepReason reason) : IDisposable
+    {
+        public KeyframeGrab Grab { get; } = grab;
+        public ulong Hash { get; } = hash;
+        public ChangeResult Change { get; } = change;
+        public KeepReason Reason { get; } = reason;
+        public void Dispose() => Grab.Dispose();
+    }
+
+    public KeyframePipeline(Func<IStore?> store, Func<Settings> settings, Action<CaptureMeta> stored)
     {
         _store = store;
         _settings = settings;
         _stored = stored;
-        _encoder = new KeyframeEncoder(devices ?? (() => null));
-        _task = Task.Run(() => RunAsync(_cts.Token));
+        _governor = new EncodeGovernor<Pending>(() => Environment.TickCount64, Environment.ProcessorCount, EncodeAndStore,
+            (p, why) => Log.Warn($"keyframe dropped by the CPU budget ({why})"), KeyframeEncoder.InitialEstimateMs);
+        _thread = new Thread(Run) { IsBackground = true, Name = "keyframes", Priority = ThreadPriority.BelowNormal };
+        _thread.Start();
     }
 
     public void Post(KeyframeGrab grab)
@@ -69,48 +102,63 @@ internal sealed class KeyframePipeline : IAsyncDisposable
         lock (_dedup) return _dedup.TryGetValue(monitor, out var d) && d.ContextDiffers(context);
     }
 
-    private async Task RunAsync(CancellationToken ct)
+    private void Run()
     {
-        try
+        try { Governance.ApplyEcoQosToCurrentThread(); } catch (Exception ex) { Log.Debug($"keyframe thread EcoQoS: {ex.Message}"); }
+        var ct = _cts.Token;
+        while (!ct.IsCancellationRequested)
         {
-            await foreach (var grab in _channel.Reader.ReadAllAsync(ct).ConfigureAwait(false))
+            if (_channel.Reader.TryRead(out var grab))
             {
-                using (grab)
+                bool owned = false;
+                try { owned = Process(grab); }
+                catch (Exception ex)
                 {
-                    try { Process(grab); }
-                    catch (Exception ex)
-                    {
-                        Interlocked.Increment(ref Failed);
-                        Log.Warn("keyframe", ex);
-                    }
+                    Interlocked.Increment(ref Failed);
+                    Log.Warn("keyframe", ex);
                 }
+                finally { if (!owned) grab.Dispose(); }
+                continue;
             }
+            lock (_governor) _governor.Pump();
+            try
+            {
+                // Wake for a new grab, or every 500 ms while frames wait for budget. One pending wait at a time
+                // (single-reader channel): a wait that timed out is reused on the next pass.
+                _wait ??= _channel.Reader.WaitToReadAsync(ct).AsTask();
+                if (!_wait.Wait(_governor.Waiting > 0 ? 500 : Timeout.Infinite, ct)) continue;
+                bool more = _wait.Result;
+                _wait = null;
+                if (!more) break;
+            }
+            catch (OperationCanceledException) { break; }
+            catch (AggregateException) { break; }
         }
-        catch (OperationCanceledException) { }
     }
 
-    private unsafe void Process(KeyframeGrab g)
+    /// <summary>True when the grab was handed to the governor (it disposes it).</summary>
+    private unsafe bool Process(KeyframeGrab g)
     {
         var s = _settings();
         var store = _store();
-        if (store is null) return;
-        string format = s.Keyframes.Format == "jpeg" ? "jpeg" : "webp";
+        if (store is null) return false;
+        string sampleFormat = s.Keyframes.Format == "jpeg" ? "jpeg" : "webp";
         int quality = Math.Clamp(s.Keyframes.Quality, 30, 95);
         byte[]? sampleBytes = null;
         if (g.Request.ReplaySample && Sampler is { } sampler)
         {
-            sampleBytes = ImageCodec.EncodeBgra(g.Pixels, g.Width, g.Height, g.Stride, format, quality);
+            sampleBytes = ImageCodec.EncodeBgra(g.Pixels, g.Width, g.Height, g.Stride, sampleFormat, quality);
             var rq = g.Request;
             sampler.Add(new Replay.ReplaySampler.Sample(rq.Ts, g.Monitor, rq.App, GuardrailPolicy.FilterTitle(rq.Title, s.Privacy), rq.Site,
-                g.Width, g.Height, sampleBytes, ImageCodec.Mime(format)), Math.Clamp(s.Replay.Seconds, 15, 600) + 10);
+                g.Width, g.Height, sampleBytes, ImageCodec.Mime(sampleFormat)), Math.Clamp(s.Replay.Seconds, 15, 600) + 10);
         }
-        try { ProcessKeyframe(g, s, store, format, quality, sampleBytes); }
+        try { return ProcessKeyframe(g, s, store, sampleFormat, sampleBytes); }
         finally { if (sampleBytes is not null) Array.Clear(sampleBytes); }
     }
 
-    private unsafe void ProcessKeyframe(KeyframeGrab g, Settings s, IStore store, string format, int quality, byte[]? encoded)
+    private bool ProcessKeyframe(KeyframeGrab g, Settings s, IStore store, string sampleFormat, byte[]? sampleBytes)
     {
-        if (!g.Request.Keyframe) return;
+        if (!g.Request.Keyframe) return false;
         DedupFilter dedup;
         lock (_dedup)
         {
@@ -126,40 +174,75 @@ internal sealed class KeyframePipeline : IAsyncDisposable
         {
             map.Clear();
             Interlocked.Increment(ref SkippedSimilar);
-            return;
+            return false;
         }
-        sw.Restart();
-        byte[] bytes;
-        string kfFormat;
-        try
+        // The next grabs compare against this frame even while its encode waits for budget.
+        dedup.Accept(hash, g.Request.Context, map);
+
+        // A replay sample (WebP or JPEG) is stored as is when the keyframe uses the same format: no second encode.
+        if (sampleBytes is not null && ImageCodec.Resolve(s.Keyframes.Format) == sampleFormat)
         {
-            // A replay sample (WebP or JPEG, which the worker decodes) is reused when the keyframe uses the same format.
-            if (encoded is not null && ImageCodec.Resolve(s.Keyframes.Format) == format) (bytes, kfFormat) = (encoded.ToArray(), format);
-            else (bytes, kfFormat) = _encoder.Encode(g.Pixels, g.Width, g.Height, g.Stride, s);
+            Store(store, s, g, hash, change, reason, sampleBytes.ToArray(), sampleFormat, g.Width, g.Height);
+            return false;
         }
-        catch { map.Clear(); throw; }
+        lock (_governor) _governor.Offer(new Pending(g, hash, change, reason));
+        return true;
+    }
+
+    /// <summary>Governor callback: encode at the level, store, return the CPU ms the encode used on this thread.</summary>
+    private unsafe double EncodeAndStore(Pending p, EncodeLevel level)
+    {
+        var s = _settings();
+        var store = _store();
+        if (store is null) return 0;
+        var g = p.Grab;
+        double cpu0 = Win32.CurrentThreadCpuMs();
+        var sw = Stopwatch.StartNew();
+        byte[] bytes;
+        string format;
+        int w, h;
+        try { (bytes, format, w, h) = KeyframeEncoder.Encode(g.Pixels, g.Width, g.Height, g.Stride, s, level); }
+        catch (Exception ex)
+        {
+            Interlocked.Increment(ref Failed);
+            Log.Warn("keyframe encode", ex);
+            return Math.Max(0, Win32.CurrentThreadCpuMs() - cpu0);
+        }
+        double cpu = Math.Max(0, Win32.CurrentThreadCpuMs() - cpu0);
         LastEncodeMs = sw.Elapsed.TotalMilliseconds;
         EncodeMsTotal += LastEncodeMs;
+        EncodeCpuMsTotal += cpu;
+        KeyframeEncoder.LogChange(ref _encoderName, KeyframeEncoder.Describe(format, level));
+        try { Store(store, s, g, p.Hash, p.Change, p.Reason, bytes, format, w, h); }
+        catch (Exception ex)
+        {
+            Interlocked.Increment(ref Failed);
+            Log.Warn("keyframe store", ex);
+        }
+        return cpu;
+    }
+
+    private void Store(IStore store, Settings s, KeyframeGrab g, ulong hash, ChangeResult change, KeepReason reason, byte[] bytes, string format, int w, int h)
+    {
         var req = g.Request;
         var title = GuardrailPolicy.FilterTitle(req.Title, s.Privacy);
-        var cap = new NewScreenCapture(req.Ts, req.App, req.ExePath, title, g.Monitor, g.Width, g.Height, hash,
+        var cap = new NewScreenCapture(req.Ts, req.App, req.ExePath, title, g.Monitor, w, h, hash,
             bytes, ImageCodec.Mime(format), s.Keyframes.Enabled, req.Site,
             Change: change.Comparable ? Math.Round(change.Score, 2) : null, Switch: reason is KeepReason.First or KeepReason.Switch);
         string id;
         try { id = store.AddScreenCapture(cap); }
-        catch { map.Clear(); throw; }
         finally { Array.Clear(bytes); }
-        dedup.Accept(hash, req.Context, map);
         Interlocked.Increment(ref Kept);
         _stored(new CaptureMeta(id, req.Ts, CaptureKind.Screen, req.App, title, g.Monitor, 0, s.Keyframes.Enabled, false, req.Site));
     }
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
     {
         _channel.Writer.TryComplete();
         _cts.Cancel();
-        try { await _task.ConfigureAwait(false); } catch { }
+        _thread.Join(5000);
         while (_channel.Reader.TryRead(out var g)) g.Dispose();
-        _encoder.Dispose();
+        lock (_governor) _governor.Clear();
+        return ValueTask.CompletedTask;
     }
 }

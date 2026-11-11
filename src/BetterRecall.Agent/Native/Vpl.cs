@@ -41,7 +41,6 @@ internal static unsafe class Vpl
     public const int P_FrameRateN = 96, P_FrameRateD = 100, P_AspectW = 106, P_AspectH = 108, P_PicStruct = 110, P_ChromaFormat = 112;
     public const int P_CodecId = 116, P_CodecProfile = 120, P_CodecLevel = 122;
     public const int P_TargetUsage = 126, P_GopPicSize = 128, P_GopRefDist = 130, P_GopOptFlag = 132, P_IdrInterval = 134;
-    public const int P_Qpi = 138;   // union with InitialDelayInKB; QPP and QPB share TargetKbps and MaxKbps
     public const int P_RateControl = 136, P_BufferSizeKB = 140, P_TargetKbps = 142, P_MaxKbps = 144, P_NumRefFrame = 148;
     public const int P_IOPattern = 186;
 

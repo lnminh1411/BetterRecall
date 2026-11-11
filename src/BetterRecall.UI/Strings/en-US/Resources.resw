@@ -750,10 +750,5 @@
   <data name="Danger_Exported" xml:space="preserve"><value>Exported {0:N0} captures to {1}. This copy is not encrypted.</value></data>
   <data name="Danger_ExportFileType" xml:space="preserve"><value>Zip archive</value></data>
   <data name="Danger_ExportOpen" xml:space="preserve"><value>Show in folder</value></data>
-  <data name="S_keyframes_encoder" xml:space="preserve"><value>AVIF encoder</value></data>
-  <data name="S_keyframes_encoder_D" xml:space="preserve"><value>Automatic uses the AV1 hardware encoder of an Intel GPU when there is one (almost no CPU), else the software encoder. Only for the AVIF format.</value></data>
-  <data name="S_keyframes_encoder_auto" xml:space="preserve"><value>Automatic</value></data>
-  <data name="S_keyframes_encoder_hardware" xml:space="preserve"><value>Hardware (GPU)</value></data>
-  <data name="S_keyframes_encoder_software" xml:space="preserve"><value>Software (CPU)</value></data>
   <data name="Hw_KeyframeEncoder" xml:space="preserve"><value>Keyframe encoder: {0}</value></data>
 </root>

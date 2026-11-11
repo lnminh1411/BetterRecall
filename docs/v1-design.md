@@ -277,9 +277,9 @@ Vector search needs no ANN library at v1 sizes: 30 days of 2 s keyframes after d
 | `capture.eventTriggers` | true | foreground change, scroll stop, typing pause |
 | `capture.pauseOnFullscreen` | true | |
 | `keyframes.enabled` | true | persist keyframe images |
-| `keyframes.format` | `avif` | `avif`, `webp`, `jxl`, `jpeg`. New keyframes only; old ones keep their format. AVIF (libavif + aom, speed 7, quality = `keyframes.quality` - 25) is about 30% smaller than WebP at the same look on UI screenshots; JPEG XL (effort 3) saved nothing over WebP. A codec DLL that fails to load falls back to WebP with one warning. A settings file still holding the old default `webp` is moved to `avif` on load |
+| `keyframes.format` | `avif` | `avif`, `webp`, `jxl`, `jpeg`. New keyframes only; old ones keep their format. AVIF (libavif + aom, one thread, speed 7 unless the CPU budget steps it down, quality = `keyframes.quality` - 25) is about 30% smaller than WebP at the same look on UI screenshots; JPEG XL (effort 3) saved nothing over WebP. A codec DLL that fails to load falls back to WebP with one warning. A settings file still holding the old default `webp` is moved to `avif` on load |
+| (keyframe CPU budget) | fixed | Not a setting (user requirement): keyframe encoding under 1 % CPU averaged over 60 s and at most 1.5 % in any 10 s, as Task Manager counts CPU (share of all logical processors). `EncodeGovernor` steps libaom speed 7 -> 8 -> 9 at 75 % size, then queues frames (6, newest never dropped), then WebP; see docs/v0.2-plan.md batch 2 for the measurements |
 | `keyframes.quality` | 75 | 30 to 95 |
-| `keyframes.encoder` | `auto` | `auto`, `hardware`, `software`. AVIF only. `auto` and `hardware`: the AV1 hardware encoder of an Intel GPU through oneVPL (`HwAvifEncoder`: intra-only constant QP from `keyframes.quality`, one session per keyframe size, NV12 BT.709 limited range made on the CPU, packet wrapped by `AvifWriter`), else libaom; `hardware` logs a warning when it falls back. Odd sizes and failed frames use libaom; 3 failures in a row turn the hardware off until the setting or the quality changes. The encoder in use is logged and shown on the bench page (`CaptureBench.keyframeEncoder`) |
 | `keyframes.thumbCacheMb` | 64 | 8 to 1024 |
 | `replay.enabled` | true | |
 | `replay.seconds` | 120 | 15 to 600 |

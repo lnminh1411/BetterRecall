@@ -54,35 +54,6 @@ internal static class DevSelfTest
                 Console.WriteLine($"{format}: FAILED {ex.GetType().Name}: {ex.Message}");
             }
         }
-        // AV1 hardware (iGPU, oneVPL): "--selftest-codec [outDir]" also writes hw.avif there for a WIC / libavif check.
-        using var devices = new GpuDeviceCache();
-        using var hw = HwAvifEncoder.Create(devices, out var why);
-        if (hw is null) Console.WriteLine($"avif hardware: unavailable ({why})");
-        else
-        {
-            try
-            {
-                for (int i = 0; i < 4; i++)
-                {
-                    var sw = Stopwatch.StartNew();
-                    byte[]? enc;
-                    string? err;
-                    fixed (byte* p = px) enc = hw.Encode(p, w, h, w * 4, 75, out err);
-                    double encMs = sw.Elapsed.TotalMilliseconds;
-                    if (enc is null) { rc = 1; Console.WriteLine($"avif hardware: FAILED {err}"); break; }
-                    var (_, dw, dh) = ImageCodec.DecodeBgra(enc, "image/avif");
-                    bool ok = dw == w && dh == h;
-                    if (!ok) rc = 1;
-                    Console.WriteLine($"avif hardware ({hw.Name}, QP {HwAvifEncoder.QpFor(75)}): {enc.Length / 1024} KiB, encode {encMs:F0} ms {(ok ? "ok" : $"MISMATCH {dw}x{dh}")}");
-                    if (i == 0 && args.Length > 1) File.WriteAllBytes(Path.Combine(args[1], "hw.avif"), enc);
-                }
-            }
-            catch (Exception ex)
-            {
-                rc = 1;
-                Console.WriteLine($"avif hardware: FAILED {ex.GetType().Name}: {ex.Message}");
-            }
-        }
         return rc;
     }
 
