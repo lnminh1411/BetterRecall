@@ -75,12 +75,18 @@ logs\                   rolling logs, never any captured content, title or query
 
 1. Capture (agent). Desktop Duplication per output on the dGPU that drives it. Two consumers per frame:
    - Replay path at `replay.fps` (capped at the highest captured refresh rate): convert to NV12 on the source GPU, cross-adapter copy to the iGPU, with `replay.layout` = `composited` (default) composite every captured monitor into one canvas at its virtual-desktop position (only monitors with new frames are redrawn) and encode it with one encoder; with `perMonitor` encode each monitor separately. `replay.resolution` / `replay.scalePercent` then scale each encoded video, and the encoder maximum always applies (AV1 through oneVPL, then HEVC, then H.264; 1 s closed GOP; `replay.bitrateKbps` for the whole canvas), packets into a RAM ring of `replay.seconds`. Decided 2026-11-10: composited is the default, to meet the CPU and RAM gates; perMonitor stays available. Desktop audio (WASAPI loopback) encoded to AAC into the same ring, timestamps from QPC.
-   - Keyframe path every `capture.intervalMs`: guardrails (section 6), de-duplication (Desktop Duplication timeout, dirty area, dHash), downscale to `capture.maxWidth`, encode once (`keyframes.format`), `IStore.AddScreenCapture`. The row stays hidden from search until the worker has processed it.
+   - Keyframe path every `capture.intervalMs`: guardrails (section 6), de-duplication (Desktop Duplication timeout, dirty area, dHash), downscale to `capture.maxWidth`, smart capture (below), encode once (`keyframes.format`), `IStore.AddScreenCapture` with the change score and a switch flag. The row stays hidden from search until the worker has processed it.
+   - Smart capture (`ChangeMap`, `CapturePolicy` in the agent), compared with the previous stored keyframe of that monitor, not the previous frame. The downscaled frame is cut into 32 px tiles of 4x4 cell luma means; a tile is text-like when its strong-edge density is between 0.06 and 0.5. Change score = non-text changed tiles % + 5 x text changed tiles %, capped at 100. Keep rules: a forced capture, the first keyframe of a monitor and the first after a window or app switch always; an event trigger (`capture.eventTriggers`) when the score is at least 0.5 or the dHash distance passes `capture.dhashThreshold`; a timer tick when the score is at least `capture.dirtyMinPercent` or the dHash distance passes the threshold (0 turns the dHash test off). The Desktop Duplication dirty-rect pre-gate before the grab uses min(`capture.dirtyMinPercent`, 0.5) so triggers still see small changes.
 2. Scheduler (agent): when governance allows (section 7), `IStore.TakePendingEmbeddings`, start the worker if needed, send `embed_image` with the NSFW threshold. A dropped frame calls `IStore.DropCapture(id, "nsfw")`. Otherwise `IStore.SetEmbedding`. When `keyframes.enabled` is false the store deletes the image once the job is done.
 3. Audio (agent): loopback and microphone per `audio.*`, an energy pre-gate, segments of at most `audio.maxSegmentS` cut at silence, `transcribe` to the worker. Speech is stored with `IStore.AddAudioCapture` and gets an `embed_text` document job.
 4. Search: a pipe client sends `search`. Core's command processor gets the query vector from `IQueryEmbedder` (agent, `embed_text` kind `query`), then calls `IStore.Search`.
-5. Preview: the UI sends `thumb <id> [width]`. Core calls `IThumbnailer` (agent), which reads the keyframe with `IStore.GetKeyframe`, resizes, encodes WebP, caches it in a RAM LRU (`keyframes.thumbCacheMb`) and returns it.
+5. Preview: the UI sends `thumb <id> [width]`. Core calls `IThumbnailer` (agent), which reads the keyframe with `IStore.GetKeyframe`, resizes, encodes WebP, caches it in a RAM LRU (`keyframes.thumbCacheMb`) and returns it. The UI and the worker cannot decode AVIF or JPEG XL: `IThumbnailer.Transcode` turns such a keyframe into WebP q90 for the `keyframe` verb (`"ui"`) or JPEG q90 for export (`"jpeg"`); WebP and JPEG keyframes pass through unchanged, so keyframes stored before 0.2 keep working. The scheduler decodes AVIF and JPEG XL keyframes itself and sends `embed_image` as `bgra8`.
 6. Instant replay: `hotkeys.replay` (or the UI `replay save` verb) saves the last `replay.seconds` (default 120) to disk, then shows a notification (`replay.notify`). The agent cuts the ring at a keyframe boundary into fragmented MP4 without re-encoding, then writes `replays\<ts>.mp4.enc` through `IBlobCipher` (or a plain MP4 in `replay.exportDir` when `replay.encryptExports` is false).
+7. Storage safeguard (agent, `StorageGuard`): 5 s after start, then every 30 s, after maintenance and after a `storage.*` change. Free space = free disk space of the data dir (null on a UNC path: the disk test is skipped) plus free pages inside the store files, since SQLite reuses those before a file grows. Store size = `IStore.GetStorageUse()` live bytes (files minus free pages) of `store.db` and the keyframe month files. Free space below `storage.minFreeGb`, or store size above `storage.maxGb`: with `storage.overwrite` off capture pauses with reason `storage` (tray balloon once, banner in the main window); with it on the agent calls `IStore.DeleteForSpace` in batches of 500 rows (at most 200 batches per check) until both limits hold again, and pauses only if nothing is left to delete. A pause ends when the limits hold with a margin of min(1 GB, `storage.maxGb` / 20). The `storage` pause stops keyframes only: like `battery`, it does not stop the replay ring (RAM) or audio transcripts (small text rows).
+8. Progressive deletion (Core, in `RunMaintenance`): rows older than `retention.progressiveAfterDays` are thinned day by day. When a day first enters thinning its screen-row count is stored in `thin_days`; the day keeps ceil(count x (1 - p)) rows, p = (age of the day's midpoint in days - after) / `retention.progressiveOverDays`, capped at 1. Deleted first: non-switch screen rows with the smallest `change_pct`. Switch rows (`is_switch`) and audio rows are never thinned; `retention.days` still deletes everything older. Rows from before 0.2 (`change_pct` and `is_switch` null) get a score from the dHash distance to the previous row and a switch flag from an app or title change. `DeleteForSpace` order: oldest day first; inside a day non-switch screen rows by change, then switches and audio by age. Afterwards empty month files are deleted and free pages released (`PRAGMA incremental_vacuum` on month files created with `auto_vacuum=INCREMENTAL`; files from before 0.2 get a full `VACUUM` only when over a quarter and over 64 MiB of them is free).
+9. Export (UI verb `export`, Danger zone page): a time window and an optional app name (case-insensitive, `.exe` ignored) to a zip at a path the user picked: `images/yyyyMMdd-HHmmss-fff_<id>.<ext>` (stored without compression; AVIF and JPEG XL kept as is, or JPEG when `jpeg` is true) plus `captures.json` (oldest first: `id`, `ts`, `kind`, `app`, `title`, `site`, `text`, `file`, `durationS`). The zip is written to `<path>.partial`, then moved over the target. The UI first sends a dry run for the count, then warns that the zip is not encrypted.
+
+Store columns added in 0.2 (idempotent steps in `EncryptedStore.Migrate`, `meta.schema` unchanged): `captures.change_pct REAL` (0 to 100, null when unknown), `captures.is_switch INTEGER` (null when unknown), table `thin_days(day INTEGER PRIMARY KEY, total INTEGER NOT NULL)`.
 
 ## 4. Worker protocol
 
@@ -91,7 +97,7 @@ Frame, both directions: `u32 LE headerLen`, header (UTF-8 JSON), `u32 LE payload
 | op | Request fields | Request payload | Response fields | Response payload |
 |---|---|---|---|---|
 | `hello` | | | `hello`: `WorkerHello` | |
-| `embed_image` | `format` (`webp`, `jpeg`, `png`, `bgra8`), `width`, `height`, `stride` (bgra8 only), `nsfw` (classifier threshold, null skips the classifier), `nsfwGrid` (1 to 3, see `privacy.nsfwGrid`), `nsfwDetector` (detector threshold, null skips the detector; the agent sends it only when `privacy.nsfwFilter` and `privacy.nsfwDetector` are on). The classifier runs first; the detector only on frames the classifier passed. Each threshold must be above 0 and at most 1 | image bytes | `dim`, `ms`, `dropped` (`"nsfw"` when blocked, then no payload) | `dim` float32 LE, L2-normalised |
+| `embed_image` | `format` (`webp`, `jpeg`, `png`, `bgra8`; the agent decodes AVIF and JPEG XL keyframes and sends `bgra8`), `width`, `height`, `stride` (bgra8 only), `nsfw` (classifier threshold, null skips the classifier), `nsfwGrid` (1 to 3, see `privacy.nsfwGrid`), `nsfwDetector` (detector threshold, null skips the detector; the agent sends it only when `privacy.nsfwFilter` and `privacy.nsfwDetector` are on). The classifier runs first; the detector only on frames the classifier passed. Each threshold must be above 0 and at most 1 | image bytes | `dim`, `ms`, `dropped` (`"nsfw"` when blocked, then no payload) | `dim` float32 LE, L2-normalised |
 | `embed_text` | `text`, `kind` (`query` or `document`) | | `dim`, `ms` | float32 LE, L2-normalised |
 | `transcribe` | `sampleRate` 16000, `channels` 1, `format` `f32`, `source` (`system`, `mic`), `language` (`auto` or a code) | PCM float32 LE | `transcript`: `TranscribeResult` | |
 | `bench` | | | `bench`: `BenchResult` | |
@@ -133,7 +139,7 @@ UI-only verbs:
 | `settings get` | `Settings` | |
 | `settings set <json>` | `Settings` after merge | Partial object. Error `Invalid <section.key>.`, nothing saved on error |
 | `timeline <from> <to> [limit]` | `{"items":[CaptureMeta...]}` | Newest first, default 500, max 5000 |
-| `keyframe <id>` | `ThumbData` at stored size | For the detail view |
+| `keyframe <id>` | `ThumbData` at stored size | For the detail view. AVIF and JPEG XL keyframes come back as WebP q90 (`IThumbnailer.Transcode`) |
 | `replay save` | `ReplayClip` | Same as the replay hotkey |
 | `replay list` | `{"items":[ReplayClip...]}` | |
 | `replay export <id> <path>` | `null` | Writes a decrypted MP4 to a path the user picked. The UI warns that this copy is not encrypted |
@@ -146,6 +152,7 @@ UI-only verbs:
 | `history` | `{"items":[HistoryEntry...]}` | Saved searches, newest first, at most `privacy.searchHistoryMax`. Empty while `privacy.searchHistory` is off |
 | `history add <text>` | `null` | The UI saves a search when the user commits to it (Enter, opening a result, closing the launcher on results), not on every keystroke. Ignored while history is off |
 | `history delete <text>` / `history clear` | `null` | |
+| `export <json>` | `ExportResult` `{"count","images","bytes"}` | `ExportRequest` `{"from","to","path","app"?,"jpeg"?,"dryRun"?}`; section 3 step 9. `from` before `to`; unless `dryRun`, `path` must be absolute and end in `.zip`. Dry run only counts (`bytes` 0). Audited as `export`. Errors `Invalid from.`, `Invalid path.`, `Export failed.` |
 
 Argument rules: `unlock <passphrase>`, `replay export <id> <path>` (the path), `settings set <json>` and `search <text>` take the rest of the line as one argument, spaces included, no quoting. Error strings added for UI verbs: `Wrong passphrase.` (passphrase unlock failed), `Unlock required.` (`purge all` without an unlock in the last 60 s). Reply shapes are the Contracts records `ItemsReply<T>`, `UnlockReply`, `PurgeConfirmReply`, `VersionReply`. Enums serialise lowercase (`screen`, `audio`, `hybrid`, `text`, `vector`); `ThumbData` carries the image in the field `base64`. Long replies: read with `LineReader` (buffered), not `LineProtocol.ReadLineAsync`.
 
@@ -155,7 +162,7 @@ Hotkey grammar (agent parser and UI recorder): modifiers `Ctrl`, `Alt`, `Shift`,
 
 `search` JSON also takes `"site":"<host>"` (normalised: lower case, no `www.`); hits carry `site`. `purge` takes two more scopes on every pipe that allows purge: `purge id <id>` (one capture, the launcher's Delete) and `purge site <host>` (the launcher's "Delete all from <site>"). A `purge last` or `purge range` also deletes saved searches typed in that window.
 
-Data verbs (`search`, `get`, `thumb`, `keyframe`, `timeline`, `audit`, `replay list`, `replay export`, `facets`, `history`) answer `Store is locked.` while `security.requireUnlock` is true and the read gate is closed.
+Data verbs (`search`, `get`, `thumb`, `keyframe`, `timeline`, `audit`, `replay list`, `replay export`, `facets`, `history`, `export`) answer `Store is locked.` while `security.requireUnlock` is true and the read gate is closed.
 
 ## 6. Security and privacy
 
@@ -235,14 +242,13 @@ Vector search needs no ANN library at v1 sizes: 30 days of 2 s keyframes after d
 | `capture.intervalMs` | 2000 | 500 to 60000 |
 | `capture.monitors` | `[]` (all) | monitor indices 0 to 63 |
 | `capture.maxWidth` | 1280 | 640 to 3840 |
-| `capture.dhashThreshold` | 6 | 0 to 32 |
-| `capture.dirtyMinPercent` | 0.5 | 0 to 100 |
+| `capture.dhashThreshold` | 6 | 0 to 32. dHash distance that keeps a frame on its own; 0 turns the dHash test off |
+| `capture.dirtyMinPercent` | 15 | 0 to 100. Smart-capture change score (section 3) a timer keyframe needs, vs the previous stored keyframe. Event triggers need 0.5. A settings file still holding the old default 0.5 is moved to 15 on load |
 | `capture.eventTriggers` | true | foreground change, scroll stop, typing pause |
 | `capture.pauseOnFullscreen` | true | |
 | `keyframes.enabled` | true | persist keyframe images |
-| `keyframes.format` | `webp` | `webp`, `jpeg` |
+| `keyframes.format` | `avif` | `avif`, `webp`, `jxl`, `jpeg`. New keyframes only; old ones keep their format. AVIF (libavif + aom, speed 7, quality = `keyframes.quality` - 25) is about 30% smaller than WebP at the same look on UI screenshots; JPEG XL (effort 3) saved nothing over WebP. A codec DLL that fails to load falls back to WebP with one warning. A settings file still holding the old default `webp` is moved to `avif` on load |
 | `keyframes.quality` | 75 | 30 to 95 |
-| `keyframes.maxGb` | 20 | 1 to 2000 |
 | `keyframes.thumbCacheMb` | 64 | 8 to 1024 |
 | `replay.enabled` | true | |
 | `replay.seconds` | 120 | 15 to 600 |
@@ -258,7 +264,12 @@ Vector search needs no ANN library at v1 sizes: 30 days of 2 s keyframes after d
 | `replay.encryptExports` | true | |
 | `replay.exportDir` | empty (`<data>\replays`) | path, used when exports are not encrypted |
 | `replay.notify` | true | Windows notification after a save; clicking it opens the UI replay list |
-| `retention.days` | 30 | 1 to 3650 |
+| `retention.days` | 30 | 1 to 3650. Hard limit: older rows are deleted |
+| `retention.progressiveAfterDays` | 7 | 0 to 3650. Age where progressive deletion starts (section 3 step 8); 0 turns it off |
+| `retention.progressiveOverDays` | 30 | 1 to 3650. Days over which a day is thinned from all its rows down to its switches |
+| `storage.minFreeGb` | 25 | 0 to 10000. Below this much free space capture pauses (reason `storage`) or, with `storage.overwrite`, deletes old captures |
+| `storage.maxGb` | 20 | 1 to 20000. Most space `store.db` plus the keyframe files may use. Replaces `keyframes.maxGb` (moved on load) |
+| `storage.overwrite` | false | delete the oldest captures (progressive order) instead of pausing. The UI warns before turning it on |
 | `audio.system` | false | system audio transcripts |
 | `audio.mic` | false | microphone transcripts |
 | `audio.language` | `auto` | `auto` or a Whisper language code |
@@ -292,6 +303,7 @@ etrieval`): right screens 0.68-0.80, wrong or off-topic up to 0.61 |
 - Contracts and Core are AOT and trim compatible: System.Text.Json source generation only.
 - Build one project without rebuilding Contracts: `dotnet build src/<Project> -p:BuildProjectReferences=false`.
 - Model files are never committed. Model download needs the user's go-ahead; until then use `inference.fake`.
+- Image codecs: `src\BetterRecall.Agent\Native\` holds prebuilt x64 DLLs, copied next to the agent exe: `avif.dll` (libavif 1.4.2 with aom 3.15.3 encode, dav1d 1.5.4 decode, libyuv), `jxl.dll`, `jxl_cms.dll`, `jxl_threads.dll` (libjxl 0.12.0). Built with vcpkg, custom triplet `x64-windows-br` (static dependencies, static CRT, release only, only libavif and libjxl dynamic); the DLLs import KERNEL32 only. Licences in `codecs.LICENSE.txt` (BSD-2/BSD-3, aom and libjxl patent grants, dav1d, libyuv, libjpeg-turbo, brotli, highway, Little CMS). Loaded through `NativeLibrary` from the agent directory only, C ABI by `delegate* unmanaged` (`Avif.cs`, `Jxl.cs`). `BetterRecall.Agent.exe --selftest-codec` round-trips a synthetic frame in every format.
 
 ## 10. Benchmark and recommendations
 
