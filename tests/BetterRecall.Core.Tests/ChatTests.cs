@@ -171,14 +171,57 @@ public sealed class ChatShareGateTests
         Assert.True(passThrough.ImagesUnavailable);
         Assert.All(passThrough.Hits, h => Assert.Null(h.Image));
 
-        var liar = await Build(AiShare.TextImages, new FixedRedactor(false));   // claims to redact, returned the original
-        Assert.False(liar.ImagesUnavailable);
+        var liar = await Build(AiShare.TextImages, new FixedRedactor(false));   // returned the image unchecked (OCR off)
+        Assert.True(liar.ImagesUnavailable);
         Assert.All(liar.Hits, h => Assert.Null(h.Image));
 
         var ok = await Build(AiShare.TextImages, new FixedRedactor(true));
         Assert.Equal(FixedRedactor.Bytes, ok.Hits[0].Image!.Bytes);
         Assert.Null(ok.Hits[1].Image);   // audio has no image
         Assert.Equal(FixedRedactor.Bytes, ChatShareGate.Item(ok.Hits[0], 2, new BasicTextRedactor()).Image);
+    }
+
+    [Fact]
+    public async Task Redactor_failure_or_unchecked_image_sends_text_only_for_that_capture()
+    {
+        var shots = new[] { Screen, Screen with { Id = "s2" }, Screen with { Id = "s3" } };
+        var red = new PerIdRedactor(new() { ["s1"] = "ok", ["s2"] = "unchecked", ["s3"] = "throw" });
+        var p = await ChatShareGate.BuildAsync(shots, AiShare.TextImages, 8, 3, Detail, Thumb, red, new BasicTextRedactor(), CancellationToken.None);
+        Assert.Equal(FixedRedactor.Bytes, p.Hits[0].Image!.Bytes);
+        Assert.Null(p.Hits[1].Image);
+        Assert.Null(p.Hits[2].Image);
+        Assert.All(p.Hits, h => Assert.Contains("title: Inbox - [redacted]", h.Text));   // text still goes
+        Assert.True(p.ImagesUnavailable);
+        Assert.Contains("on-screen text reading", ChatShareGate.ToolText(p));
+    }
+
+    [Fact]
+    public async Task Text_comes_from_the_stored_capture_never_from_the_image()
+    {
+        var stored = new CaptureDetail("s1", T, CaptureKind.Screen, "chrome.exe", Screen.Title, "Total due 120 EUR, ref [redacted]", true, null);
+        var red = new PerIdRedactor([]);
+        var p = await ChatShareGate.BuildAsync([Screen], AiShare.Text, 8, 3, id => id == "s1" ? stored : null, Thumb, red, new BasicTextRedactor(), CancellationToken.None);
+        Assert.Contains("text: Total due 120 EUR, ref [redacted]", p.Hits[0].Text);
+        Assert.Equal(0, red.Calls);   // text share never touches the image
+        p = await ChatShareGate.BuildAsync([Screen], AiShare.TextImages, 8, 3, id => id == "s1" ? stored : null, Thumb, red, new BasicTextRedactor(), CancellationToken.None);
+        Assert.Contains("text: Total due 120 EUR, ref [redacted]", p.Hits[0].Text);
+        Assert.Equal(1, red.Calls);   // only for the image
+    }
+
+    private sealed class PerIdRedactor(Dictionary<string, string> mode) : IDescribeRedactor
+    {
+        public int Calls;
+        public bool RedactsImages => true;
+        public Task<OutgoingImage> RedactAsync(string captureId, OutgoingImage image, CancellationToken ct)
+        {
+            Calls++;
+            return mode.GetValueOrDefault(captureId, "unchecked") switch
+            {
+                "ok" => Task.FromResult(new OutgoingImage(FixedRedactor.Bytes, "image/webp", image.Width, image.Height, true)),
+                "throw" => throw new DescribeException("Text recognition failed, so the image was not checked and is not sent. Try again."),
+                _ => Task.FromResult(image with { Redacted = false }),
+            };
+        }
     }
 
     [Fact]
@@ -665,11 +708,33 @@ public sealed class ChatServiceTests : IDisposable
         Assert.Contains(Convert.ToBase64String(FixedRedactor.Bytes), _h.Bodies[^1]);
         Assert.DoesNotContain("\"AQID\"", _h.Bodies[^1]);   // the unredacted thumbnail bytes
 
-        _redactor = new FixedRedactor(false);
+        _redactor = new FixedRedactor(false);   // OCR off or not installed: Redacted=false
         _chat = Make();
         _p.Turns.Enqueue(ScriptProvider.Search());
         ap = (await Send(null, "Which invoice?"))[^1];
         Assert.All(ap.Items!, i => Assert.Null(i.Image));
+        Assert.Equal(ChatShareGate.ImagesUnavailableNote, ap.Text);
+        _p.Turns.Enqueue(ScriptProvider.Answer());
+        await Approve(ap.Token!);
+        Assert.Contains("on-screen text reading", _h.Bodies[^1]);
+        Assert.Contains("Acme invoice for [redacted]", _h.Bodies[^1]);
+        Assert.DoesNotContain("\"images\":[\"", _h.Bodies[^1]);
+    }
+
+    [Fact]
+    public async Task Stored_redacted_text_is_what_is_sent()
+    {
+        var v = Vec.Seeded(11);
+        var id = _t.Store.AddScreenCapture(Caps.Screen(_now.AddMinutes(-2), "excel.exe", "Budget") with { Text = "Q3 total 48,200 for [redacted]" });
+        _t.Store.SetEmbedding(id, v, Vec.Info);
+        _emb.Map["budget"] = v;
+        Set("""{"ai":{"share":"text"}}""");
+        _p.Turns.Enqueue(ScriptProvider.Search("budget"));
+        var ap = (await Send(null, "What was the Q3 total?"))[^1];
+        Assert.Contains("text: Q3 total 48,200 for [redacted]", ap.Items!.Single(i => i.Id == id).Text);
+        _p.Turns.Enqueue(ScriptProvider.Answer());
+        await Approve(ap.Token!);
+        Assert.Contains("Q3 total 48,200 for [redacted]", _h.Bodies[^1]);
     }
 
     [Fact]

@@ -66,20 +66,23 @@ public sealed partial class BasicTextRedactor : ITextRedactor
 /// <summary>One capture prepared for a chat: the exact text and optional redacted image that may be sent.</summary>
 public sealed record SharedHit(string Ref, SearchHit Hit, string Text, OutgoingImage? Image);
 
-/// <summary>What one search tool call would send. ImagesUnavailable: images were asked for (ai.share textImages) but no
-/// redactor that redacts images exists, so none are included.</summary>
+/// <summary>What one search tool call would send. ImagesUnavailable: images were asked for (ai.share textImages) but at
+/// least one could not be checked (no image redactor, OCR off or not installed, OCR failed), so those captures go as
+/// text only.</summary>
 public sealed record SharePlan(string Share, IReadOnlyList<SharedHit> Hits, bool ImagesUnavailable);
 
 /// <summary>
 /// The only place that decides what a chat sends about captures. Fails closed: an unknown share level counts as
-/// metadata; images go only through IDescribeRedactor with RedactsImages and only when the result says Redacted;
-/// every title and text snippet goes through the text redactor.
+/// metadata; images go only through IDescribeRedactor with RedactsImages and only when the result says Redacted (OCR
+/// checked it); a redactor that fails leaves that capture as text only. Titles and text come only from the store
+/// (captures.title and captures.text, already redacted when captured) and go through the text redactor again;
+/// nothing is read from the image for text.
 /// </summary>
 public static class ChatShareGate
 {
     public const int SnippetChars = 400;
     public const int ImageWidth = 768;
-    public const string ImagesUnavailableNote = "Images were not shared: no screen redaction is available on this PC, so only text was sent.";
+    public const string ImagesUnavailableNote = "Some images were not shared: images are sent only after on-screen text reading has checked them, and it is off, not installed or failed. Only text was sent for those captures. Turn on on-screen text reading (Settings > OCR) to share images.";
 
     public static async Task<SharePlan> BuildAsync(IReadOnlyList<SearchHit> hits, string share, int maxHits, int maxImages,
         Func<string, CaptureDetail?> detail, Func<string, int, CancellationToken, Task<ThumbData?>> thumb,
@@ -91,6 +94,7 @@ public static class ChatShareGate
         bool canImages = wantImages && imageRedactor is { RedactsImages: true };
         var list = new List<SharedHit>();
         int images = 0;
+        bool unchecked_ = wantImages && !canImages;
         foreach (var h in hits.Take(Math.Clamp(maxHits, 1, 20)))
         {
             var refId = "S" + (list.Count + 1).ToString(CultureInfo.InvariantCulture);
@@ -102,13 +106,20 @@ public static class ChatShareGate
                 var t = await thumb(h.Id, ImageWidth, ct).ConfigureAwait(false);
                 if (t is { Bytes.Length: > 0 })
                 {
-                    var red = await imageRedactor!.RedactAsync(h.Id, new OutgoingImage(t.Bytes, t.Mime, t.Width, t.Height, false), ct).ConfigureAwait(false);
-                    if (red.Redacted) { image = red; images++; }   // a redactor that did not redact gets nothing sent
+                    OutgoingImage? red;
+                    try { red = await imageRedactor!.RedactAsync(h.Id, new OutgoingImage(t.Bytes, t.Mime, t.Width, t.Height, false), ct).ConfigureAwait(false); }
+                    catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+                    {
+                        Log.Warn($"chat image redaction failed, sending text only ({ex.GetType().Name})");
+                        red = null;
+                    }
+                    if (red is { Redacted: true }) { image = red; images++; }
+                    else unchecked_ = true;   // not checked (OCR off, not installed, failed): text only for this capture
                 }
             }
             list.Add(new SharedHit(refId, h, text, image));
         }
-        return new SharePlan(level, list, wantImages && !canImages);
+        return new SharePlan(level, list, unchecked_);
     }
 
     /// <summary>One capture as the model sees it. metadata: time, kind, app, site. text: plus redacted title and snippet.</summary>
