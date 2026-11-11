@@ -25,7 +25,8 @@ public class SettingsTests
         var extra = SettingsSchema.All.Select(d => d.Key).Except(keys).ToList();
         Assert.Empty(extra);
         Assert.All(SettingsSchema.All, d => Assert.NotNull(SettingsSchema.Get(Defaults(), d.Key)));
-        Assert.All(SettingsSchema.All, d => Assert.Contains(d.Group, SettingsSchema.Groups));
+        Assert.All(SettingsSchema.All, d => Assert.Contains(d.Group, SettingsSchema.Groups.Append("hotkeys")));   // hotkeys: Shortcuts page
+        Assert.All(SettingsSchema.All.Where(d => d.Group == "hotkeys"), d => Assert.Contains(d.Key, ShortcutRules.Actions.Select(ShortcutRules.Key)));
     }
 
     [Fact]
@@ -130,6 +131,9 @@ public class SettingsTests
     [InlineData("hotkeys.search", "Ctrl+Alt+R", false)]   // clashes with hotkeys.replay
     [InlineData("hotkeys.search", "Ctrl+Shift+F", true)]
     [InlineData("hotkeys.search", "Shift+F", false)]
+    [InlineData("hotkeys.panic", "", true)]                // not assigned
+    [InlineData("hotkeys.lock", "Ctrl+Alt+L", true)]
+    [InlineData("hotkeys.lock", "Ctrl+Alt+P", false)]     // clashes with hotkeys.pause
     public void Validate_Strings(string key, string value, bool valid)
     {
         var s = Defaults();
@@ -170,7 +174,26 @@ public class SettingsTests
         {
             var hk = HotkeyFormat.FromKeyPress(vk, true, false, false, false)!;
             Assert.Equal(hk, HotkeyFormat.Normalize(hk));
+            Assert.Equal(vk, HotkeyFormat.VirtualKey(hk.Split('+')[^1]));
         }
+    }
+
+    [Fact]
+    public void Shortcuts_ConflictsAndParse()
+    {
+        var s = Defaults();
+        Assert.Equal("pause", ShortcutRules.UsedBy(s, "lock", "ctrl+alt+p"));
+        Assert.Null(ShortcutRules.UsedBy(s, "pause", "Ctrl+Alt+P"));      // its own combination
+        Assert.Null(ShortcutRules.UsedBy(s, "lock", ""));
+        Assert.Null(ShortcutRules.UsedBy(s, "lock", "Ctrl+Alt+L"));
+        Assert.Equal("", ShortcutRules.Get(s, "timeline"));
+        Assert.True(ShortcutRules.TryParse("Ctrl+Alt+Shift+X", out var mods, out var vk));
+        Assert.Equal(2u | 1u | 4u, mods);
+        Assert.Equal(0x58u, vk);
+        Assert.True(ShortcutRules.TryParse("Win+F12", out mods, out vk));
+        Assert.Equal(8u, mods);
+        Assert.Equal(0x7Bu, vk);
+        Assert.False(ShortcutRules.TryParse("Shift+X", out _, out _));
     }
 }
 

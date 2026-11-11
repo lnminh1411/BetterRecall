@@ -43,7 +43,7 @@ public static partial class SettingsSchema
 {
     /// <summary>Navigation order of the settings groups. Resource "G_" + id.</summary>
     public static readonly string[] Groups =
-        ["appearance", "capture", "keyframes", "replay", "audio", "privacy", "index", "inference", "governance", "security", "hotkeys", "ipc", "retention", "log", "ai"];
+        ["appearance", "capture", "keyframes", "replay", "audio", "privacy", "index", "inference", "governance", "security", "ipc", "retention", "log", "ai"];   // hotkeys: own Shortcuts page
 
     public static readonly IReadOnlyList<SettingDescriptor> All =
     [
@@ -127,6 +127,9 @@ public static partial class SettingsSchema
         new("hotkeys.pause", "hotkeys", SettingType.Hotkey),
         new("hotkeys.replay", "hotkeys", SettingType.Hotkey),
         new("hotkeys.panic", "hotkeys", SettingType.Hotkey),
+        new("hotkeys.timeline", "hotkeys", SettingType.Hotkey),
+        new("hotkeys.home", "hotkeys", SettingType.Hotkey),
+        new("hotkeys.lock", "hotkeys", SettingType.Hotkey),
 
         new("ipc.enabled", "ipc", SettingType.Bool, WarningKey: "W_ipc_enabled"),
         new("mcp.enabled", "ipc", SettingType.Bool, WarningKey: "W_mcp_enabled"),
@@ -148,6 +151,8 @@ public static partial class SettingsSchema
         new("log.level", "log", SettingType.Choice, Choices: ["debug", "info", "warn", "error"]),
 
         new("ui.theme", "appearance", SettingType.Choice, Choices: ["system", "light", "dark"]),
+        new("ui.searchAlwaysOnTop", "appearance", SettingType.Bool),
+        new("ui.startMinimized", "appearance", SettingType.Bool),
 
         new("replay.searchable", "replay", SettingType.Bool),
         new("replay.sampleSeconds", "replay", SettingType.Int, 2, 60, EnabledWhenKey: "replay.searchable", EnabledWhenValue: "true"),
@@ -217,7 +222,7 @@ public static partial class SettingsSchema
             SettingType.StringList => v is JsonArray a && a.All(e => e is JsonValue ev && ev.TryGetValue<string>(out var es) && es.Trim().Length > 0)
                                       && (d.Key != "ipc.allowClients" || a.All(e => IsAbsolutePath(e!.GetValue<string>()))),
             SettingType.IntList => v is JsonArray ia && ia.All(e => TryNumber(e, out var en) && en == Math.Floor(en) && InRange(d, en)),
-            SettingType.Hotkey => v is JsonValue hv && hv.TryGetValue<string>(out var h) && HotkeyFormat.Normalize(h) == h && !HotkeyClash(d, root, h),
+            SettingType.Hotkey => v is JsonValue hv && hv.TryGetValue<string>(out var h) && (h.Length == 0 || (HotkeyFormat.Normalize(h) == h && !HotkeyClash(d, root, h))),   // "" = not assigned
             _ => true,
         };
         return ok ? null : d.InvalidError;

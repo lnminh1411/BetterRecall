@@ -40,6 +40,9 @@
                 <NavigationViewItem x:Uid="Nav_Audit" Tag="audit">
                     <NavigationViewItem.Icon><FontIcon Glyph="&#xE9D9;" /></NavigationViewItem.Icon>
                 </NavigationViewItem>
+                <NavigationViewItem x:Uid="Nav_Shortcuts" Tag="shortcuts">
+                    <NavigationViewItem.Icon><FontIcon Glyph="&#xE765;" /></NavigationViewItem.Icon>
+                </NavigationViewItem>
             </NavigationView.MenuItems>
             <Grid>
                 <Frame x:Name="ContentFrame" />

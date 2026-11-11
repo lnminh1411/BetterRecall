@@ -395,7 +395,7 @@ public sealed class Batch4CommandTests : IAsyncDisposable
         Assert.Equal("ant-key-7", req.Headers["x-api-key"]);
         Assert.Equal(CloudDescriber.ClaudeVersion, req.Headers["anthropic-version"]);
         using var body = JsonDocument.Parse(req.Body);
-        Assert.Equal("claude-haiku-5-5", body.RootElement.GetProperty("model").GetString());
+        Assert.Equal("claude-opus-5-5", body.RootElement.GetProperty("model").GetString());
         Assert.Equal(1024, body.RootElement.GetProperty("max_tokens").GetInt32());
         var content = body.RootElement.GetProperty("messages")[0].GetProperty("content");
         Assert.Equal("image", content[0].GetProperty("type").GetString());

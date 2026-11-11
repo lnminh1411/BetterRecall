@@ -600,6 +600,34 @@
   <data name="S_privacy_searchHistory_D" xml:space="preserve"><value>Keep your searches in the encrypted store and show them as recent searches. Turning it off deletes them.</value></data>
   <data name="S_privacy_searchHistoryMax" xml:space="preserve"><value>Searches to keep</value></data>
   <data name="S_privacy_searchHistoryMax_D" xml:space="preserve"><value>Older searches are forgotten.</value></data>
+  <data name="Nav_Shortcuts.Content" xml:space="preserve"><value>Shortcuts</value></data>
+  <data name="Shortcuts_Title.Text" xml:space="preserve"><value>Shortcuts</value></data>
+  <data name="Shortcuts_Desc.Text" xml:space="preserve"><value>Global shortcuts work in any app while BetterRecall runs. A shortcut needs Ctrl, Alt or Win.</value></data>
+  <data name="Shortcuts_Change" xml:space="preserve"><value>Change</value></data>
+  <data name="Shortcuts_ChangeName" xml:space="preserve"><value>Change shortcut for {0}</value></data>
+  <data name="Shortcuts_RemoveName" xml:space="preserve"><value>Remove shortcut for {0}</value></data>
+  <data name="Shortcuts_DialogTitle" xml:space="preserve"><value>Shortcut for {0}</value></data>
+  <data name="Shortcuts_DialogHint" xml:space="preserve"><value>Press the new key combination.</value></data>
+  <data name="Shortcuts_Save" xml:space="preserve"><value>Save</value></data>
+  <data name="Shortcuts_Current" xml:space="preserve"><value>This is the current shortcut.</value></data>
+  <data name="Shortcuts_InUse" xml:space="preserve"><value>Already used by {0}. Remove it there first.</value></data>
+  <data name="Shortcuts_Taken" xml:space="preserve"><value>Windows or another app already uses this combination.</value></data>
+  <data name="Shortcuts_Free" xml:space="preserve"><value>Available.</value></data>
+  <data name="Shortcuts_Failed" xml:space="preserve"><value>Not working: Windows or another app took this combination. Pick another.</value></data>
+  <data name="S_hotkeys_timeline" xml:space="preserve"><value>Open timeline</value></data>
+  <data name="S_hotkeys_home" xml:space="preserve"><value>Open home</value></data>
+  <data name="S_hotkeys_lock" xml:space="preserve"><value>Lock history</value></data>
+  <data name="Shortcut_search_D" xml:space="preserve"><value>Open the search window.</value></data>
+  <data name="Shortcut_timeline_D" xml:space="preserve"><value>Open the timeline in the main window.</value></data>
+  <data name="Shortcut_home_D" xml:space="preserve"><value>Open the main window on Home.</value></data>
+  <data name="Shortcut_pause_D" xml:space="preserve"><value>Pause capture, or resume it when paused.</value></data>
+  <data name="Shortcut_replay_D" xml:space="preserve"><value>Save the instant replay buffer as a replay.</value></data>
+  <data name="Shortcut_lock_D" xml:space="preserve"><value>Lock search and history until you unlock again.</value></data>
+  <data name="Shortcut_panic_D" xml:space="preserve"><value>Clear the replay buffer and queues from memory at once.</value></data>
+  <data name="S_ui_searchAlwaysOnTop" xml:space="preserve"><value>Search window on top</value></data>
+  <data name="S_ui_searchAlwaysOnTop_D" xml:space="preserve"><value>Keep the search window above other windows while it is open.</value></data>
+  <data name="S_ui_startMinimized" xml:space="preserve"><value>Start minimized</value></data>
+  <data name="S_ui_startMinimized_D" xml:space="preserve"><value>When BetterRecall starts, show only the tray icon. Off opens Home.</value></data>
   <data name="Unlock_BodyPassword" xml:space="preserve"><value>Your history is locked. Enter your unlock password to search and view it.</value></data>
   <data name="Unlock_PasswordHint" xml:space="preserve"><value>Unlock password</value></data>
   <data name="Unlock_PassphraseHint" xml:space="preserve"><value>Passphrase</value></data>
@@ -637,7 +665,7 @@
   <data name="S_ai_provider_openai-compatible" xml:space="preserve"><value>OpenAI-compatible</value></data>
   <data name="S_ai_provider_claude" xml:space="preserve"><value>Anthropic Claude</value></data>
   <data name="S_ai_model" xml:space="preserve"><value>Model</value></data>
-  <data name="S_ai_model_D" xml:space="preserve"><value>Model id. Empty uses the provider default (gemini-3.8-flash, gpt-6-luna, claude-haiku-5-5).</value></data>
+  <data name="S_ai_model_D" xml:space="preserve"><value>Model id. Empty uses the provider default (gemini-3.8-flash, gpt-6-luna, claude-opus-5-5).</value></data>
   <data name="S_ai_endpoint" xml:space="preserve"><value>Endpoint</value></data>
   <data name="S_ai_endpoint_D" xml:space="preserve"><value>Empty uses the official endpoint. Must start with https://, or http:// on localhost for a local server.</value></data>
   <data name="AiKey_Title" xml:space="preserve"><value>API key</value></data>
