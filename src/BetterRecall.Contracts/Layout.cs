@@ -38,6 +38,10 @@ public static class DataPaths
     public static string KeyframesDir(string home) => Path.Combine(home, "keyframes");
     public static string ReplaysDir(string home) => Path.Combine(home, "replays");
     public static string KeyFile(string home) => Path.Combine(home, "keys", "datakey.bin");
+    /// <summary>Argon2id hash of the unlock password (security.unlockMethod password) plus the retry counter.</summary>
+    public static string UnlockPasswordFile(string home) => Path.Combine(home, "keys", "unlock.bin");
+    /// <summary>Cloud describe API key, DPAPI-encrypted (CurrentUser).</summary>
+    public static string AiKeyFile(string home) => Path.Combine(home, "keys", "ai-key.bin");
     public static string ModelsDir(string home, Settings s) =>
         string.IsNullOrWhiteSpace(s.Inference.ModelDir) ? Path.Combine(home, "models") : s.Inference.ModelDir;
     public static string CompiledCache(string home) => Path.Combine(home, "cache", "compiled");
@@ -117,6 +121,10 @@ public sealed class UtcTimestampConverter : JsonConverter<DateTimeOffset>
 [JsonSerializable(typeof(ItemsReply<HistoryEntry>))]
 [JsonSerializable(typeof(VersionReply))]
 [JsonSerializable(typeof(List<ReplayClip>))]
+[JsonSerializable(typeof(PasswordStatus))]
+[JsonSerializable(typeof(AiStatus))]
+[JsonSerializable(typeof(DescribePreview))]
+[JsonSerializable(typeof(DescribeResult))]
 [JsonSerializable(typeof(WorkerHello))]
 [JsonSerializable(typeof(TranscribeResult))]
 [JsonSerializable(typeof(BenchResult))]

@@ -92,7 +92,7 @@ public sealed class AgentApi(IAgentClient client)
             if (q.Kind is { } k)
             {
                 w.WriteStartArray("kind");
-                w.WriteStringValue(k == CaptureKind.Audio ? "audio" : "screen");
+                w.WriteStringValue(k switch { CaptureKind.Audio => "audio", CaptureKind.Replay => "replay", _ => "screen" });
                 w.WriteEndArray();
             }
             if (q.Mode != SearchMode.Hybrid) w.WriteString("mode", q.Mode.ToString().ToLowerInvariant());
@@ -203,4 +203,49 @@ public sealed class AgentApi(IAgentClient client)
 
     public async Task<AgentResult<BenchResult>> BenchAsync(CancellationToken ct = default) =>
         (await client.SendAsync("bench", ct)).As(d => Responses.Bench(d) ?? throw new JsonException());
+
+    // ---- unlock password (security.unlockMethod password) ----
+
+    public async Task<AgentResult<PasswordStatus>> PasswordStatusAsync(CancellationToken ct = default) =>
+        (await client.SendAsync("password", ct)).As(d => d.Deserialize(ContractsJson.Default.PasswordStatus) ?? throw new JsonException());
+
+    /// <summary>current is null for the first password. The caller must not keep either password.</summary>
+    public Task<AgentResult> PasswordSetAsync(string? current, string next, CancellationToken ct = default) =>
+        client.SendAsync("password set " + PasswordJson(current, next), ct);
+
+    public Task<AgentResult> PasswordClearAsync(string current, CancellationToken ct = default) =>
+        client.SendAsync("password clear " + PasswordJson(current, null), ct);
+
+    public static string PasswordJson(string? current, string? next)
+    {
+        using var ms = new MemoryStream();
+        using (var w = new Utf8JsonWriter(ms))
+        {
+            w.WriteStartObject();
+            if (current is not null) w.WriteString("current", current);
+            if (next is not null) w.WriteString("new", next);
+            w.WriteEndObject();
+        }
+        return Encoding.UTF8.GetString(ms.ToArray());
+    }
+
+    // ---- cloud describe ----
+
+    public async Task<AgentResult<AiStatus>> AiStatusAsync(CancellationToken ct = default) =>
+        (await client.SendAsync("ai", ct)).As(d => d.Deserialize(ContractsJson.Default.AiStatus) ?? throw new JsonException());
+
+    /// <summary>Stores the key in the agent (DPAPI). The caller must not keep it.</summary>
+    public async Task<AgentResult<AiStatus>> AiSetKeyAsync(string key, CancellationToken ct = default) =>
+        (await client.SendAsync("ai setkey " + OneLine(key), ct)).As(d => d.Deserialize(ContractsJson.Default.AiStatus) ?? throw new JsonException());
+
+    public async Task<AgentResult<AiStatus>> AiClearKeyAsync(CancellationToken ct = default) =>
+        (await client.SendAsync("ai clearkey", ct)).As(d => d.Deserialize(ContractsJson.Default.AiStatus) ?? throw new JsonException());
+
+    /// <summary>The exact image a confirmed send would upload, plus its token. Nothing leaves the PC yet.</summary>
+    public async Task<AgentResult<DescribePreview>> DescribePreviewAsync(string id, CancellationToken ct = default) =>
+        (await client.SendAsync("describe preview " + id, ct)).As(d => d.Deserialize(ContractsJson.Default.DescribePreview) ?? throw new JsonException());
+
+    /// <summary>Sends the previewed image to the provider. Takes seconds: use a run client, not the shared one.</summary>
+    public async Task<AgentResult<DescribeResult>> DescribeSendAsync(string token, CancellationToken ct = default) =>
+        (await client.SendAsync("describe send " + token, ct)).As(d => d.Deserialize(ContractsJson.Default.DescribeResult) ?? throw new JsonException());
 }

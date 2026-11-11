@@ -33,6 +33,9 @@ internal sealed class KeyframePipeline : IAsyncDisposable
     public double LastEncodeMs;
     public ChangeResult LastChange;
 
+    /// <summary>Receives replay samples (ReplaySample requests). Null: samples are dropped.</summary>
+    public Replay.ReplaySampler? Sampler { get; set; }
+
     /// <summary>Encoder of the last keyframe (log, status, bench).</summary>
     public string Encoder => _encoder.Active;
     public string? HardwareUnavailable => _encoder.HardwareUnavailable;
@@ -91,6 +94,23 @@ internal sealed class KeyframePipeline : IAsyncDisposable
         var s = _settings();
         var store = _store();
         if (store is null) return;
+        string format = s.Keyframes.Format == "jpeg" ? "jpeg" : "webp";
+        int quality = Math.Clamp(s.Keyframes.Quality, 30, 95);
+        byte[]? sampleBytes = null;
+        if (g.Request.ReplaySample && Sampler is { } sampler)
+        {
+            sampleBytes = ImageCodec.EncodeBgra(g.Pixels, g.Width, g.Height, g.Stride, format, quality);
+            var rq = g.Request;
+            sampler.Add(new Replay.ReplaySampler.Sample(rq.Ts, g.Monitor, rq.App, GuardrailPolicy.FilterTitle(rq.Title, s.Privacy), rq.Site,
+                g.Width, g.Height, sampleBytes, ImageCodec.Mime(format)), Math.Clamp(s.Replay.Seconds, 15, 600) + 10);
+        }
+        try { ProcessKeyframe(g, s, store, format, quality, sampleBytes); }
+        finally { if (sampleBytes is not null) Array.Clear(sampleBytes); }
+    }
+
+    private unsafe void ProcessKeyframe(KeyframeGrab g, Settings s, IStore store, string format, int quality, byte[]? encoded)
+    {
+        if (!g.Request.Keyframe) return;
         DedupFilter dedup;
         lock (_dedup)
         {
@@ -110,8 +130,13 @@ internal sealed class KeyframePipeline : IAsyncDisposable
         }
         sw.Restart();
         byte[] bytes;
-        string format;
-        try { (bytes, format) = _encoder.Encode(g.Pixels, g.Width, g.Height, g.Stride, s); }
+        string kfFormat;
+        try
+        {
+            // A replay sample (WebP or JPEG, which the worker decodes) is reused when the keyframe uses the same format.
+            if (encoded is not null && ImageCodec.Resolve(s.Keyframes.Format) == format) (bytes, kfFormat) = (encoded.ToArray(), format);
+            else (bytes, kfFormat) = _encoder.Encode(g.Pixels, g.Width, g.Height, g.Stride, s);
+        }
         catch { map.Clear(); throw; }
         LastEncodeMs = sw.Elapsed.TotalMilliseconds;
         EncodeMsTotal += LastEncodeMs;

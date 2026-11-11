@@ -19,6 +19,7 @@ public sealed record AppArgs(
     bool Hidden = false,
     string? MockQuery = null,
     bool MockMenu = false,
+    bool MockPassword = false,
     bool MockStorage = false)
 {
     public static AppArgs Parse(IEnumerable<string> args)
@@ -33,6 +34,7 @@ public sealed record AppArgs(
                 case "--mock": a = a with { Mock = true }; break;
                 case "--mock-locked": a = a with { Mock = true, MockLocked = true }; break;
                 case "--mock-passphrase": a = a with { Mock = true, MockPassphrase = true }; break;
+                case "--mock-password": a = a with { Mock = true, MockLocked = true, MockPassword = true }; break;   // unlock method password ("wrong" fails)
                 case "--mock-firstrun": a = a with { Mock = true, MockFirstRun = true }; break;
                 case "--mock-capturable": a = a with { Mock = true, MockCapturable = true }; break;
                 case "--mock-storage": a = a with { Mock = true, MockStorage = true }; break;   // capture paused for storage

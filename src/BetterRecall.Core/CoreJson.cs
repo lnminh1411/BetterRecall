@@ -54,5 +54,9 @@ public sealed record ExportEntry(string Id, DateTimeOffset Ts, CaptureKind Kind,
 [JsonSerializable(typeof(ItemsReply<CaptureMeta>))]
 [JsonSerializable(typeof(ItemsReply<AuditEntry>))]
 [JsonSerializable(typeof(ItemsReply<ReplayClip>))]
+[JsonSerializable(typeof(PasswordStatus))]
+[JsonSerializable(typeof(AiStatus))]
+[JsonSerializable(typeof(DescribePreview))]
+[JsonSerializable(typeof(DescribeResult))]
 [JsonSerializable(typeof(string))]
 public partial class CoreJson : JsonSerializerContext;

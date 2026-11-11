@@ -30,7 +30,8 @@ internal sealed class QueryEmbedder(WorkerClient worker) : IQueryEmbedder
 /// </summary>
 internal sealed class AgentHost : IAgentControl, IAsyncDisposable
 {
-    private const int HkSearch = 1, HkPause = 2, HkReplay = 3, HkPanic = 4;
+    private const int HkSearch = 1, HkPause = 2, HkReplay = 3, HkPanic = 4, HkTimeline = 5, HkHome = 6, HkLock = 7;
+    private volatile string[]? _hotkeysFailed;
 
     private readonly ICoreHost _core;
     private readonly AgentOptions _opt;
@@ -40,6 +41,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
     private readonly WorkerClient _worker;
     private readonly Thumbnailer _thumbs;
     private readonly LoopbackHub _loopback = new();
+    private readonly ReplaySampler _sampler = new();
     private readonly SemaphoreSlim _benchLock = new(1, 1);
     private readonly CancellationTokenSource _cts = new();
     private MessageWindow? _window;
@@ -107,7 +109,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         var encLuid = GpuDevices.Adapters().FirstOrDefault(a => a.VendorId == GpuDevices.VendorIntel)?.Luid;
         _probe = new SystemProbe(encLuid is null ? null : GpuDevices.PdhLuidToken(encLuid.Value));
         _scheduler = new EmbeddingScheduler(() => Store, () => S, _worker, ProbeLoad, () => _pause.Has("consent") || _pause.Has("keylocked"));
-        _pipeline = new KeyframePipeline(() => Store, () => S, OnCaptureStored, () => _capture?.Devices);
+        _pipeline = new KeyframePipeline(() => Store, () => S, OnCaptureStored, () => _capture?.Devices) { Sampler = _sampler };
         _guard = new GuardrailService(() => S, () => _sessionLocked, () => _capture?.MonitorBounds() ?? [], _opt.InstallDir);
         _guard.ForegroundChanged += _ => _capture?.OnForegroundChanged();
         _window.ForegroundChanged += () => _guard?.OnForegroundEvent();
@@ -130,6 +132,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
             try { StartupRegistration.Register(_opt.InstallDir); } catch (Exception ex) { Log.Warn("startup registration", ex); }
         }
         if (s.Capture.Consented) StartCapture();
+        if (!s.Ui.StartMinimized) UiLauncher.Start(_opt.InstallDir, "--page", "home");   // ui.startMinimized off: open Home with the tray icon
         _ = Task.Delay(TimeSpan.FromSeconds(15)).ContinueWith(_ => Diagnostics.Mark(), TaskScheduler.Default);
         Log.Info("agent running");
         _window.Run();
@@ -217,12 +220,22 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
     private void RegisterHotkeys()
     {
         var h = S.Hotkeys;
-        foreach (var (id, name, text) in new[] { (HkSearch, "search", h.Search), (HkPause, "pause", h.Pause), (HkReplay, "replay", h.Replay), (HkPanic, "panic", h.Panic) })
+        var failed = new List<string>();
+        var all = new[]
         {
+            (HkSearch, "search", h.Search), (HkPause, "pause", h.Pause), (HkReplay, "replay", h.Replay), (HkPanic, "panic", h.Panic),
+            (HkTimeline, "timeline", h.Timeline), (HkHome, "home", h.Home), (HkLock, "lock", h.Lock),
+        };
+        // Unregister first, so a combination moved from one action to another is free when the second registers.
+        foreach (var (id, _, _) in all) _window!.UnregisterHotkey(id);
+        foreach (var (id, name, text) in all)
+        {
+            if (string.IsNullOrWhiteSpace(text)) continue;   // not assigned
             var hk = HotkeyParser.Parse(text);
-            if (hk is null) { _window!.UnregisterHotkey(id); Log.Warn($"hotkey {name} invalid"); continue; }
-            _window!.RegisterHotkey(id, name, hk.Value);
+            if (hk is null) { Log.Warn($"hotkey {name} invalid"); failed.Add(name); continue; }
+            if (!_window!.RegisterHotkey(id, name, hk.Value)) failed.Add(name);
         }
+        _hotkeysFailed = failed.Count > 0 ? [.. failed] : null;
     }
 
     // ---------------- events ----------------
@@ -282,7 +295,8 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
     }
 
     private static bool HotkeysEqual(HotkeySettings a, HotkeySettings b) =>
-        a.Search == b.Search && a.Pause == b.Pause && a.Replay == b.Replay && a.Panic == b.Panic;
+        a.Search == b.Search && a.Pause == b.Pause && a.Replay == b.Replay && a.Panic == b.Panic
+        && a.Timeline == b.Timeline && a.Home == b.Home && a.Lock == b.Lock;
 
     private void OnHotkey(string name)
     {
@@ -302,6 +316,15 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
                 break;
             case "panic":
                 Panic();
+                break;
+            case "timeline":
+                UiLauncher.Start(_opt.InstallDir, "--page", "timeline");
+                break;
+            case "home":
+                UiLauncher.Start(_opt.InstallDir, "--page", "home");
+                break;
+            case "lock":
+                Lock();
                 break;
         }
     }
@@ -435,7 +458,8 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
             Queue: new QueueState((_scheduler?.Queued ?? 0) + StoreStats().PendingEmbeddings),
             Device: _supervisor.IsRunning ? _supervisor.Hello?.Device ?? "none" : "none",
             Store: StoreStats(),
-            RetentionDays: s.Retention.Days);
+            RetentionDays: s.Retention.Days,
+            HotkeysFailed: _hotkeysFailed);
     }
 
     private StoreStats StoreStats()
@@ -478,6 +502,13 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         return ok;
     }
 
+    /// <summary>Core verified the unlock password (or the data-key passphrase): open the gate without Hello.</summary>
+    public void OpenReadGate()
+    {
+        _gate.Open(S.Security.UnlockTimeoutMin);
+        RaiseStatus(force: true);
+    }
+
     public void Lock()
     {
         _gate.Close();
@@ -514,19 +545,46 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         long bytes = new FileInfo(path).Length;
         Log.Info($"replay saved: {durationMs} ms, {bytes / 1024} KiB, encrypted={encrypted}, {sw.ElapsedMilliseconds} ms");
         if (S.Replay.Notify) _window?.Notify("Replay saved", $"Last {durationMs / 1000} s saved. Click to open the replay list.");
+        IndexReplayFrames(id, ts, durationMs);
         return new ReplayClip(id, ts, durationMs, bytes, encrypted, path);
+    }
+
+    /// <summary>replay.searchable: the sampled frames of the saved clip go into the store as kind replay (id + offset).</summary>
+    private void IndexReplayFrames(string id, DateTimeOffset end, int durationMs)
+    {
+        var s = S;
+        if (!s.Replay.Searchable || Store is not { } store) return;
+        var start = end - TimeSpan.FromMilliseconds(durationMs);
+        var samples = _sampler.Take(start, end, Math.Clamp(s.Replay.SampleSeconds, 2, 60));
+        int n = 0;
+        try
+        {
+            foreach (var f in ReplaySampler.ToFrames(id, start, durationMs, samples))
+            {
+                try { store.AddReplayFrame(f); n++; }
+                finally { Array.Clear(f.Image); }
+            }
+        }
+        catch (Exception ex) { Log.Warn("replay frames", ex); }
+        if (n > 0) _scheduler?.Signal();
+        Log.Info($"replay {id}: {n} frames queued for search");
     }
 
     public IReadOnlyList<ReplayClip> ListReplays() => _replays?.List() ?? [];
 
     public Task ExportReplayAsync(string id, string path, CancellationToken ct) => _replays!.ExportAsync(id, path, ct);
 
-    public void DeleteReplay(string id) => _replays!.Delete(id);
+    public void DeleteReplay(string id)
+    {
+        _replays!.Delete(id);
+        try { Store?.DeleteReplayFrames(id); } catch (Exception ex) { Log.Warn("replay frames delete", ex); }
+    }
 
     public void Panic()
     {
         var sw = Stopwatch.StartNew();
         _capture?.Panic();
+        _sampler.Clear();
         _scheduler?.Clear();
         _thumbs.ClearCache();
         _systemAudio?.Clear();

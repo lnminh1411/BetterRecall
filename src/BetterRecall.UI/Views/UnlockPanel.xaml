@@ -12,6 +12,8 @@
             <StackPanel x:Name="PassPanel" Spacing="8" Visibility="Collapsed">
                 <PasswordBox x:Name="Pass" x:Uid="Unlock_Passphrase" KeyDown="Pass_KeyDown" />
                 <Button x:Name="PassButton" x:Uid="Unlock_PassButton" Style="{StaticResource AccentButtonStyle}" HorizontalAlignment="Stretch" Click="Pass_Click" />
+                <TextBlock x:Name="LessSecureText" TextWrapping="Wrap" Visibility="Collapsed" Style="{StaticResource CaptionTextBlockStyle}"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
             </StackPanel>
             <ProgressRing x:Name="Busy" IsActive="False" Width="24" Height="24" />
             <InfoBar x:Name="ErrorBar" IsClosable="False" Severity="Error" IsOpen="False" />

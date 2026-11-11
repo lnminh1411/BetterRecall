@@ -47,7 +47,7 @@ internal sealed class Services
         IServerTrust trust;
         if (args.Mock)
         {
-            var agent = new MockAgent(new MockOptions(args.MockLocked, args.MockPassphrase, args.MockFirstRun, args.MockCapturable, StoragePaused: args.MockStorage));
+            var agent = new MockAgent(new MockOptions(args.MockLocked, args.MockPassphrase, args.MockFirstRun, args.MockCapturable, PasswordUnlock: args.MockPassword, StoragePaused: args.MockStorage));
             pipe = MockPipeServer.NameFor(Environment.ProcessId);
             _mock = new MockPipeServer(agent, pipe);
             _mock.Start();
@@ -113,6 +113,11 @@ internal sealed class Services
 
     public bool Consented => SettingsSchema.Get(Settings.Original, "capture.consented")?.GetValue<bool>() ?? true;
     public string KeyProtection => SettingsSchema.Get(Settings.Original, "security.keyProtection")?.GetValue<string>() ?? "auto";
+    public string UnlockMethod => SettingsSchema.Get(Settings.Original, "security.unlockMethod")?.GetValue<string>() ?? "hello";
+    public bool AiEnabled => SettingsSchema.Get(Settings.Original, "ai.enabled")?.GetValue<bool>() ?? false;
+
+    /// <summary>Unlock screen mode; the data key still waits for its passphrase while the agent reports pause reason keylocked.</summary>
+    public UnlockMode UnlockMode => UnlockLogic.Mode(KeyProtection, UnlockMethod, Status?.PauseReason == "keylocked");
 
     /// <summary>security.excludeOwnWindows and security.memoryIsolation, from the saved settings.</summary>
     public void ApplySecurity()
@@ -133,6 +138,10 @@ internal sealed class Services
     };
 
     public event Action? ThemeChanged;
+
+    /// <summary>ui.searchAlwaysOnTop as saved (default on).</summary>
+    public bool SearchAlwaysOnTop => SettingsSchema.Get(Settings.Original, "ui.searchAlwaysOnTop") is not System.Text.Json.Nodes.JsonValue v
+        || !v.TryGetValue<bool>(out var b) || b;
 
     private void ApplyStatus(AgentStatus s)
     {

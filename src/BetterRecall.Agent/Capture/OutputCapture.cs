@@ -11,10 +11,12 @@ using Vortice.DXGI;
 
 namespace BetterRecall.Agent.Capture;
 
-/// <summary>Keyframe requested by the hub for one output. Metadata is decided before the grab.</summary>
+/// <summary>Keyframe requested by the hub for one output. Metadata is decided before the grab. Keyframe: store it as a
+/// screen capture (dedup applies). ReplaySample: also offer it to the replay sampler (frames of saved replays).
 /// DirtyMinPercent is the cheap pre-grab gate on the dirty area since the last grab; the pipeline compares the grab
-/// with the last stored keyframe (capture.dirtyMinPercent). Trigger: asked by an event, not the timer.
-internal sealed record KeyframeRequest(DateTimeOffset Ts, string App, string ExePath, string Title, string Context, bool Force, int MaxWidth, double DirtyMinPercent, string Site = "", bool Trigger = false);
+/// with the last stored keyframe (capture.dirtyMinPercent). Trigger: asked by an event, not the timer.</summary>
+internal sealed record KeyframeRequest(DateTimeOffset Ts, string App, string ExePath, string Title, string Context, bool Force, int MaxWidth, double DirtyMinPercent, string Site = "",
+    bool Keyframe = true, bool ReplaySample = false, bool Trigger = false);
 
 /// <summary>A grabbed, downscaled BGRA keyframe in native memory, owned by the receiver (Dispose zeroes it).</summary>
 internal sealed unsafe class KeyframeGrab : IDisposable

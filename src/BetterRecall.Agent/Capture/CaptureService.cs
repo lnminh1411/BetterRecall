@@ -29,6 +29,7 @@ internal sealed class CaptureService : IAsyncDisposable
     private AudioReplayEncoder? _audio;
     private Timer? _timer;
     private long _lastKeyframeTick;
+    private long _lastSampleTick;
     private long _lastEventTrigger;
     private long _pendingTriggerAt;
     private uint _lastInputTick;
@@ -148,7 +149,15 @@ internal sealed class CaptureService : IAsyncDisposable
             _engine.Paused = replayPaused;
             if (_audio is not null) _audio.Paused = replayPaused;
 
-            if (_keyframesPaused()) return;
+            // Replay samples (replay.searchable) follow the replay buffer, not the keyframe pause: fullscreen pauses
+            // keyframes but the replay may keep running (replay.duringFullscreen).
+            bool sampleDue = s.Replay.Enabled && s.Replay.Searchable && !replayPaused && _engine.Pipelines.Count > 0
+                && now - _lastSampleTick >= Math.Clamp(s.Replay.SampleSeconds, 2, 60) * 1000L;
+            if (_keyframesPaused())
+            {
+                if (sampleDue) { _lastSampleTick = now; RequestKeyframes(force: false, keyframe: false, sample: true); }
+                return;
+            }
             bool due = now - _lastKeyframeTick >= Math.Clamp(s.Capture.IntervalMs, 500, 60000);
             bool trigger = false;
             if (s.Capture.EventTriggers)
@@ -162,16 +171,21 @@ internal sealed class CaptureService : IAsyncDisposable
                 else if (_inputBurst && idle >= 700) { _inputBurst = false; trigger = true; }
                 if (trigger && now - _lastEventTrigger < 1000) trigger = false;
             }
-            if (!due && !trigger) return;
+            if (!due && !trigger)
+            {
+                if (sampleDue) { _lastSampleTick = now; RequestKeyframes(force: false, keyframe: false, sample: true); }
+                return;
+            }
             if (due) _lastKeyframeTick = now;
             if (trigger) _lastEventTrigger = now;
-            RequestKeyframes(force: false, trigger);
+            if (sampleDue) _lastSampleTick = now;
+            RequestKeyframes(force: false, keyframe: true, sample: sampleDue, trigger: trigger);
         }
         catch (Exception ex) { Log.Warn("capture tick", ex); }
     }
 
     /// <summary>Applies the guardrails and asks each output for a keyframe.</summary>
-    public void RequestKeyframes(bool force, bool trigger = false)
+    public void RequestKeyframes(bool force, bool keyframe = true, bool sample = false, bool trigger = false)
     {
         var s = _settings();
         var snap = _guard.Current();
@@ -193,7 +207,7 @@ internal sealed class CaptureService : IAsyncDisposable
                     Math.Clamp(s.Capture.MaxWidth, 640, 3840),
                     // Pre-grab gate stays at 0.5 % of dirty area since the last grab; the real test
                     // (capture.dirtyMinPercent against the last stored keyframe) runs in the pipeline.
-                    Math.Min(Math.Clamp(s.Capture.DirtyMinPercent, 0, 100), CapturePolicy.TriggerMinScore), site, trigger);
+                    Math.Min(Math.Clamp(s.Capture.DirtyMinPercent, 0, 100), CapturePolicy.TriggerMinScore), site, keyframe, sample, trigger);
             }
         }
     }

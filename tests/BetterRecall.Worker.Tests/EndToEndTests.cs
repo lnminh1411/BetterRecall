@@ -42,7 +42,8 @@ public class EndToEndTests(ITestOutputHelper output)
     [Fact]
     public void Worker_exe_fake_mode_end_to_end_with_hardening()
     {
-        var root = TestEnv.NewDir("e2e");
+        using var scratch = TestEnv.Scoped("e2e");
+        var root = scratch.Path;
         var install = Path.Combine(root, "install");
         var sw = Stopwatch.StartNew();
         CopyTree(BuildDir("BetterRecall.Worker"), Path.Combine(install, "worker"));
@@ -80,7 +81,8 @@ public class EndToEndTests(ITestOutputHelper output)
     [Fact]
     public void Worker_exe_real_mode_loads_runtimes_under_hardening()
     {
-        var root = TestEnv.NewDir("e2ereal");
+        using var scratch = TestEnv.Scoped("e2ereal");
+        var root = scratch.Path;
         var install = Path.Combine(root, "install");
         CopyTree(BuildDir("BetterRecall.Worker"), Path.Combine(install, "worker"));
         CopyTree(BuildDir("FakeAgent"), install);

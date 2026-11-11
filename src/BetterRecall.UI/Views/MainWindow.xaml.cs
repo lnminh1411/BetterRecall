@@ -77,6 +77,7 @@ public sealed partial class MainWindow : Window
             "danger" => typeof(DangerZonePage),
             "audit" => typeof(AuditPage),
             "bench" => typeof(BenchPage),
+            "shortcuts" => typeof(ShortcutsPage),
             "consent" => typeof(ConsentPage),
             _ => null,
         };

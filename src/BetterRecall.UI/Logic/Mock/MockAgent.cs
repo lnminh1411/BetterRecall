@@ -15,6 +15,7 @@ public sealed record MockOptions(
     bool FirstRun = false,
     bool Capturable = false,
     int Seed = 42,
+    bool PasswordUnlock = false,   // security.unlockMethod password (the mock password is anything but "wrong")
     bool StoragePaused = false);   // --mock-storage: capture paused for storage (banner)
 
 /// <summary>
@@ -41,6 +42,11 @@ public sealed class MockAgent
     private string? _pauseReason;
     private DateTimeOffset? _pausedUntil;
     private int _pending = 3;
+    private bool _passwordSet = true;
+    private int _passwordFailures;
+    private DateTimeOffset _passwordBlockedUntil;
+    private bool _aiKeySet = true;
+    private readonly Dictionary<string, (string Id, DateTimeOffset Expires)> _describeTokens = [];
 
     public const string WrongPassphrase = "wrong";
 
@@ -58,6 +64,8 @@ public sealed class MockAgent
         s.Capture.Consented = !o.FirstRun;
         s.Security.KeyProtection = o.Passphrase ? "passphrase" : "auto";
         s.Security.ExcludeOwnWindows = !o.Capturable;
+        if (o.PasswordUnlock) s.Security.UnlockMethod = "password";
+        s.Ai.Enabled = true;   // demo: Describe shows in the detail pane (off by default in the real agent)
         _settings = (JsonObject)JsonNode.Parse(JsonSerializer.Serialize(s, ContractsJson.Default.Settings))!;
         _locked = o.StartLocked;
         if (o.StoragePaused) { _paused = true; _pauseReason = "storage"; }
@@ -135,9 +143,19 @@ public sealed class MockAgent
         for (int i = 0; i < 4; i++)
         {
             var ts = now.AddHours(-(i * 7 + 1)).AddMinutes(-rnd.Next(60));
-            _replays.Add(new ReplayClip($"r_{i:D3}", ts, 120_000 - i * 15_000, 60_000_000L + rnd.Next(30_000_000), i != 2,
-                $@"C:\Users\you\AppData\Local\BetterRecall\replays\{ts:yyyyMMdd-HHmmss}.mp4{(i != 2 ? ".enc" : "")}"));
+            var clip = new ReplayClip($"r_{i:D3}", ts, 120_000 - i * 15_000, 60_000_000L + rnd.Next(30_000_000), i != 2,
+                $@"C:\Users\you\AppData\Local\BetterRecall\replays\{ts:yyyyMMdd-HHmmss}.mp4{(i != 2 ? ".enc" : "")}");
+            _replays.Add(clip);
+            // Frames sampled every 5 s of the saved clip (replay.searchable): Replay matches in search.
+            var (rapp, rtitles) = Apps[rnd.Next(Apps.Length)];
+            for (int off = 0; off < clip.DurationMs; off += 5000)
+            {
+                var title = rtitles[(off / 5000) % rtitles.Length];
+                _rows.Add(new Row(new CaptureMeta($"p_{n++:D6}", clip.Ts.AddMilliseconds(off - clip.DurationMs), CaptureKind.Replay, rapp, title, 0, 0, true, true,
+                    rapp == "chrome.exe" ? SiteOf(title) : "", clip.Id, off), title));
+            }
         }
+        _rows.Sort((a, b) => b.Meta.Ts.CompareTo(a.Meta.Ts));
 
         for (int i = 0; i < 25; i++)
         {
@@ -154,9 +172,10 @@ public sealed class MockAgent
 
     private static readonly string[] Verbs =
         ["ping", "version", "help", "status", "search", "get", "thumb", "subscribe", "pause", "resume", "purge",
-         "unlock", "lock", "consent", "settings", "timeline", "keyframe", "replay", "panic", "audit", "bench", "facets", "history", "export"];
+         "unlock", "lock", "consent", "settings", "timeline", "keyframe", "replay", "panic", "audit", "bench", "facets", "history",
+         "password", "ai", "describe", "export"];
 
-    private static readonly HashSet<string> DataVerbs = ["search", "get", "thumb", "keyframe", "timeline", "audit", "replay list", "replay export", "facets", "history", "export"];
+    private static readonly HashSet<string> DataVerbs = ["search", "get", "thumb", "keyframe", "timeline", "audit", "replay list", "replay export", "facets", "history", "describe", "export"];
 
     public bool IsLocked { get { lock (_lock) return _locked; } }
 
@@ -243,6 +262,9 @@ public sealed class MockAgent
             case "purge": return Purge(args);
             case "facets": return Facets(args);
             case "history": return History(rest);
+            case "password": return PasswordVerb(rest);
+            case "ai": return AiVerb(rest);
+            case "describe": return await DescribeAsync(args, ct);
             case "export": return await ExportAsync(rest, ct);
             case "audit":
             {
@@ -361,6 +383,7 @@ public sealed class MockAgent
                     var s = k?.GetValue<string>();
                     if (s == "screen") kinds.Add(CaptureKind.Screen);
                     else if (s == "audio") kinds.Add(CaptureKind.Audio);
+                    else if (s == "replay") kinds.Add(CaptureKind.Replay);
                     else return Envelope.Error("Invalid kind.");
                 }
             }
@@ -393,7 +416,7 @@ public sealed class MockAgent
                 var snippet = r.Text.Length > 300 ? r.Text[..300] : r.Text;
                 hits.Add(new SearchHit(m.Id, m.Ts, m.Kind, m.App, m.Title, Math.Clamp(score, 0, 1), snippet, m.HasThumb,
                     m.Kind == CaptureKind.Audio ? m.DurationMs / 1000 : null,
-                    Math.Clamp(score, 0, 1), matched > 0, matched == 0 && score < 0.5f, m.Site));
+                    Math.Clamp(score, 0, 1), matched > 0, matched == 0 && score < 0.5f, m.Site, m.ReplayId, m.ReplayOffsetMs));
             }
             hits = hits.OrderByDescending(h => h.Score).ThenByDescending(h => h.Ts).ToList();
             Audit("search", Math.Min(hits.Count, limit), q);
@@ -412,7 +435,7 @@ public sealed class MockAgent
             Audit("get", 1);
             var m = r.Meta;
             return Envelope.Ok(new CaptureDetail(m.Id, m.Ts, m.Kind, m.App, m.Title, r.Text, m.HasThumb,
-                m.Kind == CaptureKind.Audio ? m.DurationMs / 1000 : null, m.Site), ContractsJson.Default.CaptureDetail);
+                m.Kind == CaptureKind.Audio ? m.DurationMs / 1000 : null, m.Site, m.ReplayId, m.ReplayOffsetMs), ContractsJson.Default.CaptureDetail);
         }
     }
 
@@ -490,7 +513,8 @@ public sealed class MockAgent
         List<CaptureMeta> items;
         lock (_lock)
         {
-            items = _rows.Where(r => r.Meta.Ts >= from && r.Meta.Ts < to).Take(limit).Select(r => r.Meta).ToList();
+            // Like the store: replay frames are search-only, the timeline shows screen and audio rows.
+            items = _rows.Where(r => r.Meta.Ts >= from && r.Meta.Ts < to && r.Meta.Kind != CaptureKind.Replay).Take(limit).Select(r => r.Meta).ToList();
             Audit("timeline", items.Count);
         }
         return Items(items, ContractsJson.Default.ItemsReplyCaptureMeta);
@@ -498,10 +522,18 @@ public sealed class MockAgent
 
     private async Task<string> UnlockAsync(string passphrase, CancellationToken ct)
     {
-        bool passMode;
-        lock (_lock) passMode = UnlockLogic.UsesPassphrase(SettingsSchema.Get(_settings, "security.keyProtection")?.GetValue<string>());
-        await Task.Delay(SlowVerbDelay, ct);   // Windows Hello prompt in the real agent
-        if (passMode && (passphrase.Length == 0 || passphrase == WrongPassphrase)) return Envelope.Error(AgentErrors.WrongPassphrase);
+        bool passMode, passwordMode;
+        lock (_lock)
+        {
+            passMode = UnlockLogic.UsesPassphrase(SettingsSchema.Get(_settings, "security.keyProtection")?.GetValue<string>());
+            passwordMode = UnlockLogic.UsesPassword(SettingsSchema.Get(_settings, "security.unlockMethod")?.GetValue<string>());
+        }
+        await Task.Delay(SlowVerbDelay, ct);   // Windows Hello prompt (or Argon2id) in the real agent
+        if (passwordMode)
+        {
+            if (CheckPassword(passphrase) is { } err) return err;
+        }
+        else if (passMode && (passphrase.Length == 0 || passphrase == WrongPassphrase)) return Envelope.Error(AgentErrors.WrongPassphrase);
         DateTimeOffset until;
         lock (_lock)
         {
@@ -513,6 +545,143 @@ public sealed class MockAgent
         }
         StatusChanged?.Invoke();
         return Envelope.Ok(new UnlockReply(true, until), ContractsJson.Default.UnlockReply);
+    }
+
+    // ---------------- unlock password and cloud describe (mock) ----------------
+
+    /// <summary>Null when the password is accepted; any password except "wrong" is right. 5 free tries, then 30 s.</summary>
+    private string? CheckPassword(string password)
+    {
+        lock (_lock)
+        {
+            if (!_passwordSet) return Envelope.Error(AgentErrors.NoPassword);
+            var wait = _passwordBlockedUntil - Now;
+            if (wait > TimeSpan.Zero) return Envelope.Error($"Too many attempts. Try again in {(int)Math.Ceiling(wait.TotalSeconds)} s.");
+            if (password.Length > 0 && password != WrongPassphrase) { _passwordFailures = 0; return null; }
+            if (++_passwordFailures >= 5)
+            {
+                _passwordBlockedUntil = Now.AddSeconds(30);
+                return Envelope.Error("Too many attempts. Try again in 30 s.");
+            }
+            return Envelope.Error(AgentErrors.WrongPassword);
+        }
+    }
+
+    private string PasswordVerb(string rest)
+    {
+        int sp = rest.IndexOf(' ');
+        var sub = (sp < 0 ? rest : rest[..sp]).ToLowerInvariant();
+        var json = sp < 0 ? "" : rest[(sp + 1)..];
+        if (sub.Length == 0)
+            lock (_lock)
+            {
+                int wait = Math.Max(0, (int)Math.Ceiling((_passwordBlockedUntil - Now).TotalSeconds));
+                return Envelope.Ok(new PasswordStatus(_passwordSet, true, wait), ContractsJson.Default.PasswordStatus);
+            }
+        if (sub is not ("set" or "clear") || json.Length == 0) return Envelope.Error("Usage: password | password set <json> | password clear <json>");
+        JsonObject o;
+        try { o = JsonNode.Parse(json) as JsonObject ?? throw new JsonException(); }
+        catch (JsonException) { return Envelope.Error(AgentErrors.InvalidJson); }
+        bool wasSet;
+        lock (_lock) wasSet = _passwordSet;
+        if (wasSet && CheckPassword(o["current"]?.GetValue<string>() ?? "") is { } err) return err;
+        lock (_lock)
+        {
+            if (sub == "clear")
+            {
+                if (!wasSet) return Envelope.Error(AgentErrors.NoPassword);
+                if (UnlockLogic.UsesPassword(SettingsSchema.Get(_settings, "security.unlockMethod")?.GetValue<string>())) return Envelope.Error(AgentErrors.PasswordInUse);
+                _passwordSet = false;
+                Audit("password clear", 1);
+                return Envelope.Ok("null");
+            }
+            var next = o["new"]?.GetValue<string>() ?? "";
+            if (next.Length is < 6 or > 256 || string.IsNullOrWhiteSpace(next)) return Envelope.Error(AgentErrors.PasswordRule);
+            _passwordSet = true;
+            Audit("password set", 1);
+            return Envelope.Ok("null");
+        }
+    }
+
+    private AiStatus AiState()
+    {
+        var provider = SettingsSchema.Get(_settings, "ai.provider")?.GetValue<string>() ?? AiDefaults.Gemini;
+        var model = SettingsSchema.Get(_settings, "ai.model")?.GetValue<string>() ?? "";
+        var endpoint = SettingsSchema.Get(_settings, "ai.endpoint")?.GetValue<string>() ?? "";
+        var ai = new AiSettings { Provider = provider, Model = model, Endpoint = endpoint };
+        return new AiStatus(Bool("ai.enabled"), _aiKeySet, provider, AiDefaults.EffectiveModel(ai), AiDefaults.EffectiveEndpoint(ai));
+    }
+
+    private string AiVerb(string rest)
+    {
+        int sp = rest.IndexOf(' ');
+        var sub = (sp < 0 ? rest : rest[..sp]).ToLowerInvariant();
+        var tail = sp < 0 ? "" : rest[(sp + 1)..];
+        lock (_lock)
+        {
+            switch (sub)
+            {
+                case "" when tail.Length == 0: break;
+                case "setkey" when tail.Length > 0:
+                    if (tail.Any(c => c <= ' ')) return Envelope.Error(AgentErrors.ApiKeyRule);
+                    _aiKeySet = true;
+                    Audit("ai setkey", 1);
+                    break;
+                case "clearkey" when tail.Length == 0:
+                    _aiKeySet = false;
+                    Audit("ai clearkey", 1);
+                    break;
+                default:
+                    return Envelope.Error("Usage: ai | ai setkey <key> | ai clearkey");
+            }
+            return Envelope.Ok(AiState(), ContractsJson.Default.AiStatus);
+        }
+    }
+
+    /// <summary>describe preview returns the keyframe and a token; send waits a little and returns canned text. Nothing leaves the PC.</summary>
+    private async Task<string> DescribeAsync(string[] args, CancellationToken ct)
+    {
+        if (args.Length != 2) return Envelope.Error("Usage: describe preview <id> | describe send <token>");
+        AiStatus st;
+        lock (_lock) st = AiState();
+        if (!st.Enabled) return Envelope.Error(AgentErrors.AiOff);
+        if (!st.KeySet && st.Provider != AiDefaults.OpenAi) return Envelope.Error(AgentErrors.NoApiKey);
+        switch (args[0].ToLowerInvariant())
+        {
+            case "preview":
+            {
+                Row? r;
+                lock (_lock) r = _rows.FirstOrDefault(x => x.Meta.Id == args[1]);
+                if (r is null || !r.Meta.HasThumb || r.Meta.Kind == CaptureKind.Audio) return Envelope.Error(AgentErrors.NoImage);
+                var bytes = Render(r.Meta, 960, 540);
+                var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
+                lock (_lock)
+                {
+                    _describeTokens[token] = (r.Meta.Id, Now.AddSeconds(120));
+                    Audit("describe preview", 1);
+                }
+                return Envelope.Ok(new DescribePreview(token, st.Provider, st.Model, st.Endpoint, "image/png", 960, 540, false, bytes), ContractsJson.Default.DescribePreview);
+            }
+            case "send":
+            {
+                (string Id, DateTimeOffset Expires) t;
+                lock (_lock)
+                {
+                    if (!_describeTokens.Remove(args[1], out t) || t.Expires <= Now) return Envelope.Error(AgentErrors.InvalidToken);
+                }
+                await Task.Delay(SlowVerbDelay * 3, ct);   // the provider round trip
+                Row? r;
+                lock (_lock)
+                {
+                    r = _rows.FirstOrDefault(x => x.Meta.Id == t.Id);
+                    Audit("describe " + st.Provider, 1, t.Id);
+                }
+                var app = CaptureItem.AppName(r?.Meta.App ?? "an app");
+                var text = $"(Mock description) The screen shows {app} with the window \"{r?.Meta.Title}\". The user appears to be reading and editing its content.";
+                return Envelope.Ok(new DescribeResult(text, st.Provider, st.Model, 1200), ContractsJson.Default.DescribeResult);
+            }
+        }
+        return Envelope.Error("Usage: describe preview <id> | describe send <token>");
     }
 
     private string SettingsVerb(string[] args, string rest)
@@ -528,6 +697,9 @@ public sealed class MockAgent
             string result;
             lock (_lock)
             {
+                if (partial["security"] is JsonObject sec && sec["unlockMethod"] is JsonValue um && um.TryGetValue<string>(out var method)
+                    && method == "password" && !_passwordSet)
+                    return Envelope.Error(AgentErrors.NoPassword);
                 var merged = (JsonObject)_settings.DeepClone();
                 foreach (var (section, value) in partial)
                 {
@@ -589,7 +761,12 @@ public sealed class MockAgent
             }
             case "delete":
                 if (args.Length != 2) return Envelope.Error("Usage: replay delete <id>");
-                lock (_lock) return _replays.RemoveAll(r => r.Id == args[1]) > 0 ? Envelope.Ok("null") : Envelope.Error(AgentErrors.NotFound);
+                lock (_lock)
+                {
+                    if (_replays.RemoveAll(r => r.Id == args[1]) == 0) return Envelope.Error(AgentErrors.NotFound);
+                    _rows.RemoveAll(r => r.Meta.ReplayId == args[1]);
+                    return Envelope.Ok("null");
+                }
             default:
                 return Envelope.Error("Usage: replay save | replay list | replay export <id> <path> | replay delete <id>");
         }

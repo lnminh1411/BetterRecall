@@ -46,6 +46,7 @@ public sealed partial class LauncherWindow : Window
         _vm = new SearchViewModel(s.Api);
         _detail = new DetailViewModel(s.MediaApi);
         Detail.ViewModel = _detail;
+        Detail.ModalChanged += open => _modal = Math.Max(0, _modal + (open ? 1 : -1));
         GroupsSource.Source = _vm.Groups;
         ResultsGrid.ItemsSource = GroupsSource.View;
         HistoryList.ItemsSource = _vm.History;
@@ -111,6 +112,7 @@ public sealed partial class LauncherWindow : Window
         if (openMenu) _menuOnResults = true;
         WindowHelpers.CenterOnCursorMonitor(AppWindow, 1220, 740, _hwnd);
         WindowSecurity.Apply(_hwnd);   // hidden windows are skipped when the setting changes
+        if (AppWindow.Presenter is OverlappedPresenter p) p.IsAlwaysOnTop = Services.Current.SearchAlwaysOnTop;
         AppWindow.Show(true);
         Activate();
         Win32.SetForegroundWindow(_hwnd);
