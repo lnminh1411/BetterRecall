@@ -15,6 +15,9 @@ public sealed record SubscribedStatus(bool Subscribed);
 public sealed record SubscribedCaptures(string Subscribed);
 public sealed record CaptureEvent(string Id, DateTimeOffset Ts, CaptureKind Kind, string App);
 
+/// <summary>One captures.json row of an export. File is the image path inside the zip, null without an image.</summary>
+public sealed record ExportEntry(string Id, DateTimeOffset Ts, CaptureKind Kind, string App, string Title, string Site, string Text, string? File, int? DurationS);
+
 /// <summary>
 /// Source-generated JSON for everything Core writes on the pipes. Same options as ContractsJson plus
 /// the Contracts UtcTimestampConverter ("Z" timestamps). Holds the few Core-only reply shapes.
@@ -45,6 +48,9 @@ public sealed record CaptureEvent(string Id, DateTimeOffset Ts, CaptureKind Kind
 [JsonSerializable(typeof(SubscribedStatus))]
 [JsonSerializable(typeof(SubscribedCaptures))]
 [JsonSerializable(typeof(CaptureEvent))]
+[JsonSerializable(typeof(ExportRequest))]
+[JsonSerializable(typeof(ExportResult))]
+[JsonSerializable(typeof(List<ExportEntry>))]
 [JsonSerializable(typeof(ItemsReply<CaptureMeta>))]
 [JsonSerializable(typeof(ItemsReply<AuditEntry>))]
 [JsonSerializable(typeof(ItemsReply<ReplayClip>))]

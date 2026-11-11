@@ -151,6 +151,11 @@ public sealed class AgentApi(IAgentClient client)
     public Task<AgentResult> ReplayExportAsync(string id, string path, CancellationToken ct = default) =>
         client.SendAsync($"replay export {id} {path}", ct);
 
+    /// <summary>export: zip of decrypted keyframes plus captures.json. DryRun only counts.</summary>
+    public async Task<AgentResult<ExportResult>> ExportAsync(ExportRequest request, CancellationToken ct = default) =>
+        (await client.SendAsync("export " + JsonSerializer.Serialize(request, ContractsJson.Default.ExportRequest), ct))
+            .As(d => d.Deserialize(ContractsJson.Default.ExportResult) ?? throw new JsonException());
+
     public Task<AgentResult> ReplayDeleteAsync(string id, CancellationToken ct = default) => client.SendAsync("replay delete " + id, ct);
 
     public async Task<AgentResult<PurgeConfirmReply>> PurgeRangeAsync(DateTimeOffset from, DateTimeOffset to, CancellationToken ct = default) =>

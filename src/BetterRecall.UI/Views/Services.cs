@@ -47,7 +47,7 @@ internal sealed class Services
         IServerTrust trust;
         if (args.Mock)
         {
-            var agent = new MockAgent(new MockOptions(args.MockLocked, args.MockPassphrase, args.MockFirstRun, args.MockCapturable));
+            var agent = new MockAgent(new MockOptions(args.MockLocked, args.MockPassphrase, args.MockFirstRun, args.MockCapturable, StoragePaused: args.MockStorage));
             pipe = MockPipeServer.NameFor(Environment.ProcessId);
             _mock = new MockPipeServer(agent, pipe);
             _mock.Start();

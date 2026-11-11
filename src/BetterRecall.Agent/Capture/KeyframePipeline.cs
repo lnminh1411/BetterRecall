@@ -9,8 +9,8 @@ using BetterRecall.Contracts;
 namespace BetterRecall.Agent.Capture;
 
 /// <summary>
-/// Receives downscaled grabs from the capture threads: dHash de-dup, encode once (WebP or JPEG),
-/// IStore.AddScreenCapture. Runs on one background task; grabs are zeroed after use.
+/// Receives downscaled grabs from the capture threads: smart capture (change map and dHash against the last stored
+/// keyframe, CapturePolicy), encode once (keyframes.format), IStore.AddScreenCapture. Runs on one background task; grabs are zeroed after use.
 /// </summary>
 internal sealed class KeyframePipeline : IAsyncDisposable
 {
@@ -30,6 +30,7 @@ internal sealed class KeyframePipeline : IAsyncDisposable
     public long Kept, SkippedSimilar, Dropped, Failed;
     public double EncodeMsTotal, HashMsTotal, GrabMsTotal;
     public double LastEncodeMs;
+    public ChangeResult LastChange;
 
     public KeyframePipeline(Func<IStore?> store, Func<Settings> settings, Action<CaptureMeta> stored)
     {
@@ -90,25 +91,33 @@ internal sealed class KeyframePipeline : IAsyncDisposable
         }
         var sw = Stopwatch.StartNew();
         ulong hash = DHash.Compute(g.Span, g.Width, g.Height, g.Stride);
+        var map = ChangeMap.Compute(g.Span, g.Width, g.Height, g.Stride);
+        var (reason, change) = dedup.Decide(map, hash, g.Request, s.Capture.DhashThreshold, Math.Clamp(s.Capture.DirtyMinPercent, 0, 100));
         HashMsTotal += sw.Elapsed.TotalMilliseconds;
-        if (!g.Request.Force && dedup.HashCheck(hash, s.Capture.DhashThreshold, g.Request.Context) == DedupVerdict.SkipSimilar)
+        LastChange = change;
+        if (reason == KeepReason.Skip)
         {
+            map.Clear();
             Interlocked.Increment(ref SkippedSimilar);
             return;
         }
         sw.Restart();
-        string format = s.Keyframes.Format == "jpeg" ? "jpeg" : "webp";
-        byte[] bytes = ImageCodec.EncodeBgra(g.Pixels, g.Width, g.Height, g.Stride, format, Math.Clamp(s.Keyframes.Quality, 30, 95));
+        string format = ImageCodec.Resolve(s.Keyframes.Format);
+        byte[] bytes;
+        try { bytes = ImageCodec.EncodeBgra(g.Pixels, g.Width, g.Height, g.Stride, format, Math.Clamp(s.Keyframes.Quality, 30, 95)); }
+        catch { map.Clear(); throw; }
         LastEncodeMs = sw.Elapsed.TotalMilliseconds;
         EncodeMsTotal += LastEncodeMs;
         var req = g.Request;
         var title = GuardrailPolicy.FilterTitle(req.Title, s.Privacy);
         var cap = new NewScreenCapture(req.Ts, req.App, req.ExePath, title, g.Monitor, g.Width, g.Height, hash,
-            bytes, ImageCodec.Mime(format), s.Keyframes.Enabled, req.Site);
+            bytes, ImageCodec.Mime(format), s.Keyframes.Enabled, req.Site,
+            Change: change.Comparable ? Math.Round(change.Score, 2) : null, Switch: reason is KeepReason.First or KeepReason.Switch);
         string id;
         try { id = store.AddScreenCapture(cap); }
+        catch { map.Clear(); throw; }
         finally { Array.Clear(bytes); }
-        dedup.Accept(hash, req.Context);
+        dedup.Accept(hash, req.Context, map);
         Interlocked.Increment(ref Kept);
         _stored(new CaptureMeta(id, req.Ts, CaptureKind.Screen, req.App, title, g.Monitor, 0, s.Keyframes.Enabled, false, req.Site));
     }

@@ -37,6 +37,15 @@ internal sealed class WorkerClient(WorkerSupervisor supervisor)
         return new ImageEmbedResult(BinaryFrame.BytesToFloats(reply.Payload), false, reply.Header.Ms ?? 0);
     }
 
+    /// <summary>Raw BGRA (stride width * 4), for keyframes the worker cannot decode (AVIF, JPEG XL).</summary>
+    public async Task<ImageEmbedResult> EmbedBgraAsync(byte[] bgra, int width, int height, double? nsfwThreshold, int nsfwGrid, double? nsfwDetector, CancellationToken ct)
+    {
+        var reply = await CallAsync(new WorkerRequest(0, "embed_image", Format: "bgra8", Width: width, Height: height, Stride: width * 4,
+            Nsfw: nsfwThreshold, NsfwGrid: nsfwGrid, NsfwDetector: nsfwDetector), bgra, ct).ConfigureAwait(false);
+        if (reply.Header.Dropped == "nsfw") return new ImageEmbedResult(null, true, reply.Header.Ms ?? 0);
+        return new ImageEmbedResult(BinaryFrame.BytesToFloats(reply.Payload), false, reply.Header.Ms ?? 0);
+    }
+
     public async Task<float[]> EmbedTextAsync(string text, string kind, CancellationToken ct)
     {
         var reply = await CallAsync(new WorkerRequest(0, "embed_text", Text: text, Kind: kind), ReadOnlyMemory<byte>.Empty, ct).ConfigureAwait(false);

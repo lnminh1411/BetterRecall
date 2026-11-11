@@ -303,9 +303,9 @@
   <data name="S_capture_consented" xml:space="preserve"><value>Consent given</value></data>
   <data name="S_capture_consented_D" xml:space="preserve"><value>Set when you agree on the first-run page.</value></data>
   <data name="S_capture_dhashThreshold" xml:space="preserve"><value>Change threshold</value></data>
-  <data name="S_capture_dhashThreshold_D" xml:space="preserve"><value>How different a frame must be to keep it. Higher keeps fewer frames.</value></data>
-  <data name="S_capture_dirtyMinPercent" xml:space="preserve"><value>Minimum changed area (%)</value></data>
-  <data name="S_capture_dirtyMinPercent_D" xml:space="preserve"><value>Skip frames where less of the screen changed.</value></data>
+  <data name="S_capture_dhashThreshold_D" xml:space="preserve"><value>A frame whose overall layout changed this much (0 to 32) is kept even below the minimum change. 0 turns this test off.</value></data>
+  <data name="S_capture_dirtyMinPercent" xml:space="preserve"><value>Minimum change (%)</value></data>
+  <data name="S_capture_dirtyMinPercent_D" xml:space="preserve"><value>A timed capture is kept when this much of the screen changed since the last stored one; changed text counts five times. Window switches, typing pauses and scroll stops are always captured.</value></data>
   <data name="S_capture_enabled" xml:space="preserve"><value>Capture keyframes</value></data>
   <data name="S_capture_enabled_D" xml:space="preserve"><value>Turn off to stop taking screen images. Instant replay has its own switch.</value></data>
   <data name="S_capture_eventTriggers" xml:space="preserve"><value>Capture on events</value></data>
@@ -377,8 +377,6 @@
   <data name="S_keyframes_format" xml:space="preserve"><value>Image format</value></data>
   <data name="S_keyframes_format_jpeg" xml:space="preserve"><value>JPEG</value></data>
   <data name="S_keyframes_format_webp" xml:space="preserve"><value>WebP</value></data>
-  <data name="S_keyframes_maxGb" xml:space="preserve"><value>Maximum size (GB)</value></data>
-  <data name="S_keyframes_maxGb_D" xml:space="preserve"><value>The oldest keyframes are deleted above this size.</value></data>
   <data name="S_keyframes_quality" xml:space="preserve"><value>Image quality</value></data>
   <data name="S_keyframes_thumbCacheMb" xml:space="preserve"><value>Preview cache (MB)</value></data>
   <data name="S_keyframes_thumbCacheMb_D" xml:space="preserve"><value>Memory the agent uses for previews. Never written to disk.</value></data>
@@ -600,4 +598,41 @@
   <data name="S_privacy_searchHistory_D" xml:space="preserve"><value>Keep your searches in the encrypted store and show them as recent searches. Turning it off deletes them.</value></data>
   <data name="S_privacy_searchHistoryMax" xml:space="preserve"><value>Searches to keep</value></data>
   <data name="S_privacy_searchHistoryMax_D" xml:space="preserve"><value>Older searches are forgotten.</value></data>
+  <data name="G_storage" xml:space="preserve"><value>Storage</value></data>
+  <data name="G_storage_D" xml:space="preserve"><value>Disk space limits for stored captures.</value></data>
+  <data name="S_storage_minFreeGb" xml:space="preserve"><value>Keep free on the data drive (GB)</value></data>
+  <data name="S_storage_minFreeGb_D" xml:space="preserve"><value>Below this, capture pauses, or the oldest captures are deleted when overwrite is on. 0 turns the check off.</value></data>
+  <data name="S_storage_maxGb" xml:space="preserve"><value>Maximum size (GB)</value></data>
+  <data name="S_storage_maxGb_D" xml:space="preserve"><value>Stored captures (database and keyframes). Above this, capture pauses, or the oldest captures are deleted when overwrite is on.</value></data>
+  <data name="S_storage_overwrite" xml:space="preserve"><value>Overwrite oldest</value></data>
+  <data name="S_storage_overwrite_D" xml:space="preserve"><value>Instead of pausing, delete the oldest captures until there is room: in each day the smallest changes first, window and app switches last.</value></data>
+  <data name="W_storage_overwrite" xml:space="preserve"><value>Old captures are deleted automatically to make room. They cannot be recovered.</value></data>
+  <data name="S_retention_progressiveAfterDays" xml:space="preserve"><value>Start thinning after (days)</value></data>
+  <data name="S_retention_progressiveAfterDays_D" xml:space="preserve"><value>From this age, captures with the smallest change are deleted first, a little more each day. Window and app switches are kept. 0 turns thinning off.</value></data>
+  <data name="S_retention_progressiveOverDays" xml:space="preserve"><value>Thin over (days)</value></data>
+  <data name="S_retention_progressiveOverDays_D" xml:space="preserve"><value>After this many more days only window and app switches are left, until the retention limit deletes them.</value></data>
+  <data name="S_keyframes_format_avif" xml:space="preserve"><value>AVIF (smallest)</value></data>
+  <data name="S_keyframes_format_jxl" xml:space="preserve"><value>JPEG XL</value></data>
+  <data name="S_keyframes_format_D" xml:space="preserve"><value>New keyframes only; stored images keep their format. AVIF is about 30% smaller than WebP for the same look.</value></data>
+  <data name="Reason_storage" xml:space="preserve"><value>storage limit</value></data>
+  <data name="StorageBar_Title" xml:space="preserve"><value>Capture is paused: storage limit</value></data>
+  <data name="StorageBar_Message" xml:space="preserve"><value>Free up space on the data drive, raise the maximum size, or turn on Overwrite oldest.</value></data>
+  <data name="StorageBar_Open" xml:space="preserve"><value>Storage settings</value></data>
+  <data name="Danger_ExportTitle.Text" xml:space="preserve"><value>Export captures</value></data>
+  <data name="Danger_ExportBody.Text" xml:space="preserve"><value>Writes the captures of a time range, optionally of one app, to a zip file: the images plus captures.json with time, app, title and text.</value></data>
+  <data name="Danger_ExportFrom.Header" xml:space="preserve"><value>From</value></data>
+  <data name="Danger_ExportFromTime.Header" xml:space="preserve"><value>From time</value></data>
+  <data name="Danger_ExportTo.Header" xml:space="preserve"><value>To</value></data>
+  <data name="Danger_ExportToTime.Header" xml:space="preserve"><value>To time</value></data>
+  <data name="Danger_ExportApp.Header" xml:space="preserve"><value>Process name (optional)</value></data>
+  <data name="Danger_ExportApp.PlaceholderText" xml:space="preserve"><value>chrome</value></data>
+  <data name="Danger_ExportJpeg.Content" xml:space="preserve"><value>Convert images to JPEG</value></data>
+  <data name="Danger_ExportButton.Content" xml:space="preserve"><value>Export…</value></data>
+  <data name="Danger_ExportWarnTitle" xml:space="preserve"><value>The export is not encrypted</value></data>
+  <data name="Danger_ExportWarnBody" xml:space="preserve"><value>{0:N0} captures ({1:N0} images) will be written to a zip file that is not encrypted. Anyone who can open that folder can see them. Delete the copy when you are done.</value></data>
+  <data name="Danger_ExportContinue" xml:space="preserve"><value>Choose file</value></data>
+  <data name="Danger_ExportNone" xml:space="preserve"><value>Nothing was captured in that range.</value></data>
+  <data name="Danger_Exported" xml:space="preserve"><value>Exported {0:N0} captures to {1}. This copy is not encrypted.</value></data>
+  <data name="Danger_ExportFileType" xml:space="preserve"><value>Zip archive</value></data>
+  <data name="Danger_ExportOpen" xml:space="preserve"><value>Show in folder</value></data>
 </root>

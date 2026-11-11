@@ -44,6 +44,8 @@
             <Grid>
                 <Frame x:Name="ContentFrame" />
                 <InfoBar x:Name="OfflineBar" VerticalAlignment="Top" Margin="24,8" IsClosable="False" IsOpen="False" Severity="Error" />
+                <InfoBar x:Name="StorageBar" VerticalAlignment="Bottom" Margin="24,8" IsClosable="True" IsOpen="False" Severity="Warning"
+                         Closed="StorageBar_Closed" />
                 <views:UnlockPanel x:Name="Unlock" Visibility="Collapsed" />
             </Grid>
         </NavigationView>

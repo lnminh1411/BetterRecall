@@ -16,6 +16,7 @@ internal static class Program
         if (args.Length > 0 && args[0] == "--selftest-replay") return DevSelfTest.Replay(args);
         if (args.Length > 0 && args[0] == "--selftest-keyframe") return DevSelfTest.Keyframe(args);
         if (args.Length > 0 && args[0] == "--selftest-bench") return DevSelfTest.Bench(args);
+        if (args.Length > 0 && args[0] == "--selftest-codec") return DevSelfTest.Codec(args);
 
         string installDir = AppContext.BaseDirectory;
         bool autostart = true;

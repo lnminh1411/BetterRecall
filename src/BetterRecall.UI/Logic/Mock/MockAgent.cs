@@ -14,7 +14,8 @@ public sealed record MockOptions(
     bool Passphrase = false,
     bool FirstRun = false,
     bool Capturable = false,
-    int Seed = 42);
+    int Seed = 42,
+    bool StoragePaused = false);   // --mock-storage: capture paused for storage (banner)
 
 /// <summary>
 /// Fake command processor for --mock and tests. Answers every UI pipe verb with plausible data,
@@ -59,6 +60,7 @@ public sealed class MockAgent
         s.Security.ExcludeOwnWindows = !o.Capturable;
         _settings = (JsonObject)JsonNode.Parse(JsonSerializer.Serialize(s, ContractsJson.Default.Settings))!;
         _locked = o.StartLocked;
+        if (o.StoragePaused) { _paused = true; _pauseReason = "storage"; }
         if (!_locked) _unlockedUntil = _clock.GetUtcNow().AddMinutes(15);
         Generate(o.Seed);
         if (!o.FirstRun) _lastBench = MockBench.Build(_settings, _clock.GetUtcNow().AddDays(-2), _rows.Count);
@@ -152,9 +154,9 @@ public sealed class MockAgent
 
     private static readonly string[] Verbs =
         ["ping", "version", "help", "status", "search", "get", "thumb", "subscribe", "pause", "resume", "purge",
-         "unlock", "lock", "consent", "settings", "timeline", "keyframe", "replay", "panic", "audit", "bench", "facets", "history"];
+         "unlock", "lock", "consent", "settings", "timeline", "keyframe", "replay", "panic", "audit", "bench", "facets", "history", "export"];
 
-    private static readonly HashSet<string> DataVerbs = ["search", "get", "thumb", "keyframe", "timeline", "audit", "replay list", "replay export", "facets", "history"];
+    private static readonly HashSet<string> DataVerbs = ["search", "get", "thumb", "keyframe", "timeline", "audit", "replay list", "replay export", "facets", "history", "export"];
 
     public bool IsLocked { get { lock (_lock) return _locked; } }
 
@@ -241,6 +243,7 @@ public sealed class MockAgent
             case "purge": return Purge(args);
             case "facets": return Facets(args);
             case "history": return History(rest);
+            case "export": return await ExportAsync(rest, ct);
             case "audit":
             {
                 int limit = 100;
@@ -590,6 +593,53 @@ public sealed class MockAgent
             default:
                 return Envelope.Error("Usage: replay save | replay list | replay export <id> <path> | replay delete <id>");
         }
+    }
+
+    /// <summary>export: dry run counts; otherwise writes a real zip (rendered PNGs, at most 200, plus captures.json).</summary>
+    private async Task<string> ExportAsync(string rest, CancellationToken ct)
+    {
+        ExportRequest? r;
+        try { r = JsonSerializer.Deserialize(rest, ContractsJson.Default.ExportRequest); }
+        catch (JsonException) { return Envelope.Error(AgentErrors.InvalidJson); }
+        if (r is null) return Envelope.Error("Usage: export <json>");
+        if (r.From >= r.To) return Envelope.Error("Invalid from.");
+        if (!r.DryRun && (!SettingsSchema.IsAbsolutePath(r.Path) || !r.Path.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)))
+            return Envelope.Error("Invalid path.");
+        string? app = string.IsNullOrWhiteSpace(r.App) ? null : r.App.Trim().Replace(".exe", "", StringComparison.OrdinalIgnoreCase);
+        List<Row> rows;
+        lock (_lock)
+            rows = _rows.Where(x => x.Meta.Ts >= r.From && x.Meta.Ts < r.To
+                                    && (app is null || string.Equals(x.Meta.App, app, StringComparison.OrdinalIgnoreCase))).ToList();
+        int images = rows.Count(x => x.Meta.HasThumb);
+        if (r.DryRun) return Envelope.Ok(new ExportResult(rows.Count, images, 0), ContractsJson.Default.ExportResult);
+        await Task.Delay(SlowVerbDelay, ct);
+        var entries = new JsonArray();
+        using (var fs = new FileStream(r.Path, FileMode.Create, FileAccess.Write, FileShare.None))
+        using (var zip = new System.IO.Compression.ZipArchive(fs, System.IO.Compression.ZipArchiveMode.Create))
+        {
+            int written = 0;
+            foreach (var row in rows.OrderBy(x => x.Meta.Ts))
+            {
+                string? file = null;
+                if (row.Meta.HasThumb && written < 200)
+                {
+                    file = $"images/{row.Meta.Ts.ToLocalTime():yyyyMMdd-HHmmss-fff}_{row.Meta.Id}.png";
+                    using var es = zip.CreateEntry(file).Open();
+                    es.Write(Render(row.Meta, 640, 360));
+                    written++;
+                }
+                entries.Add(new JsonObject
+                {
+                    ["id"] = row.Meta.Id, ["ts"] = row.Meta.Ts.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture),
+                    ["kind"] = row.Meta.Kind == CaptureKind.Audio ? "audio" : "screen", ["app"] = row.Meta.App, ["title"] = row.Meta.Title,
+                    ["site"] = row.Meta.Site, ["text"] = row.Text, ["file"] = file,
+                });
+            }
+            using var js = zip.CreateEntry("captures.json").Open();
+            js.Write(System.Text.Encoding.UTF8.GetBytes(entries.ToJsonString()));
+        }
+        lock (_lock) Audit("export", rows.Count);
+        return Envelope.Ok(new ExportResult(rows.Count, images, new FileInfo(r.Path).Length), ContractsJson.Default.ExportResult);
     }
 
     private string Purge(string[] args)

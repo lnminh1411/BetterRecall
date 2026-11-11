@@ -257,29 +257,6 @@ public class StoreTests
     }
 
     [Fact]
-    public void Keyframe_size_cap_drops_oldest_first()
-    {
-        using var t = new TempStore();
-        var now = DateTimeOffset.UtcNow;
-        var big = new byte[200_000];
-        new Random(1).NextBytes(big);
-        var ids = new List<string>();
-        for (int i = 0; i < 10; i++)
-        {
-            var id = t.Store.AddScreenCapture(Caps.Screen(now.AddMinutes(-60 + i), title: "frame " + i, image: big));
-            t.Store.TakePendingEmbeddings(1);
-            t.Store.SetEmbedding(id, Vec.Seeded(i), Vec.Info);
-            ids.Add(id);
-        }
-        t.Store.KeyframeLimitOverride = 1_000_000;
-        t.Store.RunMaintenance(new Settings());
-        Assert.Null(t.Store.GetKeyframe(ids[0]));
-        Assert.NotNull(t.Store.GetKeyframe(ids[^1]));
-        Assert.NotNull(t.Store.Get(ids[0])); // row and vector stay, only the image goes
-        Assert.True(t.Store.Stats().ThumbBytes <= 1_100_000);
-    }
-
-    [Fact]
     public void Embedding_space_dim_truncation_and_model_change()
     {
         using var t = new TempStore();

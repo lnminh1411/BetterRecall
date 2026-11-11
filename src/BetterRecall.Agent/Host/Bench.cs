@@ -510,7 +510,7 @@ internal sealed class AgentBenchTarget : IBenchTarget
                         long t0 = Stopwatch.GetTimestamp();
                         unsafe
                         {
-                            _ = ImageCodec.EncodeBgra(grab.Pixels, grab.Width, grab.Height, grab.Stride, settings.Keyframes.Format, settings.Keyframes.Quality);
+                            _ = ImageCodec.EncodeBgra(grab.Pixels, grab.Width, grab.Height, grab.Stride, ImageCodec.Resolve(settings.Keyframes.Format), settings.Keyframes.Quality);
                         }
                         totalEncodeMs += (Stopwatch.GetTimestamp() - t0) * 1000.0 / Stopwatch.Frequency;
                         encodeCount++;

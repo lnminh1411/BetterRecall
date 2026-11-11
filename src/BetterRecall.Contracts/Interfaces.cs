@@ -36,8 +36,16 @@ public interface IStore : IDisposable
 
     StoreStats Stats();
 
-    /// <summary>Applies retention.days and thumbnails.maxGb. Agent calls it hourly and at start.</summary>
+    /// <summary>Applies retention.days and progressive thinning (retention.progressive*). Agent calls it hourly and at start.</summary>
     void RunMaintenance(Settings settings);
+
+    /// <summary>Store file sizes and their reusable free pages (storage.maxGb, storage.minFreeGb).</summary>
+    StorageUse GetStorageUse() => new(Stats().Bytes, 0);
+
+    /// <summary>storage.overwrite: deletes up to maxRows captures in progressive order (oldest day first; in a day
+    /// the smallest changes first, window/app switches last) and returns the freed pages to the disk where it can.
+    /// Returns rows deleted, 0 when nothing is left.</summary>
+    int DeleteForSpace(int maxRows) => 0;
 
     /// <summary>Records the EmbeddingInfo in use. A smaller dim truncates and renormalises stored vectors in place.
     /// A different model re-queues embedding jobs for rows whose keyframe or text still exists; those rows stay
@@ -73,6 +81,10 @@ public interface IThumbnailer
     /// <summary>width 64..1280. WebP. Null when the row or keyframe is gone.</summary>
     Task<ThumbData?> GetThumbAsync(string id, int width, CancellationToken ct);
     void ClearCache();
+
+    /// <summary>Stored keyframe to a format the reader can decode. target "ui": AVIF and JPEG XL become WebP, others
+    /// pass through; "jpeg": always JPEG. The default passes everything through.</summary>
+    ThumbData Transcode(ThumbData keyframe, string target) => keyframe;
 }
 
 /// <summary>AES-256-GCM file encryption with the data key, 64 KiB chunks. Implemented in Core.</summary>

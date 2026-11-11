@@ -43,7 +43,7 @@ internal sealed class ReadGate(Func<DateTimeOffset> now)
 /// </summary>
 internal sealed class PauseController(Func<DateTimeOffset> now)
 {
-    private static readonly string[] Priority = ["consent", "keylocked", "lock", "user", "ipc", "fullscreen", "battery"];
+    private static readonly string[] Priority = ["consent", "keylocked", "lock", "storage", "user", "ipc", "fullscreen", "battery"];
     private readonly object _gate = new();
     private readonly Dictionary<string, DateTimeOffset?> _reasons = new();
 
@@ -76,7 +76,8 @@ internal sealed class PauseController(Func<DateTimeOffset> now)
     /// <summary>Paused for keyframes (any reason).</summary>
     public bool KeyframesPaused => Current().Reason is not null;
 
-    /// <summary>Paused for the replay ring and audio: every reason except fullscreen (replay.duringFullscreen decides that).</summary>
+    /// <summary>Paused for the replay ring and audio: every reason except fullscreen (replay.duringFullscreen decides that),
+    /// battery and storage (the ring lives in RAM; only keyframes fill the disk).</summary>
     public bool ContinuousPaused(bool duringFullscreen)
     {
         lock (_gate)
@@ -85,7 +86,7 @@ internal sealed class PauseController(Func<DateTimeOffset> now)
             foreach (var r in _reasons.Keys)
             {
                 if (r == "fullscreen" && duringFullscreen) continue;
-                if (r == "battery") continue;
+                if (r is "battery" or "storage") continue;
                 return true;
             }
             return false;

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) BetterRecall contributors
+using BetterRecall.Contracts;
 using BetterRecall.UI.Logic;
 using BetterRecall.UI.Native;
 using Microsoft.UI.Windowing;
@@ -149,6 +150,31 @@ public sealed partial class MainWindow : Window
         PauseButton.Content = Loc.Get(paused ? "Main_Resume" : "Main_Pause");
         PauseButton.IsEnabled = st is not null && (st.PauseReason is null or "user" or "ipc");
         LockButton.Content = Loc.Get(Services.Current.Locked ? "Main_Unlock" : "Main_Lock");
+        UpdateStorageBar(st);
+    }
+
+    private bool _storageBarClosed;
+
+    /// <summary>Banner while capture is paused for storage (storage.minFreeGb / maxGb); closing hides it until the next pause.</summary>
+    private void UpdateStorageBar(AgentStatus? st)
+    {
+        bool storage = st?.Paused == true && st.PauseReason == "storage";
+        if (!storage) _storageBarClosed = false;
+        bool open = storage && !_storageBarClosed;
+        if (open && StorageBar.ActionButton is null)
+        {
+            StorageBar.Title = Loc.Get("StorageBar_Title");
+            StorageBar.Message = Loc.Get("StorageBar_Message");
+            var b = new Button { Content = Loc.Get("StorageBar_Open") };
+            b.Click += (_, _) => ShowPage("settings:storage");
+            StorageBar.ActionButton = b;
+        }
+        if (StorageBar.IsOpen != open) StorageBar.IsOpen = open;
+    }
+
+    private void StorageBar_Closed(InfoBar sender, InfoBarClosedEventArgs args)
+    {
+        if (args.Reason == InfoBarCloseReason.CloseButton) _storageBarClosed = true;
     }
 
     private async void Pause_Click(object sender, RoutedEventArgs e)

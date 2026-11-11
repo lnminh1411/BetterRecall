@@ -72,6 +72,7 @@ public sealed class CommandProcessor
     internal const string UsageReplay = "Usage: replay save | replay list | replay export <id> <path> | replay delete <id>";
     internal const string UsageAudit = "Usage: audit [limit]";
     internal const string UsageBench = "Usage: bench | bench full | bench last";
+    internal const string UsageExport = "Usage: export <json>";
     internal const string ErrLocked = "Store is locked.";
     internal const string ErrNotFound = "Not found.";
     internal const string ErrInternal = "Internal error.";
@@ -87,7 +88,7 @@ public sealed class CommandProcessor
 
     private static readonly string[] PublicVerbs = ["ping", "version", "help", "status", "search", "get", "thumb", "subscribe", "pause", "resume", "purge"];
     private static readonly string[] McpVerbs = ["ping", "version", "status", "search", "get"];
-    private static readonly string[] UiOnlyVerbs = ["unlock", "lock", "consent", "settings", "timeline", "keyframe", "replay", "panic", "audit", "bench", "facets", "history"];
+    private static readonly string[] UiOnlyVerbs = ["unlock", "lock", "consent", "settings", "timeline", "keyframe", "replay", "panic", "audit", "bench", "facets", "history", "export"];
 
     private readonly CommandDeps _d;
     private DateTimeOffset _lastUnlock = DateTimeOffset.MinValue;
@@ -337,6 +338,8 @@ public sealed class CommandProcessor
                 return Facets(s, args);
             case "history":
                 return History(s, rest);
+            case "export":
+                return await ExportAsync(s, rest, ct).ConfigureAwait(false);
         }
         return Err($"Unknown command '{verbRaw}'.");
     }
@@ -575,7 +578,42 @@ public sealed class CommandProcessor
         var t = _d.Store()!.GetKeyframe(args[0]);
         Audit(s, "keyframe", t == null ? 0 : 1, "");
         if (t == null) return Err(ErrNotFound);
-        return Ok(JsonSerializer.Serialize(t, CoreJson.Default.ThumbData));
+        // AVIF and JPEG XL keyframes reach the UI as WebP (the agent transcodes).
+        var ui = _d.Thumbnailer.Transcode(t, "ui");
+        try { return Ok(JsonSerializer.Serialize(ui, CoreJson.Default.ThumbData)); }
+        finally
+        {
+            Array.Clear(t.Bytes);
+            if (!ReferenceEquals(ui, t)) Array.Clear(ui.Bytes);
+        }
+    }
+
+    /// <summary>export {"from","to","path","app"?,"jpeg"?,"dryRun"?}: zip of decrypted keyframes plus captures.json.</summary>
+    private async Task<Reply> ExportAsync(ClientSession s, string rest, CancellationToken ct)
+    {
+        if (rest.Length == 0) return Err(UsageExport);
+        ExportRequest? r;
+        try { r = JsonSerializer.Deserialize(rest, CoreJson.Default.ExportRequest); }
+        catch (JsonException) { return Err(ErrJson); }
+        if (r is null) return Err(UsageExport);
+        if (r.From >= r.To) return Err("Invalid from.");
+        if (!r.DryRun && (string.IsNullOrWhiteSpace(r.Path) || !Path.IsPathFullyQualified(r.Path)
+            || !r.Path.EndsWith(".zip", StringComparison.OrdinalIgnoreCase) || r.Path.IndexOfAny(Path.GetInvalidPathChars()) >= 0))
+            return Err("Invalid path.");
+        if (IsLocked(s.Kind)) return Err(ErrLocked);
+        var store = _d.Store()!;
+        if (r.DryRun) return Ok(JsonSerializer.Serialize(Store.CaptureExporter.Count(store, r), CoreJson.Default.ExportResult));
+        try
+        {
+            var result = await Task.Run(() => Store.CaptureExporter.Write(store, r, _d.Thumbnailer.Transcode, ct), ct).ConfigureAwait(false);
+            Audit(s, "export", result.Count, "");
+            return Ok(JsonSerializer.Serialize(result, CoreJson.Default.ExportResult));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Log.Warn("export failed", ex);
+            return Err("Export failed.");
+        }
     }
 
     private Reply Timeline(ClientSession s, string[] args)

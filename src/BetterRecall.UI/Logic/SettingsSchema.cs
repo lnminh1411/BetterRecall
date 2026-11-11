@@ -43,7 +43,7 @@ public static partial class SettingsSchema
 {
     /// <summary>Navigation order of the settings groups. Resource "G_" + id.</summary>
     public static readonly string[] Groups =
-        ["appearance", "capture", "keyframes", "replay", "audio", "privacy", "index", "inference", "governance", "security", "hotkeys", "ipc", "retention", "log"];
+        ["appearance", "capture", "keyframes", "replay", "audio", "privacy", "index", "inference", "governance", "security", "hotkeys", "ipc", "storage", "retention", "log"];
 
     public static readonly IReadOnlyList<SettingDescriptor> All =
     [
@@ -58,9 +58,8 @@ public static partial class SettingsSchema
         new("capture.pauseOnFullscreen", "capture", SettingType.Bool),
 
         new("keyframes.enabled", "keyframes", SettingType.Bool),
-        new("keyframes.format", "keyframes", SettingType.Choice, Choices: ["webp", "jpeg"]),
+        new("keyframes.format", "keyframes", SettingType.Choice, Choices: ["avif", "webp", "jxl", "jpeg"]),
         new("keyframes.quality", "keyframes", SettingType.Int, 30, 95),
-        new("keyframes.maxGb", "keyframes", SettingType.Int, 1, 2000),
         new("keyframes.thumbCacheMb", "keyframes", SettingType.Int, 8, 1024),
 
         new("replay.enabled", "replay", SettingType.Bool),
@@ -144,6 +143,12 @@ public static partial class SettingsSchema
         new("ipc.idleTimeoutS", "ipc", SettingType.Int, 10, 3600),
 
         new("retention.days", "retention", SettingType.Int, 1, 3650),
+        new("retention.progressiveAfterDays", "retention", SettingType.Int, 0, 3650),
+        new("retention.progressiveOverDays", "retention", SettingType.Int, 1, 3650),
+
+        new("storage.minFreeGb", "storage", SettingType.Int, 0, 10000),
+        new("storage.maxGb", "storage", SettingType.Int, 1, 20000),
+        new("storage.overwrite", "storage", SettingType.Bool, WarningKey: "W_storage_overwrite"),
 
         new("log.level", "log", SettingType.Choice, Choices: ["debug", "info", "warn", "error"]),
 

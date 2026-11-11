@@ -16,6 +16,47 @@ namespace BetterRecall.Agent.Host;
 /// </summary>
 internal static class DevSelfTest
 {
+    /// <summary>"--selftest-codec": encodes a synthetic 1280x720 frame in every keyframes.format, decodes it back,
+    /// transcodes it for the UI and prints size and timings. Checks the codec DLLs load in the published build.</summary>
+    public static unsafe int Codec(string[] args)
+    {
+        Log.AlsoConsole = true;
+        const int w = 1280, h = 720;
+        var px = new byte[w * h * 4];
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++)
+            {
+                int i = (y * w + x) * 4;
+                bool text = y % 24 < 12 && x % 9 < 6 && (x / 200 + y / 48) % 3 != 0;
+                byte v = text ? (byte)30 : (byte)(200 + (x + y) % 40);
+                px[i] = v; px[i + 1] = v; px[i + 2] = (byte)(text ? 30 : 230); px[i + 3] = 255;
+            }
+        int rc = 0;
+        foreach (var format in new[] { "avif", "webp", "jxl", "jpeg" })
+        {
+            try
+            {
+                var sw = Stopwatch.StartNew();
+                byte[] enc;
+                fixed (byte* p = px) enc = ImageCodec.EncodeBgra(p, w, h, w * 4, format, 75);
+                double encMs = sw.Elapsed.TotalMilliseconds;
+                sw.Restart();
+                var (_, dw, dh) = ImageCodec.DecodeBgra(enc, ImageCodec.Mime(format));
+                double decMs = sw.Elapsed.TotalMilliseconds;
+                var ui = ImageCodec.Transcode(enc, ImageCodec.Mime(format), "webp", 90);
+                bool ok = dw == w && dh == h && ui.Width == w;
+                if (!ok) rc = 1;
+                Console.WriteLine($"{format}: {enc.Length / 1024} KiB, encode {encMs:F0} ms, decode {decMs:F0} ms, ui {ui.Mime} {ui.Bytes.Length / 1024} KiB {(ok ? "ok" : "MISMATCH")}");
+            }
+            catch (Exception ex)
+            {
+                rc = 1;
+                Console.WriteLine($"{format}: FAILED {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+        return rc;
+    }
+
     /// <summary>"--selftest-bench [seconds-per-run]": the encoder and capture benchmark on this PC, no worker, no Core.</summary>
     public static int Bench(string[] args)
     {
@@ -155,7 +196,7 @@ internal static class DevSelfTest
                 byte[] bytes = ImageCodec.EncodeBgra(g.Pixels, g.Width, g.Height, g.Stride, format, quality);
                 encodeMs.Add(sw.Elapsed.TotalMilliseconds);
                 Console.WriteLine($"monitor {g.Monitor}: {g.Width}x{g.Height} dhash={h:X16} {format} {bytes.Length / 1024} KiB");
-                if (outDir is not null) File.WriteAllBytes(Path.Combine(outDir, $"kf-{g.Monitor}.{(format == "jpeg" ? "jpg" : "webp")}"), bytes);
+                if (outDir is not null) File.WriteAllBytes(Path.Combine(outDir, $"kf-{g.Monitor}.{(format == "jpeg" ? "jpg" : format)}"), bytes);
                 g.Dispose();
                 if (Interlocked.Increment(ref done) >= outputs.Count * 3) finished.Set();
             }

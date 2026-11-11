@@ -15,7 +15,7 @@ public sealed partial class SettingsShellPage : Page
     {
         ["appearance"] = "\uE790", ["capture"] = "\uE7F4", ["keyframes"] = "\uEB9F", ["replay"] = "\uE714", ["audio"] = "\uE767",
         ["privacy"] = "\uEA18", ["index"] = "\uE721", ["inference"] = "\uE945", ["governance"] = "\uE916",
-        ["security"] = "\uE72E", ["hotkeys"] = "\uE765", ["ipc"] = "\uE71B", ["retention"] = "\uE823", ["log"] = "\uE8A5",
+        ["security"] = "\uE72E", ["hotkeys"] = "\uE765", ["ipc"] = "\uE71B", ["storage"] = "\uEDA2", ["retention"] = "\uE823", ["log"] = "\uE8A5",
     };
 
     private string _group = "";
