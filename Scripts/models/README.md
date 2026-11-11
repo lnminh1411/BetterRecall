@@ -5,7 +5,7 @@ Model preparation for `BetterRecall.Worker`. Every script writes into the models
 `manifest.json` (file, size, sha256, source URL, licence, revision, tensor names, shapes, preprocessing). The worker
 reads only the manifest. Its SHA-256 is the "model hash" in `cache\device.json` and `cache\compiled\`.
 
-Downloads go to the Hugging Face cache at `%LOCALAPPDATA%\BetterRecall\cache\hf` (`HF_HOME`). Model weights are never committed.
+Downloads go to the Hugging Face cache at `%LOCALAPPDATA%\BetterRecall\cache\hf` (`HF_HOME`). Model weights are never committed; the converted folders are published at `huggingface.co/lnminh1411/BetterRecall-models`.
 
 ## Downloads (each needs the user's go-ahead)
 
@@ -16,7 +16,7 @@ Downloads go to the Hugging Face cache at `%LOCALAPPDATA%\BetterRecall\cache\hf`
 | Whisper large-v3-turbo: `model.safetensors`, tokenizer + configs | `huggingface.co/openai/whisper-large-v3-turbo` @ `41f01f3f` | MIT | 1.62 GB | Speech to text (multilingual, auto language) |
 | Silero VAD v6.2.3: `silero_vad.onnx` | `github.com/snakers4/silero-vad` tag `v6.2.3`, `src/silero_vad/data/` | MIT | 2.3 MB | Speech gate before Whisper (CPU) |
 | NSFW classifier: `model.safetensors`, configs (not `optimizer.pt`, `pytorch_model.bin`, the YOLO `.pt`) | `huggingface.co/Falconsai/nsfw_image_detection` @ `96cb0d03` | Apache-2.0 | 345 MB | NSFW gate before embedding (ViT-base/16, labels `normal`/`nsfw`; INT8 on the CPU, FP32 on NPU/GPU) |
-| NSFW detector: `320n.onnx` only | `huggingface.co/deepghs/nudenet_onnx` @ `44956a05` (ONNX of notAI-tech/NudeNet) | Apache-2.0 | 12 MB | Second NSFW model (YOLOv8n body-part detector at 640 px), used as is |
+| NSFW detector: `320n.onnx` only | `huggingface.co/deepghs/nudenet_onnx` @ `44956a05` (ONNX of notAI-tech/NudeNet) | AGPL-3.0 (repo tagged Apache-2.0, upstream NudeNet is AGPL-3.0) | 12 MB | Second NSFW model (YOLOv8n body-part detector at 640 px), used as is |
 | OpenVINO GenAI 2026.4.1 runtime archive (not a model) | `storage.openvinotoolkit.org/repositories/openvino_genai/packages/2026.4.1/windows/openvino_genai_windows_2026.4.1.0_x86_64.zip` | Apache-2.0 | 254 MB | `openvino_genai_c.dll` for Whisper; staged into `artifacts\native\openvino-genai\` |
 
 Total about 5.3 GB downloaded. Converted output on disk is about 2.5 GB: EmbeddingGemma 2 about 1.3 GB

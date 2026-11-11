@@ -13,7 +13,7 @@ The UI talks to the agent only over a named pipe, so the two run as separate pro
 
 ## Models
 
-Model weights are not in this repository. The converted models (OpenVINO IR and ONNX) are published separately on Hugging Face, each folder under its upstream licence:
+Model weights are not in this repository. The converted models (OpenVINO IR and ONNX) are published separately on Hugging Face at [`lnminh1411/BetterRecall-models`](https://huggingface.co/lnminh1411/BetterRecall-models), each folder under its upstream licence:
 
 | Model | Upstream | Licence |
 |---|---|---|
@@ -21,8 +21,10 @@ Model weights are not in this repository. The converted models (OpenVINO IR and 
 | SigLIP 2 base patch16-224 | `google/siglip2-base-patch16-224` | Apache-2.0 |
 | Whisper large-v3-turbo | `openai/whisper-large-v3-turbo` | MIT |
 | NSFW classifier | `Falconsai/nsfw_image_detection` | Apache-2.0 |
-| NSFW detector (NudeNet 320n ONNX) | `deepghs/nudenet_onnx` | Apache-2.0 |
+| NSFW detector (NudeNet 320n ONNX) | `deepghs/nudenet_onnx` (ONNX of `notAI-tech/NudeNet`) | AGPL-3.0 |
 | Silero VAD v6.2.3 | `snakers4/silero-vad` | MIT |
+
+The NudeNet ONNX repackaging is tagged Apache-2.0, but the original NudeNet project is AGPL-3.0, so the detector is distributed under AGPL-3.0.
 
 `Scripts/models/` can also rebuild them from the official upstream files.
 

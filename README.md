@@ -15,4 +15,4 @@ It also keeps an instant replay buffer, so you can save the last minutes of your
 
 Screenshots show the real app running on demo data (`--mock`).
 
-**Status:** early development, Windows 11 x64. There is no installer yet; build from source. **Docs:** [`docs/`](docs/documentations_summary.md). **Licences:** the WinUI app and contracts are MIT, the rest is AGPL-3.0 ([`LICENSING.md`](LICENSING.md)); models keep their own licences.
+**Status:** early development, Windows 11 x64. There is no installer yet; build from source and download the models from [Hugging Face](https://huggingface.co/lnminh1411/BetterRecall-models). **Docs:** [`docs/`](docs/documentations_summary.md). **Licences:** the WinUI app and contracts are MIT, the rest is AGPL-3.0 ([`LICENSING.md`](LICENSING.md)); models keep their own licences.
