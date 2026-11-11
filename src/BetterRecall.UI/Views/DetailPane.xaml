@@ -20,6 +20,12 @@
             <TextBlock x:Name="AppText" Foreground="{ThemeResource TextFillColorSecondaryBrush}" IsTextSelectionEnabled="True" />
             <TextBlock x:Name="TimeText" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
             <InfoBar x:Name="ErrorBar" IsClosable="False" Severity="Warning" IsOpen="False" />
+            <StackPanel x:Name="Actions" Orientation="Horizontal" Spacing="8" Margin="0,6,0,0">
+                <Button x:Name="ReplayButton" Visibility="Collapsed" Click="Replay_Click" />
+                <Button x:Name="DescribeButton" Visibility="Collapsed" Click="Describe_Click" />
+                <ProgressRing x:Name="DescribeBusy" IsActive="False" Width="20" Height="20" />
+            </StackPanel>
+            <InfoBar x:Name="DescribeBar" IsClosable="True" Severity="Informational" IsOpen="False" />
         </StackPanel>
         <ScrollViewer x:Name="TranscriptScroll" Grid.Row="2" VerticalScrollBarVisibility="Auto">
             <StackPanel Spacing="4">

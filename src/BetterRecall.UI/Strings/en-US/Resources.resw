@@ -600,4 +600,82 @@
   <data name="S_privacy_searchHistory_D" xml:space="preserve"><value>Keep your searches in the encrypted store and show them as recent searches. Turning it off deletes them.</value></data>
   <data name="S_privacy_searchHistoryMax" xml:space="preserve"><value>Searches to keep</value></data>
   <data name="S_privacy_searchHistoryMax_D" xml:space="preserve"><value>Older searches are forgotten.</value></data>
+  <data name="Unlock_BodyPassword" xml:space="preserve"><value>Your history is locked. Enter your unlock password to search and view it.</value></data>
+  <data name="Unlock_PasswordHint" xml:space="preserve"><value>Unlock password</value></data>
+  <data name="Unlock_PassphraseHint" xml:space="preserve"><value>Passphrase</value></data>
+  <data name="Unlock_PasswordLessSecure" xml:space="preserve"><value>Unlocking with a password is less secure than Windows Hello: anyone who learns it can open your history on this PC. You can switch back in Settings &gt; Security.</value></data>
+  <data name="Err_WrongPassword" xml:space="preserve"><value>That password is not correct.</value></data>
+  <data name="Err_NoPassword" xml:space="preserve"><value>No unlock password is set. Set one in Settings &gt; Security first.</value></data>
+  <data name="Err_PasswordRule" xml:space="preserve"><value>The password must be 6 to 256 characters.</value></data>
+  <data name="Err_PasswordInUse" xml:space="preserve"><value>The password is in use. Switch the unlock method to Windows Hello before removing it.</value></data>
+  <data name="Err_TooManyTries" xml:space="preserve"><value>Too many wrong tries. Try again in {0} s.</value></data>
+  <data name="Err_AiOff" xml:space="preserve"><value>Cloud describe is off. Turn it on in Settings &gt; Cloud describe.</value></data>
+  <data name="Err_NoApiKey" xml:space="preserve"><value>No API key is set for this provider. Add one in Settings &gt; Cloud describe.</value></data>
+  <data name="Err_ApiKeyRule" xml:space="preserve"><value>That API key is not valid: no spaces, at most 4096 characters.</value></data>
+  <data name="Err_NoImage" xml:space="preserve"><value>This capture has no image to describe.</value></data>
+  <data name="Err_ProviderUnreachable" xml:space="preserve"><value>The provider could not be reached. Check the endpoint and your connection.</value></data>
+  <data name="Err_ProviderTimeout" xml:space="preserve"><value>The provider did not answer in time.</value></data>
+  <data name="G_ai" xml:space="preserve"><value>Cloud describe</value></data>
+  <data name="G_ai_D" xml:space="preserve"><value>Optional: describe a capture with an online AI model. Off by default.</value></data>
+  <data name="Ai_NoteTitle" xml:space="preserve"><value>Sends a screenshot off this PC</value></data>
+  <data name="Ai_Note" xml:space="preserve"><value>This is the only BetterRecall feature that connects to the internet. Nothing is sent unless you press Describe on a capture and then Send in the preview. Each send is listed in the audit log. The provider's own terms and data handling apply.</value></data>
+  <data name="W_ai_enabled" xml:space="preserve"><value>When on, the detail pane shows Describe. Every send still asks you first and shows the exact image.</value></data>
+  <data name="S_ai_enabled" xml:space="preserve"><value>Cloud describe</value></data>
+  <data name="S_ai_enabled_D" xml:space="preserve"><value>Show a Describe button for captures with an image.</value></data>
+  <data name="S_ai_provider" xml:space="preserve"><value>Provider</value></data>
+  <data name="S_ai_provider_D" xml:space="preserve"><value>Which API the image is sent to.</value></data>
+  <data name="S_ai_provider_gemini" xml:space="preserve"><value>Google Gemini</value></data>
+  <data name="S_ai_provider_openai-compatible" xml:space="preserve"><value>OpenAI-compatible</value></data>
+  <data name="S_ai_provider_claude" xml:space="preserve"><value>Anthropic Claude</value></data>
+  <data name="S_ai_model" xml:space="preserve"><value>Model</value></data>
+  <data name="S_ai_model_D" xml:space="preserve"><value>Model id. Empty uses the provider default (gemini-3.8-flash, gpt-6-luna, claude-haiku-5-5).</value></data>
+  <data name="S_ai_endpoint" xml:space="preserve"><value>Endpoint</value></data>
+  <data name="S_ai_endpoint_D" xml:space="preserve"><value>Empty uses the official endpoint. Must start with https://, or http:// on localhost for a local server.</value></data>
+  <data name="AiKey_Title" xml:space="preserve"><value>API key</value></data>
+  <data name="AiKey_Desc" xml:space="preserve"><value>Stored encrypted for your Windows account in its own file, never in settings.json. It is never shown again after saving.</value></data>
+  <data name="AiKey_Placeholder" xml:space="preserve"><value>Paste the API key</value></data>
+  <data name="AiKey_Save" xml:space="preserve"><value>Save</value></data>
+  <data name="AiKey_Remove" xml:space="preserve"><value>Remove key</value></data>
+  <data name="AiKey_StateSet" xml:space="preserve"><value>A key is saved. Sends go to {0}, model {1}, at {2}.</value></data>
+  <data name="AiKey_StateNone" xml:space="preserve"><value>No key saved. Provider {0}, model {1}, endpoint {2}.</value></data>
+  <data name="S_replay_searchable" xml:space="preserve"><value>Search saved replays</value></data>
+  <data name="S_replay_searchable_D" xml:space="preserve"><value>When a replay is saved, a frame every few seconds is added to search as a Replay match that opens the replay at that moment.</value></data>
+  <data name="S_replay_sampleSeconds" xml:space="preserve"><value>Seconds between replay frames</value></data>
+  <data name="S_replay_sampleSeconds_D" xml:space="preserve"><value>Smaller finds more moments and uses more space.</value></data>
+  <data name="S_security_unlockMethod" xml:space="preserve"><value>Unlock method</value></data>
+  <data name="S_security_unlockMethod_D" xml:space="preserve"><value>How you open your history. A password works when Windows Hello is not set up.</value></data>
+  <data name="S_security_unlockMethod_hello" xml:space="preserve"><value>Windows Hello</value></data>
+  <data name="S_security_unlockMethod_password" xml:space="preserve"><value>Password</value></data>
+  <data name="W_security_unlockMethod" xml:space="preserve"><value>A password is less secure than Windows Hello. Set the password below before choosing it.</value></data>
+  <data name="Pw_Title" xml:space="preserve"><value>Unlock password</value></data>
+  <data name="Pw_Desc" xml:space="preserve"><value>Used when the unlock method is Password. Only a slow Argon2id hash is kept; after 5 wrong tries the wait grows up to 15 minutes.</value></data>
+  <data name="Pw_StateSet" xml:space="preserve"><value>A password is set.</value></data>
+  <data name="Pw_StateNone" xml:space="preserve"><value>No password is set.</value></data>
+  <data name="Pw_NoHello" xml:space="preserve"><value>Windows Hello is not available on this PC.</value></data>
+  <data name="Pw_Set" xml:space="preserve"><value>Set password</value></data>
+  <data name="Pw_Change" xml:space="preserve"><value>Change password</value></data>
+  <data name="Pw_Remove" xml:space="preserve"><value>Remove password</value></data>
+  <data name="Pw_Current" xml:space="preserve"><value>Current password</value></data>
+  <data name="Pw_New" xml:space="preserve"><value>New password</value></data>
+  <data name="Pw_Again" xml:space="preserve"><value>New password again</value></data>
+  <data name="Pw_DialogBody" xml:space="preserve"><value>6 to 256 characters. BetterRecall cannot recover a forgotten password; switch back to Windows Hello if you lose it.</value></data>
+  <data name="Pw_Mismatch" xml:space="preserve"><value>The new passwords do not match.</value></data>
+  <data name="Pw_RemoveBody" xml:space="preserve"><value>Enter the current password to remove it.</value></data>
+  <data name="Detail_Describe" xml:space="preserve"><value>Describe</value></data>
+  <data name="Detail_OpenReplay" xml:space="preserve"><value>Open replay at {0}</value></data>
+  <data name="Describe_Title" xml:space="preserve"><value>Send this image?</value></data>
+  <data name="Describe_Body" xml:space="preserve"><value>This image will be sent to {0} (model {1}, {2}). The text that comes back is shown here and not saved.</value></data>
+  <data name="Describe_PreviewName" xml:space="preserve"><value>Image that will be sent</value></data>
+  <data name="Describe_Redacted" xml:space="preserve"><value>Redaction was applied to this copy.</value></data>
+  <data name="Describe_NotRedacted" xml:space="preserve"><value>Not redacted: this BetterRecall version has no redaction yet, so the image is sent exactly as shown.</value></data>
+  <data name="Describe_Send" xml:space="preserve"><value>Send</value></data>
+  <data name="Describe_ResultTitle" xml:space="preserve"><value>Description ({0})</value></data>
+  <data name="Replays_MatchTitle" xml:space="preserve"><value>Replay match</value></data>
+  <data name="Replays_MatchBody" xml:space="preserve"><value>Replay of {0}, at {1}.</value></data>
+  <data name="Replays_MatchGone" xml:space="preserve"><value>That replay no longer exists.</value></data>
+  <data name="Replays_PlayFrom" xml:space="preserve"><value>Play from {0}</value></data>
+  <data name="Replays_PlayerTitle" xml:space="preserve"><value>Replay of {0} from {1}</value></data>
+  <data name="Replays_PlayerName" xml:space="preserve"><value>Replay of {0}</value></data>
+  <data name="Replays_PlayerClose" xml:space="preserve"><value>Close</value></data>
+  <data name="Replays_OpenExternal" xml:space="preserve"><value>Open in default player</value></data>
 </root>

@@ -9,6 +9,8 @@ public enum CaptureKind
 {
     [JsonStringEnumMemberName("screen")] Screen,
     [JsonStringEnumMemberName("audio")] Audio,
+    /// <summary>A frame sampled from a saved replay (replay id + offset), searchable like a screen capture.</summary>
+    [JsonStringEnumMemberName("replay")] Replay,
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter<SearchMode>))]
@@ -30,7 +32,9 @@ public sealed record CaptureMeta(
     int DurationMs,
     bool HasThumb,
     bool Embedded,
-    string Site = "");       // browser host (no scheme, path or query), empty when unknown
+    string Site = "",        // browser host (no scheme, path or query), empty when unknown
+    string? ReplayId = null, // kind replay: saved replay the frame belongs to
+    int? ReplayOffsetMs = null);
 
 /// <summary>Screen capture handed from the agent to the store. Thumb is WebP bytes or null.</summary>
 public sealed record NewScreenCapture(
@@ -46,6 +50,20 @@ public sealed record NewScreenCapture(
     string ImageMime,        // image/webp | image/jpeg
     bool KeepKeyframe,       // false when keyframes.enabled is false: image deleted once the job is done
     string Site = "");       // browser host from the address bar, empty when unknown or privacy.recordSite is off
+
+/// <summary>Frame sampled from a saved replay, handed from the agent to the store (kind replay).</summary>
+public sealed record NewReplayFrame(
+    DateTimeOffset Ts,
+    string ReplayId,
+    int OffsetMs,            // position in the replay file
+    string App,
+    string Title,
+    int Monitor,
+    int Width,
+    int Height,
+    byte[] Image,            // keyframes.format bytes
+    string ImageMime,
+    string Site = "");
 
 /// <summary>Speech segment after transcription.</summary>
 public sealed record NewAudioCapture(
@@ -89,7 +107,9 @@ public sealed record SearchHit(
     float? Cosine = null,     // query-to-capture cosine when the hit was in the vector candidates
     bool TextMatch = false,   // found by keyword search (title, app, transcript)
     bool Weak = false,        // no keyword match and Cosine below index.weakMatchBelow: show it, label it weak
-    string Site = "");
+    string Site = "",
+    string? ReplayId = null,  // kind replay: open this replay at ReplayOffsetMs
+    int? ReplayOffsetMs = null);
 
 public sealed record SearchResponse(int Count, bool Truncated, long TookMs, IReadOnlyList<SearchHit> Results);
 
@@ -103,7 +123,9 @@ public sealed record CaptureDetail(
     string Text,
     bool HasThumb,
     int? DurationS,
-    string Site = "");
+    string Site = "",
+    string? ReplayId = null,
+    int? ReplayOffsetMs = null);
 
 /// <summary>Bytes serialise as the JSON field "base64" (research.md 7.6).</summary>
 public sealed record ThumbData(string Id, string Mime, int Width, int Height, [property: JsonPropertyName("base64")] byte[] Bytes);
@@ -165,6 +187,21 @@ public sealed record PurgeConfirmReply(string Confirm, int? Rows);
 public sealed record VersionReply(string App, int Protocol);
 
 public sealed record ReplayClip(string Id, DateTimeOffset Ts, int DurationMs, long Bytes, bool Encrypted, string Path);
+
+/// <summary>password: unlock password state (security.unlockMethod). RetryAfterS &gt; 0 while too many wrong tries block it.</summary>
+public sealed record PasswordStatus(bool Set, bool HelloAvailable, int RetryAfterS);
+
+/// <summary>ai: cloud describe state. Never carries the API key itself.</summary>
+public sealed record AiStatus(bool Enabled, bool KeySet, string Provider, string Model, string Endpoint);
+
+/// <summary>describe preview: the exact image a later "describe send &lt;token&gt;" sends (token valid 120 s).
+/// Redacted is false until redaction exists (batch 3).</summary>
+public sealed record DescribePreview(
+    string Token, string Provider, string Model, string Endpoint, string Mime, int Width, int Height, bool Redacted,
+    [property: JsonPropertyName("base64")] byte[] Bytes);
+
+/// <summary>describe send: the provider's text.</summary>
+public sealed record DescribeResult(string Text, string Provider, string Model, long TookMs);
 
 // ---- worker protocol payloads (docs/v1-design.md section 4) ----
 

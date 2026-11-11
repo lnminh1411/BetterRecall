@@ -56,6 +56,11 @@ public interface IStore : IDisposable
     void AddHistory(string q, DateTimeOffset ts, int max) { }
     /// <summary>Removes one saved search, or all of them when q is null. Returns rows removed.</summary>
     int DeleteHistory(string? q) => 0;
+
+    /// <summary>Stores a frame sampled from a saved replay (kind replay) and queues its embedding.</summary>
+    string AddReplayFrame(NewReplayFrame frame) => throw new NotSupportedException();
+    /// <summary>Deletes every frame of a replay (replay deleted). Returns rows removed.</summary>
+    int DeleteReplayFrames(string replayId) => 0;
 }
 
 public sealed record PurgeScope(string Kind, DateTimeOffset? From = null, DateTimeOffset? To = null, string? App = null, string? Site = null, string? Id = null)
@@ -135,6 +140,10 @@ public interface IAgentControl
     /// <summary>Hardware scan, worker bench (devices x image tokens), encoder bench, capture bench.
     /// Search, Recommendations stay empty: Core adds them. Takes up to a few minutes.</summary>
     Task<BenchReport> BenchFullAsync(CancellationToken ct) => throw new NotSupportedException();
+
+    /// <summary>Opens the read gate for security.unlockTimeoutMin without a Windows Hello prompt. Core calls it only after it
+    /// verified the unlock password (security.unlockMethod password) or the data-key passphrase.</summary>
+    void OpenReadGate() => throw new NotSupportedException();
     event Action<AgentStatus>? StatusChanged;
     event Action<CaptureMeta>? CaptureStored;
 }

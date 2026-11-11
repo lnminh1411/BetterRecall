@@ -46,6 +46,7 @@ public sealed partial class LauncherWindow : Window
         _vm = new SearchViewModel(s.Api);
         _detail = new DetailViewModel(s.MediaApi);
         Detail.ViewModel = _detail;
+        Detail.ModalChanged += open => _modal = Math.Max(0, _modal + (open ? 1 : -1));
         GroupsSource.Source = _vm.Groups;
         ResultsGrid.ItemsSource = GroupsSource.View;
         HistoryList.ItemsSource = _vm.History;

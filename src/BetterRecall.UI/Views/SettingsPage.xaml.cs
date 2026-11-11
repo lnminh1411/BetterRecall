@@ -77,6 +77,12 @@ public sealed partial class SettingsPage : Page
         }
 
         if (_group == "inference") Cards.Children.Add(BenchCard());
+        if (_group == "security") Cards.Children.Add(SecretCards.PasswordCard(this));
+        if (_group == "ai")
+        {
+            Cards.Children.Insert(1, new InfoBar { IsOpen = true, IsClosable = false, Severity = InfoBarSeverity.Informational, Title = Loc.Get("Ai_NoteTitle"), Message = Loc.Get("Ai_Note") });
+            Cards.Children.Add(SecretCards.ApiKeyCard(this));
+        }
         UpdateState();
     }
 

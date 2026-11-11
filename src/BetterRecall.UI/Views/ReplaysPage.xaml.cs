@@ -31,13 +31,35 @@ public sealed partial class ReplaysPage : Page, IDataPage
 {
     private readonly List<ReplayRow> _rows = [];
 
+    private (string Id, int OffsetMs)? _openAt;   // replay match: "replays:<id>@<ms>"
+
     public ReplaysPage()
     {
         InitializeComponent();
         Loaded += (_, _) => Reload();
     }
 
-    public void Reload() => _ = LoadAsync();
+    protected override void OnNavigatedTo(Microsoft.UI.Xaml.Navigation.NavigationEventArgs e) => _openAt = ReplayLink.Parse(e.Parameter as string);
+
+    public void Reload() => _ = LoadAndOpenAsync();
+
+    /// <summary>After a replay match: offers to play that replay from the matched second.</summary>
+    private async Task LoadAndOpenAsync()
+    {
+        await LoadAsync();
+        if (_openAt is not { } at) return;
+        _openAt = null;
+        if (_rows.FirstOrDefault(r => r.Id == at.Id) is not { } row)
+        {
+            Show(InfoBarSeverity.Warning, Loc.Get("Replays_MatchGone"));
+            return;
+        }
+        List.ScrollIntoView(row);
+        Show(InfoBarSeverity.Informational, Loc.Format("Replays_MatchBody", row.When, StatusText.FormatDuration(at.OffsetMs)), Loc.Get("Replays_MatchTitle"));
+        var play = new Button { Content = Loc.Format("Replays_PlayFrom", StatusText.FormatDuration(at.OffsetMs)) };
+        play.Click += async (_, _) => await PlayAsync(row, at.OffsetMs);
+        ResultBar.ActionButton = play;
+    }
 
     private async Task LoadAsync()
     {
@@ -82,7 +104,14 @@ public sealed partial class ReplaysPage : Page, IDataPage
     private async void Play_Click(object sender, RoutedEventArgs e)
     {
         if ((sender as FrameworkElement)?.Tag is not string id || _rows.FirstOrDefault(x => x.Id == id) is not { } row) return;
+        await PlayAsync(row, null);
+    }
 
+    /// <summary>Export (warning, file picker) then open. With an offset the clip plays in an in-app player from that
+    /// second, since the default player cannot be told where to start.</summary>
+    private async Task PlayAsync(ReplayRow row, int? offsetMs)
+    {
+        var id = row.Id;
         var warn = WindowHelpers.Dialog(XamlRoot, Loc.Get("Replays_WarnTitle"),
             new TextBlock { Text = Loc.Get("Replays_WarnBody"), TextWrapping = TextWrapping.Wrap }, Loc.Get("Replays_WarnContinue"));
         if (await warn.ShowAsync() != ContentDialogResult.Primary) return;
@@ -111,8 +140,25 @@ public sealed partial class ReplaysPage : Page, IDataPage
             var open = new Button { Content = Loc.Get("Replays_Open") };
             open.Click += (_, _) => Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
             ResultBar.ActionButton = open;
-            Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
+            if (offsetMs is { } at) await PlayInAppAsync(path, at, row.When);
+            else Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
         }
+    }
+
+    private async Task PlayInAppAsync(string path, int offsetMs, string when)
+    {
+        var player = new MediaPlayerElement { AreTransportControlsEnabled = true, MinWidth = 640, MinHeight = 360, AutoPlay = true };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(player, Loc.Format("Replays_PlayerName", when));
+        var mp = new Windows.Media.Playback.MediaPlayer { Source = Windows.Media.Core.MediaSource.CreateFromUri(new Uri(path)) };
+        mp.MediaOpened += (s, _) => s.PlaybackSession.Position = TimeSpan.FromMilliseconds(offsetMs);
+        player.SetMediaPlayer(mp);
+        var dialog = WindowHelpers.Dialog(XamlRoot, Loc.Format("Replays_PlayerTitle", when, StatusText.FormatDuration(offsetMs)), player, Loc.Get("Replays_OpenExternal"), Loc.Get("Replays_PlayerClose"));
+        dialog.Resources["ContentDialogMaxWidth"] = 1200.0;
+        var choice = await dialog.ShowAsync();
+        mp.Pause();
+        player.SetMediaPlayer(null);
+        mp.Dispose();
+        if (choice == ContentDialogResult.Primary) Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
     }
 
     private async void Delete_Click(object sender, RoutedEventArgs e)
