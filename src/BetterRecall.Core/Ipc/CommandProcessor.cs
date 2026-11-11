@@ -29,8 +29,9 @@ internal sealed record DescribeTicket(string CaptureId, Ai.OutgoingImage Image, 
 
 public enum Subscription { None, Status, Captures }
 
-/// <summary>One response line, plus a request to switch the connection to stream mode or close it.</summary>
-public readonly record struct Reply(string Line, Subscription Subscribe = Subscription.None, bool Close = false);
+/// <summary>One response line, plus a request to switch the connection to stream mode or close it. Stream: a reply of
+/// several lines (chat); the producer emits each line, the connection stays open for further requests afterwards.</summary>
+public readonly record struct Reply(string Line, Subscription Subscribe = Subscription.None, bool Close = false, Func<Action<string>, Task>? Stream = null);
 
 /// <summary>Everything the command processor reads or calls.</summary>
 public sealed class CommandDeps
@@ -54,13 +55,17 @@ public sealed class CommandDeps
     public Ai.CloudDescriber? Describer { get; init; }
     /// <summary>Applied to every image before preview and send. Null means pass-through (no redaction yet).</summary>
     public Ai.IDescribeRedactor? Redactor { get; init; }
+    /// <summary>Cloud chat transport (tests pass a handler for a local fake server). Null: a default ProviderHttp.</summary>
+    public Ai.ProviderHttp? ChatHttp { get; init; }
+    /// <summary>Provider wire formats (tests may override). Null: Ai.ChatProviders.For.</summary>
+    public Func<string, Ai.IChatProvider>? ChatProviders { get; init; }
 }
 
 /// <summary>
 /// Verbs, usage strings and errors of research 7.6 and v1-design section 5 for the UI, public and MCP pipes.
 /// HandleAsync never throws: unexpected exceptions become "Internal error." and go to the log without detail text.
 /// </summary>
-public sealed class CommandProcessor
+public sealed partial class CommandProcessor
 {
     public static readonly string AppVersion =
         System.Reflection.CustomAttributeExtensions.GetCustomAttribute<System.Reflection.AssemblyInformationalVersionAttribute>(typeof(CommandProcessor).Assembly)?.InformationalVersion ?? "0.0.0";
@@ -99,6 +104,7 @@ public sealed class CommandProcessor
     internal const string UsagePassword = "Usage: password | password set <json> | password clear <json>";
     internal const string UsageAi = "Usage: ai | ai setkey <key> | ai clearkey";
     internal const string UsageDescribe = "Usage: describe preview <id> | describe send <token>";
+    internal const string UsageChat = "Usage: chat list | chat get <id> | chat send <json> | chat approve <json> | chat deny <token> | chat rename <json> | chat delete <id> | chat clear";
     internal const string ErrWrongPassword = "Wrong password.";
     internal const string ErrNoPassword = "No unlock password is set.";
     internal const string ErrPasswordRule = "Password must be 6 to 256 characters.";
@@ -114,14 +120,42 @@ public sealed class CommandProcessor
 
     private static readonly string[] PublicVerbs = ["ping", "version", "help", "status", "search", "get", "thumb", "subscribe", "pause", "resume", "purge"];
     private static readonly string[] McpVerbs = ["ping", "version", "status", "search", "get"];
-    private static readonly string[] UiOnlyVerbs = ["unlock", "lock", "consent", "settings", "timeline", "keyframe", "replay", "panic", "audit", "bench", "facets", "history", "password", "ai", "describe", "export"];
+    private static readonly string[] UiOnlyVerbs = ["unlock", "lock", "consent", "settings", "timeline", "keyframe", "replay", "panic", "audit", "bench", "facets", "history", "password", "ai", "describe", "export", "chat"];
 
     private readonly CommandDeps _d;
     private DateTimeOffset _lastUnlock = DateTimeOffset.MinValue;
 
     internal Func<DateTimeOffset> Now { get; set; } = () => DateTimeOffset.UtcNow;
 
-    public CommandProcessor(CommandDeps deps) => _d = deps;
+    private readonly Ai.ChatService? _chat;
+
+    /// <summary>Panic: forget chat approvals and unsaved chats, and delete saved chats. The read gate is already closed,
+    /// so this goes to the store directly.</summary>
+    private void OnPanic()
+    {
+        _chat?.Clear();
+        try { _d.Store()?.DeleteChats(null); } catch (Exception ex) { Log.Warn("panic chat delete", ex); }
+    }
+
+    public CommandProcessor(CommandDeps deps)
+    {
+        _d = deps;
+        if (deps.AiKey is { } keys)
+        {
+            _chat = new Ai.ChatService(new Ai.ChatDeps
+            {
+                Settings = () => _d.Settings.Current,
+                Store = () => IsLocked(PipeKind.Ui) ? null : _d.Store(),
+                Embedder = deps.Embedder,
+                Thumbnailer = deps.Thumbnailer,
+                ApiKey = keys.Read,
+                Http = deps.ChatHttp ?? new Ai.ProviderHttp(),
+                Providers = deps.ChatProviders ?? Ai.ChatProviders.For,
+                ImageRedactor = deps.Redactor,
+            });
+            deps.Agent.Panicked += OnPanic;
+        }
+    }
 
     private Settings S => _d.Settings.Current;
 
@@ -166,6 +200,11 @@ public sealed class CommandProcessor
                     if (t.IsFaulted || t.IsCanceled || t.Result == null) { try { req.Cancel(); } catch (ObjectDisposedException) { } }
                 }, TaskScheduler.Default);
                 reply = await HandleAsync(session, line, req.Token).ConfigureAwait(false);
+                if (reply.Stream is { } producer)
+                {
+                    if (!await RunStreamAsync(stream, producer, req.Token).ConfigureAwait(false)) return;
+                    continue;
+                }
             }
             else reply = await HandleAsync(session, line, ct).ConfigureAwait(false);
             if (reply.Subscribe != Subscription.None)
@@ -179,11 +218,35 @@ public sealed class CommandProcessor
         }
     }
 
-    /// <summary>Verbs that may run for minutes (bench full, up to about 10). UI pipe only.</summary>
+    /// <summary>Writes a multi-line reply as the producer emits it. False when the client went away.</summary>
+    internal static async Task<bool> RunStreamAsync(Stream stream, Func<Action<string>, Task> producer, CancellationToken ct)
+    {
+        var ch = Channel.CreateUnbounded<string>(new UnboundedChannelOptions { SingleReader = true });
+        var run = Task.Run(async () =>
+        {
+            try { await producer(l => ch.Writer.TryWrite(l)).ConfigureAwait(false); }
+            catch (OperationCanceledException) { }
+            catch (Exception ex) { Log.Error("stream producer failed", ex); ch.Writer.TryWrite(Envelope.Error(ErrInternal)); }
+            finally { ch.Writer.TryComplete(); }
+        }, CancellationToken.None);
+        bool ok = true;
+        try
+        {
+            await foreach (var l in ch.Reader.ReadAllAsync(ct).ConfigureAwait(false))
+                if (!await WriteAsync(stream, l, ct).ConfigureAwait(false)) { ok = false; break; }
+        }
+        catch (OperationCanceledException) { ok = false; }
+        try { await run.ConfigureAwait(false); } catch { }
+        return ok;
+    }
+
+    /// <summary>Verbs that may run for minutes (bench full, up to about 10; chat turns). UI pipe only.</summary>
     internal static bool IsLongRunning(PipeKind kind, string line)
     {
         if (kind != PipeKind.Ui) return false;
         var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length >= 2 && parts[0].Equals("chat", StringComparison.OrdinalIgnoreCase)
+            && parts[1].ToLowerInvariant() is "send" or "approve" or "deny") return true;
         if (parts.Length == 3 && parts[0].Equals("describe", StringComparison.OrdinalIgnoreCase) && parts[1].Equals("send", StringComparison.OrdinalIgnoreCase)) return true;
         return parts.Length == 2 && parts[0].Equals("bench", StringComparison.OrdinalIgnoreCase) && parts[1].Equals("full", StringComparison.OrdinalIgnoreCase);
     }
@@ -373,6 +436,8 @@ public sealed class CommandProcessor
                 return await DescribeAsync(s, args, ct).ConfigureAwait(false);
             case "export":
                 return await ExportAsync(s, rest, ct).ConfigureAwait(false);
+            case "chat":
+                return ChatVerb(s, rest, ct);
         }
         return Err($"Unknown command '{verbRaw}'.");
     }
@@ -783,6 +848,7 @@ public sealed class CommandProcessor
                 if (ticket.Scope == null)
                 {
                     int all = await _d.PurgeAll(ct).ConfigureAwait(false);
+                    _chat?.Clear();
                     return Ok(JsonSerializer.Serialize(new PurgeResult(all), CoreJson.Default.PurgeResult));
                 }
                 var st = _d.Store();
@@ -948,7 +1014,11 @@ public sealed class CommandProcessor
     private AiStatus AiState()
     {
         var a = S.Ai;
-        return new AiStatus(a.Enabled, _d.AiKey?.IsSet == true, a.Provider, AiDefaults.EffectiveModel(a), AiDefaults.EffectiveEndpoint(a));
+        AiUsage? usage = null;
+        try { if (!IsLocked(PipeKind.Ui) && _d.Store() is { } st) usage = Ai.AiBudget.Usage(st, a, Now()); }
+        catch (Exception ex) { Log.Warn("ai usage read failed", ex); }
+        return new AiStatus(a.Enabled, _d.AiKey?.IsSet == true, a.Provider, AiDefaults.EffectiveModel(a), AiDefaults.EffectiveEndpoint(a),
+            usage, Ai.ProviderHttp.IsLoopback(AiDefaults.EffectiveEndpoint(a)));
     }
 
     /// <summary>ai: status (never the key). ai setkey &lt;key&gt; stores the key DPAPI-encrypted; ai clearkey deletes it.</summary>
@@ -1018,9 +1088,12 @@ public sealed class CommandProcessor
                 if (keyNeeded && key == null) return Err(ErrNoApiKey);
                 var verb = "describe " + ai.Provider;
                 var sha = Convert.ToHexStringLower(SHA256.HashData(ticket.Image.Bytes));
+                var store = _d.Store()!;
+                if (Ai.AiBudget.Check(Ai.AiBudget.Usage(store, ai, now)) is { } over) return Err(over.Message);
                 try
                 {
                     var result = await _d.Describer.DescribeAsync(ai, key, ticket.Image, ct).ConfigureAwait(false);
+                    store.AddAiUsage(Ai.AiBudget.Today(now), 1, 0);
                     Audit(s, verb, 1, sha);
                     return Ok(JsonSerializer.Serialize(result, CoreJson.Default.DescribeResult));
                 }
@@ -1056,6 +1129,9 @@ public sealed class CommandProcessor
                 // Turning search history off forgets what was saved.
                 if (!S.Privacy.SearchHistory)
                     try { _d.Store()?.DeleteHistory(null); } catch (Exception ex) { Log.Warn("history clear failed", ex); }
+                // Turning chat history off deletes the saved chats (chats of this session stay in memory only).
+                if (!S.Ai.ChatHistory)
+                    try { if (!IsLocked(PipeKind.Ui)) _d.Store()?.DeleteChats(null); } catch (Exception ex) { Log.Warn("chat clear failed", ex); }
                 return Ok(JsonSerializer.Serialize(S, CoreJson.Default.Settings));
         }
         return Err(UsageSettings);

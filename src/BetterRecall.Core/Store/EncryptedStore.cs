@@ -179,6 +179,7 @@ public sealed partial class EncryptedStore : IStore
             CREATE TABLE IF NOT EXISTS replay_frames(rid INTEGER PRIMARY KEY, replay_id TEXT NOT NULL, offset_ms INTEGER NOT NULL);
             CREATE INDEX IF NOT EXISTS ix_replay_frames_replay ON replay_frames(replay_id);
             """);
+        MigrateChats();
     }
 
     private SqliteConnection? Kf(string month, bool create)
@@ -700,8 +701,11 @@ public sealed partial class EncryptedStore : IStore
             int n = DeleteRowsLocked(SelectScope(scope));
             // A time-window purge (panic flush, "delete the last hour") also forgets searches typed in that window.
             if (scope.Kind is "last" or "range" && scope.From != null && scope.To != null)
+            {
                 Exec(_w, "DELETE FROM search_history WHERE ts >= $from AND ts <= $to",
                     ("$from", scope.From.Value.ToUnixTimeMilliseconds()), ("$to", scope.To.Value.ToUnixTimeMilliseconds()));
+                DeleteChatsInWindowLocked(scope.From.Value, scope.To.Value);   // chats active in the window go too
+            }
             CheckpointLocked();
             Log.Info($"purge ({scope.Kind}) removed {n} rows");
             return n;

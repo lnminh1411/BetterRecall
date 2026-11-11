@@ -347,6 +347,11 @@ public sealed partial class SettingsStore : ISettingsStore
         ("retention.progressiveOverDays", s => Range(s.Retention.ProgressiveOverDays, 1, 3650)),
         ("storage.minFreeGb", s => Range(s.Storage.MinFreeGb, 0, 10000)),
         ("storage.maxGb", s => Range(s.Storage.MaxGb, 1, 20000)),
+        ("ai.share", s => In(s.Ai.Share, AiShare.All)),
+        ("ai.chatMaxHits", s => Range(s.Ai.ChatMaxHits, 1, 20)),
+        ("ai.chatMaxImages", s => Range(s.Ai.ChatMaxImages, 0, 8)),
+        ("ai.dailyRequests", s => Range(s.Ai.DailyRequests, 0, 100_000)),
+        ("ai.dailyTokens", s => s.Ai.DailyTokens >= 0 && s.Ai.DailyTokens <= 1_000_000_000),
     ];
 
     [GeneratedRegex("^[a-z]{2,3}(-[A-Za-z]{2,4})?$")]

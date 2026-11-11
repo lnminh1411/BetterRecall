@@ -69,6 +69,18 @@ public interface IStore : IDisposable
     string AddReplayFrame(NewReplayFrame frame) => throw new NotSupportedException();
     /// <summary>Deletes every frame of a replay (replay deleted). Returns rows removed.</summary>
     int DeleteReplayFrames(string replayId) => 0;
+
+    /// <summary>Saved chats, newest first.</summary>
+    IReadOnlyList<ChatSummary> Chats(int limit) => [];
+    ChatRecord? GetChat(string id) => null;
+    /// <summary>Upserts the chat (title, updated, provider, model, transcript) and appends messages with Seq above the stored ones.</summary>
+    void SaveChat(ChatRecord chat) => throw new NotSupportedException();
+    bool RenameChat(string id, string title) => false;
+    /// <summary>Deletes one chat, or all when id is null. Returns chats removed.</summary>
+    int DeleteChats(string? id) => 0;
+    /// <summary>Requests and tokens counted for a local day (yyyy-MM-dd).</summary>
+    (int Requests, long Tokens) AiUsage(string day) => (0, 0);
+    void AddAiUsage(string day, int requests, long tokens) { }
 }
 
 public sealed record PurgeScope(string Kind, DateTimeOffset? From = null, DateTimeOffset? To = null, string? App = null, string? Site = null, string? Id = null)
@@ -156,6 +168,8 @@ public interface IAgentControl
     /// <summary>Opens the read gate for security.unlockTimeoutMin without a Windows Hello prompt. Core calls it only after it
     /// verified the unlock password (security.unlockMethod password) or the data-key passphrase.</summary>
     void OpenReadGate() => throw new NotSupportedException();
+    /// <summary>Raised after a panic flush: chat state held in memory is dropped.</summary>
+    event Action? Panicked { add { } remove { } }
     event Action<AgentStatus>? StatusChanged;
     event Action<CaptureMeta>? CaptureStored;
 }

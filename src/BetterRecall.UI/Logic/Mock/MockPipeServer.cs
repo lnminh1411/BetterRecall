@@ -71,6 +71,12 @@ public sealed class MockPipeServer(MockAgent agent, string pipeName) : IAsyncDis
                     return;
                 }
                 if (line is null) return;
+                if (MockAgent.IsStreamLine(line))
+                {
+                    // Multi-line reply (chat): each event goes out as it is produced; the connection stays usable after.
+                    await agent.StreamAsync(line, l => LineProtocol.WriteLineAsync(pipe, l, ct), ct).ConfigureAwait(false);
+                    continue;
+                }
                 var response = await agent.HandleAsync(line, ct).ConfigureAwait(false);
                 await LineProtocol.WriteLineAsync(pipe, response, ct).ConfigureAwait(false);
                 if (line.Trim().Equals("subscribe", StringComparison.OrdinalIgnoreCase) && response.StartsWith("{\"ok\":true", StringComparison.Ordinal))

@@ -72,6 +72,7 @@ public sealed partial class MainWindow : Window
         {
             "home" => typeof(HomePage),
             "timeline" => typeof(TimelinePage),
+            "chat" => typeof(ChatPage),
             "replays" => typeof(ReplaysPage),
             "settings" => typeof(SettingsShellPage),
             "danger" => typeof(DangerZonePage),

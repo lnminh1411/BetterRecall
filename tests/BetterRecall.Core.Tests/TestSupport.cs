@@ -159,6 +159,8 @@ internal sealed class FakeAgent : IAgentControl
     }
     public event Action<AgentStatus>? StatusChanged;
     public event Action<CaptureMeta>? CaptureStored;
+    public event Action? Panicked;
+    public void RaisePanic() => Panicked?.Invoke();
     public void RaiseStatus() => StatusChanged?.Invoke(Status);
     public void RaiseCapture(CaptureMeta m) => CaptureStored?.Invoke(m);
 }

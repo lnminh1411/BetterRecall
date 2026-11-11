@@ -124,6 +124,8 @@ internal static class SecretCards
         var state = new TextBlock { TextWrapping = TextWrapping.Wrap, Style = Caption() };
         AutomationProperties.SetLiveSetting(state, Microsoft.UI.Xaml.Automation.Peers.AutomationLiveSetting.Polite);
         panel.Children.Add(state);
+        var usage = new TextBlock { TextWrapping = TextWrapping.Wrap, Style = Caption() };
+        panel.Children.Add(usage);
         var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
         var box = new PasswordBox { PlaceholderText = Loc.Get("AiKey_Placeholder"), MinWidth = 280 };
         AutomationProperties.SetName(box, Loc.Get("AiKey_Title"));
@@ -140,6 +142,13 @@ internal static class SecretCards
             remove.Visibility = set ? Visibility.Visible : Visibility.Collapsed;
             state.Text = !r.Ok ? Loc.Error(r.Kind, r.Error)
                 : Loc.Format(set ? "AiKey_StateSet" : "AiKey_StateNone", r.Value!.Provider, r.Value.Model, r.Value.Endpoint);
+            var parts = ChatViewModel.UsageParts(r.Ok ? r.Value?.Usage : null);
+            usage.Text = parts is null ? "" : Loc.Format("Chat_Usage",
+                parts.Value.Requests,
+                parts.Value.RequestLimit == "Chat_NoLimit" ? Loc.Get("Chat_NoLimit") : parts.Value.RequestLimit,
+                parts.Value.Tokens,
+                parts.Value.TokenLimit == "Chat_NoLimit" ? Loc.Get("Chat_NoLimit") : parts.Value.TokenLimit);
+            usage.Visibility = string.IsNullOrEmpty(usage.Text) ? Visibility.Collapsed : Visibility.Visible;
         }
 
         save.Click += async (_, _) =>

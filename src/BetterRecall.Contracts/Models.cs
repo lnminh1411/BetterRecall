@@ -207,8 +207,40 @@ public sealed record ReplayClip(string Id, DateTimeOffset Ts, int DurationMs, lo
 /// <summary>password: unlock password state (security.unlockMethod). RetryAfterS &gt; 0 while too many wrong tries block it.</summary>
 public sealed record PasswordStatus(bool Set, bool HelloAvailable, int RetryAfterS);
 
-/// <summary>ai: cloud describe state. Never carries the API key itself.</summary>
-public sealed record AiStatus(bool Enabled, bool KeySet, string Provider, string Model, string Endpoint);
+/// <summary>ai: cloud describe and chat state. Never carries the API key itself. Local: the endpoint is a loopback
+/// address, so requests stay on this PC.</summary>
+public sealed record AiStatus(bool Enabled, bool KeySet, string Provider, string Model, string Endpoint, AiUsage? Usage = null, bool Local = false);
+
+/// <summary>Today's cloud requests and tokens against the local budget (ai.dailyRequests, ai.dailyTokens; 0 = no limit).</summary>
+public sealed record AiUsage(string Day, int Requests, long Tokens, int RequestLimit, long TokenLimit);
+
+/// <summary>A capture a chat answer used, shown as a source card.</summary>
+public sealed record ChatSource(string Id, DateTimeOffset Ts, CaptureKind Kind, string App, string Title, string Site,
+    string? ReplayId = null, int? ReplayOffsetMs = null);
+
+/// <summary>One capture in an approval prompt: exactly the text and (redacted) image that would be sent.</summary>
+public sealed record ChatApprovalItem(string Id, DateTimeOffset Ts, CaptureKind Kind, string App, string Title, string Site,
+    string Text, string? ImageMime = null, [property: JsonPropertyName("base64")] byte[]? Image = null);
+
+/// <summary>
+/// One line of a chat stream. Type: start (chatId), search (query run locally), text (delta), approval (token, items,
+/// share, text = notice), sources, warning (code, text), done (usage), error (code, text, retryAt). The stream ends
+/// after done, approval or error.
+/// </summary>
+public sealed record ChatEvent(string Type, string? ChatId = null, string? Text = null, string? Token = null, string? Query = null,
+    IReadOnlyList<ChatSource>? Sources = null, IReadOnlyList<ChatApprovalItem>? Items = null, string? Share = null,
+    string? Code = null, DateTimeOffset? RetryAt = null, AiUsage? Usage = null);
+
+public sealed record ChatSummary(string Id, string Title, DateTimeOffset Created, DateTimeOffset Updated, int Messages);
+
+/// <summary>Role user or assistant.</summary>
+public sealed record ChatMessage(int Seq, DateTimeOffset Ts, string Role, string Text, IReadOnlyList<ChatSource>? Sources = null);
+
+public sealed record ChatDetail(ChatSummary Chat, IReadOnlyList<ChatMessage> Messages, bool Approved);
+
+/// <summary>A saved chat. Transcript is the provider-native message list (JSON) so later turns append to it unchanged.</summary>
+public sealed record ChatRecord(string Id, string Title, DateTimeOffset Created, DateTimeOffset Updated, string Provider, string Model,
+    string Transcript, IReadOnlyList<ChatMessage> Messages);
 
 /// <summary>describe preview: the exact image a later "describe send &lt;token&gt;" sends (token valid 120 s).
 /// Redacted is false until redaction exists (batch 3).</summary>

@@ -83,6 +83,13 @@ public class DescribeRedactorTests
     }
 
     [Fact]
+    public void Chat_may_send_its_checked_images()
+    {
+        IDescribeRedactor r = new DescribeRedactor(new Reader(CardLine), Defaults);
+        Assert.True(r.RedactsImages);   // chat still sends only results with Redacted set
+    }
+
+    [Fact]
     public async Task Ocr_failure_blocks_the_send()
     {
         var r = new DescribeRedactor(new Reader(() => throw new WorkerException("Device failed: x.")), Defaults);
