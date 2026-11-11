@@ -2,7 +2,7 @@
 # Copyright (c) BetterRecall contributors
 """One command for the whole model pipeline: venvs, downloads, exports, GenAI runtime, worker rebuild.
 
-Usage: python Scripts/models/prepare_all.py [--skip-venv] [--only embeddinggemma2,siglip2,whisper,nsfw,nsfw-detector]
+Usage: python Scripts/models/prepare_all.py [--skip-venv] [--only embeddinggemma2,siglip2,whisper,nsfw,nsfw-detector,ocr,ner]
 Venvs live in %BETTERRECALL_DEV% (default %LOCALAPPDATA%\\BetterRecall-dev), pip cache in its pip folder. Models and
 the Hugging Face cache go to %LOCALAPPDATA%\\BetterRecall\\. See Scripts/models/README.md for what each step downloads.
 """
@@ -29,6 +29,8 @@ EXPORTS = {  # name -> (script, venv)
     "whisper": ("export_whisper.py", "venv-whisper"),
     "nsfw": ("export_nsfw.py", "venv"),
     "nsfw-detector": ("export_nsfw_detector.py", "venv"),
+    "ocr": ("export_ocr.py", "venv"),
+    "ner": ("export_ner.py", "venv"),
 }
 
 

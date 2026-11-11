@@ -36,9 +36,12 @@ internal sealed class CaptureService : IAsyncDisposable
     private bool _inputBurst;
     private bool _lockMemory;
 
+    private readonly Privacy.RedactionMasks? _redactions;
+
     public CaptureService(Func<Settings> settings, Func<bool> keyframesPaused, Func<bool> replayPaused,
-        GuardrailService guard, KeyframePipeline pipeline, LoopbackHub loopback, bool lockMemory)
+        GuardrailService guard, KeyframePipeline pipeline, LoopbackHub loopback, bool lockMemory, Privacy.RedactionMasks? redactions = null)
     {
+        _redactions = redactions;
         _settings = settings;
         _keyframesPaused = keyframesPaused;
         _replayPaused = replayPaused;
@@ -91,7 +94,16 @@ internal sealed class CaptureService : IAsyncDisposable
         _guard.Refresh();
     }
 
-    private RECT[] Masks() => _guard.Current().MaskRects;
+    /// <summary>Replay masks: denied windows (guardrails), password fields (live, privacy.redactPasswords) and the
+    /// redaction boxes of each monitor's newest keyframe.</summary>
+    private RECT[] Masks() => MergeMasks(_guard.Current(), _settings().Privacy.RedactPasswords, _redactions?.All() ?? []);
+
+    internal static RECT[] MergeMasks(GuardSnapshot snap, bool passwords, RECT[] redactions)
+    {
+        var secrets = passwords ? snap.SecretRects : [];
+        if (secrets.Length == 0 && redactions.Length == 0) return snap.MaskRects;
+        return [.. snap.MaskRects, .. secrets, .. redactions];
+    }
 
     /// <summary>Pushes replay settings and pause state into the engine and the audio ring.</summary>
     public void ApplySettings()
@@ -203,11 +215,13 @@ internal sealed class CaptureService : IAsyncDisposable
                 string app = exe.Length == 0 ? "" : Path.GetFileNameWithoutExtension(exe);
                 string title = w?.Title ?? "";
                 string site = w is not null && snap.Foreground is { } f && f.Hwnd == w.Hwnd ? snap.Site : "";
+                var bounds = new RECT(o.Info.Left, o.Info.Top, o.Info.Left + o.Info.Width, o.Info.Top + o.Info.Height);
                 o.PendingKeyframe = new KeyframeRequest(ts, app, exe, title, app + "\u0001" + title, force,
                     Math.Clamp(s.Capture.MaxWidth, 640, 3840),
                     // Pre-grab gate stays at 0.5 % of dirty area since the last grab; the real test
                     // (capture.dirtyMinPercent against the last stored keyframe) runs in the pipeline.
-                    Math.Min(Math.Clamp(s.Capture.DirtyMinPercent, 0, 100), CapturePolicy.TriggerMinScore), site, keyframe, sample, trigger);
+                    Math.Min(Math.Clamp(s.Capture.DirtyMinPercent, 0, 100), CapturePolicy.TriggerMinScore), site, keyframe, sample, trigger,
+                    s.Privacy.RedactPasswords ? snap.SecretRects : null, bounds);
             }
         }
     }

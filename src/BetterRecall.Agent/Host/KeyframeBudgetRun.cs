@@ -5,8 +5,10 @@ using System.Diagnostics;
 using System.Globalization;
 using BetterRecall.Agent.Capture;
 using BetterRecall.Agent.Native;
+using BetterRecall.Agent.Privacy;
 using BetterRecall.Agent.Scheduling;
 using BetterRecall.Agent.Util;
+using BetterRecall.Agent.Worker;
 using BetterRecall.Contracts;
 
 namespace BetterRecall.Agent.Host;
@@ -18,10 +20,15 @@ namespace BetterRecall.Agent.Host;
 /// the encode CPU as Task Manager counts it (share of all logical processors); at the end the 60 s average, the 10 s
 /// peak, ms per frame per level, and, from a second thread outside the budget, the size WebP and JPEG need to reach the
 /// same text sharpness as each AVIF keyframe.
+/// "--ocr-home &lt;dir&gt;" also runs OCR and redaction before each encode, as the agent does: a real worker started with
+/// that home (its settings.json can point inference.modelDir at installed models). OCR CPU is reported apart from the
+/// encode CPU (the budget covers the encode only): the keyframe thread's own share and the worker process's.
+/// "--worker &lt;exe&gt;" overrides the worker path (default: worker\ next to this exe).
 /// </summary>
 internal static unsafe class KeyframeBudgetRun
 {
     private sealed record Encoded(long T, EncodeLevel Level, double CpuMs, double WallMs, int Bytes);
+    private sealed record OcrRun(long T, double CpuMs, double WallMs, bool Ok, int Spans);
 
     private sealed class Item(KeyframeGrab g) : IDisposable
     {
@@ -33,8 +40,24 @@ internal static unsafe class KeyframeBudgetRun
     {
         Log.AlsoConsole = true;
         CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
-        double minutes = args.Length > 1 ? double.Parse(args[1], CultureInfo.InvariantCulture) : 10;
+        double minutes = args.Length > 1 && !args[1].StartsWith("--", StringComparison.Ordinal) ? double.Parse(args[1], CultureInfo.InvariantCulture) : 10;
+        string? ocrHome = null, workerExe = null;
+        for (int i = 1; i < args.Length - 1; i++)
+        {
+            if (args[i] == "--ocr-home") ocrHome = Path.GetFullPath(args[++i]);
+            else if (args[i] == "--worker") workerExe = Path.GetFullPath(args[++i]);
+        }
         var s = new Settings();
+        WorkerSupervisor? supervisor = null;
+        IKeyframeReader? reader = null;
+        if (ocrHome is not null)
+        {
+            workerExe ??= InstallLayout.Full(AppContext.BaseDirectory.TrimEnd('\\'), InstallLayout.WorkerExe);
+            supervisor = new WorkerSupervisor(new ProcessWorkerLauncher(workerExe, s.Governance.EcoQos), ocrHome, () => 24 * 3600);
+            reader = new WorkerKeyframeReader(new WorkerClient(supervisor));
+            Console.WriteLine($"ocr on: worker {workerExe}, home {ocrHome}");
+        }
+        var red = RedactionOptions.From(s.Privacy);
         var outputs = GpuDevices.Outputs();
         int procs = Environment.ProcessorCount;
         Console.WriteLine($"{outputs.Count} monitor(s), {procs} logical processors, {minutes} min, interval {s.Capture.IntervalMs} ms, " +
@@ -45,6 +68,8 @@ internal static unsafe class KeyframeBudgetRun
         var grabs = new BlockingCollection<KeyframeGrab>(new ConcurrentQueue<KeyframeGrab>(), 6);
         var compare = new BlockingCollection<(byte[] Px, int W, int H, byte[] Avif)>(4);
         var encodes = new List<Encoded>();
+        var ocrs = new List<OcrRun>();
+        string ocrFirstError = "";
         var matched = new List<(int Avif, int Webp, int Jpeg)>();
         long skipped = 0, kept = 0, channelDrops = 0;
         var clock = Stopwatch.StartNew();
@@ -86,6 +111,33 @@ internal static unsafe class KeyframeBudgetRun
                     var map = ChangeMap.Compute(g.Span, g.Width, g.Height, g.Stride);
                     var (reason, _) = d.Decide(map, hash, g.Request, s.Capture.DhashThreshold, s.Capture.DirtyMinPercent);
                     if (reason == KeepReason.Skip) { map.Clear(); skipped++; continue; }
+                    if (reader is not null)
+                    {
+                        // As the agent: OCR the downscaled frame, paint the redaction boxes, then encode.
+                        double c0 = Win32.CurrentThreadCpuMs();
+                        var sw = Stopwatch.StartNew();
+                        var copy = new byte[g.Stride * g.Height];
+                        g.Span.CopyTo(copy);
+                        OcrResult? r = null;
+                        try
+                        {
+                            using var timeout = new CancellationTokenSource(KeyframePipeline.OcrTimeout);
+                            r = reader.ReadAsync(copy, g.Width, g.Height, g.Stride, red.Entities, timeout.Token).GetAwaiter().GetResult();
+                        }
+                        catch (Exception ex) when (ex is WorkerException or OperationCanceledException)
+                        {
+                            if (ocrFirstError.Length == 0) ocrFirstError = ex.Message;
+                        }
+                        finally { Array.Clear(copy); }
+                        int spans = 0;
+                        if (r is not null)
+                        {
+                            var rr = Redactor.Apply(r.Lines, [], red);
+                            if (rr.Boxes.Length > 0) RedactionMasks.Fill(g.Pixels, g.Width, g.Height, g.Stride, rr.Boxes);
+                            spans = rr.Spans;
+                        }
+                        lock (ocrs) ocrs.Add(new OcrRun(clock.ElapsedMilliseconds, Win32.CurrentThreadCpuMs() - c0, sw.Elapsed.TotalMilliseconds, r is not null, spans));
+                    }
                     d.Accept(hash, g.Request.Context, map);
                     kept++;
                     lock (governor) governor.Offer(new Item(g));
@@ -134,6 +186,23 @@ internal static unsafe class KeyframeBudgetRun
         nint lastFg = 0;
         var proc = Process.GetCurrentProcess();
         double procCpu0 = proc.TotalProcessorTime.TotalMilliseconds;
+        // Worker CPU since its start (model loading included); a restarted worker adds on top of what was last seen.
+        int workerPid = 0;
+        double workerBase = 0, workerSeen = 0;
+        double WorkerCpuMs()
+        {
+            if (supervisor is null || supervisor.Pid == 0) return workerSeen;
+            try
+            {
+                double t = Process.GetProcessById(supervisor.Pid).TotalProcessorTime.TotalMilliseconds;
+                if (supervisor.Pid != workerPid) { workerPid = supervisor.Pid; workerBase = workerSeen; }
+                workerSeen = workerBase + t;
+            }
+            catch (ArgumentException) { }
+            catch (InvalidOperationException) { }
+            return workerSeen;
+        }
+        double workerLast = 0;
         while (clock.ElapsedMilliseconds < end)
         {
             long now = clock.ElapsedMilliseconds;
@@ -159,14 +228,26 @@ internal static unsafe class KeyframeBudgetRun
                     cpu10 = encodes.Where(e => e.T > now - 10_000).Sum(e => e.CpuMs);
                     foreach (var e in encodes.Where(e => e.T > now - 10_000)) perLevel[(int)e.Level]++;
                 }
+                string ocrPart = "";
+                if (reader is not null)
+                {
+                    double o10;
+                    lock (ocrs) o10 = ocrs.Where(e => e.T > now - 10_000).Sum(e => e.CpuMs);
+                    double wNow = WorkerCpuMs();
+                    ocrPart = FormattableString.Invariant($"  ocr CPU last 10 s: thread {o10 / (procs * 10_000.0) * 100:F2} %, worker {(wNow - workerLast) / (procs * 10_000.0) * 100:F2} %");
+                    workerLast = wNow;
+                }
                 Console.WriteLine(FormattableString.Invariant(
-                    $"t={now / 1000,4} s  encode CPU last 10 s {cpu10 / (procs * 10_000.0) * 100:F2} %  frames n/f/r/w {perLevel[0]}/{perLevel[1]}/{perLevel[2]}/{perLevel[3]}  waiting {governor?.Waiting ?? 0}  kept {kept} skipped {skipped}"));
+                    $"t={now / 1000,4} s  encode CPU last 10 s {cpu10 / (procs * 10_000.0) * 100:F2} %  frames n/f/r/w {perLevel[0]}/{perLevel[1]}/{perLevel[2]}/{perLevel[3]}  waiting {governor?.Waiting ?? 0}  kept {kept} skipped {skipped}{ocrPart}"));
             }
             Thread.Sleep(50);
         }
         foreach (var c in captures) c.Dispose();
         grabs.CompleteAdding();
-        worker.Join(10_000);
+        worker.Join(KeyframePipeline.OcrTimeout + TimeSpan.FromSeconds(10));
+        double workerTotal = WorkerCpuMs();
+        if (supervisor is not null)
+            try { supervisor.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(10)); } catch (Exception ex) { Console.WriteLine($"worker stop: {ex.Message}"); }
         compare.CompleteAdding();
         comparer.Join(120_000);
         proc.Refresh();
@@ -184,7 +265,22 @@ internal static unsafe class KeyframeBudgetRun
         Console.WriteLine();
         Console.WriteLine(FormattableString.Invariant($"run {end / 1000} s: {kept} kept, {skipped} skipped as similar, {list.Count} encoded, {governor?.Dropped ?? 0} dropped by budget, {channelDrops} grab drops"));
         Console.WriteLine(FormattableString.Invariant($"encode CPU: average {total / (procs * (double)end) * 100:F3} %, peak 10 s {peak10 / (procs * 10_000.0) * 100:F3} % (cap 1.5), peak 60 s {peak60 / (procs * 60_000.0) * 100:F3} % (cap 1.0)"));
-        Console.WriteLine(FormattableString.Invariant($"whole test process CPU (capture, smart capture, size check included): {procCpu / (procs * (double)end) * 100:F3} %"));
+        if (reader is not null)
+        {
+            var ol = ocrs.ToList();
+            double oPeak10 = 0, oPeak60 = 0;
+            foreach (var e in ol)
+            {
+                oPeak10 = Math.Max(oPeak10, ol.Where(x => x.T > e.T - 10_000 && x.T <= e.T).Sum(x => x.CpuMs));
+                oPeak60 = Math.Max(oPeak60, ol.Where(x => x.T > e.T - 60_000 && x.T <= e.T).Sum(x => x.CpuMs));
+            }
+            int ok = ol.Count(o => o.Ok);
+            Console.WriteLine(FormattableString.Invariant($"ocr (not in the encode budget): {ol.Count} frames, {ok} read, {ol.Count - ok} failed{(ocrFirstError.Length > 0 ? " (first: " + ocrFirstError + ")" : "")}, redacted spans {ol.Sum(o => o.Spans)}"));
+            if (ol.Count > 0)
+                Console.WriteLine(FormattableString.Invariant($"  wall avg {ol.Average(o => o.WallMs):F0} ms (max {ol.Max(o => o.WallMs):F0}); keyframe thread CPU avg {ol.Average(o => o.CpuMs):F1} ms/frame, {ol.Sum(o => o.CpuMs) / (procs * (double)end) * 100:F3} % average, peak 10 s {oPeak10 / (procs * 10_000.0) * 100:F3} %, peak 60 s {oPeak60 / (procs * 60_000.0) * 100:F3} %"));
+            Console.WriteLine(FormattableString.Invariant($"  worker process CPU (OCR plus its idle work): {workerTotal / (procs * (double)end) * 100:F3} % average, {(ok > 0 ? workerTotal / ok : 0):F0} ms per read frame"));
+        }
+        Console.WriteLine(FormattableString.Invariant($"whole test process CPU (capture, smart capture, size check{(reader is null ? "" : ", OCR client side")} included; worker excluded): {procCpu / (procs * (double)end) * 100:F3} %"));
         foreach (var g in list.GroupBy(e => e.Level).OrderBy(g => g.Key))
             Console.WriteLine(FormattableString.Invariant(
                 $"  {g.Key,-8} {g.Count(),4} frames  CPU {g.Average(e => e.CpuMs):F1} ms (max {g.Max(e => e.CpuMs):F1})  wall {g.Average(e => e.WallMs):F1} ms  {g.Average(e => e.Bytes) / 1024:F1} KiB"));

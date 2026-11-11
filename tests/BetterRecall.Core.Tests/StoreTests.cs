@@ -165,6 +165,29 @@ public class StoreTests
     }
 
     [Fact]
+    public void Screen_ocr_text_is_searchable_snippeted_and_returned()
+    {
+        using var t = new TempStore();
+        var ocr = string.Concat(Enumerable.Repeat("lorem ipsum ", 40)) + "Quarterly zebra forecast for Northwind " + string.Concat(Enumerable.Repeat("dolor sit ", 40));
+        var id = t.Store.AddScreenCapture(Caps.Screen(T0, title: "Report - Excel") with { Text = ocr });
+        var plain = t.Store.AddScreenCapture(Caps.Screen(T0.AddSeconds(5), title: "Zebra notes") with { Text = "  " });
+        Assert.Empty(Find(t.Store, "northwind", mode: SearchMode.Text).Results);
+        t.Store.SetEmbedding(id, Vec.Seeded(4), Vec.Info);
+        t.Store.SetEmbedding(plain, Vec.Seeded(5), Vec.Info);
+
+        var hit = Find(t.Store, "northwind", mode: SearchMode.Text).Results.Single();
+        Assert.Equal(id, hit.Id);
+        Assert.Contains("Northwind", hit.Snippet);
+        Assert.True(hit.Snippet.Length <= 300);
+        // Title matches still snippet the title.
+        var both = Find(t.Store, "zebra", mode: SearchMode.Text).Results;
+        Assert.Equal(2, both.Count);
+        Assert.Equal("Zebra notes", both.Single(x => x.Id == plain).Snippet);
+        Assert.Equal(ocr, t.Store.Get(id)!.Text);
+        Assert.Equal("Zebra notes", t.Store.Get(plain)!.Text);
+    }
+
+    [Fact]
     public void Hybrid_ranking_fuses_text_and_vector()
     {
         using var t = new TempStore();

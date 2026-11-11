@@ -103,6 +103,13 @@ public sealed class RequestHandler(IWorkerEngine engine, Func<WorkerSettings> se
                 return new WorkerReply(new WorkerResponse(r.Id, true, Ms: Ms(sw), Transcript: t), []);
             }
 
+            case "ocr":
+            {
+                var image = ValidateImage(r, payload);
+                var result = engine.Ocr(image, r.Entities == true);
+                return new WorkerReply(new WorkerResponse(r.Id, true, Ms: Ms(sw), Ocr: result with { Ms = Ms(sw) }), []);
+            }
+
             case "bench":
                 return new WorkerReply(new WorkerResponse(r.Id, true, Ms: Ms(sw), Bench: engine.Bench()), []);
 

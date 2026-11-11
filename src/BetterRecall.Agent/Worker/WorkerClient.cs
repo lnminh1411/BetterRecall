@@ -64,6 +64,14 @@ internal sealed class WorkerClient(WorkerSupervisor supervisor)
         finally { Array.Clear(bytes); }
     }
 
+    /// <summary>Text lines of a BGRA keyframe; entities asks for NER person/address spans too.</summary>
+    public async Task<OcrResult> OcrAsync(ReadOnlyMemory<byte> bgra, int width, int height, int stride, bool entities, CancellationToken ct)
+    {
+        var reply = await CallAsync(new WorkerRequest(0, "ocr", Format: "bgra8", Width: width, Height: height, Stride: stride,
+            Entities: entities ? true : null), bgra, ct).ConfigureAwait(false);
+        return reply.Header.Ocr ?? throw new WorkerException("Internal error.");
+    }
+
     public async Task<BenchResult> BenchAsync(CancellationToken ct)
     {
         var reply = await CallAsync(new WorkerRequest(0, "bench"), ReadOnlyMemory<byte>.Empty, ct).ConfigureAwait(false);

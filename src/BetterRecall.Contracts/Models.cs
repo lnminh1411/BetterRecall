@@ -51,8 +51,9 @@ public sealed record NewScreenCapture(
     bool KeepKeyframe,       // false when keyframes.enabled is false: image deleted once the job is done
     string Site = "",        // browser host from the address bar, empty when unknown or privacy.recordSite is off
     double? Change = null,   // change score vs the previous stored keyframe of the monitor (0-100), null when unknown
-    bool Switch = false);    // first keyframe after a window/app switch (or of the monitor): progressive deletion keeps it.
+    bool Switch = false,     // first keyframe after a window/app switch (or of the monitor): progressive deletion keeps it.
                              // Change null and Switch false: unknown, the store derives both from neighbouring rows
+    string? Text = null);    // OCR text after redaction (ocr.enabled), null when not read
 
 /// <summary>Store files on disk and the free pages inside them (reused by new rows before the files grow).</summary>
 public sealed record StorageUse(long FileBytes, long FreeBytes)
@@ -119,7 +120,7 @@ public sealed record SearchHit(
     bool HasThumb,
     int? DurationS,
     float? Cosine = null,     // query-to-capture cosine when the hit was in the vector candidates
-    bool TextMatch = false,   // found by keyword search (title, app, transcript)
+    bool TextMatch = false,   // found by keyword search (title, app, transcript, screen text)
     bool Weak = false,        // no keyword match and Cosine below index.weakMatchBelow: show it, label it weak
     string Site = "",
     string? ReplayId = null,  // kind replay: open this replay at ReplayOffsetMs
@@ -127,7 +128,7 @@ public sealed record SearchHit(
 
 public sealed record SearchResponse(int Count, bool Truncated, long TookMs, IReadOnlyList<SearchHit> Results);
 
-/// <summary>Result of get: hit plus full stored text (title for screen, transcript for audio).</summary>
+/// <summary>Result of get: hit plus full stored text (screen: redacted OCR text when read, else the title; audio: transcript).</summary>
 public sealed record CaptureDetail(
     string Id,
     DateTimeOffset Ts,
@@ -230,7 +231,19 @@ public sealed record WorkerHello(
     bool Asr,
     bool Vad,
     string[] Missing,        // model names not installed
-    string? NsfwDevice = null); // device of the NSFW gate (NPU | iGPU | GPU <adapter> | CPU), null when not loaded
+    string? NsfwDevice = null, // device of the NSFW gate (NPU | iGPU | GPU <adapter> | CPU), null when not loaded
+    string? OcrDevice = null); // OCR engine and device ("onnx iGPU", "windows"), null when OCR is off or not loaded
+
+/// <summary>Entity found by the NER model in an OCR line: UTF-16 Start and Length in the line text.
+/// Label: person | address | location (other labels are dropped by the worker).</summary>
+public sealed record OcrEntity(int Start, int Length, string Label, float Score);
+
+/// <summary>One recognised text line in keyframe pixels. Cuts has Text.Length + 1 x positions (image pixels): character
+/// i spans [Cuts[i], Cuts[i+1]). Entities is null unless the request asked for them.</summary>
+public sealed record OcrLine(string Text, int X, int Y, int W, int H, float Confidence, int[] Cuts, OcrEntity[]? Entities = null);
+
+/// <summary>ocr reply: lines top to bottom, the engine that read them ("onnx" | "windows") and the time taken.</summary>
+public sealed record OcrResult(OcrLine[] Lines, string Engine, double Ms);
 
 public sealed record TranscriptSegment(int StartMs, int EndMs, string Text);
 
@@ -298,7 +311,8 @@ public sealed record WorkerRequest(
     string? Language = null,
     double? Nsfw = null,     // embed_image: NSFW threshold, null skips the check
     int? NsfwGrid = null,    // embed_image: 1 whole frame, 2 adds quadrants + centre, 3 adds a 3x3 grid; null means 1
-    double? NsfwDetector = null); // embed_image: NSFW detector threshold, null skips the detector
+    double? NsfwDetector = null, // embed_image: NSFW detector threshold, null skips the detector
+    bool? Entities = null);  // ocr: also run the NER model (names, addresses) over the lines
 
 /// <summary>Response header for the worker pipe.</summary>
 public sealed record WorkerResponse(
@@ -310,4 +324,5 @@ public sealed record WorkerResponse(
     string? Dropped = null,  // embed_image: "nsfw" when blocked, no payload follows
     WorkerHello? Hello = null,
     TranscribeResult? Transcript = null,
-    BenchResult? Bench = null);
+    BenchResult? Bench = null,
+    OcrResult? Ocr = null);

@@ -50,6 +50,43 @@ SOURCES = {
         "file": "320n.onnx", "size": 12150158,
         "sha256": "c15d8273adad2d0a92f014cc69ab2d6c311a06777a55545f2c4eb46f51911f0f",
     },
+    # OCR (PaddleOCR, official ONNX exports, Apache-2.0; pinned 2026-11-11). Each repo: inference.onnx + inference.yml
+    # (pre/post-processing and, for recognisers, the character dictionary). Used as is; export_ocr.py writes dict files.
+    "ocr": {
+        "licence": "Apache-2.0", "approx_mb": 100,
+        "det": {"repo": "PaddlePaddle/PP-OCRv6_small_det_onnx", "revision": "28fe5895c24fd108c19eb3e8479f4ab385fbfc62",
+                "size": 9880512, "sha256": "d73e0058b7a8086bbd57f3d10b8bcd4ff95363f67e06e2762b5e814fe9c9410e"},
+        "rec": {
+            "main": {"repo": "PaddlePaddle/PP-OCRv6_small_rec_onnx", "revision": "b8f84f0b80c529de40b4fbb3544b84fa7233a513",
+                     "size": 21159378, "sha256": "5435fd747c9e0efe15a96d0b378d5bd157e9492ed8fd80edf08f30d02fa24634"},
+            "korean": {"repo": "PaddlePaddle/korean_PP-OCRv5_mobile_rec_onnx", "revision": "5c6f574b8e2230adf4287b33e736d71b9fabd28e",
+                       "size": 13418787, "sha256": "92f0b7785e64fc9090106a241cf4c1eb97472824558272751b88a2a4476d3a08"},
+            "cyrillic": {"repo": "PaddlePaddle/cyrillic_PP-OCRv5_mobile_rec_onnx", "revision": "2cef88145434beb8afa9dd82d77d799eb1ad7b29",
+                         "size": 8048799, "sha256": "5371ee1ddaa7983cc62d0818d99e982b6804638c85e4f960d59a574094e172e5"},
+            "arabic": {"repo": "PaddlePaddle/arabic_PP-OCRv5_mobile_rec_onnx", "revision": "14aaedcd75825982689ecf5cd64ab33ee083215a",
+                       "size": 7998947, "sha256": "799113ebf267fbe742deb99eb36e8d42c9ddc5291ceacf92add41b4d52a59110"},
+            "devanagari": {"repo": "PaddlePaddle/devanagari_PP-OCRv5_mobile_rec_onnx", "revision": "251aec19e36739540d35e2cc943f6aa7503b98e5",
+                           "size": 7912311, "sha256": "cb789212ce96c69d3e74728ae4309d179281d68cb3945d0616b67cafab41c986"},
+            "th": {"repo": "PaddlePaddle/th_PP-OCRv5_mobile_rec_onnx", "revision": "1d4adbbafb1034a2fd6618498575b81ea7b69f69",
+                   "size": 7891015, "sha256": "27618be66018f8598ac0a526a593f9f1cebf794e7eded93428e8fb016e537f5f"},
+            "el": {"repo": "PaddlePaddle/el_PP-OCRv5_mobile_rec_onnx", "revision": "8152b89d2ee0e1d4c92decab75fe75e5e3d836b6",
+                   "size": 7808735, "sha256": "2acf17fcaea2bc81b878e311e6263b8885f48bb03796f75f9f30ed3242bbaa6d"},
+            "ta": {"repo": "PaddlePaddle/ta_PP-OCRv5_mobile_rec_onnx", "revision": "0db89798af0d5218fad9ea7ace0557526e9077f1",
+                   "size": 7885691, "sha256": "c6d2b682d2a0ea4cb1fccdba295976f93fd439964d16cdc666cadef531accbee"},
+            "te": {"repo": "PaddlePaddle/te_PP-OCRv5_mobile_rec_onnx", "revision": "f1197c83430241c58c64b0952b3a80366d04eeba",
+                   "size": 7898759, "sha256": "8238bfc46d4cffe720ed6706e3842802467343497428693ff2bfb4e6b3caa36b"},
+        },
+    },
+    # Names and addresses for redaction: mmBERT-small token classifier, 41 PII labels, 22 languages, MIT (pinned 2026-11-11).
+    "ner": {
+        "repo": "Wismut/nym-pii-multilingual-small", "revision": "4348999cd3c2e20c49615e9af7c6bbb45b64cd85",
+        "licence": "MIT", "approx_mb": 151,
+        "files": {
+            "int8/model_int8.onnx": {"size": 138730982, "sha256": "139006aea2cbd8e709d322f056232570de54661f624143be4893aaa387190286"},
+            "int8/tokenizer.json": {"size": 12389891, "sha256": "c299144e68dfec1dc536204a7ae3712710c5c6cade9269a83f5042250d47d8de"},
+            "int8/config.json": {},
+        },
+    },
     "silero-vad": {
         "url": "https://github.com/snakers4/silero-vad/raw/v6.2.3/src/silero_vad/data/silero_vad.onnx",
         "repo": "snakers4/silero-vad", "revision": "v6.2.3", "licence": "MIT", "approx_mb": 2.3,
@@ -89,12 +126,16 @@ def file_entry(model_dir: Path, rel: str, source: str | None = None) -> dict:
 def write_manifest(model_dir: Path, manifest: dict, files: list[str]) -> Path:
     """manifest.json in the C# ModelManifest shape (camelCase), with size and sha256 of every file."""
     s = SOURCES[manifest["name"]]
-    src = f"https://huggingface.co/{s['repo']}/tree/{s['revision']}" if "url" not in s else s["url"]
-    manifest.setdefault("id", s["repo"])
-    manifest.setdefault("revision", s["revision"])
+    if "repo" in s:
+        src = f"https://huggingface.co/{s['repo']}/tree/{s['revision']}" if "url" not in s else s["url"]
+        manifest.setdefault("id", s["repo"])
+        manifest.setdefault("revision", s["revision"])
+        manifest.setdefault("source", src)
+    else:  # several upstream repos (ocr): the caller sets id, revision and source; per-file sources via fileSources
+        src = manifest["source"]
     manifest.setdefault("licence", s["licence"])
-    manifest.setdefault("source", src)
-    manifest["files"] = [file_entry(model_dir, f, src) for f in files]
+    per_file = manifest.pop("fileSources", {})
+    manifest["files"] = [file_entry(model_dir, f, per_file.get(f, src)) for f in files]
     out = model_dir / "manifest.json"
     out.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"wrote {out}")

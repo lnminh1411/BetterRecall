@@ -43,7 +43,7 @@ public static partial class SettingsSchema
 {
     /// <summary>Navigation order of the settings groups. Resource "G_" + id.</summary>
     public static readonly string[] Groups =
-        ["appearance", "capture", "keyframes", "replay", "audio", "privacy", "index", "inference", "governance", "security", "ipc", "storage", "retention", "log", "ai"];   // hotkeys: own Shortcuts page
+        ["appearance", "capture", "keyframes", "replay", "audio", "privacy", "ocr", "index", "inference", "governance", "security", "ipc", "storage", "retention", "log", "ai"];   // hotkeys: own Shortcuts page
 
     public static readonly IReadOnlyList<SettingDescriptor> All =
     [
@@ -99,6 +99,19 @@ public static partial class SettingsSchema
         new("privacy.recordSite", "privacy", SettingType.Bool),
         new("privacy.searchHistory", "privacy", SettingType.Bool),
         new("privacy.searchHistoryMax", "privacy", SettingType.Int, 10, 1000, EnabledWhenKey: "privacy.searchHistory", EnabledWhenValue: "true"),
+        new("privacy.redactPasswords", "privacy", SettingType.Bool),
+        new("privacy.redactCards", "privacy", SettingType.Bool),
+        new("privacy.redactIds", "privacy", SettingType.Bool),
+        new("privacy.redactBirthDates", "privacy", SettingType.Bool),
+        new("privacy.redactEmails", "privacy", SettingType.Bool),
+        new("privacy.redactPhones", "privacy", SettingType.Bool),
+        new("privacy.redactNames", "privacy", SettingType.Bool, EnabledWhenKey: "ocr.enabled", EnabledWhenValue: "true"),
+        new("privacy.redactAddresses", "privacy", SettingType.Bool, EnabledWhenKey: "ocr.enabled", EnabledWhenValue: "true"),
+
+        new("ocr.enabled", "ocr", SettingType.Bool),
+        new("ocr.engine", "ocr", SettingType.Choice, Choices: ["onnx", "windows"], EnabledWhenKey: "ocr.enabled", EnabledWhenValue: "true"),
+        new("ocr.languages", "ocr", SettingType.Text, Pattern: @"^(auto|[a-z]{2,3}(-[A-Za-z]{2,4})?( *, *[a-z]{2,3}(-[A-Za-z]{2,4})?){0,15})$", EnabledWhenKey: "ocr.enabled", EnabledWhenValue: "true"),
+        new("ocr.device", "ocr", SettingType.Choice, Choices: ["auto", "npu", "igpu", "gpu", "cpu"], EnabledWhenKey: "ocr.engine", EnabledWhenValue: "onnx"),
 
         new("index.dim", "index", SettingType.IntChoice, Choices: ["768", "512", "256"], WarningKey: "W_index_dim"),
         new("index.weakMatchBelow", "index", SettingType.Double, 0, 1),

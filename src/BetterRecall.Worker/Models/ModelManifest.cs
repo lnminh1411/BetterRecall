@@ -25,6 +25,8 @@ public sealed class ModelManifest
     public List<VisionGraph> Vision { get; set; } = [];
     public ClassifierSpec? Classifier { get; set; }
     public DetectorSpec? Detector { get; set; }
+    public OcrSpec? Ocr { get; set; }
+    public NerSpec? Ner { get; set; }
     public List<ManifestFile> Files { get; set; } = [];
     /// <summary>OpenVINO IR file -> ONNX graph of the same model, for ONNX Runtime (DirectML graphics cards, CPU without
     /// OpenVINO). Null or missing entry: the IR file only (ONNX Runtime cannot read it).</summary>
@@ -199,6 +201,57 @@ public sealed class DetectorSpec
     public int Size { get; set; } = 640;
     public string[] Labels { get; set; } = [];
     public string[] BlockLabels { get; set; } = [];
+}
+
+/// <summary>PaddleOCR (models\ocr, Scripts\models\export_ocr.py): one DB text detector and CTC line recognisers.</summary>
+public sealed class OcrSpec
+{
+    public OcrDetSpec Det { get; set; } = new();
+    /// <summary>First entry ("main") always runs; the others when ocr.languages asks for one of their languages.</summary>
+    public List<OcrRecSpec> Rec { get; set; } = [];
+}
+
+/// <summary>DB detector: input [1,3,H,W] BGR, (x/255 - mean) / std, H and W multiples of 32; output [1,1,H,W]
+/// text probability. Thresholds from the upstream inference.yml.</summary>
+public sealed class OcrDetSpec
+{
+    public string File { get; set; } = "det.onnx";
+    public string Input { get; set; } = "x";
+    public float Thresh { get; set; } = 0.2f;
+    public float BoxThresh { get; set; } = 0.45f;
+    public float Unclip { get; set; } = 1.4f;
+    public float[] Mean { get; set; } = [0.485f, 0.456f, 0.406f];
+    public float[] Std { get; set; } = [0.229f, 0.224f, 0.225f];
+    /// <summary>Longer image side is scaled down to this before detection.</summary>
+    public int MaxSide { get; set; } = 1920;
+}
+
+/// <summary>CTC line recogniser: input [N,3,Height,W] BGR, (x/255 - 0.5) / 0.5; output [N,T,Classes] softmax;
+/// class 0 = blank, 1..n = Dict lines, n+1 = space.</summary>
+public sealed class OcrRecSpec
+{
+    public string Name { get; set; } = "";
+    public string File { get; set; } = "";
+    public string Dict { get; set; } = "";
+    public string Input { get; set; } = "x";
+    public int Height { get; set; } = 48;
+    /// <summary>Language codes the model reads; "latin" stands for every Latin-script language.</summary>
+    public string[] Languages { get; set; } = [];
+    public int Classes { get; set; }
+}
+
+/// <summary>Token-classification PII model (models\ner, Scripts\models\export_ner.py): BIO tags over a BPE
+/// tokenizer.json; Entities maps upstream base labels to person | address.</summary>
+public sealed class NerSpec
+{
+    public string File { get; set; } = "model.onnx";
+    public string Tokenizer { get; set; } = "tokenizer.json";
+    public string InputIds { get; set; } = "input_ids";
+    public string AttentionMask { get; set; } = "attention_mask";
+    public string Output { get; set; } = "logits";
+    public int MaxTokens { get; set; } = 512;
+    public string[] Labels { get; set; } = [];
+    public Dictionary<string, string> Entities { get; set; } = [];
 }
 
 [JsonSourceGenerationOptions(

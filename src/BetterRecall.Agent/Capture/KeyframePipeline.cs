@@ -4,19 +4,41 @@ using System.Diagnostics;
 using System.Threading.Channels;
 using BetterRecall.Agent.Guardrails;
 using BetterRecall.Agent.Native;
+using BetterRecall.Agent.Privacy;
 using BetterRecall.Agent.Scheduling;
 using BetterRecall.Agent.Util;
+using BetterRecall.Agent.Worker;
 using BetterRecall.Contracts;
 
 namespace BetterRecall.Agent.Capture;
 
+/// <summary>Reads the text of a BGRA keyframe (the worker's ocr op). Abstracted for tests.</summary>
+internal interface IKeyframeReader
+{
+    Task<OcrResult> ReadAsync(ReadOnlyMemory<byte> bgra, int width, int height, int stride, bool entities, CancellationToken ct);
+}
+
+internal sealed class WorkerKeyframeReader(WorkerClient worker) : IKeyframeReader
+{
+    public Task<OcrResult> ReadAsync(ReadOnlyMemory<byte> bgra, int width, int height, int stride, bool entities, CancellationToken ct)
+        => worker.OcrAsync(bgra, width, height, stride, entities, ct);
+}
+
 /// <summary>
 /// Receives downscaled grabs from the capture threads: smart capture (change map and dHash against the last stored
-/// keyframe, CapturePolicy), then the CPU budget (EncodeGovernor) decides when and how each kept frame is encoded
-/// (KeyframeEncoder), then IStore.AddScreenCapture. Runs on its own below-normal EcoQoS thread; grabs are zeroed after use.
+/// keyframe, CapturePolicy), OCR (ocr.enabled), redaction (privacy.redact*: black boxes on the pixels, redacted words
+/// left out of the text), the replay sample (WebP or JPEG, redacted), then the CPU budget (EncodeGovernor) decides when
+/// and how each kept frame is encoded (KeyframeEncoder), then IStore.AddScreenCapture. Runs on its own below-normal
+/// EcoQoS thread; grabs are zeroed after use.
+/// Redaction happens before anything is encoded or stored. When OCR fails for a passing reason (worker restarting,
+/// busy, timeout) and a text detector is on, the keyframe is dropped rather than stored unredacted; when the OCR model
+/// is not installed, keyframes are stored without text (only password fields and the title are redacted) and a warning
+/// is logged. OCR time is measured apart from encode time: the CPU budget covers the keyframe encode only.
 /// </summary>
 internal sealed class KeyframePipeline : IAsyncDisposable
 {
+    public static readonly TimeSpan OcrTimeout = TimeSpan.FromSeconds(30);
+
     private readonly Channel<KeyframeGrab> _channel = Channel.CreateBounded<KeyframeGrab>(new BoundedChannelOptions(6)
     {
         FullMode = BoundedChannelFullMode.DropWrite,
@@ -25,20 +47,26 @@ internal sealed class KeyframePipeline : IAsyncDisposable
     private readonly Func<IStore?> _store;
     private readonly Func<Settings> _settings;
     private readonly Action<CaptureMeta> _stored;
+    private readonly IKeyframeReader? _reader;
+    private readonly RedactionMasks? _masks;
     private readonly Dictionary<int, DedupFilter> _dedup = new();
     private readonly EncodeGovernor<Pending> _governor;
     private readonly Thread _thread;
     private readonly CancellationTokenSource _cts = new();
     private string _encoderName = "";
     private Task<bool>? _wait;
+    private long _lastMissingLog = -1;
 
     // Measurements.
     public long Kept, SkippedSimilar, Dropped, Failed;
+    public long OcrRead, OcrFailed, OcrUnavailable, RedactDropped, RedactedSpans;
     public double EncodeMsTotal, HashMsTotal, GrabMsTotal, EncodeCpuMsTotal;
-    public double LastEncodeMs;
+    /// <summary>OCR wall time, and the CPU this thread spent on it (copy, IPC); the worker's own CPU is not included.</summary>
+    public double OcrMsTotal, OcrCpuMsTotal;
+    public double LastEncodeMs, LastOcrMs;
     public ChangeResult LastChange;
 
-    /// <summary>Receives replay samples (ReplaySample requests). Null: samples are dropped.</summary>
+    /// <summary>Receives replay samples (ReplaySample requests), redacted like keyframes. Null: samples are dropped.</summary>
     public Replay.ReplaySampler? Sampler { get; set; }
 
     /// <summary>Encoder of the last keyframe, e.g. "libaom speed 7" or "libaom speed 8 (CPU budget)" (log, status, bench).</summary>
@@ -62,21 +90,26 @@ internal sealed class KeyframePipeline : IAsyncDisposable
     public long BudgetDropped => _governor.Dropped;
     public long BudgetWebP => _governor.WebPFallbacks;
 
-    /// <summary>A kept frame waiting for its encode. Owns the grab.</summary>
-    private sealed class Pending(KeyframeGrab grab, ulong hash, ChangeResult change, KeepReason reason) : IDisposable
+    /// <summary>A kept, redacted frame waiting for its encode. Owns the grab.</summary>
+    private sealed class Pending(KeyframeGrab grab, ulong hash, ChangeResult change, KeepReason reason, string title, string? text) : IDisposable
     {
         public KeyframeGrab Grab { get; } = grab;
         public ulong Hash { get; } = hash;
         public ChangeResult Change { get; } = change;
         public KeepReason Reason { get; } = reason;
+        public string Title { get; } = title;
+        public string? Text { get; } = text;
         public void Dispose() => Grab.Dispose();
     }
 
-    public KeyframePipeline(Func<IStore?> store, Func<Settings> settings, Action<CaptureMeta> stored)
+    public KeyframePipeline(Func<IStore?> store, Func<Settings> settings, Action<CaptureMeta> stored,
+        IKeyframeReader? reader = null, RedactionMasks? masks = null)
     {
         _store = store;
         _settings = settings;
         _stored = stored;
+        _reader = reader;
+        _masks = masks;
         _governor = new EncodeGovernor<Pending>(() => Environment.TickCount64, Environment.ProcessorCount, EncodeAndStore,
             (p, why) => Log.Warn($"keyframe dropped by the CPU budget ({why})"), KeyframeEncoder.InitialEstimateMs);
         _thread = new Thread(Run) { IsBackground = true, Name = "keyframes", Priority = ThreadPriority.BelowNormal };
@@ -95,6 +128,7 @@ internal sealed class KeyframePipeline : IAsyncDisposable
     public void ResetDedup()
     {
         lock (_dedup) foreach (var d in _dedup.Values) d.Reset();
+        _masks?.Clear();
     }
 
     public bool ContextChanged(int monitor, string context)
@@ -111,7 +145,8 @@ internal sealed class KeyframePipeline : IAsyncDisposable
             if (_channel.Reader.TryRead(out var grab))
             {
                 bool owned = false;
-                try { owned = Process(grab); }
+                try { owned = Process(grab, ct); }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
                 catch (Exception ex)
                 {
                     Interlocked.Increment(ref Failed);
@@ -137,57 +172,143 @@ internal sealed class KeyframePipeline : IAsyncDisposable
     }
 
     /// <summary>True when the grab was handed to the governor (it disposes it).</summary>
-    private unsafe bool Process(KeyframeGrab g)
+    private bool Process(KeyframeGrab g, CancellationToken ct)
     {
         var s = _settings();
         var store = _store();
         if (store is null) return false;
-        string sampleFormat = s.Keyframes.Format == "jpeg" ? "jpeg" : "webp";
-        int quality = Math.Clamp(s.Keyframes.Quality, 30, 95);
-        byte[]? sampleBytes = null;
-        if (g.Request.ReplaySample && Sampler is { } sampler)
+        var req = g.Request;
+        bool sample = req.ReplaySample && Sampler is not null;
+        bool keep = req.Keyframe;
+        DedupFilter? dedup = null;
+        ChangeMap? map = null;
+        ulong hash = 0;
+        var change = default(ChangeResult);
+        var reason = KeepReason.Skip;
+        var sw = Stopwatch.StartNew();
+        if (keep)
         {
-            sampleBytes = ImageCodec.EncodeBgra(g.Pixels, g.Width, g.Height, g.Stride, sampleFormat, quality);
-            var rq = g.Request;
-            sampler.Add(new Replay.ReplaySampler.Sample(rq.Ts, g.Monitor, rq.App, GuardrailPolicy.FilterTitle(rq.Title, s.Privacy), rq.Site,
-                g.Width, g.Height, sampleBytes, ImageCodec.Mime(sampleFormat)), Math.Clamp(s.Replay.Seconds, 15, 600) + 10);
+            lock (_dedup)
+            {
+                if (!_dedup.TryGetValue(g.Monitor, out dedup)) _dedup[g.Monitor] = dedup = new DedupFilter();
+            }
+            hash = DHash.Compute(g.Span, g.Width, g.Height, g.Stride);
+            map = ChangeMap.Compute(g.Span, g.Width, g.Height, g.Stride);
+            (reason, change) = dedup.Decide(map, hash, req, s.Capture.DhashThreshold, Math.Clamp(s.Capture.DirtyMinPercent, 0, 100));
+            HashMsTotal += sw.Elapsed.TotalMilliseconds;
+            LastChange = change;
+            if (reason == KeepReason.Skip)
+            {
+                map.Clear();
+                map = null;
+                Interlocked.Increment(ref SkippedSimilar);
+                keep = false;
+            }
         }
-        try { return ProcessKeyframe(g, s, store, sampleFormat, sampleBytes); }
+        if (!keep && !sample) return false;
+
+        // Redaction before anything is encoded: stored keyframes and replay samples get the same black boxes.
+        var red = RedactionOptions.From(s.Privacy);
+        bool hasBounds = req.Bounds.Width > 0 && req.Bounds.Height > 0;
+        var secrets = red.Passwords && hasBounds && req.Secrets is { Length: > 0 } sr
+            ? RedactionMasks.ToKeyframe(sr, req.Bounds, g.Width, g.Height) : [];
+
+        OcrResult? ocr = null;
+        if (s.Ocr.Enabled && _reader is not null)
+        {
+            double cpu0 = Win32.CurrentThreadCpuMs();
+            sw.Restart();
+            var (result, permanent, why) = Read(g, red.Entities, ct);
+            LastOcrMs = sw.Elapsed.TotalMilliseconds;
+            OcrMsTotal += LastOcrMs;
+            OcrCpuMsTotal += Math.Max(0, Win32.CurrentThreadCpuMs() - cpu0);
+            if (result is not null) { ocr = result; Interlocked.Increment(ref OcrRead); }
+            else if (permanent)
+            {
+                Interlocked.Increment(ref OcrUnavailable);
+                long now = Environment.TickCount64;
+                if (_lastMissingLog < 0 || now - _lastMissingLog > 600_000)
+                {
+                    _lastMissingLog = now;
+                    Log.Warn($"ocr unavailable ({why}): keyframes stored without text; text redaction off until it is installed");
+                }
+            }
+            else if (red.AnyText)
+            {
+                // Never store or sample a frame whose text could not be checked.
+                map?.Clear();
+                Interlocked.Increment(ref RedactDropped);
+                Log.Debug($"keyframe dropped: ocr failed ({why})");
+                return false;
+            }
+            else Interlocked.Increment(ref OcrFailed);
+        }
+
+        var title = GuardrailPolicy.FilterTitle(req.Title, s.Privacy);
+        var r = Redactor.Apply(ocr?.Lines ?? [], secrets, ocr is null ? red with { Names = false, Addresses = false } : red, title);
+        if (r.Boxes.Length > 0) FillBoxes(g, r.Boxes);
+        if (hasBounds) _masks?.Set(g.Monitor, RedactionMasks.ToDesktop(r.Boxes, g.Width, g.Height, req.Bounds));
+        Interlocked.Add(ref RedactedSpans, r.Spans);
+        string? text = ocr is null ? null : r.Text;
+
+        string sampleFormat = s.Keyframes.Format == "jpeg" ? "jpeg" : "webp";
+        byte[]? sampleBytes = null;
+        try
+        {
+            if (sample)
+            {
+                sampleBytes = Encode(g, sampleFormat, Math.Clamp(s.Keyframes.Quality, 30, 95));
+                Sampler!.Add(new Replay.ReplaySampler.Sample(req.Ts, g.Monitor, req.App, r.Title, req.Site, g.Width, g.Height,
+                    sampleBytes, ImageCodec.Mime(sampleFormat)), Math.Clamp(s.Replay.Seconds, 15, 600) + 10);
+            }
+            if (!keep) return false;
+            // The next grabs compare against this frame even while its encode waits for budget.
+            dedup!.Accept(hash, req.Context, map!);
+
+            // A replay sample (WebP or JPEG) is stored as is when the keyframe uses the same format: no second encode.
+            if (sampleBytes is not null && ImageCodec.Resolve(s.Keyframes.Format) == sampleFormat)
+            {
+                Store(store, s, g, hash, change, reason, r.Title, text, sampleBytes.ToArray(), sampleFormat, g.Width, g.Height);
+                return false;
+            }
+            lock (_governor) _governor.Offer(new Pending(g, hash, change, reason, r.Title, text));
+            return true;
+        }
         finally { if (sampleBytes is not null) Array.Clear(sampleBytes); }
     }
 
-    private bool ProcessKeyframe(KeyframeGrab g, Settings s, IStore store, string sampleFormat, byte[]? sampleBytes)
+    /// <summary>OCR result, or why there is none: permanent (model or Windows OCR language not installed) or passing.
+    /// Blocks this thread: the pipeline thread has no synchronization context.</summary>
+    private (OcrResult? Result, bool Permanent, string Why) Read(KeyframeGrab g, bool entities, CancellationToken ct)
     {
-        if (!g.Request.Keyframe) return false;
-        DedupFilter dedup;
-        lock (_dedup)
+        var copy = CopyPixels(g);
+        try
         {
-            if (!_dedup.TryGetValue(g.Monitor, out dedup!)) _dedup[g.Monitor] = dedup = new DedupFilter();
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(OcrTimeout);
+            var r = _reader!.ReadAsync(copy, g.Width, g.Height, g.Stride, entities, timeout.Token).GetAwaiter().GetResult();
+            return (r, false, "");
         }
-        var sw = Stopwatch.StartNew();
-        ulong hash = DHash.Compute(g.Span, g.Width, g.Height, g.Stride);
-        var map = ChangeMap.Compute(g.Span, g.Width, g.Height, g.Stride);
-        var (reason, change) = dedup.Decide(map, hash, g.Request, s.Capture.DhashThreshold, Math.Clamp(s.Capture.DirtyMinPercent, 0, 100));
-        HashMsTotal += sw.Elapsed.TotalMilliseconds;
-        LastChange = change;
-        if (reason == KeepReason.Skip)
+        catch (WorkerException ex) when (ex.Message.StartsWith("Model not installed", StringComparison.Ordinal))
         {
-            map.Clear();
-            Interlocked.Increment(ref SkippedSimilar);
-            return false;
+            return (null, true, ex.Message);
         }
-        // The next grabs compare against this frame even while its encode waits for budget.
-        dedup.Accept(hash, g.Request.Context, map);
-
-        // A replay sample (WebP or JPEG) is stored as is when the keyframe uses the same format: no second encode.
-        if (sampleBytes is not null && ImageCodec.Resolve(s.Keyframes.Format) == sampleFormat)
-        {
-            Store(store, s, g, hash, change, reason, sampleBytes.ToArray(), sampleFormat, g.Width, g.Height);
-            return false;
-        }
-        lock (_governor) _governor.Offer(new Pending(g, hash, change, reason));
-        return true;
+        catch (WorkerException ex) { return (null, false, ex.Message); }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested) { return (null, false, "timeout"); }
+        finally { Array.Clear(copy); }
     }
+
+    private static byte[] CopyPixels(KeyframeGrab g)
+    {
+        var copy = new byte[g.Stride * g.Height];
+        g.Span.CopyTo(copy);
+        return copy;
+    }
+
+    private static unsafe void FillBoxes(KeyframeGrab g, Box[] boxes) => RedactionMasks.Fill(g.Pixels, g.Width, g.Height, g.Stride, boxes);
+
+    private static unsafe byte[] Encode(KeyframeGrab g, string format, int quality)
+        => ImageCodec.EncodeBgra(g.Pixels, g.Width, g.Height, g.Stride, format, quality);
 
     /// <summary>Governor callback: encode at the level, store, return the CPU ms the encode used on this thread.</summary>
     private unsafe double EncodeAndStore(Pending p, EncodeLevel level)
@@ -213,7 +334,7 @@ internal sealed class KeyframePipeline : IAsyncDisposable
         EncodeMsTotal += LastEncodeMs;
         EncodeCpuMsTotal += cpu;
         KeyframeEncoder.LogChange(ref _encoderName, KeyframeEncoder.Describe(format, level));
-        try { Store(store, s, g, p.Hash, p.Change, p.Reason, bytes, format, w, h); }
+        try { Store(store, s, g, p.Hash, p.Change, p.Reason, p.Title, p.Text, bytes, format, w, h); }
         catch (Exception ex)
         {
             Interlocked.Increment(ref Failed);
@@ -222,13 +343,13 @@ internal sealed class KeyframePipeline : IAsyncDisposable
         return cpu;
     }
 
-    private void Store(IStore store, Settings s, KeyframeGrab g, ulong hash, ChangeResult change, KeepReason reason, byte[] bytes, string format, int w, int h)
+    private void Store(IStore store, Settings s, KeyframeGrab g, ulong hash, ChangeResult change, KeepReason reason, string title, string? text,
+        byte[] bytes, string format, int w, int h)
     {
         var req = g.Request;
-        var title = GuardrailPolicy.FilterTitle(req.Title, s.Privacy);
         var cap = new NewScreenCapture(req.Ts, req.App, req.ExePath, title, g.Monitor, w, h, hash,
             bytes, ImageCodec.Mime(format), s.Keyframes.Enabled, req.Site,
-            Change: change.Comparable ? Math.Round(change.Score, 2) : null, Switch: reason is KeepReason.First or KeepReason.Switch);
+            Change: change.Comparable ? Math.Round(change.Score, 2) : null, Switch: reason is KeepReason.First or KeepReason.Switch, Text: text);
         string id;
         try { id = store.AddScreenCapture(cap); }
         finally { Array.Clear(bytes); }
