@@ -117,7 +117,7 @@ public static class MockBench
         Rec("replay.fps", 60, "R_fps_headroom", "60", F(av1.EncodeMsP95), F(Math.Round(1000.0 / 60, 1)), F(av1.CpuPercent));
         Rec("replay.bitrateKbps", 19500, "R_bitrate_quality", "19500", "6400", "1440", "60", "0.035");
 
-        return new BenchReport(ts, 214_000, Hardware, Inference, Encoders(), new CaptureBench(0.8, 6.4, 3.1),
+        return new BenchReport(ts, 214_000, Hardware, Inference, Encoders(), new CaptureBench(0.8, 6.4, 3.1, "oneVPL AV1 VDENC on Intel(R) Graphics"),
             new SearchBench(rows, 38.5, 61.2), [.. recs]);
     }
 }

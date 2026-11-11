@@ -386,6 +386,8 @@ public sealed partial class BenchPage : Page, IDataPage
                     cap.CrossAdapterMs.ToString("0.#", CultureInfo.CurrentCulture)),
                 TextWrapping = TextWrapping.Wrap,
             });
+            if (!string.IsNullOrEmpty(cap.KeyframeEncoder))
+                CaptureLines.Children.Add(new TextBlock { Text = Loc.Format("Hw_KeyframeEncoder", cap.KeyframeEncoder), TextWrapping = TextWrapping.Wrap });
         }
         if (rep.Search is { } search)
         {

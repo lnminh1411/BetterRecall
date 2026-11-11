@@ -107,7 +107,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         var encLuid = GpuDevices.Adapters().FirstOrDefault(a => a.VendorId == GpuDevices.VendorIntel)?.Luid;
         _probe = new SystemProbe(encLuid is null ? null : GpuDevices.PdhLuidToken(encLuid.Value));
         _scheduler = new EmbeddingScheduler(() => Store, () => S, _worker, ProbeLoad, () => _pause.Has("consent") || _pause.Has("keylocked"));
-        _pipeline = new KeyframePipeline(() => Store, () => S, OnCaptureStored);
+        _pipeline = new KeyframePipeline(() => Store, () => S, OnCaptureStored, () => _capture?.Devices);
         _guard = new GuardrailService(() => S, () => _sessionLocked, () => _capture?.MonitorBounds() ?? [], _opt.InstallDir);
         _guard.ForegroundChanged += _ => _capture?.OnForegroundChanged();
         _window.ForegroundChanged += () => _guard?.OnForegroundEvent();

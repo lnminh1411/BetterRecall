@@ -59,6 +59,7 @@ public class StorageSettingsTests
     [Theory]
     [InlineData("{\"keyframes\":{\"maxGb\":20}}", "Invalid keyframes.maxGb.")]
     [InlineData("{\"keyframes\":{\"format\":\"heic\"}}", "Invalid keyframes.format.")]
+    [InlineData("{\"keyframes\":{\"encoder\":\"gpu\"}}", "Invalid keyframes.encoder.")]
     [InlineData("{\"storage\":{\"minFreeGb\":-1}}", "Invalid storage.minFreeGb.")]
     [InlineData("{\"storage\":{\"maxGb\":0}}", "Invalid storage.maxGb.")]
     [InlineData("{\"storage\":{\"overwrite\":1}}", "Invalid storage.overwrite.")]

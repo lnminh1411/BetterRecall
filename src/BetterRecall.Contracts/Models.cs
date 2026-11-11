@@ -225,7 +225,8 @@ public sealed record EncoderBench(
     bool Ok, double EncodeMsP95, double CpuPercent, long WorkingSetMb, string? Error,
     string? Resolution = null);   // replay.resolution value that produced this size (native, 1080p, ...)
 
-public sealed record CaptureBench(double TickMs, double KeyframeEncodeMs, double CrossAdapterMs);
+public sealed record CaptureBench(double TickMs, double KeyframeEncodeMs, double CrossAdapterMs,
+    string? KeyframeEncoder = null);   // encoder the keyframe timing used, e.g. "oneVPL AV1 VDENC on Intel(R) Graphics", "libaom (software)"
 
 public sealed record SearchBench(long Rows, double VectorMs, double HybridMs);
 

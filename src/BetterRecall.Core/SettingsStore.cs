@@ -273,6 +273,7 @@ public sealed partial class SettingsStore : ISettingsStore
         ("capture.dirtyMinPercent", s => Range(s.Capture.DirtyMinPercent, 0, 100)),
         ("keyframes.format", s => In(s.Keyframes.Format, "avif", "webp", "jxl", "jpeg")),
         ("keyframes.quality", s => Range(s.Keyframes.Quality, 30, 95)),
+        ("keyframes.encoder", s => In(s.Keyframes.Encoder, "auto", "hardware", "software")),
         ("keyframes.thumbCacheMb", s => Range(s.Keyframes.ThumbCacheMb, 8, 1024)),
         ("replay.seconds", s => Range(s.Replay.Seconds, 15, 600)),
         ("replay.fps", s => ReplaySettings.FpsChoices.Contains(s.Replay.Fps)),

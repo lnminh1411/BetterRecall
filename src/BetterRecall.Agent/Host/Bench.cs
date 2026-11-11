@@ -501,8 +501,11 @@ internal sealed class AgentBenchTarget : IBenchTarget
 
             double totalEncodeMs = 0;
             int encodeCount = 0;
+            using var keyframeEncoder = new KeyframeEncoder(() => _devices);
             lock (grabLock)
             {
+                // Untimed first encode: opens the hardware encoder session when keyframes.encoder uses it.
+                if (collectedGrabs.Count > 0) unsafe { var g0 = collectedGrabs[0]; _ = keyframeEncoder.Encode(g0.Pixels, g0.Width, g0.Height, g0.Stride, settings); }
                 foreach (var grab in collectedGrabs)
                 {
                     try
@@ -510,7 +513,7 @@ internal sealed class AgentBenchTarget : IBenchTarget
                         long t0 = Stopwatch.GetTimestamp();
                         unsafe
                         {
-                            _ = ImageCodec.EncodeBgra(grab.Pixels, grab.Width, grab.Height, grab.Stride, ImageCodec.Resolve(settings.Keyframes.Format), settings.Keyframes.Quality);
+                            _ = keyframeEncoder.Encode(grab.Pixels, grab.Width, grab.Height, grab.Stride, settings);
                         }
                         totalEncodeMs += (Stopwatch.GetTimestamp() - t0) * 1000.0 / Stopwatch.Frequency;
                         encodeCount++;
@@ -571,7 +574,7 @@ internal sealed class AgentBenchTarget : IBenchTarget
                 }
             }
 
-            return new CaptureBench(tickMs, keyframeEncodeMs, crossAdapterMs);
+            return new CaptureBench(tickMs, keyframeEncodeMs, crossAdapterMs, keyframeEncoder.Active);
         }
         finally
         {

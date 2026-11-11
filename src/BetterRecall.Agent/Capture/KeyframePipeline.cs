@@ -23,6 +23,7 @@ internal sealed class KeyframePipeline : IAsyncDisposable
     private readonly Func<Settings> _settings;
     private readonly Action<CaptureMeta> _stored;
     private readonly Dictionary<int, DedupFilter> _dedup = new();
+    private readonly KeyframeEncoder _encoder;
     private readonly Task _task;
     private readonly CancellationTokenSource _cts = new();
 
@@ -32,11 +33,17 @@ internal sealed class KeyframePipeline : IAsyncDisposable
     public double LastEncodeMs;
     public ChangeResult LastChange;
 
-    public KeyframePipeline(Func<IStore?> store, Func<Settings> settings, Action<CaptureMeta> stored)
+    /// <summary>Encoder of the last keyframe (log, status, bench).</summary>
+    public string Encoder => _encoder.Active;
+    public string? HardwareUnavailable => _encoder.HardwareUnavailable;
+
+    /// <param name="devices">GPU devices for the AV1 hardware keyframe encoder; null or returning null: software only.</param>
+    public KeyframePipeline(Func<IStore?> store, Func<Settings> settings, Action<CaptureMeta> stored, Func<GpuDeviceCache?>? devices = null)
     {
         _store = store;
         _settings = settings;
         _stored = stored;
+        _encoder = new KeyframeEncoder(devices ?? (() => null));
         _task = Task.Run(() => RunAsync(_cts.Token));
     }
 
@@ -102,9 +109,9 @@ internal sealed class KeyframePipeline : IAsyncDisposable
             return;
         }
         sw.Restart();
-        string format = ImageCodec.Resolve(s.Keyframes.Format);
         byte[] bytes;
-        try { bytes = ImageCodec.EncodeBgra(g.Pixels, g.Width, g.Height, g.Stride, format, Math.Clamp(s.Keyframes.Quality, 30, 95)); }
+        string format;
+        try { (bytes, format) = _encoder.Encode(g.Pixels, g.Width, g.Height, g.Stride, s); }
         catch { map.Clear(); throw; }
         LastEncodeMs = sw.Elapsed.TotalMilliseconds;
         EncodeMsTotal += LastEncodeMs;
@@ -128,5 +135,6 @@ internal sealed class KeyframePipeline : IAsyncDisposable
         _cts.Cancel();
         try { await _task.ConfigureAwait(false); } catch { }
         while (_channel.Reader.TryRead(out var g)) g.Dispose();
+        _encoder.Dispose();
     }
 }

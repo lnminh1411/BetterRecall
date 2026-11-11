@@ -60,6 +60,7 @@ public static partial class SettingsSchema
         new("keyframes.enabled", "keyframes", SettingType.Bool),
         new("keyframes.format", "keyframes", SettingType.Choice, Choices: ["avif", "webp", "jxl", "jpeg"]),
         new("keyframes.quality", "keyframes", SettingType.Int, 30, 95),
+        new("keyframes.encoder", "keyframes", SettingType.Choice, Choices: ["auto", "hardware", "software"]),
         new("keyframes.thumbCacheMb", "keyframes", SettingType.Int, 8, 1024),
 
         new("replay.enabled", "replay", SettingType.Bool),

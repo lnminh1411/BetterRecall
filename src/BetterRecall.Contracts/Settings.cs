@@ -50,6 +50,7 @@ public sealed class KeyframeSettings
     public bool Enabled { get; set; } = true;          // persist keyframe images
     public string Format { get; set; } = "avif";       // avif | webp | jxl | jpeg (avif and jxl fall back to webp when their codec is missing)
     public int Quality { get; set; } = 75;
+    public string Encoder { get; set; } = "auto";       // auto | hardware | software: AVIF on the iGPU's AV1 encoder, then libaom
     public int ThumbCacheMb { get; set; } = 64;        // RAM-only preview cache in the agent
 }
 

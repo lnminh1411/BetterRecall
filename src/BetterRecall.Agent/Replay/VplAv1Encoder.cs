@@ -117,7 +117,8 @@ internal sealed unsafe class VplAv1Encoder : IVideoEncoder
 
     private static int Align(int v, int a) => (v + a - 1) / a * a;
 
-    public static VplAv1Encoder? Create(GpuDevice dev, int w, int h, int fps, int kbps, PacketSink sink, out string? error)
+    /// <param name="intraQp">Set: keyframe stills. Every frame intra (GOP 1), constant QP (AV1 q index 1-255) instead of VBR.</param>
+    public static VplAv1Encoder? Create(GpuDevice dev, int w, int h, int fps, int kbps, PacketSink sink, out string? error, int? intraQp = null)
     {
         error = null;
         if (!Vpl.TryLoad()) { error = Vpl.LoadError ?? "libvpl.dll not loaded"; return null; }
@@ -125,7 +126,7 @@ internal sealed unsafe class VplAv1Encoder : IVideoEncoder
         foreach (bool video in new[] { true, false })
             foreach (bool lowPower in new[] { true, false })
             {
-                var enc = TryCreate(dev, w, h, fps, kbps, sink, video, lowPower, out error, out bool retrySysmem);
+                var enc = TryCreate(dev, w, h, fps, kbps, sink, video, lowPower, out error, out bool retrySysmem, intraQp);
                 if (enc is not null) return enc;
                 if (video && retrySysmem) break;
             }
@@ -133,7 +134,7 @@ internal sealed unsafe class VplAv1Encoder : IVideoEncoder
     }
 
     private static VplAv1Encoder? TryCreate(GpuDevice dev, int w, int h, int fps, int kbps, PacketSink sink, bool videoMemory, bool lowPower,
-        out string? error, out bool retrySysmem)
+        out string? error, out bool retrySysmem, int? intraQp = null)
     {
         error = null;
         retrySysmem = false;
@@ -180,6 +181,15 @@ internal sealed unsafe class VplAv1Encoder : IVideoEncoder
             Vpl.W16(par, Vpl.P_TargetKbps, k * 3 / 4);
             Vpl.W16(par, Vpl.P_MaxKbps, k);
             Vpl.W16(par, Vpl.P_NumRefFrame, 1);
+            if (intraQp is int qp)
+            {
+                qp = Math.Clamp(qp, 1, 255);
+                Vpl.W16(par, Vpl.P_GopPicSize, 1);
+                Vpl.W16(par, Vpl.P_RateControl, 3);  // CQP
+                Vpl.W16(par, Vpl.P_Qpi, qp);
+                Vpl.W16(par, Vpl.P_TargetKbps, qp);  // QPP shares the field
+                Vpl.W16(par, Vpl.P_MaxKbps, qp);     // QPB shares the field
+            }
             Vpl.W16(par, Vpl.P_IOPattern, videoMemory ? 0x01 : 0x02);
 
             // Query needs the output pre-filled with the input (at least CodecId), else it rejects as unsupported.
@@ -200,7 +210,7 @@ internal sealed unsafe class VplAv1Encoder : IVideoEncoder
                 return null;
             }
             int bufKb = Vpl.R16(q, Vpl.P_BufferSizeKB) * Math.Max(1, (int)Vpl.R16(q, Vpl.P_BrcMultiplier));
-            int maxLength = Math.Max(bufKb * 1000, w * h);
+            int maxLength = Math.Max(bufKb * 1000, intraQp is null ? w * h : w * h * 2);
 
             if (videoMemory && !ProbeVideoSurface(session, dev, sw, sh, out string? why))
             {
@@ -211,7 +221,7 @@ internal sealed unsafe class VplAv1Encoder : IVideoEncoder
             }
             var enc = new VplAv1Encoder(dev, loader, session, w, h, sw, sh, fps, videoMemory, lowPower, maxLength, sink);
             ok = true;
-            Log.Info($"encoder Av1 ({enc.Name}) ready ({w}x{h}@{fps}, {kbps} kbps, buffer {maxLength / 1024} KiB)");
+            Log.Info($"encoder Av1 ({enc.Name}) ready ({w}x{h}@{fps}, {(intraQp is int iq ? $"intra QP {iq}" : $"{kbps} kbps")}, buffer {maxLength / 1024} KiB)");
             return enc;
         }
         finally

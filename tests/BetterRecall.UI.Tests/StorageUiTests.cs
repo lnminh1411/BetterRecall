@@ -37,6 +37,11 @@ public class StorageUiTests
         var format = SettingsSchema.Find("keyframes.format")!;
         Assert.Equal(["avif", "webp", "jxl", "jpeg"], format.Choices!);
         Assert.All(format.Choices!, c => Assert.True(s.ContainsKey(format.ChoiceKey(c)), c));
+        var encoder = SettingsSchema.Find("keyframes.encoder")!;
+        Assert.Equal(["auto", "hardware", "software"], encoder.Choices!);
+        Assert.Equal("auto", new Settings().Keyframes.Encoder);
+        Assert.All(encoder.Choices!, c => Assert.True(s.ContainsKey(encoder.ChoiceKey(c)), c));
+        Assert.True(s.ContainsKey(encoder.LabelKey) && s.ContainsKey(encoder.DescriptionKey) && s.ContainsKey("Hw_KeyframeEncoder"));
         foreach (var k in new[] { "G_storage", "G_storage_D", "Reason_storage", "StorageBar_Title", "StorageBar_Message", "StorageBar_Open",
                                   "Danger_ExportTitle.Text", "Danger_ExportWarnBody", "Danger_Exported", "Danger_ExportNone" })
             Assert.True(s.ContainsKey(k), k);
