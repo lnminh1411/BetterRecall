@@ -619,7 +619,16 @@
   <data name="G_ai_D" xml:space="preserve"><value>Optional: describe a capture with an online AI model. Off by default.</value></data>
   <data name="Ai_NoteTitle" xml:space="preserve"><value>Sends a screenshot off this PC</value></data>
   <data name="Ai_Note" xml:space="preserve"><value>This is the only BetterRecall feature that connects to the internet. Nothing is sent unless you press Describe on a capture and then Send in the preview. Each send is listed in the audit log. The provider's own terms and data handling apply.</value></data>
-  <data name="W_ai_enabled" xml:space="preserve"><value>When on, the detail pane shows Describe. Every send still asks you first and shows the exact image.</value></data>
+  <data name="W_ai_enabled" xml:space="preserve"><value>BetterRecall's no-network guarantee holds only while this is off. Turning it on ends it: BetterRecall can then send a capture image to the AI provider when you press Send.</value></data>
+  <data name="Ai_ConfirmTitle" xml:space="preserve"><value>End the no-network guarantee?</value></data>
+  <data name="Ai_ConfirmBody" xml:space="preserve"><value>Turning this on ends the no-network guarantee: BetterRecall will be able to send images to {0} over the internet.
+
+- Nothing is sent until you press Describe on a capture and then Send.
+- Only the image shown in the preview is sent; when redaction is on, that is the redacted copy.
+- {0}'s own privacy terms apply to what you send.
+- Turn cloud describe off to restore the guarantee.</value></data>
+  <data name="Ai_ConfirmTurnOn" xml:space="preserve"><value>Turn on and end guarantee</value></data>
+  <data name="Ai_GuaranteeOff" xml:space="preserve"><value>No-network guarantee off: cloud describe is on.</value></data>
   <data name="S_ai_enabled" xml:space="preserve"><value>Cloud describe</value></data>
   <data name="S_ai_enabled_D" xml:space="preserve"><value>Show a Describe button for captures with an image.</value></data>
   <data name="S_ai_provider" xml:space="preserve"><value>Provider</value></data>

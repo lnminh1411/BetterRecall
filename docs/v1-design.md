@@ -17,7 +17,7 @@ Written 2026-11-10. `docs\design.md` is the user's design. This file turns it in
 | Thumbnails | Never made at capture time. The agent makes a preview from the stored keyframe when the UI asks for it and keeps it in a RAM cache only |
 | Retention | 30 days by default |
 | Hardware use on the dev PC | NPU: EmbeddingGemma 2, Whisper, (SigLIP 2 fallback), NSFW gate. iGPU: AV1 encode; NSFW gate only when the NPU fails. RX 6600 and RTX 3050: untouched unless the NSFW gate falls back to a graphics card (`privacy.nsfwDevice`). CPU: VAD, NSFW gate as the last fallback, light preprocessing |
-| Network | BetterRecall makes no network connections, with one opt-in exception since 0.2.0-dev: cloud describe (section 6.1). It is off by default (`ai.enabled`), sends one image only when the user confirms it in a dialog, and writes an audit entry per send |
+| Network | No-network guarantee: BetterRecall makes no network connections while cloud describe (section 6.1, `ai.enabled`, off by default) is off. Turning it on ends the guarantee for that user until it is turned off again. Each image is sent only when the user confirms it in a dialog, with an audit entry per send |
 | Security | Every protection is a setting, on by default: own windows excluded from capture (`WDA_EXCLUDEFROMCAPTURE`), Windows Hello read gate, memory isolation, NSFW gate, panic flush (section 6) |
 | Phase 1 | Dev builds on the developer's PC: Core Ultra 7 265K (NPU 3720, Arc iGPU), RX 6600 + RTX 3050, Windows 11 build 29704, .NET SDK 10.0.403 |
 
@@ -221,7 +221,7 @@ Window titles go through the deny lists before they are stored (`design.md` note
 
 ### 6.1 Cloud describe (opt-in network use)
 
-The only feature that talks to the network. Off by default (`ai.enabled`). Flow: detail pane Describe, then `describe preview`, then a dialog with provider, model, endpoint and the image to be sent, then `describe send` only when the user clicks Send. The token from the preview is the only way to send, so no verb sends an image the user has not seen. The agent (Core `CloudDescriber`, `HttpClient`, no redirects, 90 s timeout) posts the image with a fixed prompt and returns the text; nothing is stored except the audit entry.
+The only feature that talks to the network. Off by default (`ai.enabled`). The no-network guarantee holds only while it is off. Switching it on (Settings > AI, or a Home switch if one is added) first shows a danger dialog, Cancel the default, whose first line says the guarantee ends and names the provider; Cancel leaves it off. While it is saved on, the AI settings group and the Home status line show "No-network guarantee off: cloud describe is on." Switching it off needs no dialog and the line goes away (`NetworkGuarantee` in the UI). Flow: detail pane Describe, then `describe preview`, then a dialog with provider, model, endpoint and the image to be sent, then `describe send` only when the user clicks Send. The token from the preview is the only way to send, so no verb sends an image the user has not seen. The agent (Core `CloudDescriber`, `HttpClient`, no redirects, 90 s timeout) posts the image with a fixed prompt and returns the text; nothing is stored except the audit entry.
 
 Redaction: the image goes through `IDescribeRedactor` before the preview. Until batch 3 lands it is `PassThroughRedactor` (preview says not redacted); batch 3 replaces one line in `CoreHost.StartPipes` and the redacted copy becomes the rule.
 

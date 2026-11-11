@@ -13,6 +13,18 @@ namespace BetterRecall.UI.Views;
 /// </summary>
 internal static class SecretCards
 {
+    /// <summary>Danger dialog before cloud describe is switched on: it ends the no-network guarantee. True on Turn on.</summary>
+    public static async Task<bool> ConfirmCloudAsync(XamlRoot root, System.Text.Json.Nodes.JsonObject? settings)
+    {
+        var body = new TextBlock
+        {
+            Text = Loc.Format(NetworkGuarantee.ConfirmBodyKey, Loc.Get(NetworkGuarantee.ProviderLabelKey(settings))),
+            TextWrapping = TextWrapping.Wrap,
+        };
+        var dialog = ViewHelpers.Dialog(root, Loc.Get(NetworkGuarantee.ConfirmTitleKey), body, Loc.Get(NetworkGuarantee.ConfirmButtonKey), danger: true);
+        return await dialog.ShowAsync() == ContentDialogResult.Primary;
+    }
+
     public static Border PasswordCard(FrameworkElement owner)
     {
         var panel = new StackPanel { Spacing = 8 };

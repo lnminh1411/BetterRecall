@@ -194,6 +194,7 @@ public sealed partial class HomePage : Page
         {
             var parts = StatusText.Describe(st, DateTimeOffset.UtcNow);
             StateText.Text = string.Join("  ·  ", parts.Take(2).Select(Loc.Text));   // capture state, lock state
+            if (NetworkGuarantee.IsOff(s.Settings.Original)) StateText.Text += "  ·  " + Loc.Get(NetworkGuarantee.OffLineKey);
             StateDot.Style = St(st.Paused ? "DotCautionStyle" : st.Capturing ? "DotSuccessStyle" : "DotNeutralStyle");
         }
 
@@ -228,7 +229,11 @@ public sealed partial class HomePage : Page
         if (_syncing || sender is not ToggleSwitch sw || sw.Tag is not string key || SettingsSchema.Find(key) is not { } d) return;
         var s = Services.Current;
         bool on = sw.IsOn;
-        if (on && d.WarningKey is not null)
+        if (NetworkGuarantee.NeedsConfirm(key, on, NetworkGuarantee.IsOff(s.Settings.Original)))
+        {
+            if (!await SecretCards.ConfirmCloudAsync(XamlRoot, s.Settings.Original)) { SyncSettings(); return; }
+        }
+        else if (on && d.WarningKey is not null)
         {
             var body = new TextBlock { Text = Loc.Get(d.WarningKey), TextWrapping = TextWrapping.Wrap };
             var dialog = WindowHelpers.Dialog(XamlRoot, Loc.Get(d.LabelKey), body, Loc.Get("Home_TurnOn"));
