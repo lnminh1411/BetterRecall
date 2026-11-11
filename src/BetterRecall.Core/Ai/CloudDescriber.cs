@@ -20,6 +20,9 @@ public sealed record OutgoingImage(byte[] Bytes, string Mime, int Width, int Hei
 public interface IDescribeRedactor
 {
     Task<OutgoingImage> RedactAsync(string captureId, OutgoingImage image, CancellationToken ct);
+    /// <summary>True only for a redactor that really blacks out sensitive areas. Chat shares images only then, and
+    /// only images it returned with Redacted set; the pass-through keeps false, so chat sends no images.</summary>
+    bool RedactsImages => false;
 }
 
 public sealed class PassThroughRedactor : IDescribeRedactor

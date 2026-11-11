@@ -52,5 +52,12 @@ public sealed record CaptureEvent(string Id, DateTimeOffset Ts, CaptureKind Kind
 [JsonSerializable(typeof(AiStatus))]
 [JsonSerializable(typeof(DescribePreview))]
 [JsonSerializable(typeof(DescribeResult))]
+[JsonSerializable(typeof(AiUsage))]
+[JsonSerializable(typeof(ChatEvent))]
+[JsonSerializable(typeof(ChatSource))]
+[JsonSerializable(typeof(List<ChatSource>))]
+[JsonSerializable(typeof(ChatSummary))]
+[JsonSerializable(typeof(ItemsReply<ChatSummary>))]
+[JsonSerializable(typeof(ChatDetail))]
 [JsonSerializable(typeof(string))]
 public partial class CoreJson : JsonSerializerContext;

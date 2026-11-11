@@ -308,6 +308,11 @@ public sealed partial class SettingsStore : ISettingsStore
         ("ai.provider", s => In(s.Ai.Provider, AiDefaults.Providers)),
         ("ai.endpoint", s => s.Ai.Endpoint != null && (s.Ai.Endpoint.Length == 0 || ValidAiEndpoint(s.Ai.Endpoint))),
         ("ai.model", s => s.Ai.Model != null && (s.Ai.Model.Length == 0 || AiModelRegex().IsMatch(s.Ai.Model))),
+        ("ai.share", s => In(s.Ai.Share, AiShare.All)),
+        ("ai.chatMaxHits", s => Range(s.Ai.ChatMaxHits, 1, 20)),
+        ("ai.chatMaxImages", s => Range(s.Ai.ChatMaxImages, 0, 8)),
+        ("ai.dailyRequests", s => Range(s.Ai.DailyRequests, 0, 100_000)),
+        ("ai.dailyTokens", s => s.Ai.DailyTokens >= 0 && s.Ai.DailyTokens <= 1_000_000_000),
     ];
 
     [GeneratedRegex("^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,127}$")]
