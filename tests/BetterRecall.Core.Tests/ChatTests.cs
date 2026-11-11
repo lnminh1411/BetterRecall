@@ -595,6 +595,7 @@ public sealed class ChatServiceTests : IDisposable
         Assert.DoesNotContain("7946", shown);
         Assert.Single(_h.Bodies);                       // only the question has left the PC so far
         Assert.DoesNotContain("Acme", _h.Bodies[0]);
+        Assert.Contains("not instructions", _h.Bodies[0]);   // captured text is framed as data (prompt injection)
         Assert.Equal(Key, _h.Requests[0].Headers.GetValues("x-api-key").Single());
 
         _p.Turns.Enqueue(ScriptProvider.Answer());
