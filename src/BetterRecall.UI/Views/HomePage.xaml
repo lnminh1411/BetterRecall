@@ -1,0 +1,82 @@
+<Page
+    x:Class="BetterRecall.UI.Views.HomePage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <!-- Start page, laid out like PowerToys Home: status header, quick access, shortcuts, feature switches. -->
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <Grid x:Name="Root" Padding="24,8,24,24" RowSpacing="16" ColumnSpacing="16" SizeChanged="Root_SizeChanged">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition x:Name="RightColumn" Width="*" />
+            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />   <!-- features card when narrow -->
+            </Grid.RowDefinitions>
+
+            <TextBlock x:Uid="Home_Title" Grid.ColumnSpan="2" Style="{StaticResource TitleTextBlockStyle}" AutomationProperties.HeadingLevel="Level1" />
+
+            <InfoBar x:Name="ErrorBar" Grid.Row="0" Grid.ColumnSpan="2" IsOpen="False" IsClosable="True" Severity="Warning"
+                     HorizontalAlignment="Right" VerticalAlignment="Center" MaxWidth="560" />
+
+            <!-- status header -->
+            <Border Grid.Row="1" Grid.ColumnSpan="2" Style="{StaticResource CardStyle}" Padding="20,16">
+                <Grid ColumnSpacing="16" RowSpacing="16">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <Border Width="52" Height="52" CornerRadius="10" Background="{ThemeResource AccentFillColorDefaultBrush}">
+                        <FontIcon Glyph="&#xE81C;" FontSize="26" Foreground="{ThemeResource TextOnAccentFillColorPrimaryBrush}" AutomationProperties.AccessibilityView="Raw" />
+                    </Border>
+                    <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="4">
+                        <TextBlock x:Name="AppName" Style="{StaticResource SubtitleTextBlockStyle}" />
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Ellipse x:Name="StateDot" Width="10" Height="10" VerticalAlignment="Center" />
+                            <TextBlock x:Name="StateText" VerticalAlignment="Center" AutomationProperties.LiveSetting="Polite" />
+                        </StackPanel>
+                    </StackPanel>
+                    <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                        <Button x:Name="PauseButton" Click="Pause_Click" Style="{StaticResource AccentButtonStyle}" MinWidth="96" />
+                        <Button x:Name="LockButton" Click="Lock_Click" MinWidth="96" />
+                    </StackPanel>
+                    <VariableSizedWrapGrid x:Name="Stats" Grid.Row="1" Grid.ColumnSpan="3" Orientation="Horizontal" ItemWidth="150" ItemHeight="48" />
+                </Grid>
+            </Border>
+
+            <!-- left column: quick access + shortcuts -->
+            <StackPanel x:Name="LeftPanel" Grid.Row="2" Spacing="16">
+                <Border Style="{StaticResource CardStyle}" Padding="16,12,16,16">
+                    <StackPanel Spacing="8">
+                        <TextBlock x:Uid="Home_QuickAccess" Style="{StaticResource BodyStrongTextBlockStyle}" AutomationProperties.HeadingLevel="Level2" />
+                        <VariableSizedWrapGrid x:Name="Tiles" Orientation="Horizontal" ItemWidth="124" ItemHeight="92" />
+                    </StackPanel>
+                </Border>
+                <Border Style="{StaticResource CardStyle}" Padding="16,12,16,16">
+                    <StackPanel Spacing="4">
+                        <Grid>
+                            <TextBlock x:Uid="Home_Shortcuts" Style="{StaticResource BodyStrongTextBlockStyle}" VerticalAlignment="Center" AutomationProperties.HeadingLevel="Level2" />
+                            <HyperlinkButton x:Uid="Home_EditShortcuts" HorizontalAlignment="Right" Padding="8,2" Click="EditShortcuts_Click" />
+                        </Grid>
+                        <StackPanel x:Name="Shortcuts" Spacing="2" />
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+
+            <!-- right column: feature switches -->
+            <Border x:Name="FeaturesCard" Grid.Row="2" Grid.Column="1" Style="{StaticResource CardStyle}" Padding="16,12,8,12" VerticalAlignment="Top">
+                <StackPanel Spacing="4">
+                    <TextBlock x:Uid="Home_Features" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,0,0,4" AutomationProperties.HeadingLevel="Level2" />
+                    <StackPanel x:Name="Features" />
+                </StackPanel>
+            </Border>
+        </Grid>
+    </ScrollViewer>
+</Page>

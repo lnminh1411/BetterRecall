@@ -1,0 +1,20 @@
+<UserControl
+    x:Class="BetterRecall.UI.Views.UnlockPanel"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <!-- Opaque: nothing captured may show through while locked. -->
+    <Grid Background="{ThemeResource SolidBackgroundFillColorBaseBrush}">
+        <StackPanel MaxWidth="440" Padding="24" VerticalAlignment="Center" HorizontalAlignment="Center" Spacing="12">
+            <FontIcon Glyph="&#xE72E;" FontSize="40" AutomationProperties.AccessibilityView="Raw" />
+            <TextBlock x:Uid="Unlock_Title" Style="{StaticResource SubtitleTextBlockStyle}" TextAlignment="Center" HorizontalAlignment="Center" AutomationProperties.HeadingLevel="Level1" />
+            <TextBlock x:Name="BodyText" TextWrapping="Wrap" TextAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            <Button x:Name="HelloButton" x:Uid="Unlock_Hello" Style="{StaticResource AccentButtonStyle}" HorizontalAlignment="Stretch" Click="Hello_Click" />
+            <StackPanel x:Name="PassPanel" Spacing="8" Visibility="Collapsed">
+                <PasswordBox x:Name="Pass" x:Uid="Unlock_Passphrase" KeyDown="Pass_KeyDown" />
+                <Button x:Name="PassButton" x:Uid="Unlock_PassButton" Style="{StaticResource AccentButtonStyle}" HorizontalAlignment="Stretch" Click="Pass_Click" />
+            </StackPanel>
+            <ProgressRing x:Name="Busy" IsActive="False" Width="24" Height="24" />
+            <InfoBar x:Name="ErrorBar" IsClosable="False" Severity="Error" IsOpen="False" />
+        </StackPanel>
+    </Grid>
+</UserControl>

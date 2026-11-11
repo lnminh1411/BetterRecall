@@ -1,0 +1,25 @@
+<Project>
+  <PropertyGroup>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <!-- Single version source for every exe, the version verb and MCP serverInfo. -->
+    <Version>0.2.0-dev</Version>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+    <Product>BetterRecall</Product>
+    <UseArtifactsOutput>true</UseArtifactsOutput>
+    <ArtifactsPath>$(MSBuildThisFileDirectory)artifacts</ArtifactsPath>
+    <Authors>BetterRecall contributors</Authors>
+    <!-- Licence split (LICENSING.md): client side MIT, backend AGPL. Contracts is MIT because the UI links it. -->
+    <BrLicense>AGPL-3.0-only</BrLicense>
+    <BrLicense Condition="'$(MSBuildProjectName)' == 'BetterRecall.UI' Or '$(MSBuildProjectName)' == 'BetterRecall.Contracts' Or '$(MSBuildProjectName)' == 'BetterRecall.UI.Tests'">MIT</BrLicense>
+    <PackageLicenseExpression>$(BrLicense)</PackageLicenseExpression>
+    <Copyright>BetterRecall contributors, $(BrLicense)</Copyright>
+    <Platforms>x64</Platforms>
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">win-x64</RuntimeIdentifier>
+  </PropertyGroup>
+  <!-- Optional, not in git: local.runsettings sets BR_TEST_TMP so test data lands on a scratch drive. -->
+  <PropertyGroup Condition="Exists('$(MSBuildThisFileDirectory)local.runsettings')">
+    <RunSettingsFilePath>$(MSBuildThisFileDirectory)local.runsettings</RunSettingsFilePath>
+  </PropertyGroup>
+</Project>

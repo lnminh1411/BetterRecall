@@ -1,0 +1,47 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.20348.0</SupportedOSPlatformVersion>
+    <OutputType>WinExe</OutputType>
+    <SelfContained>true</SelfContained>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>BetterRecall.Worker</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+    <TieredPGO>true</TieredPGO>
+    <!-- Native DLLs of OpenVINO / ONNX Runtime / Skia land next to the exe (install\worker\). -->
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\BetterRecall.Contracts\BetterRecall.Contracts.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- ONNX Runtime with CPU + DirectML EPs (MIT). QNN is picked up when its provider is present. -->
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.DirectML" Version="1.24.4" />
+    <!-- Intel OpenVINO 2026.4.1 native runtime (Apache-2.0), repackaged from the Intel archive. Used through openvino_c.dll P/Invoke. -->
+    <PackageReference Include="OpenVINO.runtime.win" Version="2026.4.1" />
+    <!-- SentencePiece (Gemma) tokenizer, managed (MIT). -->
+    <PackageReference Include="Microsoft.ML.Tokenizers" Version="2.0.1" />
+    <!-- WebP / JPEG / PNG decode (MIT). -->
+    <PackageReference Include="SkiaSharp" Version="3.119.4" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="BetterRecall.Worker.Tests" />
+  </ItemGroup>
+  <!-- OpenVINO GenAI C runtime (openvino_genai_c.dll and friends) for Whisper. Staged by Scripts\models\stage_genai_runtime.py
+       into artifacts\native\openvino-genai\. Optional: without it transcribe answers "Device failed: OpenVINO GenAI runtime not found." -->
+  <PropertyGroup>
+    <GenAiNativeDir>$(MSBuildThisFileDirectory)..\..\artifacts\native\openvino-genai\</GenAiNativeDir>
+  </PropertyGroup>
+  <!-- Publish trim: native symbols, the DirectML debug layer and OpenVINO frontends the worker never reads
+       (models are ONNX or OpenVINO IR). -->
+  <Target Name="TrimWorkerNatives" AfterTargets="Publish">
+    <ItemGroup>
+      <_TrimNative Include="$(PublishDir)libSkiaSharp.pdb;$(PublishDir)DirectML.pdb;$(PublishDir)DirectML.Debug.dll;$(PublishDir)DirectML.Debug.pdb;$(PublishDir)openvino_tensorflow_frontend.dll;$(PublishDir)openvino_tensorflow_lite_frontend.dll;$(PublishDir)openvino_paddle_frontend.dll;$(PublishDir)openvino_pytorch_frontend.dll;$(PublishDir)openvino_jax_frontend.dll;$(PublishDir)openvino_gguf_frontend.dll" />
+    </ItemGroup>
+    <Delete Files="@(_TrimNative)" />
+  </Target>
+  <ItemGroup Condition="Exists('$(GenAiNativeDir)')">
+    <None Include="$(GenAiNativeDir)*.dll" Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

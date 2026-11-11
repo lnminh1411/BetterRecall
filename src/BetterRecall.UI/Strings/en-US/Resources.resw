@@ -1,0 +1,558 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <resheader name="resmimetype"><value>text/microsoft-resx</value></resheader>
+  <resheader name="version"><value>2.0</value></resheader>
+  <resheader name="reader"><value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value></resheader>
+  <resheader name="writer"><value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value></resheader>
+  <data name="App_Name" xml:space="preserve"><value>BetterRecall</value></data>
+  <data name="Audit_ColClient.Text" xml:space="preserve"><value>Client</value></data>
+  <data name="Audit_ColCount.Text" xml:space="preserve"><value>Results</value></data>
+  <data name="Audit_ColPid.Text" xml:space="preserve"><value>PID</value></data>
+  <data name="Audit_ColPipe.Text" xml:space="preserve"><value>Pipe</value></data>
+  <data name="Audit_ColTime.Text" xml:space="preserve"><value>Time</value></data>
+  <data name="Audit_ColVerb.Text" xml:space="preserve"><value>Request</value></data>
+  <data name="Audit_Desc.Text" xml:space="preserve"><value>Every connection and data request from this app, scripts and AI assistants. Search text is kept only as a hash.</value></data>
+  <data name="Audit_List.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve"><value>Audit entries</value></data>
+  <data name="Audit_QueryHash" xml:space="preserve"><value>Query hash {0}…</value></data>
+  <data name="Audit_Refresh.Content" xml:space="preserve"><value>Refresh</value></data>
+  <data name="Audit_Title.Text" xml:space="preserve"><value>Audit log</value></data>
+  <data name="BenchPage_Applied" xml:space="preserve"><value>Applied {0} settings.</value></data>
+  <data name="BenchPage_Apply.Content" xml:space="preserve"><value>Apply selected</value></data>
+  <data name="BenchPage_ApplyNone" xml:space="preserve"><value>Select at least one recommendation.</value></data>
+  <data name="BenchPage_Cancel.Content" xml:space="preserve"><value>Cancel</value></data>
+  <data name="BenchPage_Cancelled" xml:space="preserve"><value>Benchmark cancelled.</value></data>
+  <data name="BenchPage_CaptureTitle.Text" xml:space="preserve"><value>Capture and search</value></data>
+  <data name="BenchPage_Col140.Text" xml:space="preserve"><value>140 tokens</value></data>
+  <data name="BenchPage_Col280.Text" xml:space="preserve"><value>280 tokens</value></data>
+  <data name="BenchPage_Col70.Text" xml:space="preserve"><value>70 tokens</value></data>
+  <data name="BenchPage_ColAdapter.Text" xml:space="preserve"><value>Adapter</value></data>
+  <data name="BenchPage_ColApi.Text" xml:space="preserve"><value>API</value></data>
+  <data name="BenchPage_ColCodec.Text" xml:space="preserve"><value>Codec</value></data>
+  <data name="BenchPage_ColCosine.Text" xml:space="preserve"><value>Match</value></data>
+  <data name="BenchPage_ColCpu.Text" xml:space="preserve"><value>CPU %</value></data>
+  <data name="BenchPage_ColCurrent.Text" xml:space="preserve"><value>Current</value></data>
+  <data name="BenchPage_ColDevice.Text" xml:space="preserve"><value>Device</value></data>
+  <data name="BenchPage_ColFps.Text" xml:space="preserve"><value>fps</value></data>
+  <data name="BenchPage_ColLayout.Text" xml:space="preserve"><value>Layout</value></data>
+  <data name="BenchPage_ColMb.Text" xml:space="preserve"><value>MB</value></data>
+  <data name="BenchPage_ColP95.Text" xml:space="preserve"><value>P95 ms</value></data>
+  <data name="BenchPage_ColProposed.Text" xml:space="preserve"><value>Proposed</value></data>
+  <data name="BenchPage_ColResult.Text" xml:space="preserve"><value>Result</value></data>
+  <data name="BenchPage_ColSetting.Text" xml:space="preserve"><value>Setting</value></data>
+  <data name="BenchPage_ColSize.Text" xml:space="preserve"><value>Size</value></data>
+  <data name="BenchPage_ColText.Text" xml:space="preserve"><value>Text</value></data>
+  <data name="BenchPage_Desc.Text" xml:space="preserve"><value>Measures this PC's graphics adapters, AI devices and capture, then proposes settings. Nothing changes until you apply.</value></data>
+  <data name="BenchPage_EncoderTitle.Text" xml:space="preserve"><value>Video encoders</value></data>
+  <data name="BenchPage_Encoders.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve"><value>Encoder results</value></data>
+  <data name="BenchPage_HardwareTitle.Text" xml:space="preserve"><value>Hardware</value></data>
+  <data name="BenchPage_InferenceTitle.Text" xml:space="preserve"><value>Inference</value></data>
+  <data name="BenchPage_Measured" xml:space="preserve"><value>Measured {0}, took {1}.</value></data>
+  <data name="BenchPage_Ms" xml:space="preserve"><value>{0} ms</value></data>
+  <data name="BenchPage_NoRecs" xml:space="preserve"><value>Your settings already match the recommendations.</value></data>
+  <data name="BenchPage_None" xml:space="preserve"><value>No benchmark yet. Run one to get recommendations for this PC.</value></data>
+  <data name="BenchPage_Ok" xml:space="preserve"><value>OK</value></data>
+  <data name="BenchPage_RawTitle.Header" xml:space="preserve"><value>Raw results</value></data>
+  <data name="BenchPage_RecName" xml:space="preserve"><value>{0}: {1} to {2}. {3}</value></data>
+  <data name="BenchPage_Recs.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve"><value>Recommendations</value></data>
+  <data name="BenchPage_RecsTitle.Text" xml:space="preserve"><value>Recommendations</value></data>
+  <data name="BenchPage_Run.Content" xml:space="preserve"><value>Run benchmark</value></data>
+  <data name="BenchPage_Running" xml:space="preserve"><value>Running… {0} elapsed. This can take a few minutes.</value></data>
+  <data name="BenchPage_Title.Text" xml:space="preserve"><value>Benchmark</value></data>
+  <data name="Bench_Chosen" xml:space="preserve"><value>Chosen device: {0}</value></data>
+  <data name="Bench_Desc" xml:space="preserve"><value>Times each allowed device on the real model and keeps the fastest one whose output matches the CPU. Takes up to a minute.</value></data>
+  <data name="Bench_Link" xml:space="preserve"><value>Not sure what to pick? Measure this PC and get recommendations.</value></data>
+  <data name="Bench_LinkButton" xml:space="preserve"><value>Open benchmark</value></data>
+  <data name="Bench_Row" xml:space="preserve"><value>{0} ({1}): image {2} ms, text {3} ms, match {4}</value></data>
+  <data name="Bench_RowFailed" xml:space="preserve"><value>{0} ({1}): failed. {2}</value></data>
+  <data name="Bench_Run" xml:space="preserve"><value>Run benchmark</value></data>
+  <data name="Bench_Title" xml:space="preserve"><value>Device benchmark</value></data>
+  <data name="Common_Cancel" xml:space="preserve"><value>Cancel</value></data>
+  <data name="Common_CancelButton.Content" xml:space="preserve"><value>Cancel</value></data>
+  <data name="Common_No" xml:space="preserve"><value>No</value></data>
+  <data name="Common_Off" xml:space="preserve"><value>Off</value></data>
+  <data name="Common_On" xml:space="preserve"><value>On</value></data>
+  <data name="Common_Retry" xml:space="preserve"><value>Retry</value></data>
+  <data name="Common_Yes" xml:space="preserve"><value>Yes</value></data>
+  <data name="Consent_Agree.Content" xml:space="preserve"><value>I agree, start capturing</value></data>
+  <data name="Consent_BenchBody.Text" xml:space="preserve"><value>A benchmark measures your graphics adapters and AI devices and proposes settings. It takes a few minutes and changes nothing until you apply.</value></data>
+  <data name="Consent_BenchRun.Content" xml:space="preserve"><value>Run benchmark now</value></data>
+  <data name="Consent_BenchSkip.Content" xml:space="preserve"><value>Skip</value></data>
+  <data name="Consent_BenchTitle.Text" xml:space="preserve"><value>Tune BetterRecall for this PC?</value></data>
+  <data name="Consent_Intro.Text" xml:space="preserve"><value>BetterRecall keeps a searchable history of what you see and hear on this PC. Nothing is captured until you agree.</value></data>
+  <data name="Consent_Limit.Message" xml:space="preserve"><value>Windows Hello unlock protects your history from disk theft and from other accounts. It cannot protect it from malware running as you while you are signed in.</value></data>
+  <data name="Consent_Limit.Title" xml:space="preserve"><value>The limit</value></data>
+  <data name="Consent_NotNow.Content" xml:space="preserve"><value>Not now</value></data>
+  <data name="Consent_Protect1.Text" xml:space="preserve"><value>• Password managers, remote desktop, sign-in and UAC screens, and private browser windows.</value></data>
+  <data name="Consent_Protect2.Text" xml:space="preserve"><value>• Explicit images are filtered out before indexing. BetterRecall's own windows are hidden from capture.</value></data>
+  <data name="Consent_ProtectTitle.Text" xml:space="preserve"><value>What is never captured</value></data>
+  <data name="Consent_Title.Text" xml:space="preserve"><value>Before BetterRecall starts</value></data>
+  <data name="Consent_What1.Text" xml:space="preserve"><value>• A screen image (keyframe) about every 2 seconds while the screen changes, with the window title and app name.</value></data>
+  <data name="Consent_What2.Text" xml:space="preserve"><value>• The last 2 minutes of screen video and desktop audio, in memory only. It reaches disk only when you save a replay.</value></data>
+  <data name="Consent_What3.Text" xml:space="preserve"><value>• Audio transcripts, only if you turn on system audio or the microphone in Settings.</value></data>
+  <data name="Consent_What4.Text" xml:space="preserve"><value>• No text recognition (OCR). Screen images are searched by an AI model that runs on this PC.</value></data>
+  <data name="Consent_WhatTitle.Text" xml:space="preserve"><value>What is captured</value></data>
+  <data name="Consent_Where1.Text" xml:space="preserve"><value>• Only on this PC, in your user profile (%LOCALAPPDATA%\BetterRecall), encrypted with a key protected by the TPM, a passphrase or Windows.</value></data>
+  <data name="Consent_Where2.Text" xml:space="preserve"><value>• Kept for 30 days by default. You can delete a time range, an app, or everything at any time.</value></data>
+  <data name="Consent_Where3.Text" xml:space="preserve"><value>• BetterRecall makes no network connections.</value></data>
+  <data name="Consent_WhereTitle.Text" xml:space="preserve"><value>Where it is stored</value></data>
+  <data name="Danger_AllBody.Text" xml:space="preserve"><value>Destroys the encryption key and deletes every capture, keyframe, transcript and saved replay. Nothing can be recovered.</value></data>
+  <data name="Danger_AllDone" xml:space="preserve"><value>Everything was deleted ({0:N0} captures).</value></data>
+  <data name="Danger_AllGo.Content" xml:space="preserve"><value>Unlock and delete everything</value></data>
+  <data name="Danger_AllPass.Header" xml:space="preserve"><value>Passphrase</value></data>
+  <data name="Danger_AllPass.PlaceholderText" xml:space="preserve"><value>Passphrase</value></data>
+  <data name="Danger_AllPhrase" xml:space="preserve"><value>delete everything</value></data>
+  <data name="Danger_AllPrompt" xml:space="preserve"><value>To confirm, type: {0}</value></data>
+  <data name="Danger_AllStart.Content" xml:space="preserve"><value>Delete everything…</value></data>
+  <data name="Danger_AllTitle.Text" xml:space="preserve"><value>Delete everything</value></data>
+  <data name="Danger_AppBody.Text" xml:space="preserve"><value>Deletes every capture of one app, by process name.</value></data>
+  <data name="Danger_AppButton.Content" xml:space="preserve"><value>Delete app…</value></data>
+  <data name="Danger_AppConfirm" xml:space="preserve"><value>Delete everything captured from {0}?</value></data>
+  <data name="Danger_AppName.Header" xml:space="preserve"><value>Process name</value></data>
+  <data name="Danger_AppName.PlaceholderText" xml:space="preserve"><value>chrome.exe</value></data>
+  <data name="Danger_AppTitle.Text" xml:space="preserve"><value>Delete one app</value></data>
+  <data name="Danger_ConfirmDelete" xml:space="preserve"><value>Delete</value></data>
+  <data name="Danger_ConfirmTitle" xml:space="preserve"><value>Delete captures?</value></data>
+  <data name="Danger_From.Header" xml:space="preserve"><value>From</value></data>
+  <data name="Danger_FromTime.Header" xml:space="preserve"><value>From time</value></data>
+  <data name="Danger_PanicBody.Text" xml:space="preserve"><value>Clears the replay buffer, queues and preview cache from memory and flushes the database log. If panic purge minutes is set, it also deletes that many recent minutes.</value></data>
+  <data name="Danger_PanicButton.Content" xml:space="preserve"><value>Panic flush now</value></data>
+  <data name="Danger_PanicDone" xml:space="preserve"><value>Panic flush done.</value></data>
+  <data name="Danger_PanicTitle.Text" xml:space="preserve"><value>Panic flush</value></data>
+  <data name="Danger_Purged" xml:space="preserve"><value>Deleted {0:N0} captures.</value></data>
+  <data name="Danger_RangeBody.Text" xml:space="preserve"><value>Deletes captures, transcripts and keyframes between two times. You see how many first.</value></data>
+  <data name="Danger_RangeButton.Content" xml:space="preserve"><value>Delete range…</value></data>
+  <data name="Danger_RangeConfirm" xml:space="preserve"><value>Delete everything captured from {0} to {1}?</value></data>
+  <data name="Danger_RangeInvalid" xml:space="preserve"><value>The start must be before the end.</value></data>
+  <data name="Danger_RangeTitle.Text" xml:space="preserve"><value>Delete a time range</value></data>
+  <data name="Danger_RowsCount" xml:space="preserve"><value>{0:N0} captures will be deleted. This cannot be undone.</value></data>
+  <data name="Danger_Title.Text" xml:space="preserve"><value>Danger zone</value></data>
+  <data name="Danger_To.Header" xml:space="preserve"><value>To</value></data>
+  <data name="Danger_ToTime.Header" xml:space="preserve"><value>To time</value></data>
+  <data name="Detail_Empty.Text" xml:space="preserve"><value>Select a result to see it here.</value></data>
+  <data name="Detail_ImageName" xml:space="preserve"><value>Keyframe: {0}</value></data>
+  <data name="Detail_TimeDuration" xml:space="preserve"><value>{0} · {1}</value></data>
+  <data name="Detail_Transcript.Text" xml:space="preserve"><value>Transcript</value></data>
+  <data name="Err_Internal" xml:space="preserve"><value>Something went wrong in the agent.</value></data>
+  <data name="Err_InvalidKey" xml:space="preserve"><value>Invalid value for {0}.</value></data>
+  <data name="Err_InvalidToken" xml:space="preserve"><value>The confirmation expired. Start again.</value></data>
+  <data name="Err_Locked" xml:space="preserve"><value>The store is locked.</value></data>
+  <data name="Err_NotFound" xml:space="preserve"><value>That item no longer exists.</value></data>
+  <data name="Err_NotRunning" xml:space="preserve"><value>BetterRecall is not running</value></data>
+  <data name="Err_NotRunning_Detail" xml:space="preserve"><value>Start BetterRecall, then try again.</value></data>
+  <data name="Err_NotTrusted" xml:space="preserve"><value>BetterRecall is not trusted</value></data>
+  <data name="Err_NotTrusted_Detail" xml:space="preserve"><value>The program answering on the BetterRecall pipe is not the installed BetterRecall agent, so nothing was sent to it.</value></data>
+  <data name="Err_Protocol" xml:space="preserve"><value>The agent sent a response this version cannot read.</value></data>
+  <data name="Err_Raw" xml:space="preserve"><value>{0}</value></data>
+  <data name="Err_UnlockCancelled" xml:space="preserve"><value>Unlock was cancelled.</value></data>
+  <data name="Err_UnlockRequired" xml:space="preserve"><value>Unlock again to confirm, then retry.</value></data>
+  <data name="Err_WrongPassphrase" xml:space="preserve"><value>That passphrase is not correct.</value></data>
+  <data name="G_audio" xml:space="preserve"><value>Audio</value></data>
+  <data name="G_audio_D" xml:space="preserve"><value>Transcripts of system audio and the microphone. Both are off by default.</value></data>
+  <data name="G_appearance" xml:space="preserve"><value>Appearance</value></data>
+  <data name="G_appearance_D" xml:space="preserve"><value>How BetterRecall looks.</value></data>
+  <data name="S_ui_theme" xml:space="preserve"><value>Theme</value></data>
+  <data name="S_ui_theme_D" xml:space="preserve"><value>Light or dark for the BetterRecall windows. The tray icon follows the taskbar.</value></data>
+  <data name="S_ui_theme_system" xml:space="preserve"><value>Use Windows setting</value></data>
+  <data name="S_ui_theme_light" xml:space="preserve"><value>Light</value></data>
+  <data name="S_ui_theme_dark" xml:space="preserve"><value>Dark</value></data>
+  <data name="G_capture" xml:space="preserve"><value>Capture</value></data>
+  <data name="G_capture_D" xml:space="preserve"><value>When and how screen keyframes are taken.</value></data>
+  <data name="G_governance" xml:space="preserve"><value>Performance</value></data>
+  <data name="G_governance_D" xml:space="preserve"><value>Keeps BetterRecall out of the way of games and heavy work.</value></data>
+  <data name="G_hotkeys" xml:space="preserve"><value>Hotkeys</value></data>
+  <data name="G_hotkeys_D" xml:space="preserve"><value>Global shortcuts. The BetterRecall agent handles them.</value></data>
+  <data name="G_index" xml:space="preserve"><value>Search and index</value></data>
+  <data name="G_index_D" xml:space="preserve"><value>Size of the vectors in the search index.</value></data>
+  <data name="G_inference" xml:space="preserve"><value>Inference</value></data>
+  <data name="G_inference_D" xml:space="preserve"><value>Where the on-device AI models run.</value></data>
+  <data name="G_ipc" xml:space="preserve"><value>IPC and MCP</value></data>
+  <data name="G_ipc_D" xml:space="preserve"><value>Optional access for scripts and AI assistants. Both are off by default.</value></data>
+  <data name="G_keyframes" xml:space="preserve"><value>Keyframes</value></data>
+  <data name="G_keyframes_D" xml:space="preserve"><value>Stored screen images, used for previews and search.</value></data>
+  <data name="G_log" xml:space="preserve"><value>Logs</value></data>
+  <data name="G_log_D" xml:space="preserve"><value>Logs never contain captured content, window titles or search text.</value></data>
+  <data name="G_privacy" xml:space="preserve"><value>Privacy</value></data>
+  <data name="G_privacy_D" xml:space="preserve"><value>Apps, folders and windows that are never captured, and content filters.</value></data>
+  <data name="G_replay" xml:space="preserve"><value>Instant replay</value></data>
+  <data name="G_replay_D" xml:space="preserve"><value>The last minutes of screen and desktop audio, kept in memory only until you save them.</value></data>
+  <data name="G_retention" xml:space="preserve"><value>Retention</value></data>
+  <data name="G_retention_D" xml:space="preserve"><value>How long captures are kept.</value></data>
+  <data name="G_security" xml:space="preserve"><value>Security</value></data>
+  <data name="G_security_D" xml:space="preserve"><value>Locking, key protection and process hardening.</value></data>
+  <data name="Hotkey_Help" xml:space="preserve"><value>Activate, then press the new key combination.</value></data>
+  <data name="Hotkey_Hint" xml:space="preserve"><value>Press the combination. Esc cancels.</value></data>
+  <data name="Hotkey_NeedModifier" xml:space="preserve"><value>Add Ctrl, Alt or Win.</value></data>
+  <data name="Hotkey_Press" xml:space="preserve"><value>Press keys…</value></data>
+  <data name="Hw_Battery" xml:space="preserve"><value>Battery</value></data>
+  <data name="Hw_Capture" xml:space="preserve"><value>Capture tick {0} ms, keyframe encode {1} ms, cross-adapter copy {2} ms</value></data>
+  <data name="Hw_Cpu" xml:space="preserve"><value>{0}, {1} cores, {2} threads</value></data>
+  <data name="Hw_Gpu" xml:space="preserve"><value>{0} ({1}, {2}): {3}</value></data>
+  <data name="Hw_GpuDiscrete" xml:space="preserve"><value>{0} GB</value></data>
+  <data name="Hw_GpuIntegrated" xml:space="preserve"><value>integrated</value></data>
+  <data name="Hw_Monitor" xml:space="preserve"><value>Monitor {0}: {1} × {2} at {3} Hz, on {4}</value></data>
+  <data name="Hw_NoBattery" xml:space="preserve"><value>No battery</value></data>
+  <data name="Hw_NoCodecs" xml:space="preserve"><value>no hardware encoder</value></data>
+  <data name="Hw_NoNpu" xml:space="preserve"><value>No NPU</value></data>
+  <data name="Hw_Npu" xml:space="preserve"><value>NPU: {0}</value></data>
+  <data name="Hw_Os" xml:space="preserve"><value>{0}</value></data>
+  <data name="Hw_Ram" xml:space="preserve"><value>{0} GB memory</value></data>
+  <data name="Hw_Search" xml:space="preserve"><value>Search over {0:N0} rows: vector {1} ms, hybrid {2} ms</value></data>
+  <data name="Kind_All.Content" xml:space="preserve"><value>Screen and audio</value></data>
+  <data name="Kind_Audio.Content" xml:space="preserve"><value>Audio</value></data>
+  <data name="Kind_Screen.Content" xml:space="preserve"><value>Screen</value></data>
+  <data name="Home_Title.Text" xml:space="preserve"><value>Home</value></data>
+  <data name="Home_QuickAccess.Text" xml:space="preserve"><value>Quick access</value></data>
+  <data name="Home_Shortcuts.Text" xml:space="preserve"><value>Shortcuts</value></data>
+  <data name="Home_EditShortcuts.Content" xml:space="preserve"><value>Change</value></data>
+  <data name="Home_Features.Text" xml:space="preserve"><value>Features</value></data>
+  <data name="Home_OpenGroup" xml:space="preserve"><value>Open {0} settings</value></data>
+  <data name="Home_NotSet" xml:space="preserve"><value>Not set</value></data>
+  <data name="Home_Captures" xml:space="preserve"><value>Captures</value></data>
+  <data name="Home_Storage" xml:space="preserve"><value>Storage</value></data>
+  <data name="Home_Since" xml:space="preserve"><value>Oldest capture</value></data>
+  <data name="Home_Waiting" xml:space="preserve"><value>Waiting to index</value></data>
+  <data name="Home_Device" xml:space="preserve"><value>Search runs on</value></data>
+  <data name="Home_Retention" xml:space="preserve"><value>Kept for</value></data>
+  <data name="Home_Days" xml:space="preserve"><value>{0} days</value></data>
+  <data name="Home_TurnOn" xml:space="preserve"><value>Turn on</value></data>
+  <data name="Launcher_App.PlaceholderText" xml:space="preserve"><value>App, such as chrome.exe</value></data>
+  <data name="Launcher_App.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve"><value>App filter</value></data>
+  <data name="Launcher_Kind.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve"><value>Kind</value></data>
+  <data name="Launcher_Range.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve"><value>Time range</value></data>
+  <data name="Launcher_Replays.Content" xml:space="preserve"><value>Replays</value></data>
+  <data name="Launcher_Results.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve"><value>Results</value></data>
+  <data name="Launcher_Close" xml:space="preserve"><value>Close (Esc)</value></data>
+  <data name="Launcher_EmptyHint.Text" xml:space="preserve"><value>Type what you remember: words on screen, an app, something that was said.</value></data>
+  <data name="Launcher_SearchBox.PlaceholderText" xml:space="preserve"><value>Search everything you have seen or heard</value></data>
+  <data name="Launcher_SearchBox.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve"><value>Search</value></data>
+  <data name="Launcher_Settings.Content" xml:space="preserve"><value>Settings</value></data>
+  <data name="Launcher_Timeline.Content" xml:space="preserve"><value>Timeline</value></data>
+  <data name="List_Add" xml:space="preserve"><value>Add</value></data>
+  <data name="List_AddName" xml:space="preserve"><value>Add to {0}</value></data>
+  <data name="List_AddPlaceholder" xml:space="preserve"><value>Add an entry</value></data>
+  <data name="List_Remove" xml:space="preserve"><value>Remove selected</value></data>
+  <data name="Main_Lock" xml:space="preserve"><value>Lock</value></data>
+  <data name="Main_Pause" xml:space="preserve"><value>Pause</value></data>
+  <data name="Main_Resume" xml:space="preserve"><value>Resume</value></data>
+  <data name="Main_Search.Content" xml:space="preserve"><value>Search</value></data>
+  <data name="Main_Unlock" xml:space="preserve"><value>Unlock</value></data>
+  <data name="Nav_Audit.Content" xml:space="preserve"><value>Audit log</value></data>
+  <data name="Nav_Bench.Content" xml:space="preserve"><value>Benchmark</value></data>
+  <data name="Nav_Danger.Content" xml:space="preserve"><value>Danger zone</value></data>
+  <data name="Nav_Home.Content" xml:space="preserve"><value>Home</value></data>
+  <data name="Nav_Replays.Content" xml:space="preserve"><value>Replays</value></data>
+  <data name="Nav_Settings.Content" xml:space="preserve"><value>Settings</value></data>
+  <data name="Settings_ShellTitle.Text" xml:space="preserve"><value>Settings</value></data>
+  <data name="Nav_Timeline.Content" xml:space="preserve"><value>Timeline</value></data>
+  <data name="R_battery" xml:space="preserve"><value>This PC has a battery. Pausing indexing on battery saves power.</value></data>
+  <data name="R_bitrate_quality" xml:space="preserve"><value>{0} kbps gives good quality for {1}x{2} at {3} fps ({4} bits per pixel).</value></data>
+  <data name="R_device_fastest" xml:space="preserve"><value>{0} embeds an image in {1} ms, the fastest device whose output matches the CPU.</value></data>
+  <data name="R_dim_ram" xml:space="preserve"><value>With {0} MB of memory and {1} days of retention, smaller vectors keep the index in memory.</value></data>
+  <data name="R_encoder_realtime" xml:space="preserve"><value>{0} on {1} encodes a frame in {2} ms (95th percentile), under half of the {3} ms frame time.</value></data>
+  <data name="R_fps_headroom" xml:space="preserve"><value>{0} fps keeps up in real time ({1} ms per frame, frame time {2} ms) and uses {3}% of one CPU core on a still screen.</value></data>
+  <data name="R_gpu_fastest" xml:space="preserve"><value>{0} is the fastest graphics card here: {1} ms per image.</value></data>
+  <data name="R_interval_slow_inference" xml:space="preserve"><value>Even at 70 tokens an image takes {1} ms. A keyframe every {0} ms (about {2} keyframes per second) keeps the AI device at {3}% load, under half.</value></data>
+  <data name="R_layout" xml:space="preserve"><value>{0} keeps up in real time at {1}.</value></data>
+  <data name="R_replay_unsupported" xml:space="preserve"><value>No graphics adapter could encode 720p at 15 fps in real time.</value></data>
+  <data name="R_resolution_realtime" xml:space="preserve"><value>{0} ({1}x{2}, {3} ms per frame) is the largest size the encoder keeps up with in real time.</value></data>
+  <data name="R_seconds_ram" xml:space="preserve"><value>This PC has {0} MB of memory. A shorter replay keeps memory use down.</value></data>
+  <data name="R_tokens_budget" xml:space="preserve"><value>At {0} tokens an image takes {1} ms. With about {2} keyframes per second that keeps the AI device busy {3}% of the time (the limit is 50%).</value></data>
+  <data name="Range_Any.Content" xml:space="preserve"><value>Any time</value></data>
+  <data name="Range_Last30Days.Content" xml:space="preserve"><value>Last 30 days</value></data>
+  <data name="Range_Last7Days.Content" xml:space="preserve"><value>Last 7 days</value></data>
+  <data name="Range_LastHour.Content" xml:space="preserve"><value>Last hour</value></data>
+  <data name="Range_Today.Content" xml:space="preserve"><value>Today</value></data>
+  <data name="Reason_battery" xml:space="preserve"><value>on battery</value></data>
+  <data name="Reason_consent" xml:space="preserve"><value>waiting for your consent</value></data>
+  <data name="Reason_denylist" xml:space="preserve"><value>private window</value></data>
+  <data name="Reason_fullscreen" xml:space="preserve"><value>full-screen app</value></data>
+  <data name="Reason_ipc" xml:space="preserve"><value>by a script</value></data>
+  <data name="Reason_keylocked" xml:space="preserve"><value>waiting for passphrase</value></data>
+  <data name="Reason_lock" xml:space="preserve"><value>session locked</value></data>
+  <data name="Reason_user" xml:space="preserve"><value>by you</value></data>
+  <data name="Replays_Delete" xml:space="preserve"><value>Delete</value></data>
+  <data name="Replays_DeleteBody" xml:space="preserve"><value>The replay from {0} will be deleted. This cannot be undone.</value></data>
+  <data name="Replays_DeleteName" xml:space="preserve"><value>Delete replay from {0}</value></data>
+  <data name="Replays_DeleteTitle" xml:space="preserve"><value>Delete replay?</value></data>
+  <data name="Replays_DetailsEncrypted" xml:space="preserve"><value>{0} · {1} · encrypted</value></data>
+  <data name="Replays_DetailsPlain" xml:space="preserve"><value>{0} · {1} · not encrypted</value></data>
+  <data name="Replays_Empty.Text" xml:space="preserve"><value>No saved replays. Press the replay hotkey or Save replay now.</value></data>
+  <data name="Replays_ExportWarning.Message" xml:space="preserve"><value>Play writes a decrypted MP4 to a place you pick. Anyone who can open that folder can watch it. Delete the copy when you are done.</value></data>
+  <data name="Replays_ExportWarning.Title" xml:space="preserve"><value>Exported copies are not encrypted</value></data>
+  <data name="Replays_Exported" xml:space="preserve"><value>Saved to {0}. This copy is not encrypted.</value></data>
+  <data name="Replays_ExportedTitle" xml:space="preserve"><value>Exported</value></data>
+  <data name="Replays_FileType" xml:space="preserve"><value>MP4 video</value></data>
+  <data name="Replays_List.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve"><value>Replays</value></data>
+  <data name="Replays_Open" xml:space="preserve"><value>Open</value></data>
+  <data name="Replays_Play" xml:space="preserve"><value>Play</value></data>
+  <data name="Replays_PlayName" xml:space="preserve"><value>Play replay from {0}</value></data>
+  <data name="Replays_Refresh.Content" xml:space="preserve"><value>Refresh</value></data>
+  <data name="Replays_SaveNow.Content" xml:space="preserve"><value>Save replay now</value></data>
+  <data name="Replays_Saved" xml:space="preserve"><value>Saved the last {0}.</value></data>
+  <data name="Replays_Title.Text" xml:space="preserve"><value>Instant replays</value></data>
+  <data name="Replays_WarnBody" xml:space="preserve"><value>To play this replay, BetterRecall writes a decrypted MP4 to the place you choose next. That copy is not encrypted and stays until you delete it.</value></data>
+  <data name="Replays_WarnContinue" xml:space="preserve"><value>Choose where to save</value></data>
+  <data name="Replays_WarnTitle" xml:space="preserve"><value>Export an unencrypted copy?</value></data>
+  <data name="S_audio_language" xml:space="preserve"><value>Language</value></data>
+  <data name="S_audio_language_D" xml:space="preserve"><value>auto, or a language code such as en, vi or ja.</value></data>
+  <data name="S_audio_maxSegmentS" xml:space="preserve"><value>Maximum segment (seconds)</value></data>
+  <data name="S_audio_mic" xml:space="preserve"><value>Transcribe microphone</value></data>
+  <data name="S_audio_mic_D" xml:space="preserve"><value>Your own speech becomes searchable text.</value></data>
+  <data name="S_audio_system" xml:space="preserve"><value>Transcribe system audio</value></data>
+  <data name="S_audio_system_D" xml:space="preserve"><value>Speech from apps, calls and videos becomes searchable text.</value></data>
+  <data name="S_capture_consented" xml:space="preserve"><value>Consent given</value></data>
+  <data name="S_capture_consented_D" xml:space="preserve"><value>Set when you agree on the first-run page.</value></data>
+  <data name="S_capture_dhashThreshold" xml:space="preserve"><value>Change threshold</value></data>
+  <data name="S_capture_dhashThreshold_D" xml:space="preserve"><value>How different a frame must be to keep it. Higher keeps fewer frames.</value></data>
+  <data name="S_capture_dirtyMinPercent" xml:space="preserve"><value>Minimum changed area (%)</value></data>
+  <data name="S_capture_dirtyMinPercent_D" xml:space="preserve"><value>Skip frames where less of the screen changed.</value></data>
+  <data name="S_capture_enabled" xml:space="preserve"><value>Capture keyframes</value></data>
+  <data name="S_capture_enabled_D" xml:space="preserve"><value>Turn off to stop taking screen images. Instant replay has its own switch.</value></data>
+  <data name="S_capture_eventTriggers" xml:space="preserve"><value>Capture on events</value></data>
+  <data name="S_capture_eventTriggers_D" xml:space="preserve"><value>Also take a keyframe on app switch, scroll stop and typing pause.</value></data>
+  <data name="S_capture_intervalMs" xml:space="preserve"><value>Keyframe interval (ms)</value></data>
+  <data name="S_capture_intervalMs_D" xml:space="preserve"><value>Time between keyframes while the screen changes.</value></data>
+  <data name="S_capture_maxWidth" xml:space="preserve"><value>Keyframe width (px)</value></data>
+  <data name="S_capture_maxWidth_D" xml:space="preserve"><value>Keyframes are scaled down to this width.</value></data>
+  <data name="S_capture_monitors" xml:space="preserve"><value>Monitors</value></data>
+  <data name="S_capture_monitors_D" xml:space="preserve"><value>Monitor numbers to capture, separated by commas. Empty captures all.</value></data>
+  <data name="S_capture_pauseOnFullscreen" xml:space="preserve"><value>Pause in full-screen apps</value></data>
+  <data name="S_capture_pauseOnFullscreen_D" xml:space="preserve"><value>Stops keyframes and inference while a game or presentation is full screen.</value></data>
+  <data name="S_governance_deferCpuPercent" xml:space="preserve"><value>Wait while CPU load is above (%)</value></data>
+  <data name="S_governance_deferGpuPercent" xml:space="preserve"><value>Wait while integrated GPU load is above (%)</value></data>
+  <data name="S_governance_ecoQos" xml:space="preserve"><value>Efficiency mode</value></data>
+  <data name="S_governance_ecoQos_D" xml:space="preserve"><value>Run on efficiency cores at low priority.</value></data>
+  <data name="S_governance_pauseOnBattery" xml:space="preserve"><value>Pause indexing on battery</value></data>
+  <data name="S_hotkeys_panic" xml:space="preserve"><value>Panic flush</value></data>
+  <data name="S_hotkeys_pause" xml:space="preserve"><value>Pause and resume</value></data>
+  <data name="S_hotkeys_replay" xml:space="preserve"><value>Save instant replay</value></data>
+  <data name="S_hotkeys_search" xml:space="preserve"><value>Search</value></data>
+  <data name="S_index_dim" xml:space="preserve"><value>Vector size</value></data>
+  <data name="S_index_weakMatchBelow" xml:space="preserve"><value>Label results below this score as weak matches (0 turns it off)</value></data>
+  <data name="Tile_Weak.Text" xml:space="preserve"><value>Weak match</value></data>
+  <data name="S_index_dim_256" xml:space="preserve"><value>256 (smallest)</value></data>
+  <data name="S_index_dim_512" xml:space="preserve"><value>512</value></data>
+  <data name="S_index_dim_768" xml:space="preserve"><value>768 (most accurate)</value></data>
+  <data name="S_index_dim_D" xml:space="preserve"><value>Smaller vectors use less disk and search faster, with lower accuracy.</value></data>
+  <data name="S_inference_device" xml:space="preserve"><value>Device</value></data>
+  <data name="S_inference_device_D" xml:space="preserve"><value>Automatic uses the NPU, then the CPU. A GPU is used only when you pick it or there is no NPU.</value></data>
+  <data name="S_inference_device_auto" xml:space="preserve"><value>Automatic</value></data>
+  <data name="S_inference_device_cpu" xml:space="preserve"><value>CPU</value></data>
+  <data name="S_inference_device_gpu" xml:space="preserve"><value>GPU</value></data>
+  <data name="S_inference_device_npu" xml:space="preserve"><value>NPU</value></data>
+  <data name="S_inference_gpuAdapter" xml:space="preserve"><value>Graphics card</value></data>
+  <data name="S_inference_gpuAdapter_D" xml:space="preserve"><value>Which GPU to use when Device is GPU. Automatic uses the integrated GPU through OpenVINO when there is one, else the first graphics card.</value></data>
+  <data name="S_inference_gpuAdapter_auto" xml:space="preserve"><value>Automatic</value></data>
+  <data name="S_inference_fake" xml:space="preserve"><value>Fake inference (developers)</value></data>
+  <data name="S_inference_fake_D" xml:space="preserve"><value>Test vectors instead of models. Search results are meaningless.</value></data>
+  <data name="S_inference_idleExitS" xml:space="preserve"><value>Stop the model process after idle (seconds)</value></data>
+  <data name="S_inference_imageTokens" xml:space="preserve"><value>Image detail</value></data>
+  <data name="S_inference_imageTokens_140" xml:space="preserve"><value>140</value></data>
+  <data name="S_inference_imageTokens_280" xml:space="preserve"><value>280 (most detail)</value></data>
+  <data name="S_inference_imageTokens_70" xml:space="preserve"><value>70 (fastest)</value></data>
+  <data name="S_inference_imageTokens_D" xml:space="preserve"><value>Tokens per image. Fewer is faster.</value></data>
+  <data name="S_inference_modelDir" xml:space="preserve"><value>Model folder</value></data>
+  <data name="S_inference_modelDir_D" xml:space="preserve"><value>Empty uses the BetterRecall data folder.</value></data>
+  <data name="S_ipc_allowClients" xml:space="preserve"><value>Allowed programs</value></data>
+  <data name="S_ipc_allowClients_D" xml:space="preserve"><value>Full paths. Empty allows any program running as you.</value></data>
+  <data name="S_ipc_allowControl" xml:space="preserve"><value>Allow pause and resume</value></data>
+  <data name="S_ipc_allowPurge" xml:space="preserve"><value>Allow deleting</value></data>
+  <data name="S_ipc_allowPurge_D" xml:space="preserve"><value>Needs pause and resume allowed.</value></data>
+  <data name="S_ipc_allowThumbnails" xml:space="preserve"><value>Allow previews</value></data>
+  <data name="S_ipc_defaultResults" xml:space="preserve"><value>Default results</value></data>
+  <data name="S_ipc_enabled" xml:space="preserve"><value>Allow scripts (IPC)</value></data>
+  <data name="S_ipc_enabled_D" xml:space="preserve"><value>Opens a local pipe for betterrecall.exe and other programs running as you.</value></data>
+  <data name="S_ipc_idleTimeoutS" xml:space="preserve"><value>Idle timeout (seconds)</value></data>
+  <data name="S_ipc_maxPauseS" xml:space="preserve"><value>Longest pause (seconds)</value></data>
+  <data name="S_ipc_maxResponseBytes" xml:space="preserve"><value>Maximum response size (bytes)</value></data>
+  <data name="S_ipc_maxResults" xml:space="preserve"><value>Maximum results</value></data>
+  <data name="S_ipc_maxSearchPerMinute" xml:space="preserve"><value>Searches per minute</value></data>
+  <data name="S_ipc_maxSearchPerMinute_D" xml:space="preserve"><value>Per connection.</value></data>
+  <data name="S_ipc_pipeName" xml:space="preserve"><value>Pipe name</value></data>
+  <data name="S_ipc_pipeName_D" xml:space="preserve"><value>Letters, digits, dot, dash and underscore. Your user SID is added.</value></data>
+  <data name="S_ipc_requireUnlocked" xml:space="preserve"><value>Require unlock</value></data>
+  <data name="S_ipc_requireUnlocked_D" xml:space="preserve"><value>Data requests fail while the store is locked.</value></data>
+  <data name="S_keyframes_enabled" xml:space="preserve"><value>Keep keyframe images</value></data>
+  <data name="S_keyframes_enabled_D" xml:space="preserve"><value>When off, images are deleted after indexing, and older results show only time, app and title.</value></data>
+  <data name="S_keyframes_format" xml:space="preserve"><value>Image format</value></data>
+  <data name="S_keyframes_format_jpeg" xml:space="preserve"><value>JPEG</value></data>
+  <data name="S_keyframes_format_webp" xml:space="preserve"><value>WebP</value></data>
+  <data name="S_keyframes_maxGb" xml:space="preserve"><value>Maximum size (GB)</value></data>
+  <data name="S_keyframes_maxGb_D" xml:space="preserve"><value>The oldest keyframes are deleted above this size.</value></data>
+  <data name="S_keyframes_quality" xml:space="preserve"><value>Image quality</value></data>
+  <data name="S_keyframes_thumbCacheMb" xml:space="preserve"><value>Preview cache (MB)</value></data>
+  <data name="S_keyframes_thumbCacheMb_D" xml:space="preserve"><value>Memory the agent uses for previews. Never written to disk.</value></data>
+  <data name="S_log_level" xml:space="preserve"><value>Log level</value></data>
+  <data name="S_log_level_debug" xml:space="preserve"><value>Debug</value></data>
+  <data name="S_log_level_error" xml:space="preserve"><value>Errors</value></data>
+  <data name="S_log_level_info" xml:space="preserve"><value>Information</value></data>
+  <data name="S_log_level_warn" xml:space="preserve"><value>Warnings</value></data>
+  <data name="S_mcp_enabled" xml:space="preserve"><value>Allow AI assistants (MCP)</value></data>
+  <data name="S_mcp_enabled_D" xml:space="preserve"><value>Lets betterrecall-mcp.exe search your history for an assistant such as Claude Desktop.</value></data>
+  <data name="S_privacy_browserBadgeDetection" xml:space="preserve"><value>Detect private browser windows</value></data>
+  <data name="S_privacy_browserBadgeDetection_D" xml:space="preserve"><value>Looks for the private-mode badge in Chrome, Edge and Brave. A failed check drops the frame.</value></data>
+  <data name="S_privacy_denyPathPrefixes" xml:space="preserve"><value>Never capture apps in these folders</value></data>
+  <data name="S_privacy_denyPathPrefixes_D" xml:space="preserve"><value>Full folder paths. Any app started from inside them is skipped.</value></data>
+  <data name="S_privacy_denyProcesses" xml:space="preserve"><value>Never capture these apps</value></data>
+  <data name="S_privacy_denyProcesses_D" xml:space="preserve"><value>Process names, such as KeePass.exe.</value></data>
+  <data name="S_privacy_denyTitlePatterns" xml:space="preserve"><value>Never capture windows whose title contains</value></data>
+  <data name="S_privacy_denyTitlePatterns_D" xml:space="preserve"><value>Text such as InPrivate.</value></data>
+  <data name="S_privacy_honorDisplayAffinity" xml:space="preserve"><value>Respect apps that hide from capture</value></data>
+  <data name="S_privacy_honorDisplayAffinity_D" xml:space="preserve"><value>Skip the keyframe while any visible window asks not to be captured.</value></data>
+  <data name="S_privacy_nsfwFilter" xml:space="preserve"><value>Filter explicit images</value></data>
+  <data name="S_privacy_nsfwFilter_D" xml:space="preserve"><value>Explicit frames are deleted and never indexed.</value></data>
+  <data name="S_privacy_nsfwThreshold" xml:space="preserve"><value>Filter threshold</value></data>
+  <data name="S_privacy_nsfwThreshold_D" xml:space="preserve"><value>Default 0.8 was chosen by testing; change it only if needed. Lower blocks more.</value></data>
+  <data name="S_privacy_nsfwGrid" xml:space="preserve"><value>Filter detail</value></data>
+  <data name="S_privacy_nsfwGrid_1" xml:space="preserve"><value>Whole screen (fastest)</value></data>
+  <data name="S_privacy_nsfwGrid_2" xml:space="preserve"><value>Whole screen and quarters</value></data>
+  <data name="S_privacy_nsfwGrid_3" xml:space="preserve"><value>Whole screen and ninths (catches small windows)</value></data>
+  <data name="S_privacy_nsfwGrid_D" xml:space="preserve"><value>The filter looks at the whole screen at low resolution, then at smaller parts, so explicit images in small windows or thumbnails are caught. More detail uses more CPU: up to 6 checks per screenshot for quarters, 10 for ninths.</value></data>
+  <data name="S_privacy_nsfwDetector" xml:space="preserve"><value>Also detect partial nudity</value></data>
+  <data name="S_privacy_nsfwDetector_D" xml:space="preserve"><value>A second model looks for exposed and covered body parts, so suggestive images are caught too.</value></data>
+  <data name="S_privacy_nsfwDetectorThreshold" xml:space="preserve"><value>Partial nudity threshold</value></data>
+  <data name="S_privacy_nsfwDetectorThreshold_D" xml:space="preserve"><value>Default 0.4 was chosen by testing; change it only if needed. Lower blocks more, including suggestive images.</value></data>
+  <data name="S_privacy_nsfwDevice" xml:space="preserve"><value>Filter device</value></data>
+  <data name="S_privacy_nsfwDevice_D" xml:space="preserve"><value>Where the filter runs. If the chosen device fails, the CPU is used.</value></data>
+  <data name="S_privacy_nsfwDevice_auto" xml:space="preserve"><value>Auto (NPU, then integrated GPU, then graphics card, then CPU)</value></data>
+  <data name="S_privacy_nsfwDevice_npu" xml:space="preserve"><value>NPU</value></data>
+  <data name="S_privacy_nsfwDevice_igpu" xml:space="preserve"><value>Integrated GPU</value></data>
+  <data name="S_privacy_nsfwDevice_gpu" xml:space="preserve"><value>Graphics card</value></data>
+  <data name="S_privacy_nsfwDevice_cpu" xml:space="preserve"><value>CPU</value></data>
+  <data name="S_privacy_nsfwGpuAdapter" xml:space="preserve"><value>Graphics card for the filter</value></data>
+  <data name="S_privacy_nsfwGpuAdapter_D" xml:space="preserve"><value>Automatic picks the first graphics card that is not integrated. Or pick one, or type part of its name.</value></data>
+  <data name="S_privacy_nsfwGpuAdapter_auto" xml:space="preserve"><value>Automatic</value></data>
+  <data name="S_privacy_panicPurgeMinutes" xml:space="preserve"><value>Panic purge (minutes)</value></data>
+  <data name="S_privacy_panicPurgeMinutes_D" xml:space="preserve"><value>Panic flush also deletes this many recent minutes. 0 keeps stored data.</value></data>
+  <data name="S_privacy_pauseOnLock" xml:space="preserve"><value>Pause when the PC is locked</value></data>
+  <data name="S_replay_audio" xml:space="preserve"><value>Include desktop audio</value></data>
+  <data name="S_replay_bitrateKbps" xml:space="preserve"><value>Bitrate per encoded video (kbps)</value></data>
+  <data name="S_replay_bitrateKbps_D" xml:space="preserve"><value>For the whole canvas in Composited layout, or for each monitor in Per monitor layout. Higher uses more memory.</value></data>
+  <data name="S_replay_duringFullscreen" xml:space="preserve"><value>Keep recording in full-screen apps</value></data>
+  <data name="S_replay_enabled" xml:space="preserve"><value>Instant replay</value></data>
+  <data name="S_replay_enabled_D" xml:space="preserve"><value>Keep the last minutes of screen and desktop audio in memory.</value></data>
+  <data name="S_replay_encoder" xml:space="preserve"><value>Encoder</value></data>
+  <data name="S_replay_encoderAdapter" xml:space="preserve"><value>Encoder graphics adapter</value></data>
+  <data name="S_replay_encoderAdapter_D" xml:space="preserve"><value>Automatic uses the integrated GPU first. Or pick an adapter, or type part of its name.</value></data>
+  <data name="S_replay_encoderAdapter_auto" xml:space="preserve"><value>Automatic</value></data>
+  <data name="S_replay_encoder_D" xml:space="preserve"><value>Hardware video codec. Automatic tries AV1, then HEVC, then H.264.</value></data>
+  <data name="S_replay_encoder_auto" xml:space="preserve"><value>Automatic</value></data>
+  <data name="S_replay_encoder_av1" xml:space="preserve"><value>AV1</value></data>
+  <data name="S_replay_encoder_h264" xml:space="preserve"><value>H.264</value></data>
+  <data name="S_replay_encoder_hevc" xml:space="preserve"><value>HEVC</value></data>
+  <data name="S_replay_encryptExports" xml:space="preserve"><value>Encrypt saved replays</value></data>
+  <data name="S_replay_encryptExports_D" xml:space="preserve"><value>Saved replays are encrypted on disk.</value></data>
+  <data name="S_replay_exportDir" xml:space="preserve"><value>Folder for unencrypted replays</value></data>
+  <data name="S_replay_exportDir_D" xml:space="preserve"><value>Used only when saved replays are not encrypted. Empty uses the BetterRecall data folder.</value></data>
+  <data name="S_replay_fps" xml:space="preserve"><value>Frame rate</value></data>
+  <data name="S_replay_fps_10" xml:space="preserve"><value>10 fps</value></data>
+  <data name="S_replay_fps_100" xml:space="preserve"><value>100 fps</value></data>
+  <data name="S_replay_fps_120" xml:space="preserve"><value>120 fps</value></data>
+  <data name="S_replay_fps_144" xml:space="preserve"><value>144 fps</value></data>
+  <data name="S_replay_fps_15" xml:space="preserve"><value>15 fps</value></data>
+  <data name="S_replay_fps_165" xml:space="preserve"><value>165 fps</value></data>
+  <data name="S_replay_fps_24" xml:space="preserve"><value>24 fps</value></data>
+  <data name="S_replay_fps_240" xml:space="preserve"><value>240 fps</value></data>
+  <data name="S_replay_fps_25" xml:space="preserve"><value>25 fps</value></data>
+  <data name="S_replay_fps_30" xml:space="preserve"><value>30 fps</value></data>
+  <data name="S_replay_fps_48" xml:space="preserve"><value>48 fps</value></data>
+  <data name="S_replay_fps_50" xml:space="preserve"><value>50 fps</value></data>
+  <data name="S_replay_fps_60" xml:space="preserve"><value>60 fps</value></data>
+  <data name="S_replay_fps_72" xml:space="preserve"><value>72 fps</value></data>
+  <data name="S_replay_fps_75" xml:space="preserve"><value>75 fps</value></data>
+  <data name="S_replay_fps_90" xml:space="preserve"><value>90 fps</value></data>
+  <data name="S_replay_layout" xml:space="preserve"><value>Layout</value></data>
+  <data name="S_replay_layout_D" xml:space="preserve"><value>Composited records all monitors as one video with one encoder: least CPU and memory. Per monitor records one video per monitor at full quality, with one encoder each, so it uses more CPU and memory.</value></data>
+  <data name="S_replay_layout_composited" xml:space="preserve"><value>Composited (one video)</value></data>
+  <data name="S_replay_layout_perMonitor" xml:space="preserve"><value>Per monitor</value></data>
+  <data name="S_replay_notify" xml:space="preserve"><value>Notify after saving</value></data>
+  <data name="S_replay_notify_D" xml:space="preserve"><value>Shows a notification. Clicking it opens the replay list.</value></data>
+  <data name="S_replay_resolution" xml:space="preserve"><value>Resolution</value></data>
+  <data name="S_replay_resolution_1080p" xml:space="preserve"><value>1080p</value></data>
+  <data name="S_replay_resolution_1440p" xml:space="preserve"><value>1440p</value></data>
+  <data name="S_replay_resolution_2160p" xml:space="preserve"><value>2160p</value></data>
+  <data name="S_replay_resolution_540p" xml:space="preserve"><value>540p</value></data>
+  <data name="S_replay_resolution_720p" xml:space="preserve"><value>720p</value></data>
+  <data name="S_replay_resolution_900p" xml:space="preserve"><value>900p</value></data>
+  <data name="S_replay_resolution_D" xml:space="preserve"><value>Height of each encoded video. The aspect ratio is kept and video is never scaled up.</value></data>
+  <data name="S_replay_resolution_native" xml:space="preserve"><value>Native</value></data>
+  <data name="S_replay_resolution_scale" xml:space="preserve"><value>Scale by percent</value></data>
+  <data name="S_replay_scalePercent" xml:space="preserve"><value>Scale (%)</value></data>
+  <data name="S_replay_scalePercent_D" xml:space="preserve"><value>Used when Resolution is Scale by percent.</value></data>
+  <data name="S_replay_seconds" xml:space="preserve"><value>Length (seconds)</value></data>
+  <data name="S_retention_days" xml:space="preserve"><value>Keep captures for (days)</value></data>
+  <data name="S_security_excludeOwnWindows" xml:space="preserve"><value>Hide BetterRecall windows from capture</value></data>
+  <data name="S_security_excludeOwnWindows_D" xml:space="preserve"><value>Screenshots, recordings and screen sharing show these windows as empty.</value></data>
+  <data name="S_security_keyProtection" xml:space="preserve"><value>Key protection</value></data>
+  <data name="S_security_keyProtection_D" xml:space="preserve"><value>How the encryption key is protected. Automatic picks the TPM when there is one.</value></data>
+  <data name="S_security_keyProtection_auto" xml:space="preserve"><value>Automatic</value></data>
+  <data name="S_security_keyProtection_dpapi" xml:space="preserve"><value>Windows (DPAPI)</value></data>
+  <data name="S_security_keyProtection_passphrase" xml:space="preserve"><value>Passphrase</value></data>
+  <data name="S_security_keyProtection_tpm" xml:space="preserve"><value>TPM</value></data>
+  <data name="S_security_lockOnSessionLock" xml:space="preserve"><value>Lock when the PC is locked</value></data>
+  <data name="S_security_memoryIsolation" xml:space="preserve"><value>Memory isolation</value></data>
+  <data name="S_security_memoryIsolation_D" xml:space="preserve"><value>Blocks other programs from reading BetterRecall's memory and keeps it out of crash dumps.</value></data>
+  <data name="S_security_requireUnlock" xml:space="preserve"><value>Require Windows Hello to view history</value></data>
+  <data name="S_security_unlockTimeoutMin" xml:space="preserve"><value>Stay unlocked for (minutes)</value></data>
+  <data name="Search_Count" xml:space="preserve"><value>{0} results in {1} ms</value></data>
+  <data name="Search_Hint" xml:space="preserve"><value>Type to search. Arrow keys move, Esc hides.</value></data>
+  <data name="Search_NoResults" xml:space="preserve"><value>No matches.</value></data>
+  <data name="Sec_Note" xml:space="preserve"><value>Windows Hello unlock stops someone who steals your disk, and other accounts on this PC. It does not stop malware running as you while you are signed in.</value></data>
+  <data name="Sec_NoteTitle" xml:space="preserve"><value>What the lock protects</value></data>
+  <data name="Settings_AllMonitors" xml:space="preserve"><value>All monitors</value></data>
+  <data name="Settings_Browse" xml:space="preserve"><value>Browse</value></data>
+  <data name="Settings_BrowseName" xml:space="preserve"><value>Browse for {0}</value></data>
+  <data name="Settings_DefaultPath" xml:space="preserve"><value>Default location</value></data>
+  <data name="Settings_Discard.Content" xml:space="preserve"><value>Discard changes</value></data>
+  <data name="Settings_FixErrors" xml:space="preserve"><value>Some values are not valid. Fix the highlighted settings.</value></data>
+  <data name="Settings_FixErrorsIn" xml:space="preserve"><value>Some values are not valid in: {0}.</value></data>
+  <data name="Settings_HotkeyError" xml:space="preserve"><value>Use Ctrl, Alt or Win plus a key, and do not reuse another BetterRecall hotkey.</value></data>
+  <data name="Settings_InvalidError" xml:space="preserve"><value>This value is not allowed.</value></data>
+  <data name="Settings_PathError" xml:space="preserve"><value>Enter a full path, such as D:\Folder.</value></data>
+  <data name="Settings_Pending" xml:space="preserve"><value>{0} unsaved changes</value></data>
+  <data name="Settings_Range" xml:space="preserve"><value>{0} to {1}</value></data>
+  <data name="Settings_RangeError" xml:space="preserve"><value>Enter a value from {0} to {1}.</value></data>
+  <data name="Settings_Save.Content" xml:space="preserve"><value>Save</value></data>
+  <data name="Settings_Saved" xml:space="preserve"><value>Settings saved.</value></data>
+  <data name="Settings_TooLarge" xml:space="preserve"><value>One list is too long to send in one request. Remove some entries and save again.</value></data>
+  <data name="Settings_Unavailable" xml:space="preserve"><value>Settings are unavailable</value></data>
+  <data name="Status_AudioBoth" xml:space="preserve"><value>System audio and microphone</value></data>
+  <data name="Status_AudioMic" xml:space="preserve"><value>Microphone</value></data>
+  <data name="Status_AudioSystem" xml:space="preserve"><value>System audio</value></data>
+  <data name="Status_Capturing" xml:space="preserve"><value>Capturing</value></data>
+  <data name="Status_Device" xml:space="preserve"><value>Device: {0}</value></data>
+  <data name="Status_Idle" xml:space="preserve"><value>Not capturing</value></data>
+  <data name="Status_Locked" xml:space="preserve"><value>Locked</value></data>
+  <data name="Status_Paused" xml:space="preserve"><value>Paused: {0}</value></data>
+  <data name="Status_PausedUntil" xml:space="preserve"><value>Paused: {0}, until {1}</value></data>
+  <data name="Status_Queue" xml:space="preserve"><value>{0} waiting</value></data>
+  <data name="Status_Store" xml:space="preserve"><value>{0:N0} captures, {1}</value></data>
+  <data name="Status_Unlocked" xml:space="preserve"><value>Unlocked</value></data>
+  <data name="Status_UnlockedUntil" xml:space="preserve"><value>Unlocked until {0}</value></data>
+  <data name="Timeline_AllDay.Content" xml:space="preserve"><value>Whole day</value></data>
+  <data name="Timeline_Count" xml:space="preserve"><value>{0} captures</value></data>
+  <data name="Timeline_CountTruncated" xml:space="preserve"><value>{0} captures (the first 5,000 of the day)</value></data>
+  <data name="Timeline_Day.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve"><value>Day</value></data>
+  <data name="Timeline_Empty" xml:space="preserve"><value>Nothing captured in this period.</value></data>
+  <data name="Timeline_Hour.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve"><value>Hour</value></data>
+  <data name="Timeline_HourBar" xml:space="preserve"><value>{0}: {1} captures</value></data>
+  <data name="Timeline_Items.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve"><value>Captures</value></data>
+  <data name="Timeline_NextDay.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve"><value>Next day</value></data>
+  <data name="Timeline_NextDay.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve"><value>Next day</value></data>
+  <data name="Timeline_PrevDay.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve"><value>Previous day</value></data>
+  <data name="Timeline_PrevDay.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve"><value>Previous day</value></data>
+  <data name="Timeline_Title.Text" xml:space="preserve"><value>Timeline</value></data>
+  <data name="Timeline_Today.Content" xml:space="preserve"><value>Today</value></data>
+  <data name="Unlock_BodyHello" xml:space="preserve"><value>Your history is locked. Unlock with Windows Hello to search and view it.</value></data>
+  <data name="Unlock_BodyPassphrase" xml:space="preserve"><value>Your history is locked. Enter your BetterRecall passphrase to unlock it.</value></data>
+  <data name="Unlock_Hello.Content" xml:space="preserve"><value>Unlock with Windows Hello</value></data>
+  <data name="Unlock_PassButton.Content" xml:space="preserve"><value>Unlock</value></data>
+  <data name="Unlock_Passphrase.PlaceholderText" xml:space="preserve"><value>Passphrase</value></data>
+  <data name="Unlock_Passphrase.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve"><value>Passphrase</value></data>
+  <data name="Unlock_Title.Text" xml:space="preserve"><value>BetterRecall is locked</value></data>
+  <data name="W_index_dim" xml:space="preserve"><value>Lowering this shrinks stored vectors in place. Raising it applies to new captures only: older captures cannot be re-embedded unless keyframes are kept.</value></data>
+  <data name="W_ipc_enabled" xml:space="preserve"><value>Turning this on lets any program running as you ask BetterRecall about everything you have seen. Malware running as you could then ask questions instead of only stealing an encrypted file. Keep it off unless you need it, and check the audit log.</value></data>
+  <data name="W_mcp_enabled" xml:space="preserve"><value>Turning this on lets the connected AI assistant search your history. If the assistant uses a cloud model, it sends the results it reads to its provider. BetterRecall itself still makes no network connections.</value></data>
+  <data name="W_replay_encryptExports" xml:space="preserve"><value>When off, saved replays are written as plain MP4 files that anyone with access to the folder can watch.</value></data>
+  <data name="W_security_requireUnlock" xml:space="preserve"><value>When off, anyone using your signed-in session can search your history without Windows Hello.</value></data>
+</root>

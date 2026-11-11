@@ -1,0 +1,26 @@
+<Page
+    x:Class="BetterRecall.UI.Views.SettingsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+        <ScrollViewer x:Name="Scroller" VerticalScrollBarVisibility="Auto">
+            <StackPanel x:Name="Cards" Padding="24,8,24,24" Spacing="4" />
+        </ScrollViewer>
+        <Grid x:Name="Footer" Grid.Row="1" Visibility="Collapsed" Padding="24,8" ColumnSpacing="8" Background="{ThemeResource LayerFillColorDefaultBrush}"
+              BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="0,1,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <InfoBar x:Name="SaveBar" IsOpen="False" IsClosable="True" Margin="0" />
+            <TextBlock x:Name="PendingText" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}" AutomationProperties.LiveSetting="Polite" />
+            <Button x:Name="DiscardButton" x:Uid="Settings_Discard" Grid.Column="1" Click="Discard_Click" />
+            <Button x:Name="SaveButton" x:Uid="Settings_Save" Grid.Column="2" Style="{StaticResource AccentButtonStyle}" Click="Save_Click" />
+        </Grid>
+    </Grid>
+</Page>

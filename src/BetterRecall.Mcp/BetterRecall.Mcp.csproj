@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.20348.0</SupportedOSPlatformVersion>
+    <OutputType>Exe</OutputType>
+    <PublishAot>true</PublishAot>
+    <AssemblyName>betterrecall-mcp</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\BetterRecall.Contracts\BetterRecall.Contracts.csproj" />
+    <ProjectReference Include="..\BetterRecall.Core\BetterRecall.Core.csproj" />
+  </ItemGroup>
+</Project>

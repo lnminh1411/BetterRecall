@@ -1,0 +1,37 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/BetterRecall.Agent/BetterRecall.Agent.csproj">
+      <Platform Project="x64" />
+    </Project>
+    <Project Path="src/BetterRecall.Cli/BetterRecall.Cli.csproj">
+      <Platform Project="x64" />
+    </Project>
+    <Project Path="src/BetterRecall.Contracts/BetterRecall.Contracts.csproj" />
+    <Project Path="src/BetterRecall.Core/BetterRecall.Core.csproj">
+      <Platform Project="x64" />
+    </Project>
+    <Project Path="src/BetterRecall.Mcp/BetterRecall.Mcp.csproj">
+      <Platform Project="x64" />
+    </Project>
+    <Project Path="src/BetterRecall.UI/BetterRecall.UI.csproj">
+      <Platform Project="x64" />
+    </Project>
+    <Project Path="src/BetterRecall.Worker/BetterRecall.Worker.csproj">
+      <Platform Project="x64" />
+    </Project>
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/BetterRecall.Agent.Tests/BetterRecall.Agent.Tests.csproj">
+      <Platform Project="x64" />
+    </Project>
+    <Project Path="tests/BetterRecall.Core.Tests/BetterRecall.Core.Tests.csproj">
+      <Platform Project="x64" />
+    </Project>
+    <Project Path="tests/BetterRecall.UI.Tests/BetterRecall.UI.Tests.csproj">
+      <Platform Project="x64" />
+    </Project>
+    <Project Path="tests/BetterRecall.Worker.Tests/BetterRecall.Worker.Tests.csproj">
+      <Platform Project="x64" />
+    </Project>
+  </Folder>
+</Solution>

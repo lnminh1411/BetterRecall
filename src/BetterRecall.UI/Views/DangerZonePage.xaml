@@ -1,0 +1,72 @@
+<Page
+    x:Class="BetterRecall.UI.Views.DangerZonePage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Padding="24,8,24,24" Spacing="12" MaxWidth="1000" HorizontalAlignment="Stretch">
+            <TextBlock x:Uid="Danger_Title" Style="{StaticResource PageTitleStyle}" AutomationProperties.HeadingLevel="Level1" />
+            <InfoBar x:Name="ResultBar" IsOpen="False" IsClosable="True" />
+
+            <Border Style="{StaticResource CardStyle}">
+                <Grid ColumnSpacing="16">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Spacing="2">
+                        <TextBlock x:Uid="Danger_PanicTitle" Style="{StaticResource BodyStrongTextBlockStyle}" AutomationProperties.HeadingLevel="Level2" />
+                        <TextBlock x:Uid="Danger_PanicBody" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    </StackPanel>
+                    <Button x:Name="PanicButton" x:Uid="Danger_PanicButton" Grid.Column="1" VerticalAlignment="Center" Click="Panic_Click" />
+                </Grid>
+            </Border>
+
+            <Border Style="{StaticResource CardStyle}">
+                <StackPanel Spacing="8">
+                    <TextBlock x:Uid="Danger_RangeTitle" Style="{StaticResource BodyStrongTextBlockStyle}" AutomationProperties.HeadingLevel="Level2" />
+                    <TextBlock x:Uid="Danger_RangeBody" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <StackPanel Spacing="8">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <CalendarDatePicker x:Name="FromDate" x:Uid="Danger_From" Width="242" />
+                            <TimePicker x:Name="FromTime" x:Uid="Danger_FromTime" ClockIdentifier="24HourClock" MinWidth="242" Width="242" />
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <CalendarDatePicker x:Name="ToDate" x:Uid="Danger_To" Width="242" />
+                            <TimePicker x:Name="ToTime" x:Uid="Danger_ToTime" ClockIdentifier="24HourClock" MinWidth="242" Width="242" />
+                        </StackPanel>
+                    </StackPanel>
+                    <Button x:Uid="Danger_RangeButton" Click="PurgeRange_Click" />
+                </StackPanel>
+            </Border>
+
+            <Border Style="{StaticResource CardStyle}">
+                <StackPanel Spacing="8">
+                    <TextBlock x:Uid="Danger_AppTitle" Style="{StaticResource BodyStrongTextBlockStyle}" AutomationProperties.HeadingLevel="Level2" />
+                    <TextBlock x:Uid="Danger_AppBody" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <TextBox x:Name="AppName" x:Uid="Danger_AppName" MinWidth="240" />
+                        <Button x:Uid="Danger_AppButton" VerticalAlignment="Bottom" Click="PurgeApp_Click" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <Border Style="{StaticResource CardStyle}" BorderBrush="{ThemeResource SystemFillColorCriticalBrush}">
+                <StackPanel Spacing="8">
+                    <TextBlock x:Uid="Danger_AllTitle" Style="{StaticResource BodyStrongTextBlockStyle}" AutomationProperties.HeadingLevel="Level2" />
+                    <TextBlock x:Uid="Danger_AllBody" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <Button x:Name="AllStart" x:Uid="Danger_AllStart" Click="AllStart_Click" />
+                    <StackPanel x:Name="AllConfirm" Spacing="8" Visibility="Collapsed">
+                        <TextBlock x:Name="AllPrompt" TextWrapping="Wrap" />
+                        <TextBox x:Name="AllPhrase" MaxWidth="360" HorizontalAlignment="Left" MinWidth="280" TextChanged="AllPhrase_TextChanged" />
+                        <PasswordBox x:Name="AllPass" x:Uid="Danger_AllPass" MaxWidth="360" HorizontalAlignment="Left" MinWidth="280" Visibility="Collapsed" />
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Button x:Name="AllGo" x:Uid="Danger_AllGo" IsEnabled="False" Click="AllGo_Click" />
+                            <Button x:Uid="Common_CancelButton" Click="AllCancel_Click" />
+                            <ProgressRing x:Name="AllBusy" IsActive="False" Width="20" Height="20" />
+                        </StackPanel>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</Page>

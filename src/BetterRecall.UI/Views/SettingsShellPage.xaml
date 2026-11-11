@@ -1,0 +1,15 @@
+<Page
+    x:Class="BetterRecall.UI.Views.SettingsShellPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <!-- Settings open as their own page with a group list, like Windows Terminal and PowerToys settings. -->
+    <NavigationView x:Name="Groups" PaneDisplayMode="Left" OpenPaneLength="240" IsBackButtonVisible="Collapsed"
+                    IsSettingsVisible="False" IsPaneToggleButtonVisible="False" IsTitleBarAutoPaddingEnabled="False"
+                    ItemInvoked="Groups_ItemInvoked" CompactModeThresholdWidth="0" ExpandedModeThresholdWidth="0">
+        <NavigationView.PaneHeader>
+            <TextBlock x:Uid="Settings_ShellTitle" Margin="16,8,0,8" Style="{StaticResource SubtitleTextBlockStyle}"
+                       AutomationProperties.HeadingLevel="Level1" />
+        </NavigationView.PaneHeader>
+        <Frame x:Name="GroupFrame" />
+    </NavigationView>
+</Page>

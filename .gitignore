@@ -1,0 +1,18 @@
+artifacts/
+bin/
+obj/
+*.user
+.vs/
+/models/
+*.onnx
+*.bin
+*.safetensors
+__pycache__/
+
+# Local only, not published
+Project_Note.md
+local.runsettings
+BetterRecall.Local.slnx
+# Launcher and single-file packaging are held back until the launch flow settles
+src/BetterRecall.Launcher/
+Scripts/package_single.py

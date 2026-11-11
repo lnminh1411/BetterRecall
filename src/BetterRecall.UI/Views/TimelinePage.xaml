@@ -1,0 +1,59 @@
+<Page
+    x:Class="BetterRecall.UI.Views.TimelinePage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:views="using:BetterRecall.UI.Views">
+    <Grid Padding="24,8,0,0" RowSpacing="8" SizeChanged="Root_SizeChanged">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*" />
+            <ColumnDefinition x:Name="DetailColumn" Width="380" />
+        </Grid.ColumnDefinitions>
+
+        <TextBlock x:Uid="Timeline_Title" Style="{StaticResource PageTitleStyle}" AutomationProperties.HeadingLevel="Level1" />
+
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="8">
+            <Button x:Name="PrevDay" x:Uid="Timeline_PrevDay" Click="PrevDay_Click">
+                <FontIcon Glyph="&#xE76B;" FontSize="14" />
+            </Button>
+            <CalendarDatePicker x:Name="DayPicker" x:Uid="Timeline_Day" DateChanged="DayPicker_DateChanged" />
+            <Button x:Name="NextDay" x:Uid="Timeline_NextDay" Click="NextDay_Click">
+                <FontIcon Glyph="&#xE76C;" FontSize="14" />
+            </Button>
+            <Button x:Uid="Timeline_Today" Click="Today_Click" />
+            <ProgressRing x:Name="Busy" IsActive="False" Width="20" Height="20" />
+            <TextBlock x:Name="MessageText" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Foreground="{ThemeResource TextFillColorSecondaryBrush}" AutomationProperties.LiveSetting="Polite" />
+        </StackPanel>
+
+        <!-- Hour scrubber: bar height shows captures per hour; the slider and the bars pick the hour. -->
+        <Grid Grid.Row="2" Margin="0,4,24,0" RowSpacing="2">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="56" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+            <Grid x:Name="HourBars" ColumnSpacing="2" />
+            <Grid Grid.Row="1" ColumnSpacing="8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <ToggleButton x:Name="AllDay" x:Uid="Timeline_AllDay" IsChecked="True" Click="AllDay_Click" />
+                <Slider x:Name="HourSlider" x:Uid="Timeline_Hour" Grid.Column="1" Minimum="0" Maximum="23" StepFrequency="1"
+                        TickFrequency="1" TickPlacement="BottomRight" ValueChanged="HourSlider_ValueChanged" />
+            </Grid>
+        </Grid>
+
+        <GridView x:Name="Items" x:Uid="Timeline_Items" Grid.Row="3" SelectionMode="Single" Padding="0,0,8,0"
+                  ItemTemplate="{StaticResource CaptureTileTemplate}" SelectionChanged="Items_SelectionChanged" />
+
+        <Border Grid.Column="1" Grid.RowSpan="4" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1,0,0,0"
+                Background="{ThemeResource LayerFillColorDefaultBrush}">
+            <views:DetailPane x:Name="Detail" />
+        </Border>
+    </Grid>
+</Page>
