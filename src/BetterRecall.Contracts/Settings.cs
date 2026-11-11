@@ -27,6 +27,8 @@ public sealed class Settings
 public sealed class UiSettings
 {
     public string Theme { get; set; } = "system"; // system | light | dark (UI windows; the tray icon follows the taskbar)
+    public bool SearchAlwaysOnTop { get; set; } = true;   // search window stays above other windows
+    public bool StartMinimized { get; set; } = true;      // agent start shows only the tray icon; off opens Home
 }
 
 public sealed class CaptureSettings
@@ -155,6 +157,10 @@ public sealed class HotkeySettings
     public string Pause { get; set; } = "Ctrl+Alt+P";
     public string Replay { get; set; } = "Ctrl+Alt+R";
     public string Panic { get; set; } = "Ctrl+Alt+Shift+X";
+    // Empty = not assigned (any action may be left empty).
+    public string Timeline { get; set; } = "";
+    public string Home { get; set; } = "";
+    public string Lock { get; set; } = "";
 }
 
 public sealed class IpcSettings

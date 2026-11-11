@@ -132,7 +132,8 @@ public sealed record AgentStatus(
     QueueState Queue,
     string Device,           // NPU | GPU | CPU | none
     StoreStats Store,
-    int RetentionDays);
+    int RetentionDays,
+    string[]? HotkeysFailed = null);   // hotkey actions whose RegisterHotKey failed (combination taken by another app)
 
 public sealed record AuditEntry(
     DateTimeOffset Ts,

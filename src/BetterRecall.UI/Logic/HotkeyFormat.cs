@@ -26,6 +26,17 @@ public static class HotkeyFormat
         return Named.GetValueOrDefault(vk);
     }
 
+    /// <summary>Virtual-key code of a canonical key name (inverse of <see cref="KeyName"/>), or null.</summary>
+    public static int? VirtualKey(string key)
+    {
+        if (key.Length == 1 && char.IsAsciiLetterOrDigit(key[0])) return char.ToUpperInvariant(key[0]);
+        if (key.StartsWith("NumPad", StringComparison.Ordinal) && key.Length == 7 && char.IsAsciiDigit(key[6])) return 0x60 + (key[6] - '0');
+        if (key.Length >= 2 && key[0] == 'F' && int.TryParse(key.AsSpan(1), out var f) && f is >= 1 and <= 24) return 0x6F + f;
+        foreach (var (vk, name) in Named)
+            if (name == key) return vk;
+        return null;
+    }
+
     /// <summary>Builds a hotkey from a key press. Null when no key, or no Ctrl/Alt/Win modifier (Shift alone is not enough).</summary>
     public static string? FromKeyPress(int vk, bool ctrl, bool alt, bool shift, bool win)
     {

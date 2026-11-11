@@ -111,6 +111,7 @@ public sealed partial class LauncherWindow : Window
         if (openMenu) _menuOnResults = true;
         WindowHelpers.CenterOnCursorMonitor(AppWindow, 1220, 740, _hwnd);
         WindowSecurity.Apply(_hwnd);   // hidden windows are skipped when the setting changes
+        if (AppWindow.Presenter is OverlappedPresenter p) p.IsAlwaysOnTop = Services.Current.SearchAlwaysOnTop;
         AppWindow.Show(true);
         Activate();
         Win32.SetForegroundWindow(_hwnd);

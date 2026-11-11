@@ -30,7 +30,8 @@ internal sealed class QueryEmbedder(WorkerClient worker) : IQueryEmbedder
 /// </summary>
 internal sealed class AgentHost : IAgentControl, IAsyncDisposable
 {
-    private const int HkSearch = 1, HkPause = 2, HkReplay = 3, HkPanic = 4;
+    private const int HkSearch = 1, HkPause = 2, HkReplay = 3, HkPanic = 4, HkTimeline = 5, HkHome = 6, HkLock = 7;
+    private volatile string[]? _hotkeysFailed;
 
     private readonly ICoreHost _core;
     private readonly AgentOptions _opt;
@@ -127,6 +128,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
             try { StartupRegistration.Register(_opt.InstallDir); } catch (Exception ex) { Log.Warn("startup registration", ex); }
         }
         if (s.Capture.Consented) StartCapture();
+        if (!s.Ui.StartMinimized) UiLauncher.Start(_opt.InstallDir, "--page", "home");   // ui.startMinimized off: open Home with the tray icon
         _ = Task.Delay(TimeSpan.FromSeconds(15)).ContinueWith(_ => Diagnostics.Mark(), TaskScheduler.Default);
         Log.Info("agent running");
         _window.Run();
@@ -213,12 +215,22 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
     private void RegisterHotkeys()
     {
         var h = S.Hotkeys;
-        foreach (var (id, name, text) in new[] { (HkSearch, "search", h.Search), (HkPause, "pause", h.Pause), (HkReplay, "replay", h.Replay), (HkPanic, "panic", h.Panic) })
+        var failed = new List<string>();
+        var all = new[]
         {
+            (HkSearch, "search", h.Search), (HkPause, "pause", h.Pause), (HkReplay, "replay", h.Replay), (HkPanic, "panic", h.Panic),
+            (HkTimeline, "timeline", h.Timeline), (HkHome, "home", h.Home), (HkLock, "lock", h.Lock),
+        };
+        // Unregister first, so a combination moved from one action to another is free when the second registers.
+        foreach (var (id, _, _) in all) _window!.UnregisterHotkey(id);
+        foreach (var (id, name, text) in all)
+        {
+            if (string.IsNullOrWhiteSpace(text)) continue;   // not assigned
             var hk = HotkeyParser.Parse(text);
-            if (hk is null) { _window!.UnregisterHotkey(id); Log.Warn($"hotkey {name} invalid"); continue; }
-            _window!.RegisterHotkey(id, name, hk.Value);
+            if (hk is null) { Log.Warn($"hotkey {name} invalid"); failed.Add(name); continue; }
+            if (!_window!.RegisterHotkey(id, name, hk.Value)) failed.Add(name);
         }
+        _hotkeysFailed = failed.Count > 0 ? [.. failed] : null;
     }
 
     // ---------------- events ----------------
@@ -240,7 +252,8 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
     }
 
     private static bool HotkeysEqual(HotkeySettings a, HotkeySettings b) =>
-        a.Search == b.Search && a.Pause == b.Pause && a.Replay == b.Replay && a.Panic == b.Panic;
+        a.Search == b.Search && a.Pause == b.Pause && a.Replay == b.Replay && a.Panic == b.Panic
+        && a.Timeline == b.Timeline && a.Home == b.Home && a.Lock == b.Lock;
 
     private void OnHotkey(string name)
     {
@@ -260,6 +273,15 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
                 break;
             case "panic":
                 Panic();
+                break;
+            case "timeline":
+                UiLauncher.Start(_opt.InstallDir, "--page", "timeline");
+                break;
+            case "home":
+                UiLauncher.Start(_opt.InstallDir, "--page", "home");
+                break;
+            case "lock":
+                Lock();
                 break;
         }
     }
@@ -391,7 +413,8 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
             Queue: new QueueState((_scheduler?.Queued ?? 0) + StoreStats().PendingEmbeddings),
             Device: _supervisor.IsRunning ? _supervisor.Hello?.Device ?? "none" : "none",
             Store: StoreStats(),
-            RetentionDays: s.Retention.Days);
+            RetentionDays: s.Retention.Days,
+            HotkeysFailed: _hotkeysFailed);
     }
 
     private StoreStats StoreStats()

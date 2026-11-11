@@ -224,6 +224,17 @@ public sealed partial class SettingsStore : ISettingsStore
     [GeneratedRegex("^[a-z]{2,3}$")]
     private static partial Regex LanguageRegex();
 
+    internal static string[] AllHotkeys(HotkeySettings h) => [h.Search, h.Pause, h.Replay, h.Panic, h.Timeline, h.Home, h.Lock];
+
+    /// <summary>Empty (not assigned), or a valid combination no other action uses.</summary>
+    internal static bool HotkeyOk(HotkeySettings h, string? s)
+    {
+        if (s is null) return false;
+        if (s.Length == 0) return true;
+        if (!ValidHotkey(s)) return false;
+        return AllHotkeys(h).Count(o => string.Equals(o?.Trim(), s.Trim(), StringComparison.OrdinalIgnoreCase)) == 1;
+    }
+
     internal static bool ValidHotkey(string? s)
     {
         if (string.IsNullOrWhiteSpace(s)) return false;
@@ -289,10 +300,13 @@ public sealed partial class SettingsStore : ISettingsStore
         ("governance.deferGpuPercent", s => Range(s.Governance.DeferGpuPercent, 10, 100)),
         ("security.unlockTimeoutMin", s => Range(s.Security.UnlockTimeoutMin, 1, 1440)),
         ("security.keyProtection", s => In(s.Security.KeyProtection, "auto", "tpm", "passphrase", "dpapi")),
-        ("hotkeys.search", s => ValidHotkey(s.Hotkeys.Search)),
-        ("hotkeys.pause", s => ValidHotkey(s.Hotkeys.Pause)),
-        ("hotkeys.replay", s => ValidHotkey(s.Hotkeys.Replay)),
-        ("hotkeys.panic", s => ValidHotkey(s.Hotkeys.Panic)),
+        ("hotkeys.search", s => HotkeyOk(s.Hotkeys, s.Hotkeys.Search)),
+        ("hotkeys.pause", s => HotkeyOk(s.Hotkeys, s.Hotkeys.Pause)),
+        ("hotkeys.replay", s => HotkeyOk(s.Hotkeys, s.Hotkeys.Replay)),
+        ("hotkeys.panic", s => HotkeyOk(s.Hotkeys, s.Hotkeys.Panic)),
+        ("hotkeys.timeline", s => HotkeyOk(s.Hotkeys, s.Hotkeys.Timeline)),
+        ("hotkeys.home", s => HotkeyOk(s.Hotkeys, s.Hotkeys.Home)),
+        ("hotkeys.lock", s => HotkeyOk(s.Hotkeys, s.Hotkeys.Lock)),
         ("ipc.pipeName", s => s.Ipc.PipeName != null && PipeNameRegex().IsMatch(PipeNames.Base(s.Ipc.PipeName))),
         ("ipc.allowClients", s => Strings(s.Ipc.AllowClients, IsAbs)),
         ("ipc.maxResults", s => Range(s.Ipc.MaxResults, 1, 200)),

@@ -151,7 +151,7 @@ Argument rules: `unlock <passphrase>`, `replay export <id> <path>` (the path), `
 
 Showing the launcher: when the UI is already running, the agent sets the auto-reset event `PipeNames.ShowLauncherEvent` instead of starting a second UI process. The UI waits on it and shows the launcher. The agent starts the UI exe only when the event does not exist.
 
-Hotkey grammar (agent parser and UI recorder): modifiers `Ctrl`, `Alt`, `Shift`, `Win` joined with `+`, then one key: `A`-`Z`, `0`-`9`, `F1`-`F24`, `NumPad0`-`NumPad9`, `Space`, `PageUp`, `PageDown`, `Home`, `End`, `Left`, `Up`, `Right`, `Down`, `Insert`, `Delete`, `Pause`, `PrintScreen`, or one of `` ; = , - . / ` [ \ ] ' ``.
+Hotkey grammar (agent parser and UI recorder): modifiers `Ctrl`, `Alt`, `Shift`, `Win` joined with `+`, then one key: `A`-`Z`, `0`-`9`, `F1`-`F24`, `NumPad0`-`NumPad9`, `Space`, `PageUp`, `PageDown`, `Home`, `End`, `Left`, `Up`, `Right`, `Down`, `Insert`, `Delete`, `Pause`, `PrintScreen`, or one of `` ; = , - . / ` [ \ ] ' ``. An empty string means the action has no shortcut. No two actions may share a combination (`settings set` answers `Invalid hotkeys.<action>.`). The agent re-registers every hotkey when one changes and lists the actions whose `RegisterHotKey` failed (combination held by Windows or another app) in `status` as `hotkeysFailed`; the UI Shortcuts page shows a warning on those rows and, before saving a new combination, probes it with its own `RegisterHotKey` / `UnregisterHotKey`.
 
 `search` JSON also takes `"site":"<host>"` (normalised: lower case, no `www.`); hits carry `site`. `purge` takes two more scopes on every pipe that allows purge: `purge id <id>` (one capture, the launcher's Delete) and `purge site <host>` (the launcher's "Delete all from <site>"). A `purge last` or `purge range` also deletes saved searches typed in that window.
 
@@ -282,6 +282,12 @@ etrieval`): right screens 0.68-0.80, wrong or off-topic up to 0.61 |
 | `hotkeys.pause` | `Ctrl+Alt+P` | |
 | `hotkeys.replay` | `Ctrl+Alt+R` | |
 | `hotkeys.panic` | `Ctrl+Alt+Shift+X` | |
+| `hotkeys.timeline` | empty | opens the main window on the timeline |
+| `hotkeys.home` | empty | opens the main window on Home |
+| `hotkeys.lock` | empty | locks the history (same as the `lock` verb) |
+| `ui.theme` | `system` | `system`, `light`, `dark` |
+| `ui.searchAlwaysOnTop` | true | search window topmost while shown |
+| `ui.startMinimized` | true | agent start shows only the tray icon; off also opens the main window on Home |
 | `ipc.*`, `mcp.enabled` | `research.md` 7.2 | |
 | `log.level` | `info` | `debug`, `info`, `warn`, `error` |
 

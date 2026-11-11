@@ -134,6 +134,10 @@ internal sealed class Services
 
     public event Action? ThemeChanged;
 
+    /// <summary>ui.searchAlwaysOnTop as saved (default on).</summary>
+    public bool SearchAlwaysOnTop => SettingsSchema.Get(Settings.Original, "ui.searchAlwaysOnTop") is not System.Text.Json.Nodes.JsonValue v
+        || !v.TryGetValue<bool>(out var b) || b;
+
     private void ApplyStatus(AgentStatus s)
     {
         Status = s;

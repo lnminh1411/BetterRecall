@@ -92,6 +92,8 @@ public class SettingsTests
     [InlineData("{\"security\":{\"keyProtection\":\"none\"}}", "Invalid security.keyProtection.")]
     [InlineData("{\"hotkeys\":{\"search\":\"Space\"}}", "Invalid hotkeys.search.")]
     [InlineData("{\"hotkeys\":{\"panic\":\"Ctrl+Hyper+X\"}}", "Invalid hotkeys.panic.")]
+    [InlineData("{\"hotkeys\":{\"timeline\":\"ctrl+alt+p\"}}", "Invalid hotkeys.pause.")]   // same combination as pause
+    [InlineData("{\"hotkeys\":{\"lock\":\"Lock\"}}", "Invalid hotkeys.lock.")]
     [InlineData("{\"ipc\":{\"pipeName\":\"bad name\"}}", "Invalid ipc.pipeName.")]
     [InlineData("{\"ipc\":{\"maxResults\":201}}", "Invalid ipc.maxResults.")]
     [InlineData("{\"ipc\":{\"maxResults\":5}}", "Invalid ipc.maxResults.")]
@@ -132,6 +134,21 @@ public class SettingsTests
     [InlineData("X", false)]
     [InlineData("", false)]
     public void Hotkey_format(string hk, bool ok) => Assert.Equal(ok, SettingsStore.ValidHotkey(hk));
+
+    [Fact]
+    public void Hotkeys_may_be_unassigned_and_new_actions_default_empty()
+    {
+        using var h = new TempHome(null);
+        var s = SettingsStore.Load(h.Path);
+        Assert.Equal("", s.Current.Hotkeys.Timeline);
+        Assert.Equal("", s.Current.Hotkeys.Home);
+        Assert.Equal("", s.Current.Hotkeys.Lock);
+        Assert.Null(s.TryUpdate(J("{\"hotkeys\":{\"panic\":\"\",\"lock\":\"Ctrl+Alt+L\"}}")));
+        Assert.Equal("", s.Current.Hotkeys.Panic);
+        Assert.Equal("Ctrl+Alt+L", s.Current.Hotkeys.Lock);
+        Assert.True(s.Current.Ui.SearchAlwaysOnTop);
+        Assert.True(s.Current.Ui.StartMinimized);
+    }
 
     [Fact]
     public void Replay_keys_accept_spec_values()
