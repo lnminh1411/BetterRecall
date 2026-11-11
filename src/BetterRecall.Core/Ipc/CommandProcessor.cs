@@ -128,6 +128,14 @@ public sealed partial class CommandProcessor
 
     private readonly Ai.ChatService? _chat;
 
+    /// <summary>Panic: forget chat approvals and unsaved chats, and delete saved chats. The read gate is already closed,
+    /// so this goes to the store directly.</summary>
+    private void OnPanic()
+    {
+        _chat?.Clear();
+        try { _d.Store()?.DeleteChats(null); } catch (Exception ex) { Log.Warn("panic chat delete", ex); }
+    }
+
     public CommandProcessor(CommandDeps deps)
     {
         _d = deps;
@@ -144,7 +152,7 @@ public sealed partial class CommandProcessor
                 Providers = deps.ChatProviders ?? Ai.ChatProviders.For,
                 ImageRedactor = deps.Redactor,
             });
-            deps.Agent.Panicked += _chat.Clear;
+            deps.Agent.Panicked += OnPanic;
         }
     }
 

@@ -65,6 +65,8 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
 
     public event Action<AgentStatus>? StatusChanged;
     public event Action<CaptureMeta>? CaptureStored;
+    /// <summary>After a panic flush: Core forgets chat approvals and deletes saved chats.</summary>
+    public event Action? Panicked;
 
     public AgentHost(ICoreHost core, AgentOptions opt)
     {
@@ -531,6 +533,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
             try { purged = store.Purge(PurgeScope.Last(TimeSpan.FromMinutes(minutes))); }
             catch (Exception ex) { Log.Warn("panic purge", ex); }
         }
+        try { Panicked?.Invoke(); } catch (Exception ex) { Log.Warn("panic listeners", ex); }
         Log.Info($"panic flush in {sw.ElapsedMilliseconds} ms, purged {purged} rows");
         _window?.Notify("BetterRecall", minutes > 0 ? $"Memory flushed, last {minutes} min deleted." : "Memory flushed.");
         RaiseStatus(force: true);

@@ -997,6 +997,21 @@ public sealed class ChatVerbTests : IDisposable
     }
 
     [Fact]
+    public async Task Panic_deletes_saved_chats_and_approvals()
+    {
+        Set("""{"ai":{"enabled":true,"provider":"gemini","share":"text"}}""");
+        _keys.Set(Key);
+        _h.Responses.Enqueue(ScriptHandler.Sse(GeminiSearch));
+        var token = Events(await Stream("chat send {\"text\":\"Which invoice?\"}"))[^1].GetProperty("token").GetString()!;
+        _h.Responses.Enqueue(ScriptHandler.Sse(GeminiAnswer));
+        await Stream("chat approve {\"token\":\"" + token + "\"}");
+        Assert.Single(_t.Store.Chats(10));
+        _agent.Unlocked = false;   // a real panic closes the read gate first
+        _agent.RaisePanic();
+        Assert.Empty(_t.Store.Chats(10));
+    }
+
+    [Fact]
     public async Task Turning_history_off_deletes_saved_chats()
     {
         _t.Store.SaveChat(new ChatRecord("c1", "t", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, "gemini", "m", "[]",
