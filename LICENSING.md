@@ -23,6 +23,8 @@ Model weights are not in this repository. The converted models (OpenVINO IR and 
 | NSFW classifier | `Falconsai/nsfw_image_detection` | Apache-2.0 |
 | NSFW detector (NudeNet 320n ONNX) | `deepghs/nudenet_onnx` (ONNX of `notAI-tech/NudeNet`) | AGPL-3.0 |
 | Silero VAD v6.2.3 | `snakers4/silero-vad` | MIT |
+| PaddleOCR PP-OCRv6 small (detector, main recogniser) + PP-OCRv5 mobile script recognisers | `PaddlePaddle/PP-OCRv6_small_det_onnx`, `PaddlePaddle/PP-OCRv6_small_rec_onnx`, `PaddlePaddle/<script>_PP-OCRv5_mobile_rec_onnx` | Apache-2.0 |
+| PII token classifier (names, addresses) | `Wismut/nym-pii-multilingual-small` (fine-tune of `jhu-clsp/mmBERT-small`) | MIT |
 
 The NudeNet ONNX repackaging is tagged Apache-2.0, but the original NudeNet project is AGPL-3.0, so the detector is distributed under AGPL-3.0.
 
