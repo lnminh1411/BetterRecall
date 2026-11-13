@@ -11,7 +11,7 @@ namespace BetterRecall.Core.Tests;
 public sealed class PipeTests : IAsyncLifetime
 {
     private readonly TempStore _t = new();
-    private readonly TempHome _home = new(null);
+    private readonly TempHome _home = new();   // dpapi: auto would wrap test keys with a TPM key of the user's Windows account
     private readonly string _tag = Guid.NewGuid().ToString("N")[..10];
     private SettingsStore _settings = null!;
     private KeyVault _vault = null!;

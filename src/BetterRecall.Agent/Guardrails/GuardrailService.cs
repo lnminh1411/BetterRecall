@@ -70,7 +70,11 @@ internal sealed class GuardrailService : IDisposable
                     }
                     var t0 = System.Diagnostics.Stopwatch.GetTimestamp();
                     var fg = WindowInspector.Foreground();
-                    var scan = WindowInspector.Scan(s.Privacy, _installDir, _ownPid, _monitors());
+                    // Private windows on any monitor (badge results are cached per window, so this probes new windows only).
+                    Func<WindowInfo, bool>? isPrivate = s.Privacy.BrowserBadgeDetection && badge is not null
+                        ? w => w.Title.Length > 0 && GuardrailPolicy.IsChromiumBrowser(w.ProcessName) && badge.Check(w.Hwnd) == BadgeResult.Private
+                        : null;
+                    var scan = WindowInspector.Scan(s.Privacy, _installDir, _ownPid, _monitors(), isPrivate);
                     LastScanMs = System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds;
                     var badgeResult = BadgeResult.NotBrowser;
                     if (fg is not null && s.Privacy.BrowserBadgeDetection && GuardrailPolicy.IsChromiumBrowser(fg.ProcessName))

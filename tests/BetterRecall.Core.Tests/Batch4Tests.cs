@@ -274,7 +274,10 @@ public sealed class Batch4CommandTests : IAsyncDisposable
 
         var file = File.ReadAllBytes(DataPaths.AiKeyFile(_home.Path));
         Assert.Equal(-1, Encoding.ASCII.GetString(file).IndexOf("NOT-A-REAL", StringComparison.Ordinal));
-        Assert.Equal(key, new ApiKeyStore(_home.Path).Read());
+        Assert.Equal(key, new ApiKeyStore(_home.Path).Read(_settings.Current.Ai));
+        // Bound to the provider and endpoint it was entered for.
+        var other = new AiSettings { Provider = _settings.Current.Ai.Provider, Endpoint = "https://other.example/v1" };
+        Assert.Null(new ApiKeyStore(_home.Path).Read(other));
 
         var settings = await Call("settings get");
         Assert.DoesNotContain(key, settings.Data.GetRawText());

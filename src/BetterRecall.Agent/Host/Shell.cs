@@ -15,6 +15,16 @@ internal static class StartupRegistration
     private const string AppKey = @"Software\BetterRecall";
     private const string ValueName = "BetterRecall";
 
+    /// <summary>Started by the single-file launcher, or from the installed layout (&lt;home&gt;\app\...), on the default
+    /// data folder.</summary>
+    public static bool IsInstalled(string installDir, string home)
+    {
+        if (!DataPaths.IsDefaultHome(home)) return false;
+        if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(InstallLayout.LauncherEnv))) return true;
+        var app = Path.GetFullPath(Path.Combine(home, "app")).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        return Path.GetFullPath(installDir).StartsWith(app, StringComparison.OrdinalIgnoreCase);
+    }
+
     public static void Register(string installDir)
     {
         // Started by the single-file launcher: autostart runs the launcher, so upgrades keep working.

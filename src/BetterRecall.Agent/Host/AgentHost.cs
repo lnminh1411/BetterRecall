@@ -96,7 +96,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
 
         _window = new MessageWindow();
         // Another version's launcher asks us to step aside (see PipeNames.AgentQuitEvent).
-        _quitEvent = new EventWaitHandle(false, EventResetMode.AutoReset, PipeNames.AgentQuitEvent);
+        _quitEvent = new EventWaitHandle(false, EventResetMode.AutoReset, PipeNames.AgentQuitEventFor(_opt.Home));
         _quitWait = ThreadPool.RegisterWaitForSingleObject(_quitEvent, (_, _) => { Log.Info("quit requested by launcher"); RequestQuit(); }, null, Timeout.Infinite, executeOnlyOnce: true);
         _window.Hotkey += OnHotkey;
         _window.Command += OnTrayCommand;
@@ -111,7 +111,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         _replays = new ReplayLibrary(_opt.Home, () => S, _core.Blobs);
         var encLuid = GpuDevices.Adapters().FirstOrDefault(a => a.VendorId == GpuDevices.VendorIntel)?.Luid;
         _probe = new SystemProbe(encLuid is null ? null : GpuDevices.PdhLuidToken(encLuid.Value));
-        _scheduler = new EmbeddingScheduler(() => Store, () => S, _worker, ProbeLoad, () => _pause.Has("consent") || _pause.Has("keylocked"));
+        _scheduler = new EmbeddingScheduler(() => Store, () => S, _worker, ProbeLoad, () => _pause.Has("consent") || _pause.Has("keylocked") || _pause.Has("keylost") || _pause.Has("storeerror"));
         _pipeline = new KeyframePipeline(() => Store, () => S, OnCaptureStored, new WorkerKeyframeReader(_worker), _redactions) { Sampler = _sampler };
         _guard = new GuardrailService(() => S, () => _sessionLocked, () => _capture?.MonitorBounds() ?? [], _opt.InstallDir);
         _guard.ForegroundChanged += _ => _capture?.OnForegroundChanged();
@@ -131,7 +131,9 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         _maintenanceTimer = new Timer(_ => Maintenance(), null, TimeSpan.FromHours(1), TimeSpan.FromHours(1));
         _storage = new StorageGuard(() => Store, () => S, () => StorageGuard.FreeBytesOf(_opt.Home));
         _storageTimer = new Timer(_ => StorageCheck(), null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(30));
-        if (_opt.Autostart)
+        // Only the installed app registers autostart and the CLI/MCP trust path: never a dev build, a worktree, or an
+        // agent on another data folder (it would repoint the user's startup entry at a folder that later disappears).
+        if (_opt.Autostart && StartupRegistration.IsInstalled(_opt.InstallDir, _opt.Home))
         {
             try { StartupRegistration.Register(_opt.InstallDir); } catch (Exception ex) { Log.Warn("startup registration", ex); }
         }
@@ -151,12 +153,30 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
             await _core.OpenStoreAsync(_cts.Token).ConfigureAwait(false);
             Log.Info($"store open in {sw.ElapsedMilliseconds} ms ({_core.Keys.Protection})");
             _pause.Clear("keylocked");
+            _pause.Clear("storeerror");
             Maintenance();
             _scheduler?.Signal();
             RaiseStatus(force: true);
         }
         catch (OperationCanceledException) { }
-        catch (Exception ex) { Log.Error("store open failed", ex); }
+        catch (Exception ex)
+        {
+            Log.Error("store open failed", ex);
+            _pause.Clear("keylocked");
+            if (ex is BetterRecall.Core.Crypto.KeyLostException)
+            {
+                // The key file cannot be unwrapped for good (TPM key gone, DPAPI cannot decrypt, file damaged): the old
+                // data is unreadable. Say so instead of "waiting for passphrase"; purge all starts a new key and store.
+                _pause.Set("keylost");
+            }
+            else
+            {
+                // Anything else (TPM not ready at logon, file locked, database error) may pass: say so and retry.
+                _pause.Set("storeerror");
+                _ = Task.Delay(TimeSpan.FromSeconds(30), _cts.Token).ContinueWith(t => { if (!t.IsCanceled) _ = OpenStoreAsync(); }, TaskScheduler.Default);
+            }
+            RaiseStatus(force: true);
+        }
     }
 
     private void StartCapture()
@@ -193,12 +213,21 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
     private bool ReplayPaused() =>
         _pause.ContinuousPaused(S.Replay.DuringFullscreen) || !S.Capture.Consented;
 
+    private long _lastMicRetry;
+
     private void SyncAudioSources()
     {
         if (!_captureStarted) return;
         var s = S;
         bool wantSystem = s.Audio.System && s.Capture.Consented;
         bool wantMic = s.Audio.Mic && s.Capture.Consented;
+        if (_micAudio is { MicLost: true })
+        {
+            // Unplugged or default device changed: start over on the current default microphone.
+            Log.Info("microphone lost, reopening");
+            _micAudio.Dispose();
+            _micAudio = null;
+        }
         if (wantSystem && _systemAudio is null)
         {
             try
@@ -369,9 +398,11 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
                 _sessionLocked = true;
                 if (S.Privacy.PauseOnLock) _pause.Set("lock");
                 if (S.Security.LockOnSessionLock) _gate.Close();
+                _sampler.Clear();   // search frames of a saved replay never reach back past a lock
                 break;
             case Win32.WTS_SESSION_UNLOCK:
             case Win32.WTS_CONSOLE_CONNECT:
+            case Win32.WTS_REMOTE_CONNECT:   // RDP reconnect: no SESSION_UNLOCK follows, the lock pause would stick
                 _sessionLocked = false;
                 _pause.Clear("lock");
                 break;
@@ -400,6 +431,20 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
             var n = SystemProbe.Notification();
             if (Governance.PauseKeyframes(n, S.Capture)) { if (!_pause.Has("fullscreen")) _pause.Set("fullscreen"); }
             else _pause.Clear("fullscreen");
+            if (_micAudio is { MicLost: true } && Environment.TickCount64 - _lastMicRetry > 10_000)
+            {
+                _lastMicRetry = Environment.TickCount64;
+                SyncAudioSources();
+            }
+            if ((_pause.Has("keylost") || _pause.Has("storeerror")) && Store != null)
+            {
+                // Purge all made a new key and store.
+                _pause.Clear("keylost");
+                _pause.Clear("storeerror");
+                Log.Info("store open after purge all");
+                Maintenance();
+                _scheduler?.Signal();
+            }
             RaiseStatus(force: false);
             _window?.Invoke(() => _window.UpdateTip("BetterRecall: " + StatusLine()));
         }
@@ -422,6 +467,8 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         {
             "consent" => "Waiting for consent",
             "keylocked" => "Locked: enter passphrase",
+            "keylost" => "Data key missing: purge all in Danger zone to start over",
+            "storeerror" => "Paused: storage could not be opened, retrying",
             "lock" => "Paused: session locked",
             "fullscreen" => "Paused: fullscreen",
             "storage" => "Paused: storage limit",
@@ -525,6 +572,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
     {
         _gate.Close();
         _thumbs.ClearCache();
+        _sampler.Clear();
         RaiseStatus(force: true);
     }
 
@@ -574,6 +622,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
             foreach (var f in ReplaySampler.ToFrames(id, start, durationMs, samples))
             {
                 try { store.AddReplayFrame(f); n++; }
+                catch (PurgedWindowException) { }   // sampled before a purge of that window
                 finally { Array.Clear(f.Image); }
             }
         }

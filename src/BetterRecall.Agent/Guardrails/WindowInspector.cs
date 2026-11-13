@@ -94,10 +94,12 @@ internal static unsafe class WindowInspector
 
     /// <summary>
     /// One pass over visible top-level windows: display affinity (ignoring own windows), deny-list masks,
-    /// and the topmost window per monitor for keyframe titles.
+    /// and the topmost window per monitor for keyframe titles. <paramref name="isPrivate"/> (browser badge check) denies
+    /// private browser windows anywhere on screen, not only the focused one.
     /// </summary>
     public static (bool AnyAffinity, RECT[] Masks, Dictionary<int, MonitorTop> PerMonitor) Scan(
-        PrivacySettings p, string installDir, uint ownPid, IReadOnlyList<(int Index, RECT Bounds)> monitors)
+        PrivacySettings p, string installDir, uint ownPid, IReadOnlyList<(int Index, RECT Bounds)> monitors,
+        Func<WindowInfo, bool>? isPrivate = null)
     {
         bool anyAffinity = false;
         var masks = new List<RECT>();
@@ -117,7 +119,7 @@ internal static unsafe class WindowInspector
             if (ShellClasses.Contains(cls)) continue;
             var title = Win32.GetWindowText(hwnd);
             var info = new WindowInfo(hwnd, pid, exe, title, cls);
-            bool deny = GuardrailPolicy.MatchDenyLists(info, p) != GuardReason.None;
+            bool deny = GuardrailPolicy.MatchDenyLists(info, p) != GuardReason.None || (!own && isPrivate?.Invoke(info) == true);
             if (deny) masks.Add(r);
             long exStyle = Win32.GetWindowLongPtrW(hwnd, Win32.GWL_EXSTYLE);
             bool tool = (exStyle & Win32.WS_EX_TOOLWINDOW) != 0;

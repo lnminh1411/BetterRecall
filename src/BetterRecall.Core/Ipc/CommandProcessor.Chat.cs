@@ -47,7 +47,7 @@ public sealed partial class CommandProcessor
             {
                 var ai = S.Ai;
                 if (!ai.Enabled) return Err(ErrAiOff);
-                if (ai.Provider != AiDefaults.OpenAi && _d.AiKey?.IsSet != true) return Err(ErrNoApiKey);
+                if (ai.Provider != AiDefaults.OpenAi && _d.AiKey?.Read(ai) == null) return Err(ErrNoApiKey);
                 Action<string, int, string> audit = (verb, n, sha) => Audit(s, verb, n, sha);
                 if (sub == "deny")
                 {

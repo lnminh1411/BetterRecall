@@ -15,14 +15,21 @@ namespace BetterRecall.Core.Crypto;
 /// tpm (RSA-2048, non-exportable, Microsoft Platform Crypto Provider, OAEP-SHA1), passphrase (Argon2id
 /// 64 MiB, 3 passes, AES-256-GCM wrap) or dpapi (CurrentUser). File layout: "BRK1", mode byte, mode payload.
 /// </summary>
+/// <summary>The key file cannot be unwrapped for good: its TPM key is gone, DPAPI cannot decrypt it, or the file is
+/// damaged. The data it protects is unreadable; only purge all (a new key) gets the app going again.</summary>
+public sealed class KeyLostException(string message, Exception? inner = null) : CryptographicException(message, inner);
+
 public sealed class KeyVault : IKeyVault, IDisposable
 {
+    private const string ModeInvalid = "invalid";   // damaged key file: reported as lost, purge all replaces it
     public const string ModeTpm = "tpm";
     public const string ModePassphrase = "passphrase";
     public const string ModeDpapi = "dpapi";
 
     internal const string TpmProvider = "Microsoft Platform Crypto Provider";
-    internal const string DefaultTpmKeyName = "BetterRecall.DataKeyWrap";
+    /// <summary>Name every key file before 0.2 used. Persisted TPM keys are per Windows user, not per data folder,
+    /// so one fixed name let any other data folder (a test run, a second home) open and delete the real key.</summary>
+    internal const string LegacyTpmKeyName = "BetterRecall.DataKeyWrap";
     private static readonly byte[] Magic = "BRK1"u8.ToArray();
     private const int ArgonMemoryKiB = 65536;
     private const int ArgonPasses = 3;
@@ -36,15 +43,23 @@ public sealed class KeyVault : IKeyVault, IDisposable
     private string? _fileMode;
     private TaskCompletionSource _loaded = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private volatile bool _helloAvailable;
+    private volatile bool _helloChecked;
 
     public KeyVault(string home, Func<Settings> settings, string? tpmKeyName = null, bool probeHello = true)
     {
         _keyFile = DataPaths.KeyFile(home);
         _settings = settings;
-        _tpmKeyName = tpmKeyName ?? DefaultTpmKeyName;
-        _fileMode = ReadFileMode();
+        _tpmKeyName = tpmKeyName ?? TpmKeyNameFor(home);
+        try { _fileMode = ReadFileMode(); }
+        catch (InvalidDataException ex)
+        {
+            // A damaged header used to throw here and stop the agent before its pipes started, so purge all was unreachable.
+            Log.Error("key file damaged", ex);
+            _fileMode = ModeInvalid;
+        }
         if (probeHello)
-            _ = HelloInterop.CheckAvailableAsync(CancellationToken.None).ContinueWith(t => _helloAvailable = t.IsCompletedSuccessfully && t.Result, TaskScheduler.Default);
+            _ = HelloInterop.CheckAvailableAsync(CancellationToken.None).ContinueWith(t => { _helloAvailable = t.IsCompletedSuccessfully && t.Result; _helloChecked = true; }, TaskScheduler.Default);
+        else _helloChecked = true;
     }
 
     /// <summary>Mode of the key file when it exists, else the mode a new key would use.</summary>
@@ -57,6 +72,37 @@ public sealed class KeyVault : IKeyVault, IDisposable
     }
 
     public bool HelloAvailable => _helloAvailable;
+
+    /// <summary>The Windows Hello availability check has finished (HelloAvailable is meaningful).</summary>
+    public bool HelloChecked => _helloChecked;
+
+    /// <summary>TPM key name for a data folder: "BetterRecall.DataKeyWrap." + 16 hex of SHA-256 over the full path
+    /// (upper case, no trailing separator). Key files store the name they were wrapped with, so older files keep
+    /// opening the legacy name.</summary>
+    internal static string TpmKeyNameFor(string home)
+    {
+        var full = Path.GetFullPath(home).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).ToUpperInvariant();
+        return LegacyTpmKeyName + "." + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(full)))[..16];
+    }
+
+    /// <summary>The TPM key this folder may delete: only its own name. A name read from a key file is never deleted, since a
+    /// copied or restored folder (or the legacy shared name) names a key another folder still needs.</summary>
+    internal static string? OwnedTpmKey(string ownName) => ownName == LegacyTpmKeyName ? null : ownName;
+
+    private void DeleteOwnTpmKey()
+    {
+        if (OwnedTpmKey(_tpmKeyName) is not { } name) return;
+        try { if (CngKey.Exists(name, new CngProvider(TpmProvider))) CngKey.Open(name, new CngProvider(TpmProvider)).Delete(); }
+        catch (Exception ex) { Log.Debug($"TPM key delete skipped: {ex.GetType().Name}"); }
+    }
+
+    /// <summary>TPM key name stored in a tpm-mode key file; null for other modes or a short file.</summary>
+    internal static string? TpmNameInFile(byte[] file)
+    {
+        if (file.Length < 7 || !file.AsSpan(0, 4).SequenceEqual(Magic) || file[4] != 1) return null;
+        int nameLen = BinaryPrimitives.ReadUInt16LittleEndian(file.AsSpan(5));
+        return file.Length < 7 + nameLen ? null : Encoding.UTF8.GetString(file, 7, nameLen);
+    }
 
     public bool KeyLoaded { get { lock (_gate) return _key != null; } }
 
@@ -98,11 +144,19 @@ public sealed class KeyVault : IKeyVault, IDisposable
                 Log.Info($"data key created, protection {mode}");
                 return true;
             }
+            if (_fileMode == ModeInvalid) throw new KeyLostException("The key file is damaged.");
             if (_fileMode == ModePassphrase) return false;
             var bytes = File.ReadAllBytes(_keyFile);
             var loaded = _fileMode == ModeTpm ? UnwrapTpm(bytes, iso) : UnwrapDpapi(bytes, iso);
             SetLoaded(loaded, _fileMode);
             Log.Info($"data key loaded, protection {_fileMode}");
+            if (_fileMode == ModeTpm && TpmNameInFile(bytes) != _tpmKeyName)
+            {
+                // Wrapped under another folder's or the legacy shared TPM key: move it to this folder's own key, so a
+                // purge here never needs to delete a key that may still serve another folder. The old key is left alone.
+                try { WriteWrapped(loaded, ModeTpm, null); Log.Info("data key re-wrapped under this folder's TPM key"); }
+                catch (Exception ex) { Log.Warn("TPM key rename failed, old wrap kept", ex); }
+            }
             MigrateIfNeededLocked();
             return true;
         }
@@ -125,8 +179,10 @@ public sealed class KeyVault : IKeyVault, IDisposable
                 if (s.Security.KeyProtection == ModePassphrase)
                 {
                     // First passphrase for a key wrapped by tpm or dpapi: switch the wrap.
+                    bool wasTpm = _fileMode == ModeTpm;
                     WriteWrapped(_key, ModePassphrase, passphrase);
                     _fileMode = ModePassphrase;
+                    if (wasTpm) DeleteOwnTpmKey();
                     Log.Info("data key re-wrapped with passphrase");
                     return true;
                 }
@@ -165,6 +221,7 @@ public sealed class KeyVault : IKeyVault, IDisposable
         {
             WriteWrapped(_key, want, null);
             Log.Info($"data key re-wrapped from {_fileMode} to {want}");
+            if (_fileMode == ModeTpm) DeleteOwnTpmKey();   // the old wrap could still unwrap a backed-up key file
             _fileMode = want;
         }
         catch (Exception ex) { Log.Warn($"re-wrap to {want} failed, {_fileMode} kept", ex); }
@@ -191,8 +248,7 @@ public sealed class KeyVault : IKeyVault, IDisposable
                 }
             }
             catch (Exception ex) { Log.Error("key file destroy failed", ex); throw; }
-            try { if (CngKey.Exists(_tpmKeyName, new CngProvider(TpmProvider))) CngKey.Open(_tpmKeyName, new CngProvider(TpmProvider)).Delete(); }
-            catch (Exception ex) { Log.Debug($"TPM key delete skipped: {ex.GetType().Name}"); }
+            DeleteOwnTpmKey();   // never a name read from the file: see OwnedTpmKey
             _key?.Dispose();
             _key = null;
             _fileMode = null;
@@ -340,7 +396,13 @@ public sealed class KeyVault : IKeyVault, IDisposable
         var name = Encoding.UTF8.GetString(p.Slice(2, nameLen));
         int len = BinaryPrimitives.ReadInt32LittleEndian(p.Slice(2 + nameLen));
         var wrapped = p.Slice(6 + nameLen, len).ToArray();
-        using var key = CngKey.Open(name, new CngProvider(TpmProvider));
+        CngKey key;
+        try { key = CngKey.Open(name, new CngProvider(TpmProvider)); }
+        catch (CryptographicException ex) when (ex.HResult == unchecked((int)0x80090016))   // NTE_BAD_KEYSET
+        {
+            throw new KeyLostException("The TPM key that wraps the data key no longer exists.", ex);
+        }
+        using var _ = key;
         using var rsa = new RSACng(key);
         var plain = rsa.Decrypt(wrapped, RSAEncryptionPadding.OaepSHA1);
         try { return new SecureKey(plain, iso); }
@@ -439,7 +501,8 @@ public sealed class KeyVault : IKeyVault, IDisposable
         {
             var input = new Win32.DATA_BLOB { cbData = blob.Length, pbData = (nint)d };
             if (!Win32.CryptUnprotectData(ref input, 0, 0, 0, 0, Win32.CRYPTPROTECT_UI_FORBIDDEN, out var output))
-                throw new CryptographicException(Marshal.GetLastPInvokeError());
+                throw new KeyLostException("DPAPI cannot decrypt the data key (another Windows account, or its keys were reset).",
+                    new CryptographicException(Marshal.GetLastPInvokeError()));
             try
             {
                 var plain = new ReadOnlySpan<byte>((void*)output.pbData, output.cbData).ToArray();

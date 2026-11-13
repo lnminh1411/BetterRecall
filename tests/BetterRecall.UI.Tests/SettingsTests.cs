@@ -220,6 +220,31 @@ public class SettingsEditorTests
     }
 
     [Fact]
+    public async Task Save_IgnoresAKeyTheAgentAcceptedButTheUiRulesReject()
+    {
+        await using var h = new MockHarness();
+        var editor = new SettingsEditor();
+        var loaded = (await h.Api.SettingsGetAsync()).Value!;
+        loaded["ipc"]!["pipeName"] = @"\\.\pipe\MyScripts";   // Core strips the prefix; the UI pattern does not allow it
+        Assert.True(SettingsSchema.ValidateAll(loaded).ContainsKey("ipc.pipeName"));
+        editor.Load(loaded);
+        editor.Set("capture.intervalMs", 3000);
+        var lines = new List<string>();
+        var (outcome, _) = await editor.SaveAsync(new AgentApi(new RecordingClient(h.Client, lines)));
+        Assert.Equal(SaveOutcome.Saved, outcome);
+        Assert.Equal("settings set {\"capture\":{\"intervalMs\":3000}}", Assert.Single(lines));
+    }
+
+    [Fact]
+    public void Local_time_uses_the_offset_of_that_date()
+    {
+        var cet = TimeZoneInfo.FindSystemTimeZoneById("Central European Standard Time");
+        Assert.Equal(TimeSpan.FromHours(2), LocalTime.At(new DateTime(2026, 10, 20, 0, 0, 0), cet).Offset);   // summer time
+        Assert.Equal(TimeSpan.FromHours(1), LocalTime.At(new DateTime(2026, 11, 13, 0, 0, 0), cet).Offset);
+        Assert.Equal(new DateTime(2026, 3, 29, 3, 30, 0), LocalTime.At(new DateTime(2026, 3, 29, 2, 30, 0), cet).DateTime);   // skipped hour
+    }
+
+    [Fact]
     public async Task SaveKey_SendsOneKey_KeepsOtherPendingEdits()
     {
         await using var h = new MockHarness();

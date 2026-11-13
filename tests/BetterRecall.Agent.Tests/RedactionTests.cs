@@ -167,6 +167,8 @@ public class RedactionMasksTests
         Assert.Equal(2, CaptureService.MergeMasks(snap, false, m.All()).Length);
         m.Clear();
         Assert.Same(snap.MaskRects, CaptureService.MergeMasks(snap, false, m.All()));
+        // A stale guard (Current() returns the shared Closed snapshot) masks everything instead of nothing.
+        Assert.Equal([CaptureService.MaskEverything], CaptureService.MergeMasks(GuardSnapshot.Closed, true, []));
     }
 
     [Fact]

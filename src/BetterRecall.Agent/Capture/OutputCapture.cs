@@ -164,6 +164,7 @@ internal sealed unsafe class OutputCapture : IDisposable
             {
                 Log.Warn($"capture {Info.Index}", ex);
                 ResetDuplication("error");
+                DropDeviceIfRemoved();
                 Thread.Sleep(500);
             }
         }
@@ -228,7 +229,17 @@ internal sealed unsafe class OutputCapture : IDisposable
         {
             State = "unavailable";
             Log.Debug($"duplication output {Info.Index} failed: 0x{ex.HResult:X8}");
+            DropDeviceIfRemoved();   // a removed device fails DuplicateOutput forever; the next try gets a new one
             return false;
+        }
+    }
+
+    private void DropDeviceIfRemoved()
+    {
+        if (_dev is { } d && _devices.InvalidateIfRemoved(d))
+        {
+            lock (d.Gate) { _latest?.Dispose(); _latest = null; }
+            _dev = null;
         }
     }
 

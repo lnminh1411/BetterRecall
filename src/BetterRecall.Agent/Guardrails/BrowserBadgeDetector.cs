@@ -57,12 +57,14 @@ internal sealed unsafe class BrowserBadgeDetector : IDisposable
     public BadgeResult Check(nint hwnd)
     {
         long now = Environment.TickCount64;
-        if (_cache.TryGetValue(hwnd, out var c) && now - c.At < (c.Result == BadgeResult.Private ? 600_000 : 30_000)) return c.Result;
+        // Failed probes are cached briefly too: background browser windows are probed on every scan otherwise.
+        if (_cache.TryGetValue(hwnd, out var c) && now - c.At < c.Result switch { BadgeResult.Private => 600_000, BadgeResult.CheckFailed => 5_000, _ => 30_000 })
+            return c.Result;
         var sw = Stopwatch.StartNew();
         var r = Probe(hwnd);
         LastCheckMs = sw.Elapsed.TotalMilliseconds;
         if (_cache.Count > 256) _cache.Clear();
-        if (r != BadgeResult.CheckFailed) _cache[hwnd] = (r, now);
+        _cache[hwnd] = (r, now);
         return r;
     }
 

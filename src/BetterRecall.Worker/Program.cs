@@ -44,7 +44,8 @@ public static class Program
             using var engine = EngineFactory.Create(settings, home);
             var current = settings;
             var handler = new RequestHandler(engine, () => current);
-            var exit = await WorkerLoop.RunAsync(pipe, handler, TimeSpan.FromSeconds(settings.IdleExitS), CancellationToken.None);
+            var exit = await WorkerLoop.RunAsync(pipe, handler, TimeSpan.FromSeconds(settings.IdleExitS), CancellationToken.None,
+                () => { try { return AgentPipe.HasPendingInput(pipe.SafePipeHandle); } catch { return false; } });
             Log.Info($"exit {exit}");
             return exit == LoopExit.ProtocolError ? 5 : 0;
         }

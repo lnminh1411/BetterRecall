@@ -15,7 +15,7 @@ internal sealed class WorkerClient(WorkerSupervisor supervisor)
     {
         var conn = await supervisor.EnsureAsync(ct).ConfigureAwait(false);
         var reply = await conn.SendAsync(req, payload, ct).ConfigureAwait(false);
-        if (!reply.Header.Ok) throw new WorkerException(reply.Header.Error ?? "Internal error.");
+        if (!reply.Header.Ok) throw new WorkerReplyException(reply.Header.Error ?? "Internal error.");
         supervisor.MarkHealthy();
         return reply;
     }

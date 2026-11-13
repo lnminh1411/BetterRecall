@@ -37,6 +37,18 @@ public class RealModelTests(ITestOutputHelper output)
         }
     }
 
+    /// <summary>Test data folder: BR_REAL_HOME when set (keeps the compiled-model cache between runs), else a fresh
+    /// TestEnv folder. Never the installed app's data folder: these tests overwrite settings.json and delete caches.</summary>
+    private static string TestHome()
+    {
+        var home = Environment.GetEnvironmentVariable("BR_REAL_HOME");
+        if (string.IsNullOrWhiteSpace(home)) return TestEnv.NewDir("real-home");
+        var real = Path.GetFullPath(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "BetterRecall"));
+        Assert.False(string.Equals(Path.GetFullPath(home).TrimEnd('\\'), real, StringComparison.OrdinalIgnoreCase),
+            "BR_REAL_HOME points at the installed app's data folder; use a separate folder (its settings.json would be overwritten).");
+        return home;
+    }
+
     [Fact]
     public async Task Real_models_end_to_end_in_process()
     {
@@ -47,8 +59,7 @@ public class RealModelTests(ITestOutputHelper output)
             return;
         }
 
-        var home = Environment.GetEnvironmentVariable("BR_REAL_HOME");
-        Assert.True(!string.IsNullOrWhiteSpace(home), "BR_REAL_HOME environment variable is required when BR_REAL_MODELS is set.");
+        var home = TestHome();
 
         var device = Environment.GetEnvironmentVariable("BR_REAL_DEVICE");
         if (string.IsNullOrWhiteSpace(device)) device = "auto";
@@ -230,8 +241,7 @@ public class RealModelTests(ITestOutputHelper output)
             return;
         }
 
-        var realHome = Environment.GetEnvironmentVariable("BR_REAL_HOME");
-        Assert.True(!string.IsNullOrWhiteSpace(realHome), "BR_REAL_HOME environment variable is required when BR_REAL_MODELS is set.");
+        TestHome();   // refuses the installed app's data folder
 
         var workerDir = Environment.GetEnvironmentVariable("BR_REAL_WORKER_DIR");
         if (string.IsNullOrWhiteSpace(workerDir) || !Directory.Exists(workerDir))
@@ -240,14 +250,7 @@ public class RealModelTests(ITestOutputHelper output)
             return;
         }
 
-        var parent = Directory.GetParent(Path.GetFullPath(realHome))?.FullName
-                     ?? throw new InvalidOperationException("BR_REAL_HOME has no parent directory");
-        var root = Path.Combine(parent, "e2e-exe");
-        if (Directory.Exists(root))
-        {
-            Directory.Delete(root, recursive: true);
-        }
-        Directory.CreateDirectory(root);
+        var root = TestEnv.NewDir("e2e-exe");   // never next to BR_REAL_HOME: the old code deleted <parent>\e2e-exe
 
         var install = Path.Combine(root, "install");
         CopyTree(workerDir, Path.Combine(install, "worker"));

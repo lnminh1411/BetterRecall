@@ -199,6 +199,21 @@ public class KeyVaultTests
     }
 
     [Fact]
+    public void Damaged_key_file_reports_key_lost_and_purge_replaces_it()
+    {
+        using var h = new TempHome(null);
+        var s = With("dpapi");
+        Directory.CreateDirectory(Path.GetDirectoryName(DataPaths.KeyFile(h.Path))!);
+        File.WriteAllBytes(DataPaths.KeyFile(h.Path), [1, 2, 3]);
+        using var v = new KeyVault(h.Path, () => s, probeHello: false);   // used to throw and stop the agent
+        Assert.Throws<KeyLostException>(() => v.TryLoadSilent());
+        Assert.False(v.NeedsPassphrase);
+        v.DestroyKey();
+        Assert.True(v.TryLoadSilent());
+        Assert.Equal("dpapi", v.Protection);
+    }
+
+    [Fact]
     public void Argon2id_matches_rfc9106_shape_and_is_deterministic()
     {
         var salt = new byte[16];
@@ -224,6 +239,59 @@ public class KeyVaultTests
     {
         var available = await HelloInterop.CheckAvailableAsync(CancellationToken.None);
         File.WriteAllText(Path.Combine(TestEnv.Root, "hello-available.txt"), available.ToString());
+    }
+
+    [Fact]
+    public void Tpm_key_name_is_per_data_folder_and_never_the_legacy_shared_name()
+    {
+        var a = KeyVault.TpmKeyNameFor(@"C:\Users\x\AppData\Local\BetterRecall");
+        Assert.StartsWith(KeyVault.LegacyTpmKeyName + ".", a);
+        Assert.Equal(KeyVault.LegacyTpmKeyName.Length + 17, a.Length);
+        Assert.Equal(a, KeyVault.TpmKeyNameFor(@"c:\users\x\appdata\local\betterrecall\"));
+        Assert.NotEqual(a, KeyVault.TpmKeyNameFor(@"C:\Users\x\AppData\Local\Temp\h-1"));
+    }
+
+    [Fact]
+    public void Destroy_deletes_only_this_folders_own_tpm_key()
+    {
+        var own = KeyVault.TpmKeyNameFor(@"K:\t\h-1");
+        Assert.Equal(own, KeyVault.OwnedTpmKey(own));
+        Assert.Null(KeyVault.OwnedTpmKey(KeyVault.LegacyTpmKeyName));   // shared by every pre-0.2 folder
+    }
+
+    [Fact]
+    public void Tpm_name_is_read_from_a_tpm_key_file_only()
+    {
+        var name = "BetterRecall.DataKeyWrap"u8.ToArray();
+        var file = new byte[7 + name.Length + 4 + 3];
+        "BRK1"u8.CopyTo(file);
+        file[4] = 1;
+        BitConverter.GetBytes((ushort)name.Length).CopyTo(file, 5);
+        name.CopyTo(file, 7);
+        Assert.Equal(KeyVault.LegacyTpmKeyName, KeyVault.TpmNameInFile(file));
+        file[4] = 3;
+        Assert.Null(KeyVault.TpmNameInFile(file));
+        Assert.Null(KeyVault.TpmNameInFile([1, 2]));
+    }
+
+    /// <summary>A dpapi vault's purge leaves another TPM key alone. Opt in with BR_TEST_TPM=1.</summary>
+    [Fact]
+    public void Dpapi_destroy_leaves_a_tpm_key_it_does_not_own()
+    {
+        if (Environment.GetEnvironmentVariable("BR_TEST_TPM") != "1") return;
+        var other = "BetterRecall.Test." + Guid.NewGuid().ToString("N")[..8];
+        var p = new CngKeyCreationParameters { Provider = new CngProvider(KeyVault.TpmProvider), KeyUsage = CngKeyUsages.Decryption };
+        CngKey.Create(CngAlgorithm.Rsa, other, p).Dispose();
+        try
+        {
+            using var h = new TempHome(null);
+            var s = With("dpapi");
+            using var v = new KeyVault(h.Path, () => s, probeHello: false);
+            v.TryLoadSilent();
+            v.DestroyKey();
+            Assert.True(CngKey.Exists(other, new CngProvider(KeyVault.TpmProvider)));
+        }
+        finally { CngKey.Open(other, new CngProvider(KeyVault.TpmProvider)).Delete(); }
     }
 
     /// <summary>Creates and deletes a throwaway TPM key. Opt in with BR_TEST_TPM=1.</summary>

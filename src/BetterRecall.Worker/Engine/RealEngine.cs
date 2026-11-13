@@ -213,18 +213,21 @@ public sealed class RealEngine : IWorkerEngine
             if (dev is { Kind: DeviceKind.Gpu } && gpu is not null && dev.Id != gpu.Id) dev = null;
             if (dev is not null && textDev is not null && m is not null)
             {
+                Embedder? e = null;
                 try
                 {
                     var sw = Stopwatch.StartNew();
-                    var e = new Embedder(BackendFor(dev), dev, m, _s.ImageTokens, CompiledDir(m, key), textDev);
+                    e = new Embedder(BackendFor(dev), dev, m, _s.ImageTokens, CompiledDir(m, key), textDev);
                     e.LoadAll();
                     _embedder = e; _choice = cached.Chosen;
                     Log.Info($"device from cache: {_choice.Device} {_choice.Ep} {_choice.Model}, load {sw.ElapsedMilliseconds} ms");
                     return cached.Bench ?? new BenchResult(_choice.Device, []);
                 }
-                catch (Exception e) when (e is DeviceFailedException or InvalidDataException or IOException)
+                catch (Exception ex) when (ex is DeviceFailedException or InvalidDataException or IOException)
                 {
-                    Log.Warn($"cached device failed to load ({e.Message}); benchmarking again");
+                    // Free the graphs that did compile (an NPU vision tower holds its memory) before the re-bench loads them again.
+                    e?.Dispose();
+                    Log.Warn($"cached device failed to load ({ex.Message}); benchmarking again");
                 }
             }
         }
@@ -480,12 +483,21 @@ public sealed class RealEngine : IWorkerEngine
         if (_s.OcrEngine == "windows") { lines = EnsureWindowsOcr().Read(rgb); engine = "windows"; }
         else { lines = EnsureOcr().Read(rgb); engine = "onnx"; }
         Array.Clear(rgb.Rgb);
+        bool entitiesMissing = false;
         if (entities && lines.Length > 0)
         {
-            var found = EnsureNer().Find(lines.Select(l => l.Text).ToList());
-            lines = lines.Select((l, i) => l with { Entities = found[i] ?? [] }).ToArray();
+            // A missing NER model must not throw away the OCR lines: without them every pattern redaction (cards, IBANs,
+            // birth dates) would be skipped too. Report it instead; the agent warns that names and addresses stay.
+            PiiNer? ner = null;
+            try { ner = EnsureNer(); }
+            catch (ModelNotInstalledException) { entitiesMissing = true; }
+            if (ner is not null)
+            {
+                var found = ner.Find(lines.Select(l => l.Text).ToList());
+                lines = lines.Select((l, i) => l with { Entities = found[i] ?? [] }).ToArray();
+            }
         }
-        return new OcrResult(lines, engine, Math.Round(sw.Elapsed.TotalMilliseconds, 2));
+        return new OcrResult(lines, engine, Math.Round(sw.Elapsed.TotalMilliseconds, 2), entitiesMissing);
     }
 
     /// <summary>ocr.languages as codes: the setting's list, or for "auto" the Windows user languages (English added

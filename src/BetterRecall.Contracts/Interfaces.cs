@@ -83,6 +83,10 @@ public interface IStore : IDisposable
     void AddAiUsage(string day, int requests, long tokens) { }
 }
 
+/// <summary>Thrown by Add*Capture/AddReplayFrame for an item stamped before the last "purge last N" (panic flush):
+/// frames, OCR and transcripts still in flight when the purge ran must not land inside the purged window.</summary>
+public sealed class PurgedWindowException(DateTimeOffset ts) : InvalidOperationException($"Capture at {ts:O} is inside a purged window.");
+
 public sealed record PurgeScope(string Kind, DateTimeOffset? From = null, DateTimeOffset? To = null, string? App = null, string? Site = null, string? Id = null)
 {
     public static PurgeScope ForSite(string site) => new("site", Site: site);

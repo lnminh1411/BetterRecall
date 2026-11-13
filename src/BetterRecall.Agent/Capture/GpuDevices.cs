@@ -158,6 +158,22 @@ internal sealed class GpuDeviceCache : IDisposable
         }
     }
 
+    /// <summary>Drops <paramref name="dev"/> when the driver removed or reset it (TDR, driver update), so the next Get
+    /// creates a working device. Only that instance: another caller may already have replaced it.</summary>
+    public bool InvalidateIfRemoved(GpuDevice dev)
+    {
+        bool removed;
+        try { removed = dev.Device.DeviceRemovedReason.Failure; }
+        catch (ObjectDisposedException) { return true; }   // already invalidated by another output
+        if (!removed) return false;
+        lock (_gate)
+        {
+            if (_devices.TryGetValue(dev.Luid, out var d) && ReferenceEquals(d, dev)) { _devices.Remove(dev.Luid); d.Dispose(); }
+        }
+        Log.Warn($"d3d11 device on adapter {dev.Luid:X} was removed; recreating");
+        return true;
+    }
+
     public void Dispose()
     {
         lock (_gate)

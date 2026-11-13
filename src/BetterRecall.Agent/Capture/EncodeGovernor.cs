@@ -127,6 +127,18 @@ internal sealed class EncodeGovernor<T> where T : IDisposable
     private bool Fits(EncodeLevel l) =>
         _used10 + _estimate[(int)l] <= Window10Target * Limit10Ms && _used60 + _estimate[(int)l] <= Window60Target * Limit60Ms;
 
+    /// <summary>Counts CPU spent outside the queue (the replay sample encode, also stored as the keyframe when the
+    /// formats match) against the same windows, so the budget covers every keyframe-related encode.</summary>
+    public void Charge(double ms)
+    {
+        if (ms <= 0) return;
+        long now = _clockMs();
+        Prune(now);
+        _samples.Enqueue((now, ms));
+        _used10 += ms;
+        _used60 += ms;
+    }
+
     private void Run(T item, EncodeLevel level)
     {
         double ms;

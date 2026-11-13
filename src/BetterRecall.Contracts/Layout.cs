@@ -33,6 +33,13 @@ public static class DataPaths
         return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "BetterRecall");
     }
 
+    /// <summary>True for the installed app's folder (%LOCALAPPDATA%\BetterRecall); false for a BETTERRECALL_HOME a dev
+    /// build or test points elsewhere.</summary>
+    public static bool IsDefaultHome(string home) => string.Equals(
+        Path.GetFullPath(home).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "BetterRecall"),
+        StringComparison.OrdinalIgnoreCase);
+
     public static string SettingsFile(string home) => Path.Combine(home, "settings.json");
     public static string StoreDb(string home) => Path.Combine(home, "store.db");
     public static string KeyframesDir(string home) => Path.Combine(home, "keyframes");
@@ -62,6 +69,14 @@ public static class PipeNames
         return configured;
     }
 
+    /// <summary>Base names a configured public pipe may not take: they belong to the UI, MCP and worker pipes.</summary>
+    public static bool Reserved(string configuredBase)
+    {
+        var b = Base(configuredBase);
+        return new[] { "BetterRecall.ui", "BetterRecall.mcp", "BetterRecall.worker" }
+            .Any(r => b.StartsWith(r, StringComparison.OrdinalIgnoreCase));
+    }
+
     public static string Public(string configuredBase, string sid) => $"{Base(configuredBase)}.{sid}";
     public static string Mcp(string sid) => $"BetterRecall.mcp.{sid}";
     public static string Ui(string sid) => $"BetterRecall.ui.{sid}";
@@ -75,6 +90,16 @@ public static class PipeNames
     /// <summary>Auto-reset event that asks the running agent to quit, as the tray Quit does. The single-file launcher
     /// sets it when a different version is already running, so the new one can take over.</summary>
     public const string AgentQuitEvent = @"Local\BetterRecall.Agent.Quit";
+
+    /// <summary>Single-instance mutex and quit event for one data folder. The installed folder keeps the plain names
+    /// (older launchers and agents use them); any other folder gets a suffix, so a dev or test agent never blocks or
+    /// stops the user's real one.</summary>
+    public static string AgentMutexFor(string home) => Scoped(AgentMutex, home);
+    public static string AgentQuitEventFor(string home) => Scoped(AgentQuitEvent, home);
+
+    private static string Scoped(string name, string home) => DataPaths.IsDefaultHome(home) ? name
+        : name + "." + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(Path.GetFullPath(home).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).ToUpperInvariant())))[..16];
 }
 
 /// <summary>Writes DateTimeOffset as ISO 8601 UTC with Z (research.md 7.5). Reads any ISO 8601 offset.</summary>

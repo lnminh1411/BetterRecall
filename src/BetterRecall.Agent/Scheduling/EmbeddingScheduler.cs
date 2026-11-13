@@ -104,30 +104,60 @@ internal sealed class EmbeddingScheduler : IAsyncDisposable
         {
             PendingJob? job;
             lock (_qlock) if (!_queue.TryDequeue(out job)) break;
+            bool requeued = false;
             try
             {
                 await ProcessAsync(store, job, s, ct).ConfigureAwait(false);
             }
-            catch (WorkerException ex)
+            catch (WorkerReplyException ex) when (ex.ModelMissing)
             {
-                // Worker unavailable or busy restarting: keep the job, try later.
-                lock (_qlock)
-                {
-                    var rest = _queue.ToArray();
-                    _queue.Clear();
-                    _queue.Enqueue(job);
-                    foreach (var r in rest) _queue.Enqueue(r);
-                }
+                // A model is not installed (embedder, or the NSFW detector the filter asks for, which fails closed):
+                // every job fails the same way. Keep them for when the models arrive, and say so.
+                requeued = Requeue(job);
+                Log.Warn($"indexing waits: {ex.Message} (retry in 10 min)");
+                LastDecision = "model-missing";
+                return TimeSpan.FromMinutes(10);
+            }
+            catch (WorkerReplyException ex)
+            {
+                // The worker rejected this job (unreadable image, bad text): settle it instead of retrying forever.
+                store.FailEmbedding(job.Id, ex.Message);
+                Log.Debug($"embedding failed for {job.Id}: {ex.Message}");
+            }
+            catch (Exception ex) when (ex is WorkerException || (ex is OperationCanceledException && !ct.IsCancellationRequested))
+            {
+                // Worker unavailable, restarting, or its start timed out: keep the job (image intact), try later.
+                requeued = Requeue(job);
                 Log.Debug($"scheduler deferred: {ex.Message}");
                 LastDecision = "worker-unavailable";
                 return TimeSpan.FromSeconds(15);
             }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // Local failure (image decode): settle it so the queue moves on.
+                store.FailEmbedding(job.Id, ex.GetType().Name);
+                Log.Warn($"embedding job {job.Id}", ex);
+            }
             finally
             {
-                if (job.Image is not null) Array.Clear(job.Image);
+                // A re-queued job keeps its image; anything else is done with it.
+                if (!requeued && job.Image is not null) Array.Clear(job.Image);
             }
         }
         return decision.NextCheck;
+    }
+
+    /// <summary>Puts the job back at the head of the queue.</summary>
+    private bool Requeue(PendingJob job)
+    {
+        lock (_qlock)
+        {
+            var rest = _queue.ToArray();
+            _queue.Clear();
+            _queue.Enqueue(job);
+            foreach (var r in rest) _queue.Enqueue(r);
+        }
+        return true;
     }
 
     private async Task ProcessAsync(IStore store, PendingJob job, Settings s, CancellationToken ct)

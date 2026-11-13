@@ -325,7 +325,7 @@ public sealed partial class SettingsStore : ISettingsStore
         ("hotkeys.timeline", s => HotkeyOk(s.Hotkeys, s.Hotkeys.Timeline)),
         ("hotkeys.home", s => HotkeyOk(s.Hotkeys, s.Hotkeys.Home)),
         ("hotkeys.lock", s => HotkeyOk(s.Hotkeys, s.Hotkeys.Lock)),
-        ("ipc.pipeName", s => s.Ipc.PipeName != null && PipeNameRegex().IsMatch(PipeNames.Base(s.Ipc.PipeName))),
+        ("ipc.pipeName", s => s.Ipc.PipeName != null && PipeNameRegex().IsMatch(PipeNames.Base(s.Ipc.PipeName)) && !PipeNames.Reserved(s.Ipc.PipeName)),
         ("ipc.allowClients", s => Strings(s.Ipc.AllowClients, IsAbs)),
         ("ipc.maxResults", s => Range(s.Ipc.MaxResults, 1, 200)),
         ("ipc.defaultResults", s => Range(s.Ipc.DefaultResults, 1, s.Ipc.MaxResults)),
