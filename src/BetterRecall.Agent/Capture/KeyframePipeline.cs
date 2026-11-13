@@ -285,7 +285,9 @@ internal sealed class KeyframePipeline : IAsyncDisposable
         {
             if (sample)
             {
+                double c0 = Win32.CurrentThreadCpuMs();
                 sampleBytes = Encode(g, sampleFormat, Math.Clamp(s.Keyframes.Quality, 30, 95));
+                lock (_governor) _governor.Charge(Math.Max(0, Win32.CurrentThreadCpuMs() - c0));
                 Sampler!.Add(new Replay.ReplaySampler.Sample(req.Ts, g.Monitor, req.App, r.Title, req.Site, g.Width, g.Height,
                     sampleBytes, ImageCodec.Mime(sampleFormat)), Math.Clamp(s.Replay.Seconds, 15, 600) + 10);
             }

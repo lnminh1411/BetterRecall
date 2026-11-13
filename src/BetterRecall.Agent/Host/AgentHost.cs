@@ -398,9 +398,11 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
                 _sessionLocked = true;
                 if (S.Privacy.PauseOnLock) _pause.Set("lock");
                 if (S.Security.LockOnSessionLock) _gate.Close();
+                _sampler.Clear();   // search frames of a saved replay never reach back past a lock
                 break;
             case Win32.WTS_SESSION_UNLOCK:
             case Win32.WTS_CONSOLE_CONNECT:
+            case Win32.WTS_REMOTE_CONNECT:   // RDP reconnect: no SESSION_UNLOCK follows, the lock pause would stick
                 _sessionLocked = false;
                 _pause.Clear("lock");
                 break;
@@ -570,6 +572,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
     {
         _gate.Close();
         _thumbs.ClearCache();
+        _sampler.Clear();
         RaiseStatus(force: true);
     }
 

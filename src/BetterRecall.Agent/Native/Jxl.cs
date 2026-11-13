@@ -131,7 +131,7 @@ internal static unsafe class Jxl
             }
             enc = _encoderCreate(0);
             if (enc == 0) throw new InvalidOperationException("JxlEncoderCreate failed.");
-            runner = _runnerCreate(0, (nuint)Math.Clamp(Environment.ProcessorCount / 2, 1, 4));
+            runner = _runnerCreate(0, 1);   // one thread: the keyframe CPU budget measures only the keyframe thread
             if (runner != 0) Check(_encoderSetParallelRunner(enc, _runner, runner), "runner");
             new Span<byte>(basic, BasicInfoSize).Clear();
             _encoderInitBasicInfo(basic);

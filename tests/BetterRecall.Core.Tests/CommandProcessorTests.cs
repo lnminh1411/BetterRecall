@@ -205,13 +205,14 @@ public sealed class CommandProcessorTests : IDisposable
     }
 
     [Fact]
-    public async Task Rate_limit_per_connection()
+    public async Task Rate_limit_per_pipe_survives_reconnects()
     {
         Set("{\"ipc\":{\"maxSearchPerMinute\":3}}");
         var s = new ClientSession(PipeKind.Public, 1, "x");
         for (int i = 0; i < 3; i++) Assert.True((await Call(s, "search acme")).Ok);
         Assert.Equal("Rate limit exceeded.", await Err(s, "search acme"));
-        Assert.True((await Call(new ClientSession(PipeKind.Public, 2, "y"), "search acme")).Ok);
+        // A new connection on the same pipe shares the window (reconnecting used to reset it).
+        Assert.Equal("Rate limit exceeded.", await Err(new ClientSession(PipeKind.Public, 2, "y"), "search acme"));
         _now = _now.AddSeconds(61);
         Assert.True((await Call(s, "search acme")).Ok);
         for (int i = 0; i < 10; i++) Assert.True((await Call(Ui, "search acme")).Ok); // UI is not rate limited
@@ -280,6 +281,39 @@ public sealed class CommandProcessorTests : IDisposable
         Assert.Equal(["pause  ipc", "pause 60 ipc", "resume ipc"], _agent.Calls);
         Assert.True((await Call(Ui, "pause 30")).Ok);
         Assert.Equal("pause 30 user", _agent.Calls[^1]);
+    }
+
+    [Fact]
+    public async Task Purge_last_confirm_covers_captures_stored_after_the_preview()
+    {
+        var s = new ClientSession(PipeKind.Ui, 7, @"C:\app\ui\BetterRecall.UI.exe");
+        var token = (await Call(s, "purge last 3600")).Data.GetProperty("confirm").GetString()!;
+        await Task.Delay(10);
+        var late = _t.Store.AddScreenCapture(Caps.Screen(DateTimeOffset.UtcNow, "chrome.exe", "stored after the preview"));
+        await Task.Delay(10);
+        Assert.True((await Call(s, "purge confirm " + token)).Ok);
+        Assert.Null(_t.Store.Get(late));
+    }
+
+    [Fact]
+    public async Task Locked_gate_blocks_public_purge_and_security_settings()
+    {
+        Set("{\"ipc\":{\"allowControl\":true,\"allowPurge\":true}}");
+        _storeOpen = false;   // read gate closed
+        Assert.Equal(CommandProcessor.ErrLocked, await Err(Pub, "purge app chrome.exe"));
+        Assert.Equal(CommandProcessor.ErrLocked, await Err(Ui, "settings set {\"security\":{\"keyProtection\":\"dpapi\"}}"));
+        Assert.Equal(CommandProcessor.ErrLocked, await Err(Ui, "settings set {\"ai\":{\"enabled\":true}}"));
+        Assert.True((await Call(Ui, "settings set {\"ui\":{\"theme\":\"dark\"}}")).Ok);   // harmless groups still work
+    }
+
+    [Theory]
+    [InlineData("BetterRecall.mcp")]
+    [InlineData(@"\\.\pipe\BetterRecall.ui")]
+    [InlineData("BetterRecall.worker.x")]
+    public void Public_pipe_may_not_take_a_reserved_name(string name)
+    {
+        var json = JsonSerializer.Serialize(new { ipc = new { pipeName = name } });
+        Assert.NotNull(_settings.TryUpdate(JsonDocument.Parse(json).RootElement));
     }
 
     [Fact]

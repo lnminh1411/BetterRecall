@@ -43,6 +43,7 @@ public sealed class KeyVault : IKeyVault, IDisposable
     private string? _fileMode;
     private TaskCompletionSource _loaded = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private volatile bool _helloAvailable;
+    private volatile bool _helloChecked;
 
     public KeyVault(string home, Func<Settings> settings, string? tpmKeyName = null, bool probeHello = true)
     {
@@ -57,7 +58,8 @@ public sealed class KeyVault : IKeyVault, IDisposable
             _fileMode = ModeInvalid;
         }
         if (probeHello)
-            _ = HelloInterop.CheckAvailableAsync(CancellationToken.None).ContinueWith(t => _helloAvailable = t.IsCompletedSuccessfully && t.Result, TaskScheduler.Default);
+            _ = HelloInterop.CheckAvailableAsync(CancellationToken.None).ContinueWith(t => { _helloAvailable = t.IsCompletedSuccessfully && t.Result; _helloChecked = true; }, TaskScheduler.Default);
+        else _helloChecked = true;
     }
 
     /// <summary>Mode of the key file when it exists, else the mode a new key would use.</summary>
@@ -70,6 +72,9 @@ public sealed class KeyVault : IKeyVault, IDisposable
     }
 
     public bool HelloAvailable => _helloAvailable;
+
+    /// <summary>The Windows Hello availability check has finished (HelloAvailable is meaningful).</summary>
+    public bool HelloChecked => _helloChecked;
 
     /// <summary>TPM key name for a data folder: "BetterRecall.DataKeyWrap." + 16 hex of SHA-256 over the full path
     /// (upper case, no trailing separator). Key files store the name they were wrapped with, so older files keep

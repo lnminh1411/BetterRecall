@@ -45,8 +45,8 @@ public sealed partial class DangerZonePage : Page, IDataPage
     private async void Export_Click(object sender, RoutedEventArgs e)
     {
         if (ExportFromDate.Date is not { } fd || ExportToDate.Date is not { } td) return;
-        var from = new DateTimeOffset(fd.Date + ExportFromTime.Time, DateTimeOffset.Now.Offset);
-        var to = new DateTimeOffset(td.Date + ExportToTime.Time, DateTimeOffset.Now.Offset);
+        var from = Logic.LocalTime.At(fd.Date + ExportFromTime.Time);
+        var to = Logic.LocalTime.At(td.Date + ExportToTime.Time);
         if (from >= to)
         {
             Show(InfoBarSeverity.Error, Loc.Get("Danger_RangeInvalid"));
@@ -117,8 +117,8 @@ public sealed partial class DangerZonePage : Page, IDataPage
     private async void PurgeRange_Click(object sender, RoutedEventArgs e)
     {
         if (FromDate.Date is not { } fd || ToDate.Date is not { } td) return;
-        var from = new DateTimeOffset(fd.Date + FromTime.Time, DateTimeOffset.Now.Offset);
-        var to = new DateTimeOffset(td.Date + ToTime.Time, DateTimeOffset.Now.Offset);
+        var from = Logic.LocalTime.At(fd.Date + FromTime.Time);
+        var to = Logic.LocalTime.At(td.Date + ToTime.Time);
         if (from >= to)
         {
             Show(InfoBarSeverity.Error, Loc.Get("Danger_RangeInvalid"));

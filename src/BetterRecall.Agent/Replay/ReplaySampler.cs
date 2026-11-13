@@ -47,8 +47,10 @@ internal sealed class ReplaySampler
         for (int i = _ring.Count - 1; i >= 0; i--)
         {
             if (_ring[i].Ts >= cutoff) continue;
-            // Keep the newest old sample per monitor: on a still screen it is the frame the replay starts with.
-            if (!_ring.Skip(i + 1).Any(x => x.Monitor == _ring[i].Monitor && x.Ts < cutoff)) continue;
+            // Keep the newest old sample per monitor: on a still screen it is the frame the replay starts with. Not
+            // forever: one from hours ago (before a pause or a purge) would join the next saved replay as offset 0.
+            bool stale = _ring[i].Ts < cutoff - TimeSpan.FromSeconds(60);
+            if (!stale && !_ring.Skip(i + 1).Any(x => x.Monitor == _ring[i].Monitor && x.Ts < cutoff)) continue;
             Array.Clear(_ring[i].Bytes);
             _ring.RemoveAt(i);
         }

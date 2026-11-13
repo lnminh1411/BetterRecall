@@ -22,7 +22,9 @@ public sealed class ClientSession(PipeKind kind, int pid, string image)
     public string PipeLabel => Kind switch { PipeKind.Ui => "ui", PipeKind.Mcp => "mcp", _ => "ipc" };
 }
 
-internal sealed record PurgeTicket(PurgeScope? Scope, int Rows, DateTimeOffset Expires);
+/// <param name="Span">"purge last N": the window is recomputed at confirm, so captures stored between preview and
+/// confirm (the newest, often most sensitive) are deleted too.</param>
+internal sealed record PurgeTicket(PurgeScope? Scope, int Rows, DateTimeOffset Expires, TimeSpan? Span = null);
 
 /// <summary>describe preview: the exact image the confirmed send will use.</summary>
 internal sealed record DescribeTicket(string CaptureId, Ai.OutgoingImage Image, DateTimeOffset Expires);
@@ -128,6 +130,7 @@ public sealed partial class CommandProcessor
     internal Func<DateTimeOffset> Now { get; set; } = () => DateTimeOffset.UtcNow;
 
     private readonly Ai.ChatService? _chat;
+    private readonly Queue<DateTimeOffset> _publicSearches = new(), _mcpSearches = new();
 
     /// <summary>Panic: forget chat approvals and unsaved chats, and delete saved chats. The read gate is already closed,
     /// so this goes to the store directly.</summary>
@@ -172,6 +175,7 @@ public sealed partial class CommandProcessor
         var stream = conn.Stream;
         var reader = new LineReader(stream, 8192);
         Task<string?>? next = null; // read started while a long request ran; it is the next request line
+        int maxLine = conn.Kind == PipeKind.Ui ? LineProtocol.MaxUiRequestBytes : LineProtocol.MaxRequestBytes;
         while (!ct.IsCancellationRequested)
         {
             string? line;
@@ -181,11 +185,11 @@ public sealed partial class CommandProcessor
                 try
                 {
                     if (next != null) { var pending = next; next = null; line = await pending.ConfigureAwait(false); }
-                    else line = await reader.ReadLineAsync(LineProtocol.MaxRequestBytes, idle.Token).ConfigureAwait(false);
+                    else line = await reader.ReadLineAsync(maxLine, idle.Token).ConfigureAwait(false);
                 }
-                catch (LineTooLongException)
+                catch (LineTooLongException ex)
                 {
-                    await WriteAsync(stream, Envelope.Error(LineProtocol.TooLongError), ct).ConfigureAwait(false);
+                    await WriteAsync(stream, Envelope.Error(ex.Message), ct).ConfigureAwait(false);
                     return;
                 }
                 catch (OperationCanceledException) { return; }
@@ -197,7 +201,7 @@ public sealed partial class CommandProcessor
             {
                 // No per-request timeout. Closing the pipe cancels the request: keep a read pending and cancel on end of stream.
                 using var req = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                next = reader.ReadLineAsync(LineProtocol.MaxRequestBytes, ct);
+                next = reader.ReadLineAsync(maxLine, ct);
                 _ = next.ContinueWith(t =>
                 {
                     if (t.IsFaulted || t.IsCanceled || t.Result == null) { try { req.Cancel(); } catch (ObjectDisposedException) { } }
@@ -584,10 +588,15 @@ public sealed partial class CommandProcessor
     {
         if (s.Kind == PipeKind.Ui) return false;
         var now = Now();
-        while (s.SearchTimes.Count > 0 && now - s.SearchTimes.Peek() >= TimeSpan.FromMinutes(1)) s.SearchTimes.Dequeue();
-        if (s.SearchTimes.Count >= S.Ipc.MaxSearchPerMinute) return true;
-        s.SearchTimes.Enqueue(now);
-        return false;
+        // Per pipe kind, not per connection: reconnecting used to reset the window.
+        var times = s.Kind == PipeKind.Mcp ? _mcpSearches : _publicSearches;
+        lock (times)
+        {
+            while (times.Count > 0 && now - times.Peek() >= TimeSpan.FromMinutes(1)) times.Dequeue();
+            if (times.Count >= S.Ipc.MaxSearchPerMinute) return true;
+            times.Enqueue(now);
+            return false;
+        }
     }
 
     private async Task<Reply> SearchAsync(ClientSession s, string rest, CancellationToken ct)
@@ -825,7 +834,7 @@ public sealed partial class CommandProcessor
         var now = Now();
         foreach (var k in s.PurgeTokens.Where(kv => kv.Value.Expires <= now).Select(kv => kv.Key).ToList()) s.PurgeTokens.Remove(k);
         var token = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(16));
-        s.PurgeTokens[token] = new PurgeTicket(scope, rows, now.AddSeconds(30));
+        s.PurgeTokens[token] = new PurgeTicket(scope, rows, now.AddSeconds(30), scope is { Kind: "last", From: { } f, To: { } t } ? t - f : null);
         return token;
     }
 
@@ -836,6 +845,8 @@ public sealed partial class CommandProcessor
         {
             if (!S.Ipc.AllowControl) return Err(ErrControlOff);
             if (!S.Ipc.AllowPurge) return Err(ErrPurgeOff);
+            // Row counts reveal visited sites and apps: scripts need the read gate open, like search.
+            if (IsLocked(s.Kind)) return Err(ErrLocked);
         }
         string usage = ui ? UsagePurgeUi : UsagePurge;
         if (args.Length == 0) return Err(usage);
@@ -856,7 +867,7 @@ public sealed partial class CommandProcessor
                 }
                 var st = _d.Store();
                 if (st == null) return Err(ErrLocked);
-                int n = st.Purge(ticket.Scope);
+                int n = st.Purge(ticket.Span is { } span ? PurgeScope.Last(span) : ticket.Scope);
                 Audit(s, "purge", n, "");
                 return Ok(JsonSerializer.Serialize(new PurgeResult(n), CoreJson.Default.PurgeResult));
             }
@@ -996,7 +1007,10 @@ public sealed partial class CommandProcessor
                         }
                     }
                     else if (clear) return Err(ErrNoPassword);
-                    else if (S.Security.RequireUnlock && !_d.Agent.IsUnlocked && _d.Keys.HelloAvailable) return Err(ErrUnlockRequired);
+                    // First password while locked: only when Windows Hello is known to be missing (nobody could unlock
+                    // otherwise). Before the Hello check finished, "unavailable" just meant "not checked yet".
+                    else if (S.Security.RequireUnlock && !_d.Agent.IsUnlocked && (_d.Keys.HelloAvailable || _d.Keys is Crypto.KeyVault { HelloChecked: false }))
+                        return Err(ErrUnlockRequired);
                     if (clear)
                     {
                         if (UsesPassword) return Err(ErrPasswordInUse);
@@ -1112,6 +1126,8 @@ public sealed partial class CommandProcessor
         return Err(UsageDescribe);
     }
 
+    private static readonly string[] GuardedSettingGroups = ["security", "ai", "ipc"];
+
     private Reply Settings(string rest)
     {
         var (sub, json) = SplitVerb(rest);
@@ -1125,6 +1141,11 @@ public sealed partial class CommandProcessor
                 catch (JsonException) { return Err(ErrJson); }
                 using (doc)
                 {
+                    // Security, AI and IPC settings change what is protected and what leaves the PC: not while the gate
+                    // is closed (a passphrase-wrapped key would otherwise be re-wrapped to dpapi without the passphrase).
+                    if (doc.RootElement.ValueKind == JsonValueKind.Object && IsLocked(PipeKind.Ui)
+                        && GuardedSettingGroups.Any(g => doc.RootElement.TryGetProperty(g, out _)))
+                        return Err(ErrLocked);
                     // The password method needs a password first, or nobody could unlock.
                     if (doc.RootElement.ValueKind == JsonValueKind.Object && doc.RootElement.TryGetProperty("security", out var sec)
                         && JsonString(sec, "unlockMethod") == "password" && _d.Password?.IsSet != true)

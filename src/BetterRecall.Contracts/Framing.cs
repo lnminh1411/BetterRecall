@@ -12,6 +12,8 @@ public sealed class LineTooLongException(int max) : IOException($"Line exceeds {
 public static class LineProtocol
 {
     public const int MaxRequestBytes = 4096;
+    /// <summary>UI pipe only: chat questions (4000 characters, escaped in JSON) and settings arrays exceed 4 KiB.</summary>
+    public const int MaxUiRequestBytes = 64 * 1024;
     public const string TooLongError = "Line exceeds 4096 bytes.";
 
     /// <summary>Reads one line. Strips \r and a leading BOM. Null at end of stream.</summary>

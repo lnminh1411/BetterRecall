@@ -80,8 +80,11 @@ public sealed class SettingsEditor
         Errors.Clear();
         foreach (var key in SettingsDiff.Keys(diff))
             if (SettingsSchema.Find(key) is { } d && SettingsSchema.Validate(d, Working) is { } e) Errors[key] = e;
-        // a change can make an unchanged key invalid (ipc.maxResults below ipc.defaultResults)
-        foreach (var (k, e) in SettingsSchema.ValidateAll(Working)) Errors.TryAdd(k, e);
+        // a change can make an unchanged key invalid (ipc.maxResults below ipc.defaultResults); a key that was already
+        // invalid by the UI's rules but accepted by the agent (CLI, settings.json) must not block an unrelated save
+        var before = SettingsSchema.ValidateAll(Original);
+        foreach (var (k, e) in SettingsSchema.ValidateAll(Working))
+            if (!before.ContainsKey(k)) Errors.TryAdd(k, e);
         if (Errors.Count > 0) { Changed?.Invoke(); return (SaveOutcome.Invalid, null); }
 
         var lines = SettingsDiff.ToRequestLines(diff);

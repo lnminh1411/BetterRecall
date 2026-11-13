@@ -49,8 +49,10 @@ public sealed class ReplaySamplerTests
         Assert.Equal(11, r.Count);
         _now = T0.AddSeconds(200);          // all are older than 120 s
         r.Add(S(_now, 0, 50), 120);
-        // monitor 0: newest old (i=9) + new one; monitor 1: its only old one
-        Assert.Equal(3, r.Count);
+        // monitor 0: newest old (i=9, 155 s old) + new one; monitor 1: its only old one is 200 s old, more than
+        // 60 s past the window, so it goes too (it would otherwise start every later replay)
+        Assert.Equal(2, r.Count);
+        Assert.DoesNotContain(r.Take(T0, _now, 5), x => x.Monitor == 1);
     }
 
     [Fact]

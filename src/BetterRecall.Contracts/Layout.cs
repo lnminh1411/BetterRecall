@@ -69,6 +69,14 @@ public static class PipeNames
         return configured;
     }
 
+    /// <summary>Base names a configured public pipe may not take: they belong to the UI, MCP and worker pipes.</summary>
+    public static bool Reserved(string configuredBase)
+    {
+        var b = Base(configuredBase);
+        return new[] { "BetterRecall.ui", "BetterRecall.mcp", "BetterRecall.worker" }
+            .Any(r => b.StartsWith(r, StringComparison.OrdinalIgnoreCase));
+    }
+
     public static string Public(string configuredBase, string sid) => $"{Base(configuredBase)}.{sid}";
     public static string Mcp(string sid) => $"BetterRecall.mcp.{sid}";
     public static string Ui(string sid) => $"BetterRecall.ui.{sid}";
