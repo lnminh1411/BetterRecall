@@ -4,7 +4,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
     <!-- Single version source for every exe, the version verb and MCP serverInfo. -->
-    <Version>0.2.0-dev</Version>
+    <Version>0.2.1-dev</Version>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <Product>BetterRecall</Product>
     <UseArtifactsOutput>true</UseArtifactsOutput>
