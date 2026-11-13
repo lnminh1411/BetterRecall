@@ -41,10 +41,10 @@ internal static class Program
         }
         installDir = Path.GetFullPath(installDir).TrimEnd('\\');
 
-        using var mutex = new Mutex(true, PipeNames.AgentMutex, out bool first);
-        if (!first) return 0; // single instance
-
         var home = DataPaths.Home();
+        using var mutex = new Mutex(true, PipeNames.AgentMutexFor(home), out bool first);
+        if (!first) return 0; // single instance per data folder
+
         Directory.CreateDirectory(home);
         Log.Init(DataPaths.LogsDir(home), "info");
         Log.Info($"agent start, pid {Environment.ProcessId}");

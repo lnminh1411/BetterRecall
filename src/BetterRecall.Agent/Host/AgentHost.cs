@@ -96,7 +96,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
 
         _window = new MessageWindow();
         // Another version's launcher asks us to step aside (see PipeNames.AgentQuitEvent).
-        _quitEvent = new EventWaitHandle(false, EventResetMode.AutoReset, PipeNames.AgentQuitEvent);
+        _quitEvent = new EventWaitHandle(false, EventResetMode.AutoReset, PipeNames.AgentQuitEventFor(_opt.Home));
         _quitWait = ThreadPool.RegisterWaitForSingleObject(_quitEvent, (_, _) => { Log.Info("quit requested by launcher"); RequestQuit(); }, null, Timeout.Infinite, executeOnlyOnce: true);
         _window.Hotkey += OnHotkey;
         _window.Command += OnTrayCommand;
@@ -131,7 +131,9 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         _maintenanceTimer = new Timer(_ => Maintenance(), null, TimeSpan.FromHours(1), TimeSpan.FromHours(1));
         _storage = new StorageGuard(() => Store, () => S, () => StorageGuard.FreeBytesOf(_opt.Home));
         _storageTimer = new Timer(_ => StorageCheck(), null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(30));
-        if (_opt.Autostart)
+        // Only the installed app registers autostart and the CLI/MCP trust path: never a dev build, a worktree, or an
+        // agent on another data folder (it would repoint the user's startup entry at a folder that later disappears).
+        if (_opt.Autostart && StartupRegistration.IsInstalled(_opt.InstallDir, _opt.Home))
         {
             try { StartupRegistration.Register(_opt.InstallDir); } catch (Exception ex) { Log.Warn("startup registration", ex); }
         }

@@ -64,7 +64,10 @@ def main() -> None:
         run(["dotnet", "publish", f"src/BetterRecall.{p}", "-c", a.config, "-o", str(dest)], env)
 
     print(f"\ninstall dir: {out}")
-    print(f"start:  \"{out / 'BetterRecall.Agent.exe'}\"")
+    # A dev agent gets its own data folder and never registers autostart: on the real folder it would open the user's
+    # store with dev code and repoint their startup entry at artifacts\dev.
+    dev_home = Path(os.environ.get("BETTERRECALL_DEV_HOME", r"K:\scratch\betterrecall-dev-home"))
+    print(f"start:  set BETTERRECALL_HOME={dev_home} && \"{out / 'BetterRecall.Agent.exe'}\" --no-autostart")
 
 
 if __name__ == "__main__":
