@@ -22,7 +22,9 @@ public sealed class KeyVault : IKeyVault, IDisposable
     public const string ModeDpapi = "dpapi";
 
     internal const string TpmProvider = "Microsoft Platform Crypto Provider";
-    internal const string DefaultTpmKeyName = "BetterRecall.DataKeyWrap";
+    /// <summary>Name every key file before 0.2 used. Persisted TPM keys are per Windows user, not per data folder,
+    /// so one fixed name let any other data folder (a test run, a second home) open and delete the real key.</summary>
+    internal const string LegacyTpmKeyName = "BetterRecall.DataKeyWrap";
     private static readonly byte[] Magic = "BRK1"u8.ToArray();
     private const int ArgonMemoryKiB = 65536;
     private const int ArgonPasses = 3;
@@ -41,7 +43,7 @@ public sealed class KeyVault : IKeyVault, IDisposable
     {
         _keyFile = DataPaths.KeyFile(home);
         _settings = settings;
-        _tpmKeyName = tpmKeyName ?? DefaultTpmKeyName;
+        _tpmKeyName = tpmKeyName ?? TpmKeyNameFor(home);
         _fileMode = ReadFileMode();
         if (probeHello)
             _ = HelloInterop.CheckAvailableAsync(CancellationToken.None).ContinueWith(t => _helloAvailable = t.IsCompletedSuccessfully && t.Result, TaskScheduler.Default);
@@ -57,6 +59,28 @@ public sealed class KeyVault : IKeyVault, IDisposable
     }
 
     public bool HelloAvailable => _helloAvailable;
+
+    /// <summary>TPM key name for a data folder: "BetterRecall.DataKeyWrap." + 16 hex of SHA-256 over the full path
+    /// (upper case, no trailing separator). Key files store the name they were wrapped with, so older files keep
+    /// opening the legacy name.</summary>
+    internal static string TpmKeyNameFor(string home)
+    {
+        var full = Path.GetFullPath(home).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).ToUpperInvariant();
+        return LegacyTpmKeyName + "." + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(full)))[..16];
+    }
+
+    /// <summary>TPM keys purge may delete: the one this folder's key file names, and this folder's own name unless it is
+    /// the shared legacy name.</summary>
+    internal static IReadOnlyList<string> TpmKeysToDelete(string? fileTpmName, string ownName)
+        => new[] { fileTpmName, ownName == LegacyTpmKeyName ? null : ownName }.OfType<string>().Distinct().ToList();
+
+    /// <summary>TPM key name stored in a tpm-mode key file; null for other modes or a short file.</summary>
+    internal static string? TpmNameInFile(byte[] file)
+    {
+        if (file.Length < 7 || !file.AsSpan(0, 4).SequenceEqual(Magic) || file[4] != 1) return null;
+        int nameLen = BinaryPrimitives.ReadUInt16LittleEndian(file.AsSpan(5));
+        return file.Length < 7 + nameLen ? null : Encoding.UTF8.GetString(file, 7, nameLen);
+    }
 
     public bool KeyLoaded { get { lock (_gate) return _key != null; } }
 
@@ -177,10 +201,12 @@ public sealed class KeyVault : IKeyVault, IDisposable
     {
         lock (_gate)
         {
+            string? fileTpmName = null;
             try
             {
                 if (File.Exists(_keyFile))
                 {
+                    fileTpmName = TpmNameInFile(File.ReadAllBytes(_keyFile));
                     var len = (int)new FileInfo(_keyFile).Length;
                     using (var fs = new FileStream(_keyFile, FileMode.Open, FileAccess.Write, FileShare.None))
                     {
@@ -191,8 +217,13 @@ public sealed class KeyVault : IKeyVault, IDisposable
                 }
             }
             catch (Exception ex) { Log.Error("key file destroy failed", ex); throw; }
-            try { if (CngKey.Exists(_tpmKeyName, new CngProvider(TpmProvider))) CngKey.Open(_tpmKeyName, new CngProvider(TpmProvider)).Delete(); }
-            catch (Exception ex) { Log.Debug($"TPM key delete skipped: {ex.GetType().Name}"); }
+            // Only the TPM key this folder's own key file names, plus this folder's own derived name. Never a name
+            // another folder may use (the legacy fixed name is deleted only when this folder's file names it).
+            foreach (var name in TpmKeysToDelete(fileTpmName, _tpmKeyName))
+            {
+                try { if (CngKey.Exists(name, new CngProvider(TpmProvider))) CngKey.Open(name, new CngProvider(TpmProvider)).Delete(); }
+                catch (Exception ex) { Log.Debug($"TPM key delete skipped: {ex.GetType().Name}"); }
+            }
             _key?.Dispose();
             _key = null;
             _fileMode = null;

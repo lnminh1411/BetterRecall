@@ -268,6 +268,7 @@
   <data name="Reason_fullscreen" xml:space="preserve"><value>full-screen app</value></data>
   <data name="Reason_ipc" xml:space="preserve"><value>by a script</value></data>
   <data name="Reason_keylocked" xml:space="preserve"><value>waiting for passphrase</value></data>
+  <data name="Reason_keylost" xml:space="preserve"><value>data key missing, purge all in Danger zone to start over</value></data>
   <data name="Reason_lock" xml:space="preserve"><value>session locked</value></data>
   <data name="Reason_user" xml:space="preserve"><value>by you</value></data>
   <data name="Replays_Delete" xml:space="preserve"><value>Delete</value></data>

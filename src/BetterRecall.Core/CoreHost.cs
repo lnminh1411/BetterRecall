@@ -130,6 +130,7 @@ public sealed class CoreHostImpl : ICoreHost
                 _store = null;
                 store.DeleteAllFiles();
             }
+            else EncryptedStore.DeleteFiles(_options.Home);   // never opened: its key is lost or locked, the files are unreadable
             _vault.DestroyKey();
             var replays = DataPaths.ReplaysDir(_options.Home);
             if (Directory.Exists(replays))

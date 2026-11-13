@@ -111,7 +111,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         _replays = new ReplayLibrary(_opt.Home, () => S, _core.Blobs);
         var encLuid = GpuDevices.Adapters().FirstOrDefault(a => a.VendorId == GpuDevices.VendorIntel)?.Luid;
         _probe = new SystemProbe(encLuid is null ? null : GpuDevices.PdhLuidToken(encLuid.Value));
-        _scheduler = new EmbeddingScheduler(() => Store, () => S, _worker, ProbeLoad, () => _pause.Has("consent") || _pause.Has("keylocked"));
+        _scheduler = new EmbeddingScheduler(() => Store, () => S, _worker, ProbeLoad, () => _pause.Has("consent") || _pause.Has("keylocked") || _pause.Has("keylost"));
         _pipeline = new KeyframePipeline(() => Store, () => S, OnCaptureStored, new WorkerKeyframeReader(_worker), _redactions) { Sampler = _sampler };
         _guard = new GuardrailService(() => S, () => _sessionLocked, () => _capture?.MonitorBounds() ?? [], _opt.InstallDir);
         _guard.ForegroundChanged += _ => _capture?.OnForegroundChanged();
@@ -156,7 +156,18 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
             RaiseStatus(force: true);
         }
         catch (OperationCanceledException) { }
-        catch (Exception ex) { Log.Error("store open failed", ex); }
+        catch (Exception ex)
+        {
+            Log.Error("store open failed", ex);
+            if (ex is System.Security.Cryptography.CryptographicException)
+            {
+                // The key file cannot be unwrapped (its TPM key or DPAPI secret is gone): the old data is unreadable.
+                // Say so instead of "waiting for passphrase"; purge all (Danger zone) starts a new key and store.
+                _pause.Clear("keylocked");
+                _pause.Set("keylost");
+                RaiseStatus(force: true);
+            }
+        }
     }
 
     private void StartCapture()
@@ -400,6 +411,14 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
             var n = SystemProbe.Notification();
             if (Governance.PauseKeyframes(n, S.Capture)) { if (!_pause.Has("fullscreen")) _pause.Set("fullscreen"); }
             else _pause.Clear("fullscreen");
+            if (_pause.Has("keylost") && Store != null)
+            {
+                // Purge all made a new key and store.
+                _pause.Clear("keylost");
+                Log.Info("store open after purge all");
+                Maintenance();
+                _scheduler?.Signal();
+            }
             RaiseStatus(force: false);
             _window?.Invoke(() => _window.UpdateTip("BetterRecall: " + StatusLine()));
         }
@@ -422,6 +441,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         {
             "consent" => "Waiting for consent",
             "keylocked" => "Locked: enter passphrase",
+            "keylost" => "Data key missing: purge all in Danger zone to start over",
             "lock" => "Paused: session locked",
             "fullscreen" => "Paused: fullscreen",
             "storage" => "Paused: storage limit",

@@ -10,7 +10,7 @@ namespace BetterRecall.Core.Tests;
 public sealed class CommandProcessorTests : IDisposable
 {
     private readonly TempStore _t = new();
-    private readonly TempHome _settingsHome = new(null);
+    private readonly TempHome _settingsHome = new();   // dpapi: auto would wrap test keys with a TPM key of the user's Windows account
     private readonly SettingsStore _settings;
     private readonly KeyVault _vault;
     private readonly FakeAgent _agent = new();

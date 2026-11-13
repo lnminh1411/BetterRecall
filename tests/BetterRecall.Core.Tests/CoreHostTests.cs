@@ -41,4 +41,28 @@ public class CoreHostTests
             Assert.Equal(0, host2.Store!.Stats().Rows);
         }
     }
+
+    [Fact]
+    public async Task Purge_all_when_the_store_never_opened_deletes_its_files_and_starts_fresh()
+    {
+        // Data key lost (its TPM key deleted): store.db and keyframes stay unreadable until purge all removes them.
+        using var h = new TempHome("dpapi");
+        var db = DataPaths.StoreDb(h.Path);
+        Directory.CreateDirectory(Path.GetDirectoryName(db)!);
+        File.WriteAllBytes(db, [1, 2, 3]);
+        File.WriteAllBytes(db + "-wal", [4]);
+        var kf = DataPaths.KeyframesDir(h.Path);
+        Directory.CreateDirectory(kf);
+        File.WriteAllBytes(Path.Combine(kf, "2026-11.db"), [5]);
+        var host = (CoreHostImpl)CoreHost.Create(new CoreHostOptions(h.Path, h.Path));
+        await using (host)
+        {
+            Assert.Null(host.Store);
+            Assert.Equal(0, await host.PurgeAllAsync(CancellationToken.None));
+            Assert.False(File.Exists(Path.Combine(kf, "2026-11.db")));
+            Assert.NotNull(host.Store);
+            Assert.NotEqual(3, new FileInfo(db).Length);   // the new store.db, not the old bytes
+            Assert.Equal(0, host.Store!.Stats().Rows);
+        }
+    }
 }

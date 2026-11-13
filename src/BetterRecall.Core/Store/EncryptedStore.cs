@@ -1251,13 +1251,21 @@ public sealed partial class EncryptedStore : IStore
         lock (_rl)
         {
             CloseLocked();
-            var db = DataPaths.StoreDb(_home);
-            foreach (var p in new[] { db, db + "-wal", db + "-shm" })
-                try { if (File.Exists(p)) File.Delete(p); } catch (Exception ex) { Log.Error("store file delete failed", ex); }
-            if (Directory.Exists(_kfDir))
-                foreach (var f in Directory.GetFiles(_kfDir))
-                    try { File.Delete(f); } catch (Exception ex) { Log.Error("keyframe file delete failed", ex); }
+            DeleteFiles(_home);
         }
+    }
+
+    /// <summary>Deletes store.db (+ -wal, -shm) and every keyframe file of a data folder without opening them; purge all
+    /// uses it when the store never opened (data key missing or wrong).</summary>
+    public static void DeleteFiles(string home)
+    {
+        var db = DataPaths.StoreDb(home);
+        foreach (var p in new[] { db, db + "-wal", db + "-shm" })
+            try { if (File.Exists(p)) File.Delete(p); } catch (Exception ex) { Log.Error("store file delete failed", ex); }
+        var kfDir = DataPaths.KeyframesDir(home);
+        if (Directory.Exists(kfDir))
+            foreach (var f in Directory.GetFiles(kfDir))
+                try { File.Delete(f); } catch (Exception ex) { Log.Error("keyframe file delete failed", ex); }
     }
 
     private void CloseLocked()

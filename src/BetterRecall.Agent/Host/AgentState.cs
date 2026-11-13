@@ -38,12 +38,12 @@ internal sealed class ReadGate(Func<DateTimeOffset> now)
 
 /// <summary>
 /// Capture pause reasons. Several can hold at once; the status reports the highest priority one.
-/// consent and keylocked block everything; lock pauses capture; user/ipc pause until a time or until resume;
+/// consent, keylocked and keylost (data key file present but its TPM/DPAPI key gone) block everything; lock pauses capture; user/ipc pause until a time or until resume;
 /// fullscreen only pauses keyframes and inference.
 /// </summary>
 internal sealed class PauseController(Func<DateTimeOffset> now)
 {
-    private static readonly string[] Priority = ["consent", "keylocked", "lock", "storage", "user", "ipc", "fullscreen", "battery"];
+    private static readonly string[] Priority = ["consent", "keylocked", "keylost", "lock", "storage", "user", "ipc", "fullscreen", "battery"];
     private readonly object _gate = new();
     private readonly Dictionary<string, DateTimeOffset?> _reasons = new();
 
