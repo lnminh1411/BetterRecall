@@ -111,7 +111,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         _replays = new ReplayLibrary(_opt.Home, () => S, _core.Blobs);
         var encLuid = GpuDevices.Adapters().FirstOrDefault(a => a.VendorId == GpuDevices.VendorIntel)?.Luid;
         _probe = new SystemProbe(encLuid is null ? null : GpuDevices.PdhLuidToken(encLuid.Value));
-        _scheduler = new EmbeddingScheduler(() => Store, () => S, _worker, ProbeLoad, () => _pause.Has("consent") || _pause.Has("keylocked") || _pause.Has("keylost"));
+        _scheduler = new EmbeddingScheduler(() => Store, () => S, _worker, ProbeLoad, () => _pause.Has("consent") || _pause.Has("keylocked") || _pause.Has("keylost") || _pause.Has("storeerror"));
         _pipeline = new KeyframePipeline(() => Store, () => S, OnCaptureStored, new WorkerKeyframeReader(_worker), _redactions) { Sampler = _sampler };
         _guard = new GuardrailService(() => S, () => _sessionLocked, () => _capture?.MonitorBounds() ?? [], _opt.InstallDir);
         _guard.ForegroundChanged += _ => _capture?.OnForegroundChanged();
@@ -153,6 +153,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
             await _core.OpenStoreAsync(_cts.Token).ConfigureAwait(false);
             Log.Info($"store open in {sw.ElapsedMilliseconds} ms ({_core.Keys.Protection})");
             _pause.Clear("keylocked");
+            _pause.Clear("storeerror");
             Maintenance();
             _scheduler?.Signal();
             RaiseStatus(force: true);
@@ -161,14 +162,20 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         catch (Exception ex)
         {
             Log.Error("store open failed", ex);
-            if (ex is System.Security.Cryptography.CryptographicException)
+            _pause.Clear("keylocked");
+            if (ex is BetterRecall.Core.Crypto.KeyLostException)
             {
-                // The key file cannot be unwrapped (its TPM key or DPAPI secret is gone): the old data is unreadable.
-                // Say so instead of "waiting for passphrase"; purge all (Danger zone) starts a new key and store.
-                _pause.Clear("keylocked");
+                // The key file cannot be unwrapped for good (TPM key gone, DPAPI cannot decrypt, file damaged): the old
+                // data is unreadable. Say so instead of "waiting for passphrase"; purge all starts a new key and store.
                 _pause.Set("keylost");
-                RaiseStatus(force: true);
             }
+            else
+            {
+                // Anything else (TPM not ready at logon, file locked, database error) may pass: say so and retry.
+                _pause.Set("storeerror");
+                _ = Task.Delay(TimeSpan.FromSeconds(30), _cts.Token).ContinueWith(t => { if (!t.IsCanceled) _ = OpenStoreAsync(); }, TaskScheduler.Default);
+            }
+            RaiseStatus(force: true);
         }
     }
 
@@ -206,12 +213,21 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
     private bool ReplayPaused() =>
         _pause.ContinuousPaused(S.Replay.DuringFullscreen) || !S.Capture.Consented;
 
+    private long _lastMicRetry;
+
     private void SyncAudioSources()
     {
         if (!_captureStarted) return;
         var s = S;
         bool wantSystem = s.Audio.System && s.Capture.Consented;
         bool wantMic = s.Audio.Mic && s.Capture.Consented;
+        if (_micAudio is { MicLost: true })
+        {
+            // Unplugged or default device changed: start over on the current default microphone.
+            Log.Info("microphone lost, reopening");
+            _micAudio.Dispose();
+            _micAudio = null;
+        }
         if (wantSystem && _systemAudio is null)
         {
             try
@@ -413,10 +429,16 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
             var n = SystemProbe.Notification();
             if (Governance.PauseKeyframes(n, S.Capture)) { if (!_pause.Has("fullscreen")) _pause.Set("fullscreen"); }
             else _pause.Clear("fullscreen");
-            if (_pause.Has("keylost") && Store != null)
+            if (_micAudio is { MicLost: true } && Environment.TickCount64 - _lastMicRetry > 10_000)
+            {
+                _lastMicRetry = Environment.TickCount64;
+                SyncAudioSources();
+            }
+            if ((_pause.Has("keylost") || _pause.Has("storeerror")) && Store != null)
             {
                 // Purge all made a new key and store.
                 _pause.Clear("keylost");
+                _pause.Clear("storeerror");
                 Log.Info("store open after purge all");
                 Maintenance();
                 _scheduler?.Signal();
@@ -444,6 +466,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
             "consent" => "Waiting for consent",
             "keylocked" => "Locked: enter passphrase",
             "keylost" => "Data key missing: purge all in Danger zone to start over",
+            "storeerror" => "Paused: storage could not be opened, retrying",
             "lock" => "Paused: session locked",
             "fullscreen" => "Paused: fullscreen",
             "storage" => "Paused: storage limit",

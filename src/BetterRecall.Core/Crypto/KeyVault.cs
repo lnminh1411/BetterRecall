@@ -15,8 +15,13 @@ namespace BetterRecall.Core.Crypto;
 /// tpm (RSA-2048, non-exportable, Microsoft Platform Crypto Provider, OAEP-SHA1), passphrase (Argon2id
 /// 64 MiB, 3 passes, AES-256-GCM wrap) or dpapi (CurrentUser). File layout: "BRK1", mode byte, mode payload.
 /// </summary>
+/// <summary>The key file cannot be unwrapped for good: its TPM key is gone, DPAPI cannot decrypt it, or the file is
+/// damaged. The data it protects is unreadable; only purge all (a new key) gets the app going again.</summary>
+public sealed class KeyLostException(string message, Exception? inner = null) : CryptographicException(message, inner);
+
 public sealed class KeyVault : IKeyVault, IDisposable
 {
+    private const string ModeInvalid = "invalid";   // damaged key file: reported as lost, purge all replaces it
     public const string ModeTpm = "tpm";
     public const string ModePassphrase = "passphrase";
     public const string ModeDpapi = "dpapi";
@@ -44,7 +49,13 @@ public sealed class KeyVault : IKeyVault, IDisposable
         _keyFile = DataPaths.KeyFile(home);
         _settings = settings;
         _tpmKeyName = tpmKeyName ?? TpmKeyNameFor(home);
-        _fileMode = ReadFileMode();
+        try { _fileMode = ReadFileMode(); }
+        catch (InvalidDataException ex)
+        {
+            // A damaged header used to throw here and stop the agent before its pipes started, so purge all was unreachable.
+            Log.Error("key file damaged", ex);
+            _fileMode = ModeInvalid;
+        }
         if (probeHello)
             _ = HelloInterop.CheckAvailableAsync(CancellationToken.None).ContinueWith(t => _helloAvailable = t.IsCompletedSuccessfully && t.Result, TaskScheduler.Default);
     }
@@ -128,6 +139,7 @@ public sealed class KeyVault : IKeyVault, IDisposable
                 Log.Info($"data key created, protection {mode}");
                 return true;
             }
+            if (_fileMode == ModeInvalid) throw new KeyLostException("The key file is damaged.");
             if (_fileMode == ModePassphrase) return false;
             var bytes = File.ReadAllBytes(_keyFile);
             var loaded = _fileMode == ModeTpm ? UnwrapTpm(bytes, iso) : UnwrapDpapi(bytes, iso);
@@ -379,7 +391,13 @@ public sealed class KeyVault : IKeyVault, IDisposable
         var name = Encoding.UTF8.GetString(p.Slice(2, nameLen));
         int len = BinaryPrimitives.ReadInt32LittleEndian(p.Slice(2 + nameLen));
         var wrapped = p.Slice(6 + nameLen, len).ToArray();
-        using var key = CngKey.Open(name, new CngProvider(TpmProvider));
+        CngKey key;
+        try { key = CngKey.Open(name, new CngProvider(TpmProvider)); }
+        catch (CryptographicException ex) when (ex.HResult == unchecked((int)0x80090016))   // NTE_BAD_KEYSET
+        {
+            throw new KeyLostException("The TPM key that wraps the data key no longer exists.", ex);
+        }
+        using var _ = key;
         using var rsa = new RSACng(key);
         var plain = rsa.Decrypt(wrapped, RSAEncryptionPadding.OaepSHA1);
         try { return new SecureKey(plain, iso); }
@@ -478,7 +496,8 @@ public sealed class KeyVault : IKeyVault, IDisposable
         {
             var input = new Win32.DATA_BLOB { cbData = blob.Length, pbData = (nint)d };
             if (!Win32.CryptUnprotectData(ref input, 0, 0, 0, 0, Win32.CRYPTPROTECT_UI_FORBIDDEN, out var output))
-                throw new CryptographicException(Marshal.GetLastPInvokeError());
+                throw new KeyLostException("DPAPI cannot decrypt the data key (another Windows account, or its keys were reset).",
+                    new CryptographicException(Marshal.GetLastPInvokeError()));
             try
             {
                 var plain = new ReadOnlySpan<byte>((void*)output.pbData, output.cbData).ToArray();

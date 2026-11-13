@@ -65,6 +65,10 @@ internal sealed unsafe class WasapiCapture : IDisposable
     private readonly Thread _thread;
     private readonly ManualResetEventSlim _ready = new();
     private volatile bool _stop;
+
+    /// <summary>The device went away (unplugged, default device changed, AUDCLNT_E_DEVICE_INVALIDATED): the capture
+    /// thread has ended and the owner should create a new capture.</summary>
+    public bool Lost { get; private set; }
     private Exception? _startError;
 
     public PcmFormat Format { get; private set; }
@@ -133,12 +137,14 @@ internal sealed unsafe class WasapiCapture : IDisposable
                 while (!_stop)
                 {
                     uint pending;
-                    if (nextSize(capture, &pending) < 0 || pending == 0) break;
+                    int nhr = nextSize(capture, &pending);
+                    if (nhr < 0) { Log.Warn($"audio {_source} device lost 0x{nhr:X8}"); Lost = true; _stop = true; break; }
+                    if (pending == 0) break;
                     byte* data;
                     uint frames, bflags;
                     ulong devPos, qpcPos;
                     int hr = getBuffer(capture, &data, &frames, &bflags, &devPos, &qpcPos);
-                    if (hr < 0) { Log.Warn($"audio {_source} GetBuffer 0x{hr:X8}"); _stop = true; break; }
+                    if (hr < 0) { Log.Warn($"audio {_source} GetBuffer 0x{hr:X8}"); Lost = true; _stop = true; break; }
                     try
                     {
                         long now100 = (long)(Stopwatch.GetTimestamp() * (10_000_000.0 / Stopwatch.Frequency));

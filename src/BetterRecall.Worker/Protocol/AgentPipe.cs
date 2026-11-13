@@ -115,6 +115,14 @@ public static partial class AgentPipe
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool GetNamedPipeServerProcessId(SafePipeHandle pipe, out uint serverProcessId);
 
+    /// <summary>True when the agent has written bytes this end has not read yet (idle-exit race check).</summary>
+    public static bool HasPendingInput(SafePipeHandle pipe) =>
+        PeekNamedPipe(pipe, 0, 0, 0, out uint available, 0) && available > 0;
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool PeekNamedPipe(SafePipeHandle pipe, nint buffer, uint size, nint read, out uint available, nint left);
+
     [LibraryImport("kernel32.dll", SetLastError = true)]
     private static partial SafeProcessHandle OpenProcess(uint access, [MarshalAs(UnmanagedType.Bool)] bool inherit, uint pid);
 

@@ -43,7 +43,7 @@ internal sealed class ReadGate(Func<DateTimeOffset> now)
 /// </summary>
 internal sealed class PauseController(Func<DateTimeOffset> now)
 {
-    private static readonly string[] Priority = ["consent", "keylocked", "keylost", "lock", "storage", "user", "ipc", "fullscreen", "battery"];
+    private static readonly string[] Priority = ["consent", "keylocked", "keylost", "storeerror", "lock", "storage", "user", "ipc", "fullscreen", "battery"];
     private readonly object _gate = new();
     private readonly Dictionary<string, DateTimeOffset?> _reasons = new();
 

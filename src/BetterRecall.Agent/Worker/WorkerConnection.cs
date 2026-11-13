@@ -8,7 +8,14 @@ namespace BetterRecall.Agent.Worker;
 
 internal sealed record WorkerReply(WorkerResponse Header, byte[] Payload);
 
-internal sealed class WorkerException(string message) : Exception(message);
+internal class WorkerException(string message) : Exception(message);
+
+/// <summary>The worker answered this request with an error (bad input, model not installed). Retrying the same request
+/// gives the same answer, unlike a <see cref="WorkerException"/> for a closed pipe or a restart.</summary>
+internal sealed class WorkerReplyException(string message) : WorkerException(message)
+{
+    public bool ModelMissing => Message.StartsWith("Model not installed", StringComparison.Ordinal);
+}
 
 /// <summary>
 /// Client side of the worker frame protocol (v1-design section 4) over any duplex stream.
@@ -46,12 +53,14 @@ internal sealed class WorkerConnection : IAsyncDisposable
         var tcs = new TaskCompletionSource<WorkerReply>(TaskCreationOptions.RunContinuationsAsynchronously);
         _pending[id] = tcs;
         Touch();
+        bool writing = false;
         try
         {
             var header = JsonSerializer.SerializeToUtf8Bytes(req, ContractsJson.Default.WorkerRequest);
             await _writeLock.WaitAsync(ct).ConfigureAwait(false);
             try
             {
+                writing = true;
                 await BinaryFrame.WriteAsync(_stream, header, payload, ct).ConfigureAwait(false);
             }
             finally { _writeLock.Release(); }
@@ -59,7 +68,9 @@ internal sealed class WorkerConnection : IAsyncDisposable
         catch (Exception ex)
         {
             _pending.TryRemove(id, out _);
-            if (ex is IOException or ObjectDisposedException) Fail(ex);
+            // A frame cancelled part-way leaves the pipe out of step: every later reply would be garbage. Close it; the
+            // supervisor starts a fresh worker.
+            if (ex is IOException or ObjectDisposedException || (ex is OperationCanceledException && writing)) Fail(ex);
             throw;
         }
         using var reg = ct.Register(() =>

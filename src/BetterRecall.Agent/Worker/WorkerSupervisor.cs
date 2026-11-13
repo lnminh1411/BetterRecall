@@ -78,6 +78,7 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
     public WorkerHello? Hello { get; private set; }
     public event Action<WorkerHello>? HelloReceived;
     public TimeSpan ConnectTimeout { get; init; } = TimeSpan.FromSeconds(30);
+    public TimeSpan HelloTimeout { get; init; } = TimeSpan.FromMinutes(10);
     public bool VerifyClientPid { get; init; } = true;
 
     public WorkerSupervisor(IWorkerLauncher launcher, string home, Func<int> idleExitS)
@@ -123,11 +124,12 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
                 _conn = c;
                 return c;
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
             {
+                // A connect or hello timeout is a failure too: without backoff each 30 s timeout started another worker.
                 NoteFailure();
                 Log.Warn("worker start failed", ex);
-                throw ex as WorkerException ?? new WorkerException("Worker failed to start.");
+                throw ex as WorkerException ?? new WorkerException(ex is OperationCanceledException ? "Worker start timed out." : "Worker failed to start.");
             }
         }
         finally { _startLock.Release(); }
@@ -145,7 +147,7 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
         var name = PipeNames.NewWorker();
         var server = NamedPipeServerStreamAcl.Create(name, PipeDirection.InOut, 1, PipeTransmissionMode.Byte,
             PipeOptions.Asynchronous | PipeOptions.FirstPipeInstance, 0, 0, CreatePipeSecurity());
-        int pid;
+        int pid = 0;
         try
         {
             var sw = Stopwatch.StartNew();
@@ -164,7 +166,11 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
             }
             var conn = new WorkerConnection(server);
             conn.Closed += (err, pending) => OnClosed(conn, err, pending);
-            var hello = await conn.SendAsync(new WorkerRequest(0, "hello"), ReadOnlyMemory<byte>.Empty, ct).ConfigureAwait(false);
+            // Hello waits for model load and, after a model change, the device benchmark (minutes on an NPU compile);
+            // the cap only stops a hung worker from holding the start lock forever.
+            using var helloTimeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            helloTimeout.CancelAfter(HelloTimeout);
+            var hello = await conn.SendAsync(new WorkerRequest(0, "hello"), ReadOnlyMemory<byte>.Empty, helloTimeout.Token).ConfigureAwait(false);
             if (!hello.Header.Ok || hello.Header.Hello is null)
                 throw new WorkerException(hello.Header.Error ?? "Worker hello failed.");
             Hello = hello.Header.Hello;
@@ -175,6 +181,7 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
         catch
         {
             await server.DisposeAsync().ConfigureAwait(false);
+            if (pid != 0) { try { _launcher.Kill(pid); } catch (Exception ex) { Log.Debug($"worker kill: {ex.Message}"); } }   // never leave an orphan
             throw;
         }
     }

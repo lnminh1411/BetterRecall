@@ -143,6 +143,9 @@ internal sealed class TranscriptSource : IDisposable
     private readonly object _gate = new();
     private Resampler? _resampler;
     private WasapiCapture? _mic;
+
+    /// <summary>The microphone capture ended on its own (device unplugged or changed).</summary>
+    public bool MicLost => _mic?.Lost == true;
     private readonly LoopbackHub? _hub;
     private readonly PcmHandler _handler;
 

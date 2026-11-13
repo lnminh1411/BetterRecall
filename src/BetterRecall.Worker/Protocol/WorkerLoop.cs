@@ -12,7 +12,10 @@ public enum LoopExit { PipeClosed, Shutdown, Idle, ProtocolError, Cancelled }
 /// after <c>idleExit</c> with no request.</summary>
 public static class WorkerLoop
 {
-    public static async Task<LoopExit> RunAsync(Stream pipe, RequestHandler handler, TimeSpan idleExit, CancellationToken ct)
+    /// <param name="hasPendingInput">Checked when the idle timer fires: a request the agent sent at that moment is served
+    /// instead of exiting under it (the agent would see a crash and back off).</param>
+    public static async Task<LoopExit> RunAsync(Stream pipe, RequestHandler handler, TimeSpan idleExit, CancellationToken ct,
+        Func<bool>? hasPendingInput = null)
     {
         while (true)
         {
@@ -27,6 +30,7 @@ public static class WorkerLoop
                 catch (OperationCanceledException)
                 {
                     if (ct.IsCancellationRequested) return LoopExit.Cancelled;
+                    if (hasPendingInput?.Invoke() == true) { Log.Info("idle exit skipped: a request arrived"); continue; }
                     Log.Info($"idle for {idleExit.TotalSeconds:F0} s, exiting");
                     return LoopExit.Idle;
                 }

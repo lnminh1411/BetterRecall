@@ -199,6 +199,21 @@ public class KeyVaultTests
     }
 
     [Fact]
+    public void Damaged_key_file_reports_key_lost_and_purge_replaces_it()
+    {
+        using var h = new TempHome(null);
+        var s = With("dpapi");
+        Directory.CreateDirectory(Path.GetDirectoryName(DataPaths.KeyFile(h.Path))!);
+        File.WriteAllBytes(DataPaths.KeyFile(h.Path), [1, 2, 3]);
+        using var v = new KeyVault(h.Path, () => s, probeHello: false);   // used to throw and stop the agent
+        Assert.Throws<KeyLostException>(() => v.TryLoadSilent());
+        Assert.False(v.NeedsPassphrase);
+        v.DestroyKey();
+        Assert.True(v.TryLoadSilent());
+        Assert.Equal("dpapi", v.Protection);
+    }
+
+    [Fact]
     public void Argon2id_matches_rfc9106_shape_and_is_deterministic()
     {
         var salt = new byte[16];

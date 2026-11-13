@@ -165,7 +165,7 @@ public class WorkerProtocolTests
             Handler = (req, _) => req.Op == "bench" ? (new WorkerResponse(req.Id, false, Error: "Model not installed: embeddinggemma2."), []) : null,
         };
         await using var sup = new WorkerSupervisor(launcher, "x", () => 120);
-        var ex = await Assert.ThrowsAsync<WorkerException>(() => new WorkerClient(sup).BenchAsync(CancellationToken.None));
+        var ex = await Assert.ThrowsAsync<WorkerReplyException>(() => new WorkerClient(sup).BenchAsync(CancellationToken.None));
         Assert.Equal("Model not installed: embeddinggemma2.", ex.Message);
     }
 
@@ -207,6 +207,39 @@ public class SchedulerTests
         Assert.Equal("nsfw", store.Dropped.Single().Value);
         Assert.Equal(new EmbeddingInfo("fake-model", "r1", 4), store.Space);
         Assert.Equal(11f, store.Vectors.Single(kv => kv.Key.StartsWith('a')).Value[0]); // text length
+    }
+
+    [Fact]
+    public async Task Rejected_jobs_settle_and_missing_models_wait_with_the_image_intact()
+    {
+        var store = new FakeStore();
+        var settings = new Settings();
+        store.AddScreenCapture(new NewScreenCapture(DateTimeOffset.UtcNow, "app", "", "t", 0, 10, 10, 0, [1, 2, 3], "image/webp", true));
+        var launcher = new FakeWorkerLauncher();
+        string? error = "Model not installed: nsfw-detector.";
+        byte[]? sent = null;
+        launcher.Handler = (req, payload) =>
+        {
+            if (req.Op != "embed_image") return null;
+            sent = payload.ToArray();
+            return error is null ? null : (new WorkerResponse(req.Id, false, Error: error), []);
+        };
+        await using var sup = new WorkerSupervisor(launcher, "x", () => 120);
+        await using var sched = new EmbeddingScheduler(() => store, () => settings, new WorkerClient(sup),
+            () => new GovernanceInputs(1, 0, false, UserNotificationState.AcceptsNotifications, 0), () => false);
+
+        // Missing model: the job waits (10 min) and keeps its image; it used to be zeroed and retried every 15 s.
+        Assert.Equal(TimeSpan.FromMinutes(10), await sched.StepAsync(CancellationToken.None));
+        Assert.Equal("model-missing", sched.LastDecision);
+        Assert.Equal(1, sched.Queued);
+        Assert.Empty(store.Failed);
+
+        // Next attempt sends the original bytes, the worker rejects them: the job is settled, not retried forever.
+        error = "Bad image.";
+        await sched.StepAsync(CancellationToken.None);
+        Assert.Equal([1, 2, 3], sent);
+        Assert.Equal("Bad image.", store.Failed.Single().Value);
+        Assert.Equal(0, sched.Queued);
     }
 
     [Fact]
