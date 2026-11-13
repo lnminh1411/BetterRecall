@@ -56,6 +56,7 @@ internal sealed class KeyframePipeline : IAsyncDisposable
     private string _encoderName = "";
     private Task<bool>? _wait;
     private long _lastMissingLog = -1;
+    private long _lastNerMissingLog = -1;
 
     // Measurements.
     public long Kept, SkippedSimilar, Dropped, Failed;
@@ -131,6 +132,21 @@ internal sealed class KeyframePipeline : IAsyncDisposable
         _masks?.Clear();
     }
 
+    private volatile bool _flush;
+
+    /// <summary>Panic: the keyframe thread drops every queued grab and every frame waiting for CPU budget (their pixels
+    /// leave RAM). A frame already being processed is refused by the store's purge fence.</summary>
+    public void Flush() => _flush = true;
+
+    private void FlushQueued()
+    {
+        _flush = false;
+        int n = 0;
+        while (_channel.Reader.TryRead(out var g)) { g.Dispose(); n++; }
+        lock (_governor) _governor.Clear();
+        Log.Info($"keyframes flushed ({n} queued grabs)");
+    }
+
     public bool ContextChanged(int monitor, string context)
     {
         lock (_dedup) return _dedup.TryGetValue(monitor, out var d) && d.ContextDiffers(context);
@@ -142,11 +158,13 @@ internal sealed class KeyframePipeline : IAsyncDisposable
         var ct = _cts.Token;
         while (!ct.IsCancellationRequested)
         {
+            if (_flush) FlushQueued();
             if (_channel.Reader.TryRead(out var grab))
             {
                 bool owned = false;
                 try { owned = Process(grab, ct); }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+                catch (PurgedWindowException) { Log.Debug("keyframe inside a purged window dropped"); }
                 catch (Exception ex)
                 {
                     Interlocked.Increment(ref Failed);
@@ -222,7 +240,17 @@ internal sealed class KeyframePipeline : IAsyncDisposable
             LastOcrMs = sw.Elapsed.TotalMilliseconds;
             OcrMsTotal += LastOcrMs;
             OcrCpuMsTotal += Math.Max(0, Win32.CurrentThreadCpuMs() - cpu0);
-            if (result is not null) { ocr = result; Interlocked.Increment(ref OcrRead); }
+            if (result is not null)
+            {
+                ocr = result;
+                Interlocked.Increment(ref OcrRead);
+                long now = Environment.TickCount64;
+                if (result.EntitiesMissing && (_lastNerMissingLog < 0 || now - _lastNerMissingLog > 600_000))
+                {
+                    _lastNerMissingLog = now;
+                    Log.Warn("ner model not installed: names and addresses are not redacted (pattern redaction still runs)");
+                }
+            }
             else if (permanent)
             {
                 Interlocked.Increment(ref OcrUnavailable);
@@ -335,6 +363,7 @@ internal sealed class KeyframePipeline : IAsyncDisposable
         EncodeCpuMsTotal += cpu;
         KeyframeEncoder.LogChange(ref _encoderName, KeyframeEncoder.Describe(format, level));
         try { Store(store, s, g, p.Hash, p.Change, p.Reason, p.Title, p.Text, bytes, format, w, h); }
+        catch (PurgedWindowException) { Log.Debug("keyframe inside a purged window dropped"); }
         catch (Exception ex)
         {
             Interlocked.Increment(ref Failed);

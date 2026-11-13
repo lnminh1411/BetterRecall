@@ -87,7 +87,11 @@ public sealed class ChatService(ChatDeps d)
     private sealed record Pending(Turn Turn, IReadOnlyList<ToolCall> Calls, IReadOnlyList<SharePlan?> Plans, int Rank, DateTimeOffset Expires);
 
     private readonly Lock _gate = new();
-    private readonly Dictionary<string, int> _approved = new(StringComparer.Ordinal);
+    // Per chat: share level approved and the endpoint it was approved for (a new endpoint asks again).
+    private readonly Dictionary<string, (int Rank, string Endpoint)> _approved = new(StringComparer.Ordinal);
+
+    private bool ApprovedLocked(string chatId, int rank, string endpoint) =>
+        _approved.TryGetValue(chatId, out var a) && a.Rank >= rank && a.Endpoint == endpoint;
     private readonly Dictionary<string, Pending> _pending = new(StringComparer.Ordinal);
     private readonly Dictionary<string, ChatRecord> _memory = new(StringComparer.Ordinal);
     private readonly HashSet<string> _busy = new(StringComparer.Ordinal);
@@ -110,7 +114,7 @@ public sealed class ChatService(ChatDeps d)
         var rec = Load(id);
         if (rec == null) return null;
         bool approved;
-        lock (_gate) approved = _approved.TryGetValue(id, out var r) && r >= AiShare.Rank(S.Ai.Share);
+        lock (_gate) approved = ApprovedLocked(id, AiShare.Rank(S.Ai.Share), AiDefaults.EffectiveEndpoint(S.Ai));
         return new ChatDetail(Summary(rec), rec.Messages, approved);
     }
 
@@ -138,7 +142,23 @@ public sealed class ChatService(ChatDeps d)
     public void Clear()
     {
         lock (_gate) { _approved.Clear(); _pending.Clear(); _memory.Clear(); }
+        StopAll();
     }
+
+    private CancellationTokenSource _stop = new();
+
+    /// <summary>Panic, lock or AI off: cancels every running turn and drops approvals still waiting for an answer. A
+    /// stopped turn sends nothing more and saves nothing.</summary>
+    public void StopAll()
+    {
+        CancellationTokenSource old;
+        lock (_gate) { old = _stop; _stop = new CancellationTokenSource(); _pending.Clear(); }
+        try { old.Cancel(); } catch (ObjectDisposedException) { }
+    }
+
+    private CancellationToken StopToken { get { lock (_gate) return _stop.Token; } }
+
+    private static readonly ChatEvent Stopped = new("error", Code: "stopped", Text: "The answer was stopped: BetterRecall was locked, panic flushed, or AI was turned off.");
 
     // ------------------------------------------------------------ turns
 
@@ -164,7 +184,9 @@ public sealed class ChatService(ChatDeps d)
             var transcript = new JsonArray();
             var messages = rec?.Messages.ToList() ?? [];
             var sendText = question;
-            if (rec != null && rec.Provider == ai.Provider && rec.Model == model && JsonNode.Parse(rec.Transcript) is JsonArray saved)
+            // The saved transcript holds capture text shared earlier: resend it only to the endpoint it went to.
+            if (rec != null && rec.Provider == ai.Provider && rec.Model == model && rec.Endpoint == AiDefaults.EffectiveEndpoint(ai)
+                && JsonNode.Parse(rec.Transcript) is JsonArray saved)
                 transcript = saved;
             else if (rec != null && messages.Count > 0)
                 sendText = Recap(messages) + "\n\nNew question: " + question;   // provider or model changed: start a fresh transcript
@@ -178,7 +200,7 @@ public sealed class ChatService(ChatDeps d)
             emit(new ChatEvent("start", ChatId: id));
             provider.AppendUser(turn.Transcript, sendText);
             turn.Messages.Add(new ChatMessage(NextSeq(turn), Now, "user", question));
-            await RunAsync(turn, provider, emit, ct).ConfigureAwait(false);
+            await RunStoppableAsync(turn, provider, emit, ct).ConfigureAwait(false);
         }
         finally { lock (_gate) _busy.Remove(id); }
     }
@@ -187,7 +209,11 @@ public sealed class ChatService(ChatDeps d)
     public Task ApproveAsync(string token, IReadOnlyCollection<string> remove, Action<ChatEvent> emit, CancellationToken ct, Action<string, int, string>? audit = null) =>
         ResumeAsync(token, emit, ct, audit, p =>
         {
-            lock (_gate) _approved[p.Turn.ChatId] = Math.Max(p.Rank, _approved.GetValueOrDefault(p.Turn.ChatId, -1));
+            lock (_gate)
+            {
+                int prior = _approved.TryGetValue(p.Turn.ChatId, out var a) && a.Endpoint == p.Turn.Endpoint ? a.Rank : -1;
+                _approved[p.Turn.ChatId] = (Math.Max(p.Rank, prior), p.Turn.Endpoint);
+            }
             return p.Plans.Select(pl => pl == null ? null : pl with { Hits = pl.Hits.Where(h => !remove.Contains(h.Hit.Id)).ToList() }).ToList();
         });
 
@@ -206,7 +232,7 @@ public sealed class ChatService(ChatDeps d)
         try
         {
             var provider = d.Providers(p.Turn.Provider);
-            if (p.Turn.Provider != S.Ai.Provider || p.Turn.Model != AiDefaults.EffectiveModel(S.Ai))
+            if (p.Turn.Provider != S.Ai.Provider || p.Turn.Model != AiDefaults.EffectiveModel(S.Ai) || p.Turn.Endpoint != AiDefaults.EffectiveEndpoint(S.Ai))
             {
                 emit(Error("bad_request", "The AI settings changed. Ask the question again."));
                 return;
@@ -215,22 +241,32 @@ public sealed class ChatService(ChatDeps d)
             if (audit != null) p.Turn.Audit = audit;
             var plans = decide(p);
             AppendResults(p.Turn, provider, p.Calls, plans);
-            await RunAsync(p.Turn, provider, emit, ct).ConfigureAwait(false);
+            await RunStoppableAsync(p.Turn, provider, emit, ct).ConfigureAwait(false);
         }
         finally { lock (_gate) _busy.Remove(p.Turn.ChatId); }
     }
 
-    private async Task RunAsync(Turn turn, IChatProvider provider, Action<ChatEvent> emit, CancellationToken ct)
+    private async Task RunStoppableAsync(Turn turn, IChatProvider provider, Action<ChatEvent> emit, CancellationToken ct)
+    {
+        var stop = StopToken;
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, stop);
+        try { await RunAsync(turn, provider, emit, linked.Token, stop).ConfigureAwait(false); }
+        catch (OperationCanceledException) when (stop.IsCancellationRequested && !ct.IsCancellationRequested) { emit(Stopped); }
+    }
+
+    private async Task RunAsync(Turn turn, IChatProvider provider, Action<ChatEvent> emit, CancellationToken ct, CancellationToken halt)
     {
         var store = d.Store();
         if (store == null) { emit(Error("locked", "Store is locked.")); return; }
         var key = d.ApiKey();
         while (true)
         {
+            // Lock, panic or AI off since the last round: send nothing more (the store func returns null while locked).
+            if (halt.IsCancellationRequested || !S.Ai.Enabled || d.Store() is null) { emit(Stopped); return; }
             if (turn.Rounds++ >= MaxRounds)
             {
                 emit(new ChatEvent("warning", Code: "rounds", Text: $"Stopped after {MaxRounds} model calls."));
-                Finish(turn, emit, store);
+                Finish(turn, emit, store, halt);
                 return;
             }
             var ai = S.Ai;
@@ -270,7 +306,7 @@ public sealed class ChatService(ChatDeps d)
                 if (result.StopReason == "refusal" && turn.Text.Length == 0) { Fail(turn, emit, new("refused", "The provider declined to answer this question.")); return; }
                 if (result.StopReason == "context") { Fail(turn, emit, new("context", "The conversation is too long for this model. Start a new chat.")); return; }
                 if (result.StopReason == "max_tokens") emit(new ChatEvent("warning", Code: "truncated", Text: "The answer was cut off at the length limit."));
-                Finish(turn, emit, store);
+                Finish(turn, emit, store, halt);
                 return;
             }
 
@@ -290,7 +326,7 @@ public sealed class ChatService(ChatDeps d)
             }
             bool sharesData = plans.Any(p => p is { Hits.Count: > 0 });
             bool approved;
-            lock (_gate) approved = _approved.TryGetValue(turn.ChatId, out var r) && r >= rank;
+            lock (_gate) approved = ApprovedLocked(turn.ChatId, rank, turn.Endpoint);
             if (sharesData && !approved)
             {
                 var token = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(16));
@@ -350,11 +386,13 @@ public sealed class ChatService(ChatDeps d)
         return store.Search(req, qv, req.Limit ?? 8, 1 << 20).Results;
     }
 
-    private void Finish(Turn turn, Action<ChatEvent> emit, IStore store)
+    private void Finish(Turn turn, Action<ChatEvent> emit, IStore store, CancellationToken halt)
     {
+        // Panic deletes all chats and lock closes the store: a turn still finishing must not save its transcript again.
+        if (halt.IsCancellationRequested || d.Store() is null) { emit(Stopped); return; }
         var answer = turn.Text.ToString().Trim();
         turn.Messages.Add(new ChatMessage(NextSeq(turn), Now, "assistant", answer, turn.Sources.ToList()));
-        var rec = new ChatRecord(turn.ChatId, turn.Title, turn.Created, Now, turn.Provider, turn.Model, turn.Transcript.ToJsonString(), turn.Messages);
+        var rec = new ChatRecord(turn.ChatId, turn.Title, turn.Created, Now, turn.Provider, turn.Model, turn.Transcript.ToJsonString(), turn.Messages, turn.Endpoint);
         try
         {
             if (S.Ai.ChatHistory) store.SaveChat(rec);

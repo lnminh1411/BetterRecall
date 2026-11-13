@@ -15,7 +15,18 @@ public sealed partial class EncryptedStore
     public const int ChatTitleMax = 120;
 
     /// <summary>0.2 batch 4: chats, chat_messages, ai_usage. Idempotent (CREATE IF NOT EXISTS), schema number unchanged.</summary>
-    private void MigrateChats() => Exec(_w, """
+    private void MigrateChats()
+    {
+        MigrateChatTables();
+        // 0.3: the endpoint a saved transcript was sent to; a transcript is only resent to that endpoint.
+        bool has = false;
+        using (var cmd = Cmd(_w, "SELECT name FROM pragma_table_info('chats')"))
+        using (var rd = cmd.ExecuteReader())
+            while (rd.Read()) has |= rd.GetString(0) == "endpoint";
+        if (!has) Exec(_w, "ALTER TABLE chats ADD COLUMN endpoint TEXT NOT NULL DEFAULT ''");
+    }
+
+    private void MigrateChatTables() => Exec(_w, """
         CREATE TABLE IF NOT EXISTS chats(id TEXT PRIMARY KEY, title TEXT NOT NULL, created INTEGER NOT NULL, updated INTEGER NOT NULL,
             provider TEXT NOT NULL, model TEXT NOT NULL, transcript TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS ix_chats_updated ON chats(updated);
@@ -49,11 +60,11 @@ public sealed partial class EncryptedStore
         {
             ThrowIfDisposed();
             ChatRecord head;
-            using (var cmd = Cmd(_r, "SELECT title, created, updated, provider, model, transcript FROM chats WHERE id=$id", ("$id", id)))
+            using (var cmd = Cmd(_r, "SELECT title, created, updated, provider, model, transcript, endpoint FROM chats WHERE id=$id", ("$id", id)))
             using (var rd = cmd.ExecuteReader())
             {
                 if (!rd.Read()) return null;
-                head = new ChatRecord(id, rd.GetString(0), At(rd.GetInt64(1)), At(rd.GetInt64(2)), rd.GetString(3), rd.GetString(4), rd.GetString(5), []);
+                head = new ChatRecord(id, rd.GetString(0), At(rd.GetInt64(1)), At(rd.GetInt64(2)), rd.GetString(3), rd.GetString(4), rd.GetString(5), [], rd.GetString(6));
             }
             var msgs = new List<ChatMessage>();
             using (var cmd = Cmd(_r, "SELECT seq, ts, role, text, sources FROM chat_messages WHERE chat_id=$id ORDER BY seq", ("$id", id)))
@@ -71,12 +82,13 @@ public sealed partial class EncryptedStore
             ThrowIfDisposed();
             using var tx = _w.BeginTransaction();
             Exec(_w, """
-                INSERT INTO chats(id, title, created, updated, provider, model, transcript) VALUES($id, $t, $c, $u, $p, $m, $x)
+                INSERT INTO chats(id, title, created, updated, provider, model, transcript, endpoint) VALUES($id, $t, $c, $u, $p, $m, $x, $e)
                 ON CONFLICT(id) DO UPDATE SET title=excluded.title, updated=excluded.updated, provider=excluded.provider,
-                    model=excluded.model, transcript=excluded.transcript
+                    model=excluded.model, transcript=excluded.transcript, endpoint=excluded.endpoint
                 """,
                 ("$id", chat.Id), ("$t", Cut(chat.Title.Trim(), ChatTitleMax)), ("$c", chat.Created.ToUnixTimeMilliseconds()),
-                ("$u", chat.Updated.ToUnixTimeMilliseconds()), ("$p", chat.Provider), ("$m", chat.Model), ("$x", chat.Transcript));
+                ("$u", chat.Updated.ToUnixTimeMilliseconds()), ("$p", chat.Provider), ("$m", chat.Model), ("$x", chat.Transcript),
+                ("$e", chat.Endpoint));
             long maxSeq;
             using (var cmd = Cmd(_w, "SELECT COALESCE(MAX(seq), -1) FROM chat_messages WHERE chat_id=$id", ("$id", chat.Id)))
                 maxSeq = Convert.ToInt64(cmd.ExecuteScalar(), CultureInfo.InvariantCulture);
@@ -121,6 +133,28 @@ public sealed partial class EncryptedStore
             if (n > 0) CheckpointLocked();
             return n;
         }
+    }
+
+    /// <summary>Caller holds _wl. Chats created before the retention cutoff (unix ms).</summary>
+    private void DeleteChatsOlderLocked(long cutoffMs)
+    {
+        Exec(_w, "DELETE FROM chats WHERE created < $c", ("$c", cutoffMs));
+        Exec(_w, "DELETE FROM chat_messages WHERE chat_id NOT IN (SELECT id FROM chats)");
+    }
+
+    /// <summary>Caller holds _wl. Chats whose sources cite one of these captures (by rid).</summary>
+    private void DeleteChatsCitingLocked(IReadOnlyList<long> rids)
+    {
+        for (int off = 0; off < rids.Count; off += 500)
+        {
+            var list = InList(rids.Skip(off).Take(500));
+            Exec(_w, $"""
+                DELETE FROM chats WHERE id IN (
+                    SELECT DISTINCT m.chat_id FROM chat_messages m, json_each(m.sources) j
+                    WHERE json_extract(j.value, '$.id') IN (SELECT id FROM captures WHERE rid IN ({list})))
+                """);
+        }
+        Exec(_w, "DELETE FROM chat_messages WHERE chat_id NOT IN (SELECT id FROM chats)");
     }
 
     /// <summary>Caller holds _wl. Chats with any message in [from, to].</summary>

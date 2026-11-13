@@ -240,7 +240,7 @@ public sealed record ChatDetail(ChatSummary Chat, IReadOnlyList<ChatMessage> Mes
 
 /// <summary>A saved chat. Transcript is the provider-native message list (JSON) so later turns append to it unchanged.</summary>
 public sealed record ChatRecord(string Id, string Title, DateTimeOffset Created, DateTimeOffset Updated, string Provider, string Model,
-    string Transcript, IReadOnlyList<ChatMessage> Messages);
+    string Transcript, IReadOnlyList<ChatMessage> Messages, string Endpoint = "");   // Endpoint: where the transcript was sent ("" before 0.3)
 
 /// <summary>describe preview: the exact image a later "describe send &lt;token&gt;" sends (token valid 120 s).
 /// Redacted is false until redaction exists (batch 3).</summary>
@@ -275,7 +275,9 @@ public sealed record OcrEntity(int Start, int Length, string Label, float Score)
 public sealed record OcrLine(string Text, int X, int Y, int W, int H, float Confidence, int[] Cuts, OcrEntity[]? Entities = null);
 
 /// <summary>ocr reply: lines top to bottom, the engine that read them ("onnx" | "windows") and the time taken.</summary>
-public sealed record OcrResult(OcrLine[] Lines, string Engine, double Ms);
+/// <param name="EntitiesMissing">Entities were asked for but the NER model is not installed: the lines carry none, so
+/// name and address redaction did not run (pattern redaction on the text still does).</param>
+public sealed record OcrResult(OcrLine[] Lines, string Engine, double Ms, bool EntitiesMissing = false);
 
 public sealed record TranscriptSegment(int StartMs, int EndMs, string Text);
 

@@ -48,6 +48,7 @@ public sealed partial class EncryptedStore : IStore
     private SqliteConnection _rv = null!; // vector rerank reader, so FTS and vector stages run in parallel
     private EmbeddingInfo? _space;
     private bool _disposed;
+    private long _fenceMs = long.MinValue;   // "purge last N" moment: older items arriving later are refused
 
     /// <summary>Opens (or creates) the store. key returns a fresh copy of the 32-byte SQLite key; it is zeroed after use.</summary>
     public EncryptedStore(string home, Func<byte[]> key, IVectorIndex? index = null)
@@ -365,6 +366,7 @@ public sealed partial class EncryptedStore : IStore
         lock (_wl)
         {
             ThrowIfDisposed();
+            ThrowIfFenced(c.Ts);
             var id = Ids.New('s', c.Ts);
             long ts = c.Ts.ToUnixTimeMilliseconds();
             var month = Month(ts);
@@ -404,6 +406,7 @@ public sealed partial class EncryptedStore : IStore
         lock (_wl)
         {
             ThrowIfDisposed();
+            ThrowIfFenced(f.Ts);
             var id = Ids.New('r', f.Ts);
             long ts = f.Ts.ToUnixTimeMilliseconds();
             var month = Month(ts);
@@ -455,6 +458,7 @@ public sealed partial class EncryptedStore : IStore
         lock (_wl)
         {
             ThrowIfDisposed();
+            ThrowIfFenced(c.Ts);
             var id = Ids.New('a', c.Ts);
             long ts = c.Ts.ToUnixTimeMilliseconds();
             using var tx = _w.BeginTransaction();
@@ -698,7 +702,14 @@ public sealed partial class EncryptedStore : IStore
         lock (_wl)
         {
             ThrowIfDisposed();
-            int n = DeleteRowsLocked(SelectScope(scope));
+            var rids = SelectScope(scope);
+            // app / site / id purges: chats that cite a deleted capture quote its text, so they go too
+            // (time-window purges delete chats active in the window below).
+            if (scope.Kind is not ("last" or "range")) DeleteChatsCitingLocked(rids);
+            int n = DeleteRowsLocked(rids);
+            // Panic flush / "delete the last N": items captured before now but still being encoded, OCR'd or transcribed
+            // would otherwise be stored after this purge, inside the window it just emptied.
+            if (scope.Kind == "last" && scope.To is { } to) _fenceMs = Math.Max(_fenceMs, to.ToUnixTimeMilliseconds());
             // A time-window purge (panic flush, "delete the last hour") also forgets searches typed in that window.
             if (scope.Kind is "last" or "range" && scope.From != null && scope.To != null)
             {
@@ -710,6 +721,11 @@ public sealed partial class EncryptedStore : IStore
             Log.Info($"purge ({scope.Kind}) removed {n} rows");
             return n;
         }
+    }
+
+    private void ThrowIfFenced(DateTimeOffset ts)
+    {
+        if (ts.ToUnixTimeMilliseconds() < _fenceMs) throw new PurgedWindowException(ts);
     }
 
     /// <summary>wal_checkpoint(TRUNCATE) on store.db and every open keyframe file (panic flush).</summary>
@@ -1167,6 +1183,9 @@ public sealed partial class EncryptedStore : IStore
                 expired += DeleteRowsLocked(rids);
             }
             Exec(_w, "DELETE FROM audit WHERE ts < $c", ("$c", cutoff));
+            // Searches and chats are memory too: retention.days covers them (a chat goes once its first message expires).
+            Exec(_w, "DELETE FROM search_history WHERE ts < $c", ("$c", cutoff));
+            DeleteChatsOlderLocked(cutoff);
 
             // 2. Whole keyframe files from months before the cutoff month are empty now: delete the files.
             foreach (var m in KfMonths())

@@ -594,6 +594,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
             foreach (var f in ReplaySampler.ToFrames(id, start, durationMs, samples))
             {
                 try { store.AddReplayFrame(f); n++; }
+                catch (PurgedWindowException) { }   // sampled before a purge of that window
                 finally { Array.Clear(f.Image); }
             }
         }

@@ -96,10 +96,15 @@ internal sealed class CaptureService : IAsyncDisposable
 
     /// <summary>Replay masks: denied windows (guardrails), password fields (live, privacy.redactPasswords) and the
     /// redaction boxes of each monitor's newest keyframe.</summary>
+    internal static readonly RECT MaskEverything = new(-(1 << 20), -(1 << 20), 1 << 20, 1 << 20);   // clipped to each output
+
     private RECT[] Masks() => MergeMasks(_guard.Current(), _settings().Privacy.RedactPasswords, _redactions?.All() ?? []);
 
     internal static RECT[] MergeMasks(GuardSnapshot snap, bool passwords, RECT[] redactions)
     {
+        // No fresh guard snapshot (guard thread stalled, or before its first scan): nothing says which windows are denied,
+        // so black the whole canvas rather than record unmasked. Keyframes fail closed on the same snapshot.
+        if (ReferenceEquals(snap, GuardSnapshot.Closed)) return [MaskEverything];
         var secrets = passwords ? snap.SecretRects : [];
         if (secrets.Length == 0 && redactions.Length == 0) return snap.MaskRects;
         return [.. snap.MaskRects, .. secrets, .. redactions];
@@ -245,6 +250,7 @@ internal sealed class CaptureService : IAsyncDisposable
         _engine.Panic();
         _audio?.Ring.Clear();
         _pipeline.ResetDedup();
+        _pipeline.Flush();
     }
 
     public long ReplayRingBytes()

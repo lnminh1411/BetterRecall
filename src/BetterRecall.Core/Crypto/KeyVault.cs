@@ -69,10 +69,16 @@ public sealed class KeyVault : IKeyVault, IDisposable
         return LegacyTpmKeyName + "." + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(full)))[..16];
     }
 
-    /// <summary>TPM keys purge may delete: the one this folder's key file names, and this folder's own name unless it is
-    /// the shared legacy name.</summary>
-    internal static IReadOnlyList<string> TpmKeysToDelete(string? fileTpmName, string ownName)
-        => new[] { fileTpmName, ownName == LegacyTpmKeyName ? null : ownName }.OfType<string>().Distinct().ToList();
+    /// <summary>The TPM key this folder may delete: only its own name. A name read from a key file is never deleted, since a
+    /// copied or restored folder (or the legacy shared name) names a key another folder still needs.</summary>
+    internal static string? OwnedTpmKey(string ownName) => ownName == LegacyTpmKeyName ? null : ownName;
+
+    private void DeleteOwnTpmKey()
+    {
+        if (OwnedTpmKey(_tpmKeyName) is not { } name) return;
+        try { if (CngKey.Exists(name, new CngProvider(TpmProvider))) CngKey.Open(name, new CngProvider(TpmProvider)).Delete(); }
+        catch (Exception ex) { Log.Debug($"TPM key delete skipped: {ex.GetType().Name}"); }
+    }
 
     /// <summary>TPM key name stored in a tpm-mode key file; null for other modes or a short file.</summary>
     internal static string? TpmNameInFile(byte[] file)
@@ -127,6 +133,13 @@ public sealed class KeyVault : IKeyVault, IDisposable
             var loaded = _fileMode == ModeTpm ? UnwrapTpm(bytes, iso) : UnwrapDpapi(bytes, iso);
             SetLoaded(loaded, _fileMode);
             Log.Info($"data key loaded, protection {_fileMode}");
+            if (_fileMode == ModeTpm && TpmNameInFile(bytes) != _tpmKeyName)
+            {
+                // Wrapped under another folder's or the legacy shared TPM key: move it to this folder's own key, so a
+                // purge here never needs to delete a key that may still serve another folder. The old key is left alone.
+                try { WriteWrapped(loaded, ModeTpm, null); Log.Info("data key re-wrapped under this folder's TPM key"); }
+                catch (Exception ex) { Log.Warn("TPM key rename failed, old wrap kept", ex); }
+            }
             MigrateIfNeededLocked();
             return true;
         }
@@ -149,8 +162,10 @@ public sealed class KeyVault : IKeyVault, IDisposable
                 if (s.Security.KeyProtection == ModePassphrase)
                 {
                     // First passphrase for a key wrapped by tpm or dpapi: switch the wrap.
+                    bool wasTpm = _fileMode == ModeTpm;
                     WriteWrapped(_key, ModePassphrase, passphrase);
                     _fileMode = ModePassphrase;
+                    if (wasTpm) DeleteOwnTpmKey();
                     Log.Info("data key re-wrapped with passphrase");
                     return true;
                 }
@@ -189,6 +204,7 @@ public sealed class KeyVault : IKeyVault, IDisposable
         {
             WriteWrapped(_key, want, null);
             Log.Info($"data key re-wrapped from {_fileMode} to {want}");
+            if (_fileMode == ModeTpm) DeleteOwnTpmKey();   // the old wrap could still unwrap a backed-up key file
             _fileMode = want;
         }
         catch (Exception ex) { Log.Warn($"re-wrap to {want} failed, {_fileMode} kept", ex); }
@@ -201,12 +217,10 @@ public sealed class KeyVault : IKeyVault, IDisposable
     {
         lock (_gate)
         {
-            string? fileTpmName = null;
             try
             {
                 if (File.Exists(_keyFile))
                 {
-                    fileTpmName = TpmNameInFile(File.ReadAllBytes(_keyFile));
                     var len = (int)new FileInfo(_keyFile).Length;
                     using (var fs = new FileStream(_keyFile, FileMode.Open, FileAccess.Write, FileShare.None))
                     {
@@ -217,13 +231,7 @@ public sealed class KeyVault : IKeyVault, IDisposable
                 }
             }
             catch (Exception ex) { Log.Error("key file destroy failed", ex); throw; }
-            // Only the TPM key this folder's own key file names, plus this folder's own derived name. Never a name
-            // another folder may use (the legacy fixed name is deleted only when this folder's file names it).
-            foreach (var name in TpmKeysToDelete(fileTpmName, _tpmKeyName))
-            {
-                try { if (CngKey.Exists(name, new CngProvider(TpmProvider))) CngKey.Open(name, new CngProvider(TpmProvider)).Delete(); }
-                catch (Exception ex) { Log.Debug($"TPM key delete skipped: {ex.GetType().Name}"); }
-            }
+            DeleteOwnTpmKey();   // never a name read from the file: see OwnedTpmKey
             _key?.Dispose();
             _key = null;
             _fileMode = null;

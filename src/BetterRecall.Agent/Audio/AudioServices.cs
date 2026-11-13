@@ -243,6 +243,7 @@ internal sealed class Transcriber
                 _stored();
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
+            catch (PurgedWindowException) { Log.Debug($"transcribe {src.Source}: segment inside a purged window dropped"); }
             catch (Exception ex) { Log.Warn($"transcribe {src.Source}", ex); }
             finally { Array.Clear(seg.Samples); }
         }

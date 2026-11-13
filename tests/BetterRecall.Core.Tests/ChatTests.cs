@@ -468,6 +468,36 @@ public sealed class ChatStoreTests : IDisposable
     }
 
     [Fact]
+    public void Purging_a_capture_removes_chats_that_cite_it()
+    {
+        var id = _t.Store.AddAudioCapture(Caps.Audio(T, "acme invoice total"));
+        var citing = Rec("citing", 2, T) with
+        {
+            Messages = [new ChatMessage(0, T, "user", "q"), new ChatMessage(1, T, "assistant", "acme", [new ChatSource(id, T, CaptureKind.Audio, "a", "t", "")])],
+        };
+        _t.Store.SaveChat(citing);
+        _t.Store.SaveChat(Rec("other", 2, T));
+        Assert.Equal(1, _t.Store.Purge(PurgeScope.ForId(id)));
+        Assert.Null(_t.Store.GetChat("citing"));
+        Assert.NotNull(_t.Store.GetChat("other"));
+    }
+
+    [Fact]
+    public void Retention_removes_old_chats_and_searches()
+    {
+        var now = DateTimeOffset.UtcNow;
+        _t.Store.SaveChat(Rec("old", 2, now.AddDays(-40)));
+        _t.Store.SaveChat(Rec("recent", 2, now.AddDays(-1)));
+        _t.Store.AddHistory("old search", now.AddDays(-40), 10);
+        _t.Store.AddHistory("new search", now.AddDays(-1), 10);
+        var s = new Settings();
+        s.Retention.Days = 30;
+        _t.Store.RunMaintenance(s);
+        Assert.Equal(["recent"], _t.Store.Chats(10).Select(c => c.Id));
+        Assert.Equal(["new search"], _t.Store.History(10).Select(h => h.Q));
+    }
+
+    [Fact]
     public void Time_purge_removes_chats_active_in_the_window()
     {
         _t.Store.SaveChat(Rec("inside", 2, T));
@@ -999,7 +1029,7 @@ public sealed class ChatVerbTests : IDisposable
         Assert.Equal(CommandProcessor.ErrAiOff, (await Call("chat send {\"text\":\"hi\"}")).Error);
         Set("""{"ai":{"enabled":true,"provider":"gemini"}}""");
         Assert.Equal(CommandProcessor.ErrNoApiKey, (await Call("chat send {\"text\":\"hi\"}")).Error);
-        _keys.Set(Key);
+        _keys.Set(Key, _settings.Current.Ai);
         Assert.Equal(CommandProcessor.ErrJson, (await Call("chat send not-json")).Error);
         Assert.Equal(CommandProcessor.UsageChat, (await Call("chat")).Error);
         _agent.Unlocked = false;
@@ -1019,7 +1049,7 @@ public sealed class ChatVerbTests : IDisposable
     public async Task Gemini_chat_end_to_end()
     {
         Set("""{"ai":{"enabled":true,"provider":"gemini","share":"text"}}""");
-        _keys.Set(Key);
+        _keys.Set(Key, _settings.Current.Ai);
         _h.Responses.Enqueue(ScriptHandler.Sse(GeminiSearch));
         var first = Events(await Stream("chat send {\"text\":\"Which invoice did I open?\"}"));
         Assert.Equal(["start", "search", "approval"], first.Select(e => e.GetProperty("type").GetString()));
@@ -1063,10 +1093,47 @@ public sealed class ChatVerbTests : IDisposable
     }
 
     [Fact]
+    public async Task Changing_the_endpoint_asks_for_approval_and_the_key_again()
+    {
+        Set("""{"ai":{"enabled":true,"provider":"gemini","share":"text"}}""");
+        _keys.Set(Key, _settings.Current.Ai);
+        _h.Responses.Enqueue(ScriptHandler.Sse(GeminiSearch));
+        var first = Events(await Stream("chat send {\"text\":\"Which invoice?\"}"));
+        var chatId = first[0].GetProperty("chatId").GetString()!;
+        _h.Responses.Enqueue(ScriptHandler.Sse(GeminiAnswer));
+        await Stream("chat approve {\"token\":\"" + first[^1].GetProperty("token").GetString() + "\"}");
+        Assert.True((await Call("chat get " + chatId)).Data.GetProperty("approved").GetBoolean());
+
+        // Same provider and model, another host: the key entered for Google is not sent there, and the chat's
+        // approval and saved transcript (which holds the shared capture text) do not carry over.
+        Set("""{"ai":{"endpoint":"https://proxy.example/v1beta"}}""");
+        Assert.False((await Call("chat get " + chatId)).Data.GetProperty("approved").GetBoolean());
+        Assert.Equal(CommandProcessor.ErrNoApiKey, (await Call("chat send {\"chatId\":\"" + chatId + "\",\"text\":\"And the total?\"}")).Error);
+        Assert.Equal(2, _h.Requests.Count);
+    }
+
+    [Fact]
+    public async Task Ai_off_drops_a_turn_waiting_for_approval()
+    {
+        Set("""{"ai":{"enabled":true,"provider":"gemini","share":"text"}}""");
+        _keys.Set(Key, _settings.Current.Ai);
+        _h.Responses.Enqueue(ScriptHandler.Sse(GeminiSearch));
+        var token = Events(await Stream("chat send {\"text\":\"Which invoice?\"}"))[^1].GetProperty("token").GetString()!;
+        Set("""{"ai":{"enabled":false}}""");   // AI off before the approval resumes the turn
+        Set("""{"ai":{"enabled":true}}""");
+        _h.Responses.Enqueue(ScriptHandler.Sse(GeminiAnswer));
+        var ev = Events(await Stream("chat approve {\"token\":\"" + token + "\"}"));
+        // The pending approval was dropped with the stop: nothing more is sent.
+        Assert.Equal("error", ev[^1].GetProperty("type").GetString());
+        Assert.Single(_h.Requests);
+        Assert.Empty(_t.Store.Chats(10));
+    }
+
+    [Fact]
     public async Task Panic_deletes_saved_chats_and_approvals()
     {
         Set("""{"ai":{"enabled":true,"provider":"gemini","share":"text"}}""");
-        _keys.Set(Key);
+        _keys.Set(Key, _settings.Current.Ai);
         _h.Responses.Enqueue(ScriptHandler.Sse(GeminiSearch));
         var token = Events(await Stream("chat send {\"text\":\"Which invoice?\"}"))[^1].GetProperty("token").GetString()!;
         _h.Responses.Enqueue(ScriptHandler.Sse(GeminiAnswer));

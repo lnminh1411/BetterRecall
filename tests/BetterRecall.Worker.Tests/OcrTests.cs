@@ -313,6 +313,23 @@ public class RealOcrTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void Missing_ner_model_still_returns_the_ocr_lines()
+    {
+        // Pattern redaction (cards, IBANs) needs the lines even when name/address detection cannot run.
+        if (Models() is not { } models) { output.WriteLine("skipped: BR_OCR_MODELS not set"); return; }
+        var onlyOcr = TestEnv.NewDir("ocr-no-ner");
+        var src = Path.Combine(models, ModelCatalog.Ocr);
+        var dst = Directory.CreateDirectory(Path.Combine(onlyOcr, ModelCatalog.Ocr)).FullName;
+        foreach (var f in Directory.GetFiles(src)) File.Copy(f, Path.Combine(dst, Path.GetFileName(f)));
+        using var e = Engine(onlyOcr);
+        var img = TextImages.Render(900, 120, ("Card 4111 1111 1111 1111 for Anna Schmidt", 30, 40, 22));
+        var r = e.Ocr(TextImages.AsInput(img), entities: true);
+        Assert.True(r.EntitiesMissing);
+        Assert.Contains("4111", string.Join(" ", r.Lines.Select(l => l.Text)));
+        Assert.All(r.Lines, l => Assert.Null(l.Entities));
+    }
+
+    [Fact]
     public void Tokenizer_matches_the_python_tokenizers_library()
     {
         if (Models() is not { } models || !Directory.Exists(Path.Combine(models, ModelCatalog.Ner))) { output.WriteLine("skipped: BR_OCR_MODELS not set"); return; }

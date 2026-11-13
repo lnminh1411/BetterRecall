@@ -237,14 +237,11 @@ public class KeyVaultTests
     }
 
     [Fact]
-    public void Destroy_deletes_only_the_tpm_keys_this_folder_owns()
+    public void Destroy_deletes_only_this_folders_own_tpm_key()
     {
         var own = KeyVault.TpmKeyNameFor(@"K:\t\h-1");
-        // dpapi or passphrase file: only the folder's own name, never the legacy name another install uses.
-        Assert.Equal([own], KeyVault.TpmKeysToDelete(null, own));
-        Assert.Empty(KeyVault.TpmKeysToDelete(null, KeyVault.LegacyTpmKeyName));
-        // An older tpm file naming the legacy key: that key belongs to this folder.
-        Assert.Equal([KeyVault.LegacyTpmKeyName, own], KeyVault.TpmKeysToDelete(KeyVault.LegacyTpmKeyName, own));
+        Assert.Equal(own, KeyVault.OwnedTpmKey(own));
+        Assert.Null(KeyVault.OwnedTpmKey(KeyVault.LegacyTpmKeyName));   // shared by every pre-0.2 folder
     }
 
     [Fact]

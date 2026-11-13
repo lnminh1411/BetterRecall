@@ -9,13 +9,19 @@ using BetterRecall.Core.Native;
 namespace BetterRecall.Core.Ai;
 
 /// <summary>
-/// Cloud describe API key in keys\ai-key.bin: "BRA1" + DPAPI (CurrentUser) blob of the UTF-8 key. Never in settings.json,
-/// never returned on a pipe, never logged. The key is read only for the moment of a send.
+/// Cloud API key in keys\ai-key.bin: "BRA2" + DPAPI (CurrentUser) blob of UTF-8 "provider|endpoint\nkey". Never in
+/// settings.json, never returned on a pipe, never logged. The key is read only for the moment of a send, and only for the
+/// provider and endpoint it was entered for: changing ai.provider or ai.endpoint asks for the key again, so a key never
+/// goes to a host the user did not enter it for. "BRA1" files (0.2, no binding) are used with default endpoints only.
 /// </summary>
 public sealed class ApiKeyStore(string home)
 {
     public const int MaxLength = 4096;
-    private static readonly byte[] Magic = "BRA1"u8.ToArray();
+    private static readonly byte[] Magic = "BRA2"u8.ToArray();
+    private static readonly byte[] LegacyMagic = "BRA1"u8.ToArray();
+
+    /// <summary>What a key is bound to: provider and effective endpoint (lower case).</summary>
+    public static string Binding(AiSettings a) => (a.Provider + "|" + AiDefaults.EffectiveEndpoint(a)).ToLowerInvariant();
     private readonly string _file = DataPaths.AiKeyFile(home);
     private readonly Lock _gate = new();
 
@@ -24,10 +30,10 @@ public sealed class ApiKeyStore(string home)
     public static bool Valid(string? key) =>
         key is { Length: > 0 and <= MaxLength } && key.Trim().Length == key.Length && key.All(c => c > ' ' && c < 127);
 
-    public void Set(string key)
+    public void Set(string key, AiSettings boundTo)
     {
         if (!Valid(key)) throw new ArgumentException("Invalid API key.");
-        var plain = Encoding.UTF8.GetBytes(key);
+        var plain = Encoding.UTF8.GetBytes(Binding(boundTo) + "\n" + key);
         try
         {
             var blob = Protect(plain);
@@ -59,8 +65,9 @@ public sealed class ApiKeyStore(string home)
         Log.Info("cloud describe API key removed");
     }
 
-    /// <summary>The key, or null when none is stored or the file cannot be decrypted (other user, damaged).</summary>
-    public string? Read()
+    /// <summary>The key for these AI settings, or null when none is stored, it was entered for another provider or
+    /// endpoint, or the file cannot be decrypted (other user, damaged).</summary>
+    public string? Read(AiSettings a)
     {
         byte[] file;
         lock (_gate)
@@ -68,12 +75,18 @@ public sealed class ApiKeyStore(string home)
             if (!File.Exists(_file)) return null;
             file = File.ReadAllBytes(_file);
         }
-        if (file.Length < 5 || !file.AsSpan(0, 4).SequenceEqual(Magic)) { Log.Warn("API key file damaged"); return null; }
+        bool legacy = file.Length >= 5 && file.AsSpan(0, 4).SequenceEqual(LegacyMagic);
+        if (file.Length < 5 || (!legacy && !file.AsSpan(0, 4).SequenceEqual(Magic))) { Log.Warn("API key file damaged"); return null; }
+        if (legacy && !string.IsNullOrWhiteSpace(a.Endpoint)) { Log.Info("API key predates endpoint binding: enter it again for a custom endpoint"); return null; }
         byte[]? plain = null;
         try
         {
             plain = Unprotect(file.AsSpan(4));
-            return Encoding.UTF8.GetString(plain);
+            var text = Encoding.UTF8.GetString(plain);
+            if (legacy) return text;
+            int nl = text.IndexOf('\n');
+            if (nl < 0 || text[..nl] != Binding(a)) { Log.Info("API key was entered for another provider or endpoint"); return null; }
+            return text[(nl + 1)..];
         }
         catch (CryptographicException) { Log.Warn("API key file cannot be decrypted"); return null; }
         finally { if (plain != null) CryptographicOperations.ZeroMemory(plain); }

@@ -148,12 +148,15 @@ public sealed partial class CommandProcessor
                 Store = () => IsLocked(PipeKind.Ui) ? null : _d.Store(),
                 Embedder = deps.Embedder,
                 Thumbnailer = deps.Thumbnailer,
-                ApiKey = keys.Read,
+                ApiKey = () => keys.Read(_d.Settings.Current.Ai),
                 Http = deps.ChatHttp ?? new Ai.ProviderHttp(),
                 Providers = deps.ChatProviders ?? Ai.ChatProviders.For,
                 ImageRedactor = deps.Redactor,
             });
             deps.Agent.Panicked += OnPanic;
+            // Running chat turns stop on lock and when AI is turned off (panic clears them in OnPanic).
+            deps.Agent.StatusChanged += st => { if (st.Locked) _chat.StopAll(); };
+            deps.Settings.Changed += s => { if (!s.Ai.Enabled) _chat.StopAll(); };
         }
     }
 
@@ -928,7 +931,10 @@ public sealed partial class CommandProcessor
             }
             return OpenVerified(s, "unlock password");
         }
-        else if (rest.Length > 0 && keys.Protection == Crypto.KeyVault.ModePassphrase && !keys.UnlockWithPassphrase(rest))
+        // security.keyProtection = passphrase while the key file is still tpm/dpapi: the passphrase re-wraps the key.
+        // keys.Protection reports the file's mode, so the setting has to be checked too.
+        else if (rest.Length > 0 && (keys.Protection == Crypto.KeyVault.ModePassphrase || S.Security.KeyProtection == Crypto.KeyVault.ModePassphrase)
+                 && !keys.UnlockWithPassphrase(rest))
         {
             return Err(ErrWrongPassphrase);
         }
@@ -1017,7 +1023,7 @@ public sealed partial class CommandProcessor
         AiUsage? usage = null;
         try { if (!IsLocked(PipeKind.Ui) && _d.Store() is { } st) usage = Ai.AiBudget.Usage(st, a, Now()); }
         catch (Exception ex) { Log.Warn("ai usage read failed", ex); }
-        return new AiStatus(a.Enabled, _d.AiKey?.IsSet == true, a.Provider, AiDefaults.EffectiveModel(a), AiDefaults.EffectiveEndpoint(a),
+        return new AiStatus(a.Enabled, _d.AiKey?.Read(a) != null, a.Provider, AiDefaults.EffectiveModel(a), AiDefaults.EffectiveEndpoint(a),
             usage, Ai.ProviderHttp.IsLoopback(AiDefaults.EffectiveEndpoint(a)));
     }
 
@@ -1033,7 +1039,7 @@ public sealed partial class CommandProcessor
             case "setkey" when tail.Length > 0:
                 if (store == null) return Err(ErrAiOff);
                 if (!Ai.ApiKeyStore.Valid(tail)) return Err(ErrApiKeyRule);
-                store.Set(tail);
+                store.Set(tail, S.Ai);
                 Audit(s, "ai setkey", 1, "");
                 return Ok(JsonSerializer.Serialize(AiState(), CoreJson.Default.AiStatus));
             case "clearkey" when tail.Length == 0:
@@ -1064,7 +1070,7 @@ public sealed partial class CommandProcessor
         {
             case "preview":
             {
-                if (keyNeeded && !_d.AiKey.IsSet) return Err(ErrNoApiKey);
+                if (keyNeeded && _d.AiKey.Read(ai) == null) return Err(ErrNoApiKey);
                 if (IsLocked(s.Kind)) return Err(ErrLocked);
                 var id = args[1];
                 ThumbData? img = _d.Store()!.GetKeyframe(id);
@@ -1084,7 +1090,7 @@ public sealed partial class CommandProcessor
             {
                 if (!s.DescribeTokens.Remove(args[1], out var ticket) || ticket.Expires <= now) return Err(ErrToken);
                 if (IsLocked(s.Kind)) return Err(ErrLocked);
-                var key = _d.AiKey.Read();
+                var key = _d.AiKey.Read(ai);
                 if (keyNeeded && key == null) return Err(ErrNoApiKey);
                 var verb = "describe " + ai.Provider;
                 var sha = Convert.ToHexStringLower(SHA256.HashData(ticket.Image.Bytes));

@@ -354,6 +354,27 @@ public sealed class CommandProcessorTests : IDisposable
     }
 
     [Fact]
+    public async Task Switching_an_existing_key_to_passphrase_rewraps_it_on_unlock()
+    {
+        using var h = new TempHome();   // dpapi key created first
+        var s = SettingsStore.Load(h.Path);
+        using var vault = new KeyVault(h.Path, () => s.Current, probeHello: false);
+        Assert.True(vault.TryLoadSilent());
+        Assert.Equal("dpapi", vault.Protection);
+        Assert.Null(s.TryUpdate(JsonDocument.Parse("{\"security\":{\"keyProtection\":\"passphrase\"}}").RootElement));
+        var p = new CommandProcessor(new CommandDeps
+        {
+            Settings = s, Store = () => null, Keys = vault, Agent = _agent, Embedder = _embed, Thumbnailer = _thumbs,
+            PurgeAll = _ => Task.FromResult(0),
+        });
+        Assert.True(Envelope.Parse((await p.HandleAsync(Ui, "unlock new pass", default)).Line).Ok);
+        Assert.Equal("passphrase", vault.Protection);
+        using var reopened = new KeyVault(h.Path, () => s.Current, probeHello: false);
+        Assert.False(reopened.TryLoadSilent());   // the passphrase is now required
+        Assert.True(reopened.UnlockWithPassphrase("new pass"));
+    }
+
+    [Fact]
     public async Task Unlock_with_passphrase_unwraps_the_key()
     {
         using var h = new TempHome(null);
