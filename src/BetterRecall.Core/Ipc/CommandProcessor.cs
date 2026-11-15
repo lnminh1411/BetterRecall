@@ -137,6 +137,16 @@ public sealed partial class CommandProcessor
 
     /// <summary>Panic: forget chat approvals and unsaved chats, and delete saved chats. The read gate is already closed,
     /// so this goes to the store directly.</summary>
+    /// <summary>Rows left the store for any reason (ICoreHost.Purged): unsaved chats, approvals and running turns that
+    /// quote them go too. purge confirm already does this with its window; this covers the panic flush, retention,
+    /// thinning, the space guard, NSFW drops and replay deletes (N5).</summary>
+    internal void OnStorePurged(PurgeNotice n)
+    {
+        if (_chat is null || (n.Ids.Count == 0 && n.From is null)) return;
+        var gone = n.Ids.ToHashSet(StringComparer.Ordinal);
+        _chat.ForgetCaptures(gone.Contains, n.From, n.To);
+    }
+
     private void OnPanic()
     {
         _chat?.Clear();

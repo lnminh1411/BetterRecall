@@ -65,6 +65,15 @@ internal static class GuardrailPolicy
     public static bool IsChromiumBrowser(string processName) =>
         Browsers.Any(b => string.Equals(b, processName, StringComparison.OrdinalIgnoreCase));
 
+    /// <summary>Badge result that hides a browser window (keyframes of its monitor skipped, replay masked): private, or
+    /// not known to be normal. A failed or missing probe fails closed for background windows as for the foreground one.</summary>
+    public static bool BadgeHides(BadgeResult r) => r is BadgeResult.Private or BadgeResult.CheckFailed or BadgeResult.NotChecked;
+
+    /// <summary>Badge detection on: true when the window must be hidden. badge is null when UI Automation is unavailable
+    /// (every browser window then fails closed). Non-browser and untitled windows are never hidden by the badge.</summary>
+    public static bool HidesBrowserWindow(WindowInfo w, Func<nint, BadgeResult>? badge) =>
+        w.Title.Length > 0 && IsChromiumBrowser(w.ProcessName) && BadgeHides(badge?.Invoke(w.Hwnd) ?? BadgeResult.CheckFailed);
+
     /// <summary>Process, path and title deny lists for one window. Used for the foreground window and for replay masks.</summary>
     public static GuardReason MatchDenyLists(WindowInfo w, PrivacySettings p)
     {

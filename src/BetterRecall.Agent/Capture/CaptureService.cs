@@ -166,10 +166,10 @@ internal sealed class CaptureService : IAsyncDisposable
             _engine.Paused = replayPaused;
             if (_audio is not null) _audio.Paused = replayPaused;
 
-            // Replay samples (replay.searchable) follow the replay buffer, not the keyframe pause: fullscreen pauses
-            // keyframes but the replay may keep running (replay.duringFullscreen).
-            bool sampleDue = s.Replay.Enabled && s.Replay.Searchable && !replayPaused && _engine.Pipelines.Count > 0
-                && now - _lastSampleTick >= Math.Clamp(s.Replay.SampleSeconds, 2, 60) * 1000L;
+            // Replay samples (replay.searchable) follow the replay buffer, but not through a governance pause: fullscreen,
+            // battery and storage pause keyframes and inference while the replay may keep running, and a sample costs an
+            // OCR pass and an encode (A9). A saved clip then starts from the last sample taken before the pause.
+            bool sampleDue = SampleDue(s.Replay, replayPaused, SamplesPaused?.Invoke() ?? false, _engine.Pipelines.Count, now - _lastSampleTick);
             if (_keyframesPaused())
             {
                 if (sampleDue) { _lastSampleTick = now; RequestKeyframes(force: false, keyframe: false, sample: true); }
@@ -236,6 +236,14 @@ internal sealed class CaptureService : IAsyncDisposable
     private static bool IsOnMonitor(WindowInfo w, OutputInfo o) =>
         WindowInspector.TryGetBounds(w.Hwnd, out var r) && r.Left < o.Left + o.Width && o.Left < r.Right && r.Top < o.Top + o.Height && o.Top < r.Bottom;
 
+    /// <summary>True while a pause (fullscreen, battery, storage) stops keyframes and inference but not the replay ring.</summary>
+    public Func<bool>? SamplesPaused { get; init; }
+
+    /// <summary>A replay sample grab is due. Pure.</summary>
+    internal static bool SampleDue(ReplaySettings r, bool replayPaused, bool samplesPaused, int pipelines, long sinceLastMs) =>
+        r.Enabled && r.Searchable && !replayPaused && !samplesPaused && pipelines > 0
+        && sinceLastMs >= Math.Clamp(r.SampleSeconds, 2, 60) * 1000L;
+
     public long SkippedByGuard;
     public GuardReason LastGuardReason;
 
@@ -244,6 +252,15 @@ internal sealed class CaptureService : IAsyncDisposable
     {
         var s = _settings();
         return _engine.Save(output, _audio?.Source, Math.Clamp(s.Replay.Seconds, 15, 600));
+    }
+
+    /// <summary>A purge reached the replay window (A11): zero the video and audio rings and drop queued grabs, so a later
+    /// replay save cannot write purged video. De-dup state and the replay redaction masks stay.</summary>
+    public void ForgetRecent()
+    {
+        _engine.Panic();
+        _audio?.Ring.Clear();
+        _pipeline.Flush();
     }
 
     /// <summary>Panic: zero every ring and forget de-dup state.</summary>

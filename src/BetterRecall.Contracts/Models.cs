@@ -78,7 +78,8 @@ public sealed record NewReplayFrame(
     int Height,
     byte[] Image,            // keyframes.format bytes
     string ImageMime,
-    string Site = "");
+    string Site = "",
+    DateTimeOffset? CapturedAt = null);   // when the pixels were grabbed, if earlier than Ts (a carry-in sample re-stamped to the clip start): the purge fence checks it too
 
 /// <summary>Speech segment after transcription.</summary>
 public sealed record NewAudioCapture(
@@ -170,7 +171,8 @@ public sealed record AgentStatus(
     string Device,           // NPU | GPU | CPU | none
     StoreStats Store,
     int RetentionDays,
-    string[]? HotkeysFailed = null);   // hotkey actions whose RegisterHotKey failed (combination taken by another app)
+    string[]? HotkeysFailed = null,    // hotkey actions whose RegisterHotKey failed (combination taken by another app)
+    string[]? Warnings = null);        // ocr-failing (keyframes dropped or stored without text), ner-unavailable (names and addresses not redacted)
 
 public sealed record AuditEntry(
     DateTimeOffset Ts,

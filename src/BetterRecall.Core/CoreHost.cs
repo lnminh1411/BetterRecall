@@ -29,6 +29,7 @@ public sealed class CoreHostImpl : ICoreHost
     private readonly SemaphoreSlim _storeGate = new(1, 1);
     private volatile EncryptedStore? _store;
     private PipeManager? _pipes;
+    private CommandProcessor? _processor;
     private IThumbnailer? _thumbs;
 
     /// <summary>Cloud describe redactor, set by the agent before StartPipes (OCR + privacy.redact* on the outgoing image).</summary>
@@ -62,6 +63,28 @@ public sealed class CoreHostImpl : ICoreHost
     /// <summary>Total connected pipe clients (tray indicator). Raised from pipe threads.</summary>
     public event Action<int>? ClientsChanged;
 
+    /// <summary>Rows left the store (every store instance, and purge all). See ICoreHost.Purged.</summary>
+    public event Action<PurgeNotice>? Purged;
+
+    private EncryptedStore Wire(EncryptedStore store)
+    {
+        store.Purged += OnStorePurged;
+        return store;
+    }
+
+    /// <summary>Fans a purge out: chat state in Core first, then the agent's listeners (thumbnail cache, replay ring,
+    /// samples, queued jobs). A failing listener does not stop the others.</summary>
+    private void OnStorePurged(PurgeNotice n)
+    {
+        try { _processor?.OnStorePurged(n); } catch (Exception ex) { Log.Warn("purge: chat cleanup failed", ex); }
+        if (Purged is not { } h) return;
+        foreach (var d in h.GetInvocationList())
+        {
+            try { ((Action<PurgeNotice>)d)(n); }
+            catch (Exception ex) { Log.Warn("purge listener failed", ex); }
+        }
+    }
+
     public async Task OpenStoreAsync(CancellationToken ct)
     {
         await _storeGate.WaitAsync(ct).ConfigureAwait(false);
@@ -74,7 +97,7 @@ public sealed class CoreHostImpl : ICoreHost
                 Log.Info("data key needs the passphrase; waiting for unlock");
                 await loaded.WaitAsync(ct).ConfigureAwait(false);
             }
-            try { _store = await Task.Run(() => new EncryptedStore(_options.Home, () => _vault.Derive("betterrecall-sqlite")), ct).ConfigureAwait(false); }
+            try { _store = Wire(await Task.Run(() => new EncryptedStore(_options.Home, () => _vault.Derive("betterrecall-sqlite")), ct).ConfigureAwait(false)); }
             catch (Microsoft.Data.Sqlite.SqliteException ex) when (ex.SqliteErrorCode == 26)   // SQLITE_NOTADB
             {
                 // The loaded key does not decrypt store.db (a key file swapped in from elsewhere, or a replaced key): a retry
@@ -110,6 +133,7 @@ public sealed class CoreHostImpl : ICoreHost
             // Redaction hook for cloud describe: the agent's keyframe redactor when set, else pass-through (preview says not redacted).
             Redactor = DescribeRedactor ?? new Ai.PassThroughRedactor(),
         });
+        _processor = processor;
         _pipes = new PipeManager(_settings, processor, _options.InstallDir, () => _store);
         _pipes.ClientsChanged += n => ClientsChanged?.Invoke(n);
         _pipes.StartAsync().GetAwaiter().GetResult();
@@ -124,6 +148,14 @@ public sealed class CoreHostImpl : ICoreHost
 
     /// <summary>purge all: destroys the data key and deletes every store, keyframe and replay file, then starts empty.</summary>
     internal async Task<int> PurgeAllAsync(CancellationToken ct)
+    {
+        int rows = await PurgeAllGatedAsync(ct).ConfigureAwait(false);
+        // Everything in RAM goes too: the replay ring, samples and queued jobs would otherwise outlive the data key.
+        OnStorePurged(new PurgeNotice("all", [], DateTimeOffset.MinValue, DateTimeOffset.UtcNow));
+        return rows;
+    }
+
+    private async Task<int> PurgeAllGatedAsync(CancellationToken ct)
     {
         await _storeGate.WaitAsync(ct).ConfigureAwait(false);
         try
@@ -145,7 +177,7 @@ public sealed class CoreHostImpl : ICoreHost
             try { _thumbs?.ClearCache(); } catch (Exception ex) { Log.Warn("thumbnail cache clear failed", ex); }
             Log.Info("purge all done");
             if (_vault.TryLoadSilent())
-                _store = new EncryptedStore(_options.Home, () => _vault.Derive("betterrecall-sqlite"));
+                _store = Wire(new EncryptedStore(_options.Home, () => _vault.Derive("betterrecall-sqlite")));
             else
                 _ = Task.Run(async () => { await _vault.WhenLoaded.ConfigureAwait(false); await OpenStoreAsync(CancellationToken.None).ConfigureAwait(false); });
             return rows;

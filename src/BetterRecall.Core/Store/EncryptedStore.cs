@@ -48,7 +48,22 @@ public sealed partial class EncryptedStore : IStore
     private SqliteConnection _rv = null!; // vector rerank reader, so FTS and vector stages run in parallel
     private EmbeddingInfo? _space;
     private bool _disposed;
-    private long _fenceMs = long.MinValue;   // "purge last N" moment: older items arriving later are refused
+    // Purged time windows that refuse items still in flight (B12): "purge last N" (from = MinValue: anything stamped before
+    // its end) and ranges ending about now. Each expires FenceLifetime after it was set, by the monotonic clock, so a wall
+    // clock that steps back after the purge cannot refuse new captures for long.
+    private readonly List<(long From, long To, long SetAt)> _fences = [];
+    private readonly List<(string Id, long Ts)> _deleted = [];   // rows deleted under _wl, for the next Purged notice
+
+    /// <summary>A range purge ending this close to now (or later) fences its window like "purge last N".</summary>
+    internal static readonly TimeSpan FenceSlack = TimeSpan.FromMinutes(5);
+    /// <summary>How long a fence refuses in-flight items: longer than OCR, encode and transcription can hold one.</summary>
+    internal static readonly TimeSpan FenceLifetime = TimeSpan.FromMinutes(15);
+    /// <summary>Monotonic milliseconds for fence expiry. Tests replace it.</summary>
+    internal Func<long> MonoMs { get; set; } = () => Environment.TickCount64;
+
+    /// <summary>Raised after rows were deleted (see PurgeNotice for the reasons), outside the store lock. CoreHost forwards
+    /// it as ICoreHost.Purged.</summary>
+    public event Action<PurgeNotice>? Purged;
 
     /// <summary>Opens (or creates) the store. key returns a fresh copy of the 32-byte SQLite key; it is zeroed after use.</summary>
     public EncryptedStore(string home, Func<byte[]> key, IVectorIndex? index = null)
@@ -463,6 +478,8 @@ public sealed partial class EncryptedStore : IStore
         {
             ThrowIfDisposed();
             ThrowIfFenced(f.Ts);
+            // A carry-in sample is re-stamped to the clip start: the pixels are older, and the fence checks those too (N4).
+            if (f.CapturedAt is { } grabbed && grabbed < f.Ts) ThrowIfFenced(grabbed);
             var id = Ids.New('r', f.Ts);
             long ts = f.Ts.ToUnixTimeMilliseconds();
             var month = Month(ts);
@@ -486,6 +503,7 @@ public sealed partial class EncryptedStore : IStore
             catch
             {
                 DeleteRowsLocked([rid]);
+                _deleted.Clear();   // never visible: nothing to tell
                 throw;
             }
             return id;
@@ -495,6 +513,8 @@ public sealed partial class EncryptedStore : IStore
     public int DeleteReplayFrames(string replayId)
     {
         if (string.IsNullOrWhiteSpace(replayId)) return 0;
+        PurgeNotice? notice;
+        int n;
         lock (_wl)
         {
             ThrowIfDisposed();
@@ -502,10 +522,12 @@ public sealed partial class EncryptedStore : IStore
             using (var cmd = Cmd(_w, "SELECT rid FROM replay_frames WHERE replay_id=$r", ("$r", replayId)))
             using (var rd = cmd.ExecuteReader())
                 while (rd.Read()) rids.Add(rd.GetInt64(0));
-            int n = DeleteRowsLocked(rids);
+            n = DeleteRowsLocked(rids);
             if (n > 0) Log.Info($"replay deleted: {n} replay frames removed");
-            return n;
+            notice = TakeNoticeLocked("replay");
         }
+        Raise(notice);
+        return n;
     }
 
     public string AddAudioCapture(NewAudioCapture c)
@@ -661,13 +683,16 @@ public sealed partial class EncryptedStore : IStore
 
     public void DropCapture(string id, string reason)
     {
+        PurgeNotice? notice;
         lock (_wl)
         {
             ThrowIfDisposed();
             if (Rid(id) is not long rid) return;
             DeleteRowsLocked([rid]);
             Log.Info($"capture dropped ({SafeReason(reason)})");
+            notice = TakeNoticeLocked("drop");
         }
+        Raise(notice);
     }
 
     // ---------------------------------------------------------------- deletes
@@ -682,6 +707,9 @@ public sealed partial class EncryptedStore : IStore
             var list = InList(chunk);
             // Every row delete (purge of any scope, retention, thinning, space guard) drops the saved chats that quote it.
             DeleteChatsCitingLocked(chunk);
+            using (var cmd = Cmd(_w, $"SELECT id, ts FROM captures WHERE rid IN ({list})"))
+            using (var rd = cmd.ExecuteReader())
+                while (rd.Read()) _deleted.Add((rd.GetString(0), rd.GetInt64(1)));
             var months = new Dictionary<string, List<long>>();
             using (var cmd = Cmd(_w, $"SELECT rid, kf_month FROM captures WHERE rid IN ({list}) AND +kf_month IS NOT NULL"))
             using (var rd = cmd.ExecuteReader())
@@ -757,16 +785,18 @@ public sealed partial class EncryptedStore : IStore
     /// <summary>Deletes the scope, then wal_checkpoint(TRUNCATE) on every open file. Purge(Last(Zero)) just checkpoints.</summary>
     public int Purge(PurgeScope scope)
     {
+        PurgeNotice? notice;
+        int n;
         lock (_wl)
         {
             ThrowIfDisposed();
             var rids = SelectScope(scope);
             // DeleteRowsLocked drops chats citing a deleted capture for every scope; time-window purges also delete
             // chats active in the window below.
-            int n = DeleteRowsLocked(rids);
-            // Panic flush / "delete the last N": items captured before now but still being encoded, OCR'd or transcribed
-            // would otherwise be stored after this purge, inside the window it just emptied.
-            if (scope.Kind == "last" && scope.To is { } to) _fenceMs = Math.Max(_fenceMs, to.ToUnixTimeMilliseconds());
+            n = DeleteRowsLocked(rids);
+            // Panic flush / "delete the last N" / a range up to about now: items captured before now but still being
+            // encoded, OCR'd or transcribed would otherwise be stored after this purge, inside the window it just emptied.
+            FenceLocked(scope);
             // A time-window purge (panic flush, "delete the last hour") also forgets searches typed in that window.
             if (scope.Kind is "last" or "range" && scope.From != null && scope.To != null)
             {
@@ -776,13 +806,64 @@ public sealed partial class EncryptedStore : IStore
             }
             CheckpointLocked();
             Log.Info($"purge ({scope.Kind}) removed {n} rows");
-            return n;
+            bool window = scope.Kind is "last" or "range";
+            notice = TakeNoticeLocked("purge", window ? scope.From : null, window ? scope.To : null);
+        }
+        Raise(notice);
+        return n;
+    }
+
+    /// <summary>Fences a time-window purge: "last" refuses anything stamped before its end, a range ending within
+    /// FenceSlack of now (or later) refuses its window up to now. Caller holds _wl.</summary>
+    private void FenceLocked(PurgeScope scope)
+    {
+        if (scope.To is not { } to) return;
+        var now = DateTimeOffset.UtcNow;
+        long mono = MonoMs();
+        long life = (long)FenceLifetime.TotalMilliseconds;
+        _fences.RemoveAll(x => mono - x.SetAt >= life);
+        if (scope.Kind == "last")
+            _fences.Add((long.MinValue, to.ToUnixTimeMilliseconds(), mono));
+        else if (scope.Kind == "range" && scope.From is { } from && to >= now - FenceSlack)
+        {
+            var end = to < now ? to : now;
+            if (end > from) _fences.Add((from.ToUnixTimeMilliseconds(), end.ToUnixTimeMilliseconds(), mono));
         }
     }
 
+    /// <summary>Caller holds _wl.</summary>
     private void ThrowIfFenced(DateTimeOffset ts)
     {
-        if (ts.ToUnixTimeMilliseconds() < _fenceMs) throw new PurgedWindowException(ts);
+        if (_fences.Count == 0) return;
+        long mono = MonoMs();
+        long life = (long)FenceLifetime.TotalMilliseconds;
+        _fences.RemoveAll(x => mono - x.SetAt >= life);
+        long t = ts.ToUnixTimeMilliseconds();
+        foreach (var (from, to, _) in _fences)
+            if (t >= from && t <= to) throw new PurgedWindowException(ts);
+    }
+
+    /// <summary>The rows deleted since the last notice, as a notice; null when nothing was deleted and no window was
+    /// purged. Caller holds _wl.</summary>
+    private PurgeNotice? TakeNoticeLocked(string reason, DateTimeOffset? from = null, DateTimeOffset? to = null)
+    {
+        bool window = from is { } f && to is { } t && t > f;
+        if (_deleted.Count == 0 && !window) return null;
+        var ids = _deleted.Select(d => d.Id).ToArray();
+        DateTimeOffset? newest = _deleted.Count == 0 ? null : DateTimeOffset.FromUnixTimeMilliseconds(_deleted.Max(d => d.Ts));
+        _deleted.Clear();
+        return new PurgeNotice(reason, ids, window ? from : null, window ? to : null, newest);
+    }
+
+    /// <summary>Raises Purged outside the store lock; a failing listener does not stop the others.</summary>
+    private void Raise(PurgeNotice? notice)
+    {
+        if (notice is null || Purged is not { } h) return;
+        foreach (var d in h.GetInvocationList())
+        {
+            try { ((Action<PurgeNotice>)d)(notice); }
+            catch (Exception ex) { Log.Warn("purge listener failed", ex); }
+        }
     }
 
     /// <summary>wal_checkpoint(TRUNCATE) on store.db and every open keyframe file (panic flush).</summary>
@@ -1222,6 +1303,7 @@ public sealed partial class EncryptedStore : IStore
     {
         ArgumentNullException.ThrowIfNull(settings);
         var sw = Stopwatch.StartNew();
+        PurgeNotice? notice;
         lock (_wl)
         {
             ThrowIfDisposed();
@@ -1270,7 +1352,9 @@ public sealed partial class EncryptedStore : IStore
             }
             try { Exec(_w, "PRAGMA optimize"); } catch { }
             Log.Info($"maintenance: {expired} rows expired in {sw.ElapsedMilliseconds} ms");
+            notice = TakeNoticeLocked("retention");
         }
+        Raise(notice);
     }
 
     // ---------------------------------------------------------------- test hooks

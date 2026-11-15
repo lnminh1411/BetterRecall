@@ -95,8 +95,10 @@ internal sealed class GuardrailService : IDisposable
                     long epoch = Interlocked.Read(ref _fgEpoch);   // before the foreground is read: a change during the scan makes it stale
                     var fg = WindowInspector.Foreground();
                     // Private windows on any monitor (badge results are cached per window, so this probes new windows only).
-                    Func<WindowInfo, bool>? isPrivate = s.Privacy.BrowserBadgeDetection && badge is not null
-                        ? w => w.Title.Length > 0 && GuardrailPolicy.IsChromiumBrowser(w.ProcessName) && badge.Check(w.Hwnd) == BadgeResult.Private
+                    // A failed probe, or no UI Automation at all, hides the window too: fail closed, as for the foreground (A5).
+                    Func<nint, BadgeResult>? probe = badge is null ? null : badge.Check;
+                    Func<WindowInfo, bool>? isPrivate = s.Privacy.BrowserBadgeDetection
+                        ? w => GuardrailPolicy.HidesBrowserWindow(w, probe)
                         : null;
                     var scan = WindowInspector.Scan(s.Privacy, _installDir, _ownPid, _monitors(), isPrivate);
                     LastScanMs = System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds;
@@ -111,8 +113,8 @@ internal sealed class GuardrailService : IDisposable
                         site = badge.ReadSite(fg.Hwnd);
                     var decision = GuardrailPolicy.Evaluate(fg, s.Privacy, _sessionLocked(), scan.AnyAffinity, badgeResult);
                     var masks = scan.Masks;
-                    // A private browser window found through the badge is masked in the replay as well.
-                    if (badgeResult == BadgeResult.Private && fg is not null && WindowInspector.TryGetBounds(fg.Hwnd, out var fr))
+                    // A private browser window found through the badge, or one whose probe failed, is masked in the replay as well.
+                    if (GuardrailPolicy.BadgeHides(badgeResult) && fg is not null && WindowInspector.TryGetBounds(fg.Hwnd, out var fr))
                         masks = [.. masks, fr];
                     RECT[]? secrets = null;
                     if (s.Privacy.RedactPasswords && fg is not null && decision.Allow)
