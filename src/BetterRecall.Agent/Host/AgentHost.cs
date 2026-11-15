@@ -572,7 +572,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
     private void RaiseStatus(bool force)
     {
         var st = GetStatus();
-        var key = $"{st.Capturing}|{st.Paused}|{st.PauseReason}|{st.PausedUntil}|{st.Locked}|{st.Device}|{st.Queue.Pending}|{st.Audio}|{string.Join(",", st.Warnings ?? [])}";
+        var key = $"{st.Capturing}|{st.Paused}|{st.PauseReason}|{st.PausedUntil}|{st.Locked}|{st.Device}|{st.Queue.Pending}|{st.Audio}|{st.UserPaused}|{string.Join(",", st.Warnings ?? [])}";
         if (!force && key == _lastStatusKey) return;
         _lastStatusKey = key;
         try { StatusChanged?.Invoke(st); } catch (Exception ex) { Log.Warn("StatusChanged handler", ex); }
@@ -612,7 +612,8 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
             Store: StoreStats(),
             RetentionDays: s.Retention.Days,
             HotkeysFailed: _hotkeysFailed,
-            Warnings: Warnings());
+            Warnings: Warnings(),
+            UserPaused: _pause.Has("user") || _pause.Has("ipc"));
     }
 
     /// <summary>ocr-failing: text recognition keeps failing (keyframes dropped, or stored without text) (A21).

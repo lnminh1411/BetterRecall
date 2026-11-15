@@ -4,9 +4,9 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:contracts="using:BetterRecall.Contracts"
     xmlns:views="using:BetterRecall.UI.Views">
-    <Grid>
+    <Grid SizeChanged="Root_SizeChanged">
         <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="260" />
+            <ColumnDefinition x:Name="SidebarColumn" Width="260" />
             <ColumnDefinition Width="*" />
             <ColumnDefinition x:Name="DetailColumn" Width="Auto" />
         </Grid.ColumnDefinitions>
@@ -29,10 +29,12 @@
             </Button>
 
             <!-- Saved chats list -->
-            <ListView x:Name="SavedList" Grid.Row="1" SelectionMode="Single" SelectionChanged="SavedList_SelectionChanged">
+            <!-- Rename and delete: context menu (right click, Shift+F10, menu key), F2 and Delete on the focused chat. -->
+            <ListView x:Name="SavedList" x:Uid="Chat_SavedList" Grid.Row="1" SelectionMode="Single" SelectionChanged="SavedList_SelectionChanged"
+                      ContextRequested="SavedList_ContextRequested" KeyDown="SavedList_KeyDown">
                 <ListView.ItemTemplate>
                     <DataTemplate x:DataType="contracts:ChatSummary">
-                        <Grid Padding="4,6" RowSpacing="2" ContextRequested="Chat_ContextRequested" Tag="{x:Bind}">
+                        <Grid Padding="4,6" RowSpacing="2">
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto" />
                                 <RowDefinition Height="Auto" />
@@ -55,8 +57,15 @@
             </Button>
         </Grid>
 
-        <!-- Middle: ChatView -->
-        <views:ChatView x:Name="ChatControl" Grid.Column="1" />
+        <!-- Middle: page title and ChatView -->
+        <Grid Grid.Column="1">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+            <TextBlock x:Uid="Chat_PageTitle" Margin="24,8,24,0" Style="{StaticResource PageTitleStyle}" AutomationProperties.HeadingLevel="Level1" />
+            <views:ChatView x:Name="ChatControl" Grid.Row="1" />
+        </Grid>
 
         <!-- Right: DetailPane with close button -->
         <Grid x:Name="DetailHost" Grid.Column="2" Width="380" Visibility="Collapsed"
@@ -67,7 +76,7 @@
                 <RowDefinition Height="*" />
             </Grid.RowDefinitions>
             <Button HorizontalAlignment="Right" VerticalAlignment="Center" Margin="8,8,8,0" Padding="8,4"
-                    x:Name="CloseDetailButton" Background="Transparent" BorderThickness="0" Click="CloseDetail_Click">
+                    x:Name="CloseDetailButton" Style="{StaticResource SubtleButtonStyle}" Click="CloseDetail_Click">
                 <FontIcon Glyph="&#xE711;" FontSize="14" />
             </Button>
             <views:DetailPane x:Name="Detail" Grid.Row="1" />

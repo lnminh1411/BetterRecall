@@ -3,9 +3,10 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:logic="using:BetterRecall.UI.Logic">
-    <!-- Search hit / timeline tile. The image source is set by ThumbLoader only when the tile is realised. -->
+    <!-- Search hit / timeline tile. The image source is set by ThumbLoader only when the tile is realised.
+         MinHeight, not Height: at larger Windows text sizes the two text lines need more than 48 px. -->
             <DataTemplate x:Key="CaptureTileTemplate" x:DataType="logic:CaptureItem">
-                <Grid Width="232" Height="178" CornerRadius="6"
+                <Grid Width="232" MinHeight="178" CornerRadius="6"
                       Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                       BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1"
                       AutomationProperties.Name="{x:Bind AccessibleName}">

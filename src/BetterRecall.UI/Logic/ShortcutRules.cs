@@ -16,6 +16,12 @@ public static class ShortcutRules
     public static string Get(JsonObject settings, string action) =>
         SettingsSchema.Get(settings, Key(action)) is JsonValue v && v.TryGetValue<string>(out var s) ? s : "";
 
+    /// <summary>What the Shortcuts page shows: whether it is usable, each action's keys, and which ones failed to
+    /// register. The page rebuilds its rows only when this changes, so status pushes (queue count, device) do not
+    /// destroy the focused button.</summary>
+    public static string ViewSignature(JsonObject settings, bool usable, IEnumerable<string>? failed) =>
+        string.Join('|', [usable ? "1" : "0", string.Join(',', (failed ?? []).Order(StringComparer.Ordinal)), .. Actions.Select(a => Get(settings, a))]);
+
     /// <summary>The other action that already uses this combination, or null.</summary>
     public static string? UsedBy(JsonObject settings, string action, string combo) =>
         combo.Length == 0 ? null

@@ -279,8 +279,22 @@ public sealed class ChatViewModel : ObservableObject
         "timeout" => "Chat_ErrTimeout",
         "budget" => "Chat_ErrBudget",
         "refused" => "Chat_ErrRefused",
+        "locked" => "Chat_ErrLocked",
+        "stopped" => "Chat_ErrStopped",
         _ => "Chat_ErrGeneric",
     };
+
+    /// <summary>Codes whose agent text is fixed English (ChatService lock and stop events): the UI shows its own
+    /// translated message instead. Null keeps the agent's text (provider errors carry useful detail).</summary>
+    public static string? ErrorMessageKey(string? code) => (code?.ToLowerInvariant()) switch
+    {
+        "locked" => "Chat_ErrLockedBody",
+        "stopped" => "Chat_ErrStoppedBody",
+        _ => null,
+    };
+
+    /// <summary>The stream ended because the store locked: the window must lock like any other locked reply.</summary>
+    public static bool IsLockCode(string? code) => string.Equals(code, "locked", StringComparison.OrdinalIgnoreCase);
 
     public static (string Requests, string RequestLimit, string Tokens, string TokenLimit)? UsageParts(AiUsage? u)
     {

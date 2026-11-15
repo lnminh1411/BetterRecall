@@ -472,6 +472,7 @@ public sealed partial class LauncherWindow : Window
     private MenuFlyout BuildMenu(CaptureItem item)
     {
         var m = new MenuFlyout();
+        WindowHelpers.Themed(m, Root);
         // The menu is a windowed popup: opening it deactivates the launcher, which must not hide it.
         m.Opening += (_, _) => _modal++;
         m.Closed += (_, _) => _modal--;
@@ -598,6 +599,10 @@ public sealed partial class LauncherWindow : Window
         }
         finally { _modal--; }
     }
+
+    /// <summary>A narrow launcher gives the results (or the Ask chat) more room: the preview column shrinks to 280 px.</summary>
+    private void Body_SizeChanged(object sender, SizeChangedEventArgs e) =>
+        DetailColumn.Width = new GridLength(e.NewSize.Width < 900 ? 280 : 380);
 
     private void OpenTimeline_Click(object sender, RoutedEventArgs e) => App.Current.ShowMain("timeline");
     private void OpenReplays_Click(object sender, RoutedEventArgs e) => App.Current.ShowMain("replays");

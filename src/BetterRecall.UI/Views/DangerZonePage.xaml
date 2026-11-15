@@ -2,8 +2,8 @@
     x:Class="BetterRecall.UI.Views.DangerZonePage"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
-    <ScrollViewer VerticalScrollBarVisibility="Auto">
-        <StackPanel Padding="24,8,24,24" Spacing="12" MaxWidth="1000" HorizontalAlignment="Stretch">
+    <ScrollViewer VerticalScrollBarVisibility="Auto" SizeChanged="Root_SizeChanged">
+        <StackPanel Style="{StaticResource PageStackStyle}" Spacing="12">
             <TextBlock x:Uid="Danger_Title" Style="{StaticResource PageTitleStyle}" AutomationProperties.HeadingLevel="Level1" />
             <InfoBar x:Name="ResultBar" IsOpen="False" IsClosable="True" />
 
@@ -26,11 +26,11 @@
                     <TextBlock x:Uid="Danger_ExportTitle" Style="{StaticResource BodyStrongTextBlockStyle}" AutomationProperties.HeadingLevel="Level2" />
                     <TextBlock x:Uid="Danger_ExportBody" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                     <StackPanel Spacing="8">
-                        <StackPanel Orientation="Horizontal" Spacing="8">
+                        <StackPanel x:Name="ExportFromRow" Orientation="Horizontal" Spacing="8">
                             <CalendarDatePicker x:Name="ExportFromDate" x:Uid="Danger_ExportFrom" Width="242" />
                             <TimePicker x:Name="ExportFromTime" x:Uid="Danger_ExportFromTime" ClockIdentifier="24HourClock" MinWidth="242" Width="242" />
                         </StackPanel>
-                        <StackPanel Orientation="Horizontal" Spacing="8">
+                        <StackPanel x:Name="ExportToRow" Orientation="Horizontal" Spacing="8">
                             <CalendarDatePicker x:Name="ExportToDate" x:Uid="Danger_ExportTo" Width="242" />
                             <TimePicker x:Name="ExportToTime" x:Uid="Danger_ExportToTime" ClockIdentifier="24HourClock" MinWidth="242" Width="242" />
                         </StackPanel>
@@ -49,11 +49,11 @@
                     <TextBlock x:Uid="Danger_RangeTitle" Style="{StaticResource BodyStrongTextBlockStyle}" AutomationProperties.HeadingLevel="Level2" />
                     <TextBlock x:Uid="Danger_RangeBody" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                     <StackPanel Spacing="8">
-                        <StackPanel Orientation="Horizontal" Spacing="8">
+                        <StackPanel x:Name="FromRow" Orientation="Horizontal" Spacing="8">
                             <CalendarDatePicker x:Name="FromDate" x:Uid="Danger_From" Width="242" />
                             <TimePicker x:Name="FromTime" x:Uid="Danger_FromTime" ClockIdentifier="24HourClock" MinWidth="242" Width="242" />
                         </StackPanel>
-                        <StackPanel Orientation="Horizontal" Spacing="8">
+                        <StackPanel x:Name="ToRow" Orientation="Horizontal" Spacing="8">
                             <CalendarDatePicker x:Name="ToDate" x:Uid="Danger_To" Width="242" />
                             <TimePicker x:Name="ToTime" x:Uid="Danger_ToTime" ClockIdentifier="24HourClock" MinWidth="242" Width="242" />
                         </StackPanel>
@@ -66,7 +66,7 @@
                 <StackPanel Spacing="8">
                     <TextBlock x:Uid="Danger_AppTitle" Style="{StaticResource BodyStrongTextBlockStyle}" AutomationProperties.HeadingLevel="Level2" />
                     <TextBlock x:Uid="Danger_AppBody" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                    <StackPanel Orientation="Horizontal" Spacing="8">
+                    <StackPanel x:Name="AppRow" Orientation="Horizontal" Spacing="8">
                         <TextBox x:Name="AppName" x:Uid="Danger_AppName" MinWidth="240" />
                         <Button x:Uid="Danger_AppButton" VerticalAlignment="Bottom" Click="PurgeApp_Click" />
                     </StackPanel>

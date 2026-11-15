@@ -36,7 +36,7 @@ public class SettingsTests
     public void Diff_NoChange_IsEmpty()
     {
         Assert.Empty(SettingsDiff.Diff(Defaults(), Defaults()));
-        Assert.Equal([], SettingsDiff.ToRequestLines(new JsonObject()));
+        Assert.Equal("", SettingsDiff.ToRequestLine(new JsonObject()));
     }
 
     [Fact]
@@ -50,9 +50,7 @@ public class SettingsTests
         Assert.Equal(["capture.intervalMs", "privacy.denyTitlePatterns", "security.unlockTimeoutMin"], SettingsDiff.Keys(diff).Order());
         Assert.Equal("{\"capture\":{\"intervalMs\":3000},\"privacy\":{\"denyTitlePatterns\":[\"InPrivate\",\"Incognito\"]},\"security\":{\"unlockTimeoutMin\":5}}",
             diff.ToJsonString());
-        var lines = SettingsDiff.ToRequestLines(diff)!;
-        Assert.Single(lines);
-        Assert.StartsWith("settings set {", lines[0]);
+        Assert.StartsWith("settings set {", SettingsDiff.ToRequestLine(diff));
     }
 
     [Fact]
@@ -74,22 +72,35 @@ public class SettingsTests
     }
 
     [Fact]
-    public void RequestLines_SplitPerSection_WhenTooLong()
+    public void RequestLine_IsOneLine_WhenOver4KiB()
     {
+        // B-checks-C S2: a save split per section stopped at the first error after earlier sections were saved.
         var edited = Defaults();
-        SettingsSchema.Set(edited, "privacy.denyProcesses", new JsonArray(Enumerable.Range(0, 2600).Select(i => (JsonNode)$"process{i:D4}.exe").ToArray()));
-        SettingsSchema.Set(edited, "ipc.allowClients", new JsonArray(Enumerable.Range(0, 1000).Select(i => (JsonNode)$@"C:\Tools\client{i:D4}\c.exe").ToArray()));
-        var lines = SettingsDiff.ToRequestLines(SettingsDiff.Diff(Defaults(), edited))!;
-        Assert.Equal(2, lines.Count);
-        Assert.All(lines, l => Assert.True(System.Text.Encoding.UTF8.GetByteCount(l) <= LineProtocol.MaxUiRequestBytes));
+        SettingsSchema.Set(edited, "privacy.denyProcesses", new JsonArray(Enumerable.Range(0, 160).Select(i => (JsonNode)$"process{i:D4}.exe").ToArray()));
+        SettingsSchema.Set(edited, "ipc.allowClients", new JsonArray(Enumerable.Range(0, 60).Select(i => (JsonNode)$@"C:\Tools\client{i:D3}\c.exe").ToArray()));
+        var line = SettingsDiff.ToRequestLine(SettingsDiff.Diff(Defaults(), edited))!;
+        Assert.True(System.Text.Encoding.UTF8.GetByteCount(line) > LineProtocol.MaxRequestBytes);
+        Assert.True(System.Text.Encoding.UTF8.GetByteCount(line) <= LineProtocol.MaxUiRequestBytes);
+        Assert.Contains("\"privacy\"", line);
+        Assert.Contains("\"ipc\"", line);
     }
 
     [Fact]
-    public void RequestLines_NullWhenOneSectionIsTooLong()
+    public void RequestLine_NullWhenOverTheUiPipeLimit()
     {
         var edited = Defaults();
-        SettingsSchema.Set(edited, "privacy.denyProcesses", new JsonArray(Enumerable.Range(0, 4000).Select(i => (JsonNode)$"process{i:D4}.exe").ToArray()));
-        Assert.Null(SettingsDiff.ToRequestLines(SettingsDiff.Diff(Defaults(), edited)));
+        SettingsSchema.Set(edited, "privacy.denyProcesses", new JsonArray(Enumerable.Range(0, 5000).Select(i => (JsonNode)$"process{i:D4}.exe").ToArray()));
+        Assert.Null(SettingsDiff.ToRequestLine(SettingsDiff.Diff(Defaults(), edited)));
+    }
+
+    [Fact]
+    public void RequestLine_NullWhenSectionsFitAloneButNotTogether()
+    {
+        // H-core C2 cap + B-checks-C S2: two sections that each fit 64 KiB but not together are refused, never split.
+        var edited = Defaults();
+        SettingsSchema.Set(edited, "privacy.denyProcesses", new JsonArray(Enumerable.Range(0, 2600).Select(i => (JsonNode)$"process{i:D4}.exe").ToArray()));
+        SettingsSchema.Set(edited, "ipc.allowClients", new JsonArray(Enumerable.Range(0, 1000).Select(i => (JsonNode)$@"C:\Tools\client{i:D4}\c.exe").ToArray()));
+        Assert.Null(SettingsDiff.ToRequestLine(SettingsDiff.Diff(Defaults(), edited)));
     }
 
     [Theory]

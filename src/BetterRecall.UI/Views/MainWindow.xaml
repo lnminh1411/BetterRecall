@@ -47,25 +47,39 @@
                     <NavigationViewItem.Icon><FontIcon Glyph="&#xE765;" /></NavigationViewItem.Icon>
                 </NavigationViewItem>
             </NavigationView.MenuItems>
-            <Grid>
-                <Frame x:Name="ContentFrame" />
-                <InfoBar x:Name="OfflineBar" VerticalAlignment="Top" Margin="24,8" IsClosable="False" IsOpen="False" Severity="Error" />
-                <InfoBar x:Name="StorageBar" VerticalAlignment="Bottom" Margin="24,8" IsClosable="True" IsOpen="False" Severity="Warning"
+            <!-- Banners get their own rows above the page, so they never cover its title or content. A closed InfoBar keeps
+                 its margin, so each is collapsed while closed. -->
+            <Grid x:Name="ContentHost">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+                <InfoBar x:Name="OfflineBar" Visibility="{x:Bind OfflineBar.IsOpen, Mode=OneWay}" Margin="24,8,24,0" IsClosable="False" IsOpen="False" Severity="Error" />
+                <InfoBar x:Name="StoreBar" Visibility="{x:Bind StoreBar.IsOpen, Mode=OneWay}" Grid.Row="1" Margin="24,8,24,0" IsClosable="False" IsOpen="False" />
+                <InfoBar x:Name="StorageBar" Visibility="{x:Bind StorageBar.IsOpen, Mode=OneWay}" Grid.Row="2" Margin="24,8,24,0" IsClosable="True" IsOpen="False" Severity="Warning"
                          Closed="StorageBar_Closed" />
-                <InfoBar x:Name="StoreBar" VerticalAlignment="Bottom" Margin="24,8" IsClosable="False" IsOpen="False" />
-                <views:UnlockPanel x:Name="Unlock" Visibility="Collapsed" />
+                <InfoBar x:Name="ActionBar" Visibility="{x:Bind ActionBar.IsOpen, Mode=OneWay}" Grid.Row="3" Margin="24,8,24,0" IsClosable="True" IsOpen="False" Severity="Warning" />
+                <Frame x:Name="ContentFrame" Grid.Row="4" />
+                <views:UnlockPanel x:Name="Unlock" Grid.Row="4" Visibility="Collapsed" />
             </Grid>
         </NavigationView>
 
         <Grid x:Name="StatusBar" Grid.Row="2" Padding="16,4" ColumnSpacing="8" Background="{ThemeResource LayerFillColorDefaultBrush}"
               BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="0,1,0,0">
             <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
-            <TextBlock x:Name="StatusLine" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Style="{StaticResource CaptionTextBlockStyle}"
+            <!-- Only capture and lock state are announced; the counts after them change with every capture. -->
+            <TextBlock x:Name="StateLine" VerticalAlignment="Center" TextWrapping="NoWrap" Style="{StaticResource CaptionTextBlockStyle}"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" AutomationProperties.LiveSetting="Polite" />
-            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="4">
+            <TextBlock x:Name="StatusLine" Grid.Column="1" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap"
+                       Style="{StaticResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="4">
                 <Button x:Name="PauseButton" Click="Pause_Click" />
                 <Button x:Name="LockButton" Click="Lock_Click" />
                 <Button x:Uid="Main_Search" Click="Search_Click" />

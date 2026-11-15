@@ -216,8 +216,6 @@
   <data name="Home_Retention" xml:space="preserve"><value>Kept for</value></data>
   <data name="Home_Days" xml:space="preserve"><value>{0} days</value></data>
   <data name="Home_TurnOn" xml:space="preserve"><value>Turn on</value></data>
-  <data name="Launcher_App.PlaceholderText" xml:space="preserve"><value>App, such as chrome.exe</value></data>
-  <data name="Launcher_App.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve"><value>App filter</value></data>
   <data name="Launcher_Kind.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve"><value>Kind</value></data>
   <data name="Launcher_Range.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve"><value>Time range</value></data>
   <data name="Launcher_Replays.Content" xml:space="preserve"><value>Replays</value></data>
@@ -254,7 +252,7 @@
   <data name="R_gpu_fastest" xml:space="preserve"><value>{0} is the fastest graphics card here: {1} ms per image.</value></data>
   <data name="R_interval_slow_inference" xml:space="preserve"><value>Even at 70 tokens an image takes {1} ms. A keyframe every {0} ms (about {2} keyframes per second) keeps the AI device at {3}% load, under half.</value></data>
   <data name="R_layout" xml:space="preserve"><value>{0} keeps up in real time at {1}.</value></data>
-  <data name="R_replay_unsupported" xml:space="preserve"><value>No graphics adapter could encode 720p at 15 fps in real time.</value></data>
+  <data name="R_replay_unsupported" xml:space="preserve"><value>No graphics adapter could encode {0} at {1} fps in real time.</value></data>
   <data name="R_resolution_realtime" xml:space="preserve"><value>{0} ({1}x{2}, {3} ms per frame) is the largest size the encoder keeps up with in real time.</value></data>
   <data name="R_seconds_ram" xml:space="preserve"><value>This PC has {0} MB of memory. A shorter replay keeps memory use down.</value></data>
   <data name="R_tokens_budget" xml:space="preserve"><value>At {0} tokens an image takes {1} ms. With about {2} keyframes per second that keeps the AI device busy {3}% of the time (the limit is 50%).</value></data>
@@ -517,7 +515,7 @@
   <data name="Settings_RangeError" xml:space="preserve"><value>Enter a value from {0} to {1}.</value></data>
   <data name="Settings_Save.Content" xml:space="preserve"><value>Save</value></data>
   <data name="Settings_Saved" xml:space="preserve"><value>Settings saved.</value></data>
-  <data name="Settings_TooLarge" xml:space="preserve"><value>One list is too long to send in one request. Remove some entries and save again.</value></data>
+  <data name="Settings_TooLarge" xml:space="preserve"><value>These changes are too large to save at once. Remove some list entries and save again.</value></data>
   <data name="Settings_Unavailable" xml:space="preserve"><value>Settings are unavailable</value></data>
   <data name="Status_AudioBoth" xml:space="preserve"><value>System audio and microphone</value></data>
   <data name="Status_AudioMic" xml:space="preserve"><value>Microphone</value></data>
@@ -836,7 +834,6 @@
   <data name="Chat_DeleteAll" xml:space="preserve"><value>Delete all chats</value></data>
   <data name="Chat_DeleteAllConfirm" xml:space="preserve"><value>Delete all chats? This cannot be undone.</value></data>
   <data name="Chat_CloseDetail" xml:space="preserve"><value>Close detail</value></data>
-  <data name="Chat_Sources" xml:space="preserve"><value>Sources</value></data>
   <data name="Chat_Empty" xml:space="preserve"><value>Ask anything about your past activity.</value></data>
   <data name="Chat_ErrAuth" xml:space="preserve"><value>Authentication failed</value></data>
   <data name="Chat_ErrQuota" xml:space="preserve"><value>Quota exceeded</value></data>
@@ -850,4 +847,18 @@
   <data name="Chat_ErrRefused" xml:space="preserve"><value>Request refused</value></data>
   <data name="Chat_ErrGeneric" xml:space="preserve"><value>Chat error</value></data>
   <data name="Chat_Searching" xml:space="preserve"><value>Searching your history for "{0}"</value></data>
+  <data name="Home_Connecting" xml:space="preserve"><value>Connecting to BetterRecall…</value></data>
+  <data name="Home_Day" xml:space="preserve"><value>{0} day</value></data>
+  <data name="Timeline_EmptyPending" xml:space="preserve"><value>Nothing indexed in this period yet. {0:N0} captures are waiting to be indexed.</value></data>
+  <data name="Timeline_CloseDetail.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve"><value>Close detail</value></data>
+  <data name="Timeline_CloseDetail.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve"><value>Close detail</value></data>
+  <data name="Chat_PageTitle.Text" xml:space="preserve"><value>Ask</value></data>
+  <data name="Chat_SavedList.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve"><value>Saved chats</value></data>
+  <data name="Chat_ApprovalInclude" xml:space="preserve"><value>Share {0}, {1}</value></data>
+  <data name="Chat_ErrLocked" xml:space="preserve"><value>BetterRecall is locked</value></data>
+  <data name="Chat_ErrLockedBody" xml:space="preserve"><value>Unlock BetterRecall, then ask again.</value></data>
+  <data name="Chat_ErrStopped" xml:space="preserve"><value>Answer stopped</value></data>
+  <data name="Chat_ErrStoppedBody" xml:space="preserve"><value>The answer was stopped because BetterRecall was locked, captures it quoted were deleted, or AI was turned off.</value></data>
+  <data name="Key_Delete" xml:space="preserve"><value>Delete</value></data>
+  <data name="Audit_Empty.Text" xml:space="preserve"><value>No requests logged yet.</value></data>
 </root>

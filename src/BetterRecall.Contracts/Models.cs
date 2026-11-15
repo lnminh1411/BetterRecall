@@ -172,7 +172,8 @@ public sealed record AgentStatus(
     StoreStats Store,
     int RetentionDays,
     string[]? HotkeysFailed = null,    // hotkey actions whose RegisterHotKey failed (combination taken by another app)
-    string[]? Warnings = null);        // ocr-failing (keyframes dropped or stored without text), ner-unavailable (names and addresses not redacted)
+    string[]? Warnings = null,         // ocr-failing (keyframes dropped or stored without text), ner-unavailable (names and addresses not redacted)
+    bool UserPaused = false);          // a user or ipc pause is set, even when a higher-priority reason is reported
 
 public sealed record AuditEntry(
     DateTimeOffset Ts,

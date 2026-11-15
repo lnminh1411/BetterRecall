@@ -44,11 +44,26 @@ public sealed partial class ShortcutsPage : Page
 
     private static string Label(string action) => Loc.Get("S_hotkeys_" + action);
 
+    private string? _shown;
+
+    /// <summary>Rebuilds the rows only when what they show changed: a status push for a new queue count must not
+    /// destroy the focused Change or Remove button.</summary>
     private void Build()
     {
         var s = Services.Current;
         bool usable = s.Settings.Loaded && s.Connection == AgentErrorKind.None;
         var failed = s.Status?.HotkeysFailed ?? [];
+        var sig = ShortcutRules.ViewSignature(s.Settings.Original, usable, failed);
+        if (sig == _shown) return;
+        _shown = sig;
+        // keep the keyboard position across a real rebuild (a saved change re-enables buttons)
+        int focusRow = -1, focusCol = -1;
+        if (XamlRoot is not null && FocusManager.GetFocusedElement(XamlRoot) is FrameworkElement f
+            && f.Parent is Grid fr && Rows.Children.IndexOf(fr) is >= 0 and var ri)
+        {
+            focusRow = ri;
+            focusCol = Grid.GetColumn(f);
+        }
         Rows.Children.Clear();
         for (int i = 0; i < ShortcutRules.Actions.Length; i++)
         {
@@ -56,7 +71,7 @@ public sealed partial class ShortcutsPage : Page
             var keys = ShortcutRules.Get(s.Settings.Original, action);
             var row = new Grid { MinHeight = 56, ColumnSpacing = 12, Padding = new Thickness(0, 8, 0, 8) };
             if (i > 0) row.BorderThickness = new Thickness(0, 1, 0, 0);
-            row.BorderBrush = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["CardStrokeColorDefaultBrush"];
+            row.Style = St("RowSeparatorStyle");   // theme-aware brush (ui.theme may differ from Windows)
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -68,11 +83,7 @@ public sealed partial class ShortcutsPage : Page
             if (keys.Length > 0 && failed.Contains(action))
             {
                 var warn = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, Margin = new Thickness(0, 2, 0, 0) };
-                warn.Children.Add(new FontIcon
-                {
-                    Glyph = "\uE7BA", FontSize = 14,
-                    Foreground = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["SystemFillColorCautionBrush"],
-                });
+                warn.Children.Add(new FontIcon { Glyph = "\uE7BA", FontSize = 14, Style = St("CautionIconStyle") });
                 warn.Children.Add(new TextBlock { Text = Loc.Get("Shortcuts_Failed"), Style = St("CaptionSecondaryTextStyle"), TextWrapping = TextWrapping.Wrap });
                 text.Children.Add(warn);
             }
@@ -102,6 +113,12 @@ public sealed partial class ShortcutsPage : Page
             row.Children.Add(remove);
 
             Rows.Children.Add(row);
+        }
+        if (focusRow >= 0 && focusRow < Rows.Children.Count && Rows.Children[focusRow] is Grid g
+            && g.Children.OfType<Control>().FirstOrDefault(c => Grid.GetColumn(c) == focusCol) is { } target)
+        {
+            if (target.IsEnabled) target.Focus(FocusState.Keyboard);
+            else g.Children.OfType<Control>().FirstOrDefault(c => c.IsEnabled)?.Focus(FocusState.Keyboard);
         }
     }
 
@@ -149,7 +166,7 @@ public sealed partial class ShortcutsPage : Page
             bool ctrl = Down(VirtualKey.Control), alt = Down(VirtualKey.Menu), shift = Down(VirtualKey.Shift);
             bool win = Down(VirtualKey.LeftWindows) || Down(VirtualKey.RightWindows);
             // Tab, Esc and Enter keep their dialog meaning unless a combination modifier is down.
-            if (e.Key is (VirtualKey.Tab or VirtualKey.Escape or VirtualKey.Enter) && !(ctrl || alt || win)) return;
+            if ((HotkeyFormat.LeavesRecorder((int)e.Key, ctrl, alt, win) || e.Key is VirtualKey.Escape or VirtualKey.Enter) && !(ctrl || alt || win)) return;
             e.Handled = true;
             var hk = HotkeyFormat.FromKeyPress((int)e.Key, ctrl, alt, shift, win);
             if (hk is null)

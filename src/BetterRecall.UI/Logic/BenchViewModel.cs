@@ -41,7 +41,13 @@ public sealed class RecommendationRow(Recommendation rec) : ObservableObject
     public JsonNode? Proposed { get; } = ParseLiteral(rec.Value);
     public JsonNode? Current { get; } = ParseLiteral(rec.Current);
     /// <summary>Reason code is the resource key; Args fill its placeholders.</summary>
-    public LocalizedText Reason => new(Rec.Reason, [.. Rec.Args]);
+    public LocalizedText Reason => ReasonText(Rec.Reason, Rec.Args);
+
+    /// <summary>R_layout gets the setting id ("composited"); show the layout's translated label in its place.</summary>
+    public static LocalizedText ReasonText(string reason, IReadOnlyList<string> args) =>
+        reason == "R_layout" && args.Count > 0
+            ? new(reason, [new LocalizedText("S_replay_layout_" + args[0]), .. args.Skip(1)])
+            : new(reason, [.. args]);
 
     public bool Selected { get => _selected; set => Set(ref _selected, value); }
     public string? Error { get => _error; set => Set(ref _error, value); }

@@ -34,6 +34,7 @@ public sealed partial class AuditPage : Page, IDataPage
         var r = await Services.Current.Api.AuditAsync(500);
         Busy.IsActive = false;
         ErrorBar.IsOpen = !r.Ok;
+        EmptyText.Visibility = Visibility.Collapsed;
         if (!r.Ok)
         {
             ErrorBar.Message = Loc.Error(r.Kind, r.Error);
@@ -41,6 +42,7 @@ public sealed partial class AuditPage : Page, IDataPage
             return;
         }
         List.ItemsSource = r.Value!.Select(x => new AuditRow(x)).ToList();
+        EmptyText.Visibility = r.Value!.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void Refresh_Click(object sender, RoutedEventArgs e) => Reload();

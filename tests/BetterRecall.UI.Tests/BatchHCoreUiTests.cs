@@ -43,8 +43,7 @@ public class BatchHCoreUiTests
         var original = new JsonObject { ["privacy"] = new JsonObject { ["denyProcesses"] = new JsonArray() } };
         var edited = (JsonObject)original.DeepClone();
         edited["privacy"]!["denyProcesses"] = new JsonArray(Enumerable.Range(0, 1000).Select(i => (JsonNode)$"process{i:D4}.exe").ToArray());
-        var lines = SettingsDiff.ToRequestLines(SettingsDiff.Diff(original, edited))!;
-        var line = Assert.Single(lines);
+        var line = SettingsDiff.ToRequestLine(SettingsDiff.Diff(original, edited))!;
         Assert.True(Encoding.UTF8.GetByteCount(line) > LineProtocol.MaxRequestBytes);
     }
 
