@@ -68,10 +68,17 @@ internal sealed class GuardrailService : IDisposable
     public void OnForegroundEvent()
     {
         Interlocked.Increment(ref _fgEpoch);
-        _wake.Set();
+        Wake();
     }
 
-    public void Refresh() => _wake.Set();
+    public void Refresh() => Wake();
+
+    /// <summary>Session events and foreground hooks can still arrive during shutdown (A22).</summary>
+    private void Wake()
+    {
+        if (_stop) return;
+        try { _wake.Set(); } catch (ObjectDisposedException) { }
+    }
 
     private void Run()
     {
@@ -133,7 +140,8 @@ internal sealed class GuardrailService : IDisposable
                     }
                 }
                 catch (Exception ex) { Log.Warn("guardrail scan", ex); }
-                _wake.WaitOne(500);
+                try { _wake.WaitOne(500); }
+                catch (ObjectDisposedException) { break; }   // disposed while a scan ran past Dispose's join (A22)
             }
         }
         finally
@@ -147,8 +155,10 @@ internal sealed class GuardrailService : IDisposable
     public void Dispose()
     {
         _stop = true;
-        _wake.Set();
-        _thread.Join(2000);
-        _wake.Dispose();
+        try { _wake.Set(); } catch (ObjectDisposedException) { return; }
+        // A scan stuck in a long UI Automation call outlives the join: leave the event to the finalizer then, so the
+        // thread's next wait does not throw on a disposed handle (A22).
+        bool ended = !_thread.IsAlive || _thread.Join(2000);
+        if (ended) _wake.Dispose();
     }
 }

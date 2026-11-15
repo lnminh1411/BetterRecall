@@ -80,9 +80,8 @@ internal sealed unsafe class OutputCapture : IDisposable
     private MoveRectBuffer _moveBuf = new();
     private long _lastRetry;
 
-    // Change tracking between keyframe grabs.
-    private bool _framesSinceGrab = true;
-    private double _dirtyPctSinceGrab = 100;
+    // Change tracking since the last keyframe grab and since the last sample grab, kept apart (A8).
+    private readonly ChangeGate _keyframeGate = new(), _sampleGate = new();
 
     private FramePacer? _pollPacer;
     private int _lastPollFps;
@@ -228,8 +227,8 @@ internal sealed unsafe class OutputCapture : IDisposable
                 try { SetUpFrames(texW, texH, deskW, deskH, rotation); }
                 catch { try { dup.Dispose(); } catch { } throw; }
                 _dup = dup;
-                _framesSinceGrab = true;
-                _dirtyPctSinceGrab = 100;
+                _keyframeGate.Invalidate();
+                _sampleGate.Invalidate();
                 State = _rotationBlocked ? "rotation unsupported" : "running";
                 Log.Info($"duplication up on output {Info.Index} ({_srcW}x{_srcH}{(rotation != 0 ? $", rotated {rotation}" : "")}, vendor 0x{Info.VendorId:X4})");
                 if (_rotationBlocked)
@@ -360,9 +359,9 @@ internal sealed unsafe class OutputCapture : IDisposable
                 else _dev.Context.CopyResource(_latest!, tex);
                 var (dirtyRect, dirtyPct) = ProcessChanges(info.TotalMetadataBufferSize);
                 _feedDirty = DirtyMapper.Union(_feedDirty, dirtyRect);
-                _dirtyPctSinceGrab = Math.Min(100, _dirtyPctSinceGrab + dirtyPct);
+                _keyframeGate.Frame(dirtyPct);
+                _sampleGate.Frame(dirtyPct);
             }
-            _framesSinceGrab = true;
         }
         finally
         {
@@ -445,7 +444,8 @@ internal sealed unsafe class OutputCapture : IDisposable
     {
         if (_latest is null || _dev is null || _rotationBlocked) return;
         if (_pendingGrab is not null) FinishGrab();
-        bool changed = _framesSinceGrab && _dirtyPctSinceGrab >= req.DirtyMinPercent;
+        bool changed = (req.Keyframe && _keyframeGate.Changed(req.DirtyMinPercent))
+                       || (req.ReplaySample && _sampleGate.Changed(req.DirtyMinPercent));
         if (!req.Force && !changed) { SkippedNoChange++; return; }
         long t0 = Stopwatch.GetTimestamp();
         int w = Math.Min(req.MaxWidth, _srcW) & ~1;
@@ -467,8 +467,9 @@ internal sealed unsafe class OutputCapture : IDisposable
             }
             _kfScaler.Run(_latest, copyToStaging: true);
         }
-        _framesSinceGrab = false;
-        _dirtyPctSinceGrab = 0;
+        // Only the gates of what this grab serves: a sample-only grab leaves the keyframe gate armed.
+        if (req.Keyframe || req.Force) _keyframeGate.Reset();
+        if (req.ReplaySample || req.Force) _sampleGate.Reset();
         _pendingGrab = (req, w, h);
         GrabTicks += Stopwatch.GetTimestamp() - t0;
     }

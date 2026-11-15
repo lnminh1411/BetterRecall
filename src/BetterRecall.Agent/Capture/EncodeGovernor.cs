@@ -36,6 +36,9 @@ internal sealed class EncodeGovernor<T> where T : IDisposable
     public EncodeLevel Level { get; private set; }
     public int Waiting => _waiting.Count;
     public long Encoded, Deferred, Dropped, WebPFallbacks, Downgraded;
+    /// <summary>Replay sample encodes skipped because they did not fit the budget (A19).</summary>
+    public long SamplesDeferred;
+    private double _sampleEstimate = -1;
 
     /// <param name="encode">Encodes and stores the item at the level; returns the CPU ms it used. Owns nothing: the
     /// governor disposes the item after the call.</param>
@@ -129,6 +132,27 @@ internal sealed class EncodeGovernor<T> where T : IDisposable
 
     /// <summary>Counts CPU spent outside the queue (the replay sample encode, also stored as the keyframe when the
     /// formats match) against the same windows, so the budget covers every keyframe-related encode.</summary>
+    /// <summary>A replay sample encode may run now: its expected cost fits both windows and no kept keyframe is waiting
+    /// for budget (keyframes come first). Samples used to be charged only after the fact, so on a small CPU with large
+    /// frames they alone could exceed the limits and starve keyframes (A19). A false answer is counted; the caller skips
+    /// this sample and the next one is due a few seconds later.</summary>
+    public bool TryAdmitSample()
+    {
+        Prune(_clockMs());
+        double est = _sampleEstimate >= 0 ? _sampleEstimate : _estimate[(int)EncodeLevel.WebP];
+        bool fits = _waiting.Count == 0 && _used10 + est <= Window10Target * Limit10Ms && _used60 + est <= Window60Target * Limit60Ms;
+        if (!fits) SamplesDeferred++;
+        return fits;
+    }
+
+    /// <summary>Charges a replay sample encode and learns its cost for <see cref="TryAdmitSample"/>.</summary>
+    public void ChargeSample(double ms)
+    {
+        ms = Math.Max(0, ms);
+        _sampleEstimate = _sampleEstimate < 0 ? ms : _sampleEstimate * 0.7 + ms * 0.3;
+        Charge(ms);
+    }
+
     public void Charge(double ms)
     {
         if (ms <= 0) return;

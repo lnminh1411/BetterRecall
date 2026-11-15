@@ -71,7 +71,7 @@ internal static unsafe class KeyframeBudgetRun
         if (ocrHome is not null)
         {
             workerExe ??= InstallLayout.Full(AppContext.BaseDirectory.TrimEnd('\\'), InstallLayout.WorkerExe);
-            supervisor = new WorkerSupervisor(new ProcessWorkerLauncher(workerExe, s.Governance.EcoQos), ocrHome, () => 24 * 3600);
+            supervisor = new WorkerSupervisor(new ProcessWorkerLauncher(workerExe, () => s.Governance.EcoQos), ocrHome, () => 24 * 3600);
             reader = new WorkerKeyframeReader(new WorkerClient(supervisor));
             Console.WriteLine($"ocr on: worker {workerExe}, home {ocrHome}");
         }
