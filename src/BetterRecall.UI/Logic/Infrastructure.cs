@@ -65,6 +65,7 @@ public sealed class ThumbnailCache(long maxBytes)
     private readonly Dictionary<string, LinkedListNode<(string Key, byte[] Bytes)>> _map = new();
     private readonly Dictionary<string, Task<byte[]?>> _inflight = new();
     private long _bytes;
+    private long _gen;   // bumped by Clear: a load that started before it does not refill the cache
 
     public long Bytes { get { lock (_lock) return _bytes; } }
     public int Count { get { lock (_lock) return _map.Count; } }
@@ -84,10 +85,18 @@ public sealed class ThumbnailCache(long maxBytes)
 
     public void Put(string id, int width, byte[] bytes)
     {
+        long gen;
+        lock (_lock) gen = _gen;
+        PutIf(gen, id, width, bytes);
+    }
+
+    private void PutIf(long gen, string id, int width, byte[] bytes)
+    {
         if (bytes.Length > maxBytes) return;
         var key = KeyOf(id, width);
         lock (_lock)
         {
+            if (gen != _gen) return;
             if (_map.Remove(key, out var old))
             {
                 _lru.Remove(old);
@@ -138,9 +147,11 @@ public sealed class ThumbnailCache(long maxBytes)
     {
         try
         {
+            long gen;
+            lock (_lock) gen = _gen;
             await Task.Yield();
             var bytes = await load(ct).ConfigureAwait(false);
-            if (bytes is not null) Put(id, width, bytes);
+            if (bytes is not null) PutIf(gen, id, width, bytes);
             return bytes;
         }
         finally
@@ -153,6 +164,7 @@ public sealed class ThumbnailCache(long maxBytes)
     {
         lock (_lock)
         {
+            _gen++;
             _lru.Clear();
             _map.Clear();
             _bytes = 0;

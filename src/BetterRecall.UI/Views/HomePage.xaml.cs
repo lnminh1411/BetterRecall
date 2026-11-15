@@ -198,10 +198,13 @@ public sealed partial class HomePage : Page
 
         Stats.Children.Clear();
         if (st is null || offline) return;
-        Stat("Home_Captures", st.Store.Rows.ToString("N0", CultureInfo.CurrentCulture));
-        Stat("Home_Storage", StatusText.FormatBytes(st.Store.Bytes));
-        Stat("Home_Since", st.Store.Oldest is { } o ? o.ToLocalTime().ToString("d", CultureInfo.CurrentCulture) : "-");
-        Stat("Home_Waiting", st.Queue.Pending.ToString("N0", CultureInfo.CurrentCulture));
+        if (!st.Locked && !s.Locked)   // capture counts, size and age only while unlocked, as in the status bar
+        {
+            Stat("Home_Captures", st.Store.Rows.ToString("N0", CultureInfo.CurrentCulture));
+            Stat("Home_Storage", StatusText.FormatBytes(st.Store.Bytes));
+            Stat("Home_Since", st.Store.Oldest is { } o ? o.ToLocalTime().ToString("d", CultureInfo.CurrentCulture) : "-");
+            Stat("Home_Waiting", st.Queue.Pending.ToString("N0", CultureInfo.CurrentCulture));
+        }
         Stat("Home_Device", st.Device);
         Stat("Home_Retention", Loc.Format("Home_Days", st.RetentionDays));
         SyncSettings();   // connection changes enable or disable the switches
