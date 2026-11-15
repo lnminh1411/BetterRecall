@@ -19,6 +19,23 @@ public static class InstallLayout
     public const string LauncherEnv = "BETTERRECALL_LAUNCHER";
 
     public static string Full(string installDir, string relative) => Path.GetFullPath(Path.Combine(installDir, relative));
+
+    /// <summary>Marker file Scripts/dev_build.py writes into its output folder: this install dir is a dev build.</summary>
+    public const string DevBuildMarker = ".devbuild";
+
+    /// <summary>Agent flag that lets a dev build open the default data folder anyway.</summary>
+    public const string AllowDefaultHomeFlag = "--allow-default-home";
+
+    /// <summary>A dev build never opens the user's real data folder (it would run dev code on their store) unless started
+    /// with --allow-default-home: it needs its own BETTERRECALL_HOME. A layout the single-file launcher extracted
+    /// (&lt;home&gt;pp\..., or started with BETTERRECALL_LAUNCHER) is installed, marker or not.</summary>
+    public static bool RefusesHome(string installDir, string home, bool allowDefaultHome)
+    {
+        if (allowDefaultHome || !DataPaths.IsDefaultHome(home) || !File.Exists(Path.Combine(installDir, DevBuildMarker))) return false;
+        if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(LauncherEnv))) return false;
+        var app = Path.GetFullPath(Path.Combine(home, "app")).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        return !Path.GetFullPath(installDir).StartsWith(app, StringComparison.OrdinalIgnoreCase);
+    }
 }
 
 /// <summary>Data dir layout. BETTERRECALL_HOME overrides %LOCALAPPDATA%\BetterRecall.</summary>
@@ -55,6 +72,8 @@ public static class DataPaths
     public static string DeviceCache(string home) => Path.Combine(home, "cache", "device.json");
     public static string BenchReport(string home) => Path.Combine(home, "cache", "bench.json");
     public static string LogsDir(string home) => Path.Combine(home, "logs");
+    /// <summary>Process id of the agent that owns this data folder (written once it holds AgentMutexFor(home)).</summary>
+    public static string AgentPidFile(string home) => Path.Combine(home, "agent.pid");
 }
 
 public static class PipeNames
@@ -77,15 +96,21 @@ public static class PipeNames
             .Any(r => b.StartsWith(r, StringComparison.OrdinalIgnoreCase));
     }
 
-    public static string Public(string configuredBase, string sid) => $"{Base(configuredBase)}.{sid}";
-    public static string Mcp(string sid) => $"BetterRecall.mcp.{sid}";
-    public static string Ui(string sid) => $"BetterRecall.ui.{sid}";
+    /// <summary>Pipe names for the data folder home: the default folder keeps the plain names (older clients use them),
+    /// any other folder gets the same suffix as AgentMutexFor, so a dev or test agent never serves the real UI, CLI or
+    /// MCP client and theirs never reach the real agent.</summary>
+    public static string Public(string configuredBase, string sid, string home) => Scoped($"{Base(configuredBase)}.{sid}", home);
+    public static string Mcp(string sid, string home) => Scoped($"BetterRecall.mcp.{sid}", home);
+    public static string Ui(string sid, string home) => Scoped($"BetterRecall.ui.{sid}", home);
     public static string NewWorker() => $"BetterRecall.worker.{Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16)).ToLowerInvariant()}";
 
     public const string AgentMutex = @"Local\BetterRecall.Agent";
 
     /// <summary>Auto-reset event the agent sets to show the launcher of an already running UI.</summary>
     public const string ShowLauncherEvent = @"Local\BetterRecall.UI.ShowLauncher";
+
+    /// <summary>WinUI AppInstance key of the UI single instance.</summary>
+    public const string UiInstanceKey = "BetterRecall.UI";
 
     /// <summary>Auto-reset event that asks the running agent to quit, as the tray Quit does. The single-file launcher
     /// sets it when a different version is already running, so the new one can take over.</summary>
@@ -96,8 +121,11 @@ public static class PipeNames
     /// stops the user's real one.</summary>
     public static string AgentMutexFor(string home) => Scoped(AgentMutex, home);
     public static string AgentQuitEventFor(string home) => Scoped(AgentQuitEvent, home);
+    public static string ShowLauncherEventFor(string home) => Scoped(ShowLauncherEvent, home);
+    public static string UiInstanceKeyFor(string home) => Scoped(UiInstanceKey, home);
 
-    private static string Scoped(string name, string home) => DataPaths.IsDefaultHome(home) ? name
+    /// <summary>name for the default data folder, else name + "." + 16 hex of SHA-256 over the full upper-case path.</summary>
+    public static string Scoped(string name, string home) => DataPaths.IsDefaultHome(home) ? name
         : name + "." + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
             System.Text.Encoding.UTF8.GetBytes(Path.GetFullPath(home).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).ToUpperInvariant())))[..16];
 }

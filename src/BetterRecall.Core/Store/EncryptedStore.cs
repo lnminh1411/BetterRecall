@@ -181,6 +181,21 @@ public sealed partial class EncryptedStore : IStore
             CREATE INDEX IF NOT EXISTS ix_replay_frames_replay ON replay_frames(replay_id);
             """);
         MigrateChats();
+        MigrateFts();
+    }
+
+    /// <summary>
+    /// FTS5 keeps the terms of deleted rows in its index segments unless the persistent secure-delete option is on.
+    /// Turned on once per store; an existing store also gets one optimize, which merges the old segments so the terms
+    /// of earlier deletes go too (PRAGMA secure_delete then zeroes the freed pages).
+    /// </summary>
+    private void MigrateFts()
+    {
+        if (Scalar(_w, "SELECT v FROM meta WHERE k='fts_secure_delete'") is not null) return;
+        Exec(_w, "INSERT INTO fts(fts, rank) VALUES('secure-delete', 1)");
+        Exec(_w, "INSERT INTO fts(fts) VALUES('optimize')");
+        Exec(_w, "INSERT OR REPLACE INTO meta(k, v) VALUES('fts_secure_delete', '1')");
+        Exec(_w, "PRAGMA wal_checkpoint(TRUNCATE)");
     }
 
     private SqliteConnection? Kf(string month, bool create)
@@ -665,6 +680,8 @@ public sealed partial class EncryptedStore : IStore
         {
             var chunk = rids.Skip(off).Take(500).ToList();
             var list = InList(chunk);
+            // Every row delete (purge of any scope, retention, thinning, space guard) drops the saved chats that quote it.
+            DeleteChatsCitingLocked(chunk);
             var months = new Dictionary<string, List<long>>();
             using (var cmd = Cmd(_w, $"SELECT rid, kf_month FROM captures WHERE rid IN ({list}) AND +kf_month IS NOT NULL"))
             using (var rd = cmd.ExecuteReader())
@@ -744,9 +761,8 @@ public sealed partial class EncryptedStore : IStore
         {
             ThrowIfDisposed();
             var rids = SelectScope(scope);
-            // app / site / id purges: chats that cite a deleted capture quote its text, so they go too
-            // (time-window purges delete chats active in the window below).
-            if (scope.Kind is not ("last" or "range")) DeleteChatsCitingLocked(rids);
+            // DeleteRowsLocked drops chats citing a deleted capture for every scope; time-window purges also delete
+            // chats active in the window below.
             int n = DeleteRowsLocked(rids);
             // Panic flush / "delete the last N": items captured before now but still being encoded, OCR'd or transcribed
             // would otherwise be stored after this purge, inside the window it just emptied.

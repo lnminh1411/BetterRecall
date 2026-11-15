@@ -14,6 +14,9 @@ public enum AgentErrorKind
     NotTrusted,
     /// <summary>Server answered "Store is locked.".</summary>
     Locked,
+    /// <summary>Server answered "Store is not open.": the gate is open but the store did not open (key lost, storage
+    /// error). The agent status pause reason says which; unlocking does not help.</summary>
+    NotOpen,
     /// <summary>Server answered ok:false with another message.</summary>
     Server,
     /// <summary>Response line was not valid JSON or had the wrong shape.</summary>
@@ -24,6 +27,7 @@ public enum AgentErrorKind
 public static class AgentErrors
 {
     public const string StoreLocked = "Store is locked.";
+    public const string StoreNotOpen = "Store is not open.";
     public const string UnlockCancelled = "Unlock cancelled.";
     public const string WrongPassphrase = "Wrong passphrase.";
     public const string UnlockRequired = "Unlock required.";
@@ -65,6 +69,7 @@ public readonly record struct AgentResult(bool Ok, JsonElement Data, AgentErrorK
     {
         if (ok) return Success(data);
         if (error == AgentErrors.StoreLocked) return Fail(AgentErrorKind.Locked, error);
+        if (error == AgentErrors.StoreNotOpen) return Fail(AgentErrorKind.NotOpen, error);
         return Fail(AgentErrorKind.Server, error ?? AgentErrors.Internal);
     }
 

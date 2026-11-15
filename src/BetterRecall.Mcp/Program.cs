@@ -8,7 +8,7 @@ using BetterRecall.Mcp;
 // betterrecall-mcp: MCP server over stdio. Holds no key and opens no database: every tool call is one request
 // on the MCP pipe of the running agent, after the client trust check (research 7.4, 7.8). stdout carries only JSON-RPC.
 
-var pipeName = PipeNames.Mcp(PipeNames.UserSid());
+var pipeName = PipeNames.Mcp(PipeNames.UserSid(), DataPaths.Home());   // the agent of this data folder only
 var agentExe = InstallLayout.Full(AppContext.BaseDirectory, InstallLayout.AgentExe);
 
 async Task<PipeAnswer> CallPipe(string line, CancellationToken ct)

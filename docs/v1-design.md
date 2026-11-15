@@ -134,6 +134,8 @@ Line protocol for all three (`research.md` 7.5): UTF-8, one request per `\n`, `\
 | Public | `\\.\pipe\BetterRecall.<SID>` | `ipc.enabled` | any client passing the trust checks, narrowed by `ipc.allowClients` | `research.md` 7.6 |
 | MCP | `\\.\pipe\BetterRecall.mcp.<SID>` | `mcp.enabled` | `<install>\betterrecall-mcp.exe` | `ping`, `version`, `status`, `search`, `get` |
 
+Names per data folder: the default folder (`%LOCALAPPDATA%\BetterRecall`) uses the names above; any other `BETTERRECALL_HOME` appends `.<16 hex>` (SHA-256 of the full upper-case path), as the agent mutex and quit event do (`PipeNames.Scoped`). The same suffix scopes the show-launcher event and the UI's AppInstance key. Agent, UI, CLI, MCP and launcher all resolve the folder the same way (`DataPaths.Home()`), so a dev or test agent never serves the real UI and never reaches the real agent. The agent writes its pid to `<home>\agent.pid`; the launcher uses it to find the agent of its folder. A hidden UI exits when the agent it talks to exits.
+
 Security descriptor, trust checks, public verbs, `search` JSON form, result shape, errors, subscribe and audit follow `research.md` 7.2 to 7.9 exactly, except that the pipe names carry the SID suffix as above, and `thumb` takes an optional width: `thumb <id> [width]`, width 64 to 1280, default 320.
 
 UI-only verbs:
@@ -177,7 +179,7 @@ UI-only verbs:
 
 Argument rules: `unlock <passphrase>`, `replay export <id> <path>` (the path), `settings set <json>` and `search <text>` take the rest of the line as one argument, spaces included, no quoting. Error strings added for UI verbs: `Wrong passphrase.` (passphrase unlock failed), `Unlock required.` (`purge all` without an unlock in the last 60 s). Reply shapes are the Contracts records `ItemsReply<T>`, `UnlockReply`, `PurgeConfirmReply`, `VersionReply`. Enums serialise lowercase (`screen`, `audio`, `hybrid`, `text`, `vector`); `ThumbData` carries the image in the field `base64`. Long replies: read with `LineReader` (buffered), not `LineProtocol.ReadLineAsync`.
 
-Showing the launcher: when the UI is already running, the agent sets the auto-reset event `PipeNames.ShowLauncherEvent` instead of starting a second UI process. The UI waits on it and shows the launcher. The agent starts the UI exe only when the event does not exist.
+Showing the launcher: when the UI is already running, the agent sets the auto-reset event `PipeNames.ShowLauncherEventFor(home)` instead of starting a second UI process. The UI waits on it and shows the launcher. The agent starts the UI exe only when the event does not exist.
 
 Hotkey grammar (agent parser and UI recorder): modifiers `Ctrl`, `Alt`, `Shift`, `Win` joined with `+`, then one key: `A`-`Z`, `0`-`9`, `F1`-`F24`, `NumPad0`-`NumPad9`, `Space`, `PageUp`, `PageDown`, `Home`, `End`, `Left`, `Up`, `Right`, `Down`, `Insert`, `Delete`, `Pause`, `PrintScreen`, or one of `` ; = , - . / ` [ \ ] ' ``. An empty string means the action has no shortcut. No two actions may share a combination (`settings set` answers `Invalid hotkeys.<action>.`). The agent re-registers every hotkey when one changes and lists the actions whose `RegisterHotKey` failed (combination held by Windows or another app) in `status` as `hotkeysFailed`; the UI Shortcuts page shows a warning on those rows and, before saving a new combination, probes it with its own `RegisterHotKey` / `UnregisterHotKey`.
 
@@ -185,7 +187,7 @@ Hotkey grammar (agent parser and UI recorder): modifiers `Ctrl`, `Alt`, `Shift`,
 
 `search` kind filter also takes `replay`; a hit and `get` of a replay frame carry `replayId` and `replayOffsetMs`.
 
-Data verbs (`search`, `get`, `thumb`, `keyframe`, `timeline`, `audit`, `replay list`, `replay export`, `facets`, `history`, `describe`, `export`, `chat`) answer `Store is locked.` while `security.requireUnlock` is true and the read gate is closed.
+Data verbs (`search`, `get`, `thumb`, `keyframe`, `timeline`, `audit`, `replay list`, `replay export`, `facets`, `history`, `describe`, `export`, `chat`) answer `Store is locked.` while `security.requireUnlock` is true and the read gate is closed, or while the data key waits for its passphrase. With the gate open but the store not open (pause reason `keylost` or `storeerror`) they answer `Store is not open.`, and so do settings saves of the security, ai and ipc groups; the UI then shows the pause reason, not the unlock panel.
 
 ## 6. Security and privacy
 

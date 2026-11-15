@@ -18,7 +18,9 @@ public static class Program
     {
         WinRT.ComWrappersSupport.InitializeComWrappers();
         var parsed = AppArgs.Parse(args);
-        var key = AppInstance.FindOrRegisterForKey(parsed.Mock ? "BetterRecall.UI.mock" : "BetterRecall.UI");
+        // One UI per data folder: a UI of another folder (dev build, second home) never takes this one's activations.
+        var key = AppInstance.FindOrRegisterForKey(parsed.Mock ? "BetterRecall.UI.mock"
+            : BetterRecall.Contracts.PipeNames.UiInstanceKeyFor(BetterRecall.Contracts.DataPaths.Home()));
         if (!key.IsCurrent)
         {
             // We may hold the foreground right the agent granted; pass it on so the launcher can take focus.

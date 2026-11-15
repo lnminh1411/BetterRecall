@@ -934,16 +934,78 @@ public sealed class ChatServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task Model_change_starts_a_fresh_transcript_with_a_recap()
+    public async Task Model_change_starts_a_fresh_transcript_without_a_recap()
     {
         var chatId = await ApprovedChat();
         Set("""{"ai":{"model":"gemini-other"}}""");
         _p.Turns.Enqueue(ScriptProvider.Answer("Ok."));
-        await Send(chatId, "Next question");
-        Assert.Contains("Earlier in this chat", _h.Bodies[^1]);
-        Assert.Contains("New question: Next question", _h.Bodies[^1]);
-        Assert.DoesNotContain("Captures from the user", _h.Bodies[^1]);
+        var ev = await Send(chatId, "Next question");
+        // Earlier answers restate capture content: a new provider, model or endpoint gets none of them, only a note here.
+        Assert.Contains(ev, e => e.Type == "warning" && e.Code == "fresh" && e.Text == ChatService.FreshNote);
+        Assert.Contains("Next question", _h.Bodies[^1]);
+        Assert.DoesNotContain("Which invoice did I see?", _h.Bodies[^1]);
+        Assert.DoesNotContain("Acme invoice", _h.Bodies[^1]);
+        Assert.DoesNotContain("Earlier in this chat", _h.Bodies[^1]);
         Assert.Equal(4, _t.Store.GetChat(chatId)!.Messages.Count);
+    }
+
+    private bool Gone(string id) => _t.Store.Get(id) == null;
+
+    [Fact]
+    public async Task Purge_drops_a_pending_approval_citing_the_capture()
+    {
+        _p.Turns.Enqueue(ScriptProvider.Search());
+        var ev = await Send(null, "Which invoice did I see?");
+        Assert.Equal("approval", ev[^1].Type);
+        _t.Store.Purge(PurgeScope.ForId(_shot));
+        _chat.ForgetCaptures(Gone);
+        Assert.Equal("token", (await Approve(ev[^1].Token!))[^1].Code);
+        Assert.Single(_h.Bodies);   // nothing about the deleted capture left the PC
+    }
+
+    [Fact]
+    public async Task Approval_answered_after_a_purge_never_sends_the_deleted_capture()
+    {
+        _p.Turns.Enqueue(ScriptProvider.Search());
+        var ev = await Send(null, "Which invoice did I see?");
+        _t.Store.Purge(PurgeScope.ForId(_shot));   // no ForgetCaptures: the resume itself rechecks
+        _p.Turns.Enqueue(ScriptProvider.Answer("Nothing."));
+        await Approve(ev[^1].Token!);
+        Assert.DoesNotContain("Acme", _h.Bodies[^1]);
+    }
+
+    [Fact]
+    public async Task Purge_drops_unsaved_chats_citing_the_capture()
+    {
+        Set("""{"ai":{"chatHistory":false}}""");
+        var chatId = await ApprovedChat();
+        _p.Turns.Enqueue(ScriptProvider.Answer("Hi."));
+        var other = (await Send(null, "Hello?"))[0].ChatId!;
+        Assert.Equal(2, _chat.List(10).Count);
+        _t.Store.Purge(PurgeScope.ForId(_shot));
+        _chat.ForgetCaptures(Gone);
+        Assert.Null(_chat.Get(chatId));
+        Assert.NotNull(_chat.Get(other));
+        // A time-window purge drops unsaved chats active in the window.
+        _chat.ForgetCaptures(_ => false, _now.AddHours(-1), _now.AddHours(1));
+        Assert.Empty(_chat.List(10));
+    }
+
+    [Fact]
+    public async Task Purge_stops_a_running_turn_that_cites_the_capture_and_it_saves_nothing()
+    {
+        var chatId = await ApprovedChat();
+        _h.Responses.Enqueue(() =>
+        {
+            // The purge lands while the follow-up request is in flight.
+            _t.Store.Purge(PurgeScope.ForId(_shot));
+            _chat.ForgetCaptures(Gone);
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("") };
+        });
+        _p.Turns.Enqueue(ScriptProvider.Answer("It was Acme."));
+        var ev = await Send(chatId, "And the amount?");
+        Assert.Equal("stopped", ev[^1].Code);
+        Assert.Null(_t.Store.GetChat(chatId));   // the purge deleted it; the stopped turn did not save it again
     }
 }
 
