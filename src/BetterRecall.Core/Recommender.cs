@@ -80,34 +80,45 @@ public static class Recommender
         if (inf == null) return;
         var passing = inf.Devices?.Where(d => d.Ok && d.ImageMs > 0).ToList() ?? [];
         BenchDevice? fastest = passing.OrderBy(d => d.ImageMs).FirstOrDefault();
-        string chosen = fastest?.Device ?? inf.Chosen;
+        int monitors = CapturedMonitors(r.Hardware, s);
+        double kps = ExpectedKeyframesPerSecond(monitors, s.Capture.IntervalMs);
+
+        // One rule with the worker (DevicePolicy, section 4): "auto" runs on the NPU, a GPU only when there is no NPU
+        // (and then the GPU inference.gpuAdapter "auto" picks), and an accelerator beats a faster CPU. The bench used
+        // to recommend the fastest row, so on "auto" it proposed a GPU while the worker ran on the NPU (D36). Leaving
+        // auto is recommended only when auto falls back to the CPU while an accelerator passed, or when auto's device
+        // cannot keep up with the keyframe rate (embed duty over DutyLimit) and a faster one can.
+        bool hasNpu = r.Hardware.Npu != null || passing.Any(d => Is(d.Device, "NPU")) || (inf.Devices?.Any(d => Is(d.Device, "NPU")) ?? false);
+        bool InAuto(BenchDevice d) => hasNpu ? Is(d.Device, "NPU") : Is(d.Device, "GPU") && (d.Adapter == null || d.AdapterAuto);
+        var autoPick = passing.Where(InAuto).OrderBy(d => d.TextDevice != null ? 1 : 0).ThenBy(d => d.ImageMs).FirstOrDefault()
+                       ?? passing.Where(d => Is(d.Device, "CPU")).OrderBy(d => d.ImageMs).FirstOrDefault();
+        BenchDevice? target = autoPick ?? fastest;
+        if (autoPick != null && fastest != null && !ReferenceEquals(autoPick, fastest))
+        {
+            bool autoOnCpu = Is(autoPick.Device, "CPU") && !Is(fastest.Device, "CPU");
+            bool autoTooSlow = Duty(autoPick.ImageMs, kps) > DutyLimit && Duty(fastest.ImageMs, kps) <= DutyLimit;
+            if (autoOnCpu || autoTooSlow) target = fastest;
+        }
+        string chosen = target?.Device ?? inf.Chosen;
         if (string.IsNullOrWhiteSpace(chosen) || chosen.Equals("none", StringComparison.OrdinalIgnoreCase)) return;
 
-        // Auto policy (section 4): NPU and CPU; a GPU only when no NPU exists, and then the GPU that
-        // inference.gpuAdapter "auto" picks (rows carry Adapter only on PCs with more than one GPU). Fastest passing among those.
-        bool hasNpu = r.Hardware.Npu != null || passing.Any(d => Is(d.Device, "NPU")) || (inf.Devices?.Any(d => Is(d.Device, "NPU")) ?? false);
-        var autoPick = passing.Where(d => Is(d.Device, "NPU") || Is(d.Device, "CPU") || (!hasNpu && Is(d.Device, "GPU") && (d.Adapter == null || d.AdapterAuto)))
-            .OrderBy(d => d.ImageMs).FirstOrDefault();
-        bool isAuto = autoPick != null && Is(autoPick.Device, chosen) && string.Equals(autoPick.Adapter, fastest?.Adapter, StringComparison.OrdinalIgnoreCase);
-        string device = isAuto ? "auto" : chosen.ToLowerInvariant();
-        string shown = fastest?.Adapter is { } adapterName ? $"{chosen.ToUpperInvariant()} ({adapterName})" : chosen.ToUpperInvariant();
-        Add(list, "inference.device", device, s.Inference.Device, RDevice, shown, Ms(fastest?.ImageMs ?? 0));
+        string device = target != null && ReferenceEquals(target, autoPick) ? "auto" : chosen.ToLowerInvariant();
+        string shown = target?.Adapter is { } adapterName ? $"{chosen.ToUpperInvariant()} ({adapterName})" : chosen.ToUpperInvariant();
+        Add(list, "inference.device", device, s.Inference.Device, RDevice, shown, Ms(target?.ImageMs ?? 0));
         // A specific GPU: inference.gpuAdapter is its name, or auto when it is the GPU auto picks. A current value that
         // already names this GPU (part of its name) stays.
-        if (fastest is { Adapter: { Length: > 0 } name } && Is(fastest.Device, "GPU"))
+        if (target is { Adapter: { Length: > 0 } name } && Is(target.Device, "GPU"))
         {
             string cur = s.Inference.GpuAdapter ?? "auto";
             bool curAuto = string.IsNullOrWhiteSpace(cur) || Is(cur.Trim(), "auto");
-            bool same = fastest.AdapterAuto ? curAuto : !curAuto && name.Contains(cur.Trim(), StringComparison.OrdinalIgnoreCase);
-            if (!same) Add(list, "inference.gpuAdapter", fastest.AdapterAuto ? "auto" : name, cur, RGpuAdapter, name, Ms(fastest.ImageMs));
+            bool same = target.AdapterAuto ? curAuto : !curAuto && name.Contains(cur.Trim(), StringComparison.OrdinalIgnoreCase);
+            if (!same) Add(list, "inference.gpuAdapter", target.AdapterAuto ? "auto" : name, cur, RGpuAdapter, name, Ms(target.ImageMs));
         }
 
         // Token budgets are timed on the worker's chosen device only (for a GPU, ChosenAdapter names which one).
         var tokens = inf.Tokens?.Where(t => Is(t.Device, chosen) && t.ImageMs > 0
-            && (fastest?.Adapter == null || string.Equals(fastest.Adapter, inf.ChosenAdapter, StringComparison.OrdinalIgnoreCase))).ToList() ?? [];
+            && (target?.Adapter == null || string.Equals(target.Adapter, inf.ChosenAdapter, StringComparison.OrdinalIgnoreCase))).ToList() ?? [];
         if (tokens.Count == 0) return;
-        int monitors = CapturedMonitors(r.Hardware, s);
-        double kps = ExpectedKeyframesPerSecond(monitors, s.Capture.IntervalMs);
         foreach (var t in TokenChoices)
         {
             var tb = tokens.FirstOrDefault(x => x.ImageTokens == t);

@@ -45,6 +45,40 @@ public sealed class KeyVault : IKeyVault, IDisposable
     private TaskCompletionSource _loaded = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private volatile bool _helloAvailable;
     private volatile bool _helloChecked;
+    private int _passFailures;
+    private long _passLockedUntilMs;
+
+    /// <summary>Clock of the passphrase rate limit (tests set it).</summary>
+    internal Func<DateTimeOffset> Now { get; set; } = () => DateTimeOffset.UtcNow;
+
+    /// <summary>Seconds until the next passphrase try is accepted, 0 when tries are open. Same schedule as the unlock
+    /// password (<see cref="UnlockPassword"/>): 5 free wrong tries, then 30 s doubling to 15 min. Kept in memory: every
+    /// try costs a 64 MiB Argon2id run in the agent, and an agent restart is not something a pipe client can trigger.</summary>
+    public int PassphraseRetryAfterSeconds
+    {
+        get
+        {
+            lock (_gate)
+            {
+                long wait = _passLockedUntilMs - Now().ToUnixTimeMilliseconds();
+                return wait > 0 ? (int)Math.Ceiling(wait / 1000.0) : 0;
+            }
+        }
+    }
+
+    /// <summary>Caller holds _gate.</summary>
+    private bool PassphraseThrottledLocked() => Now().ToUnixTimeMilliseconds() < _passLockedUntilMs;
+
+    /// <summary>Counts one passphrase check. Caller holds _gate.</summary>
+    private void NotePassphraseLocked(bool ok)
+    {
+        if (ok) { _passFailures = 0; _passLockedUntilMs = 0; return; }
+        _passFailures++;
+        if (_passFailures < UnlockPassword.FreeTries) return;
+        int extra = Math.Min(_passFailures - UnlockPassword.FreeTries, 5);
+        _passLockedUntilMs = (Now() + TimeSpan.FromSeconds(Math.Min(30 * Math.Pow(2, extra), 900))).ToUnixTimeMilliseconds();
+        Log.Info($"passphrase wrong ({_passFailures} in a row), tries paused");
+    }
 
     public KeyVault(string home, Func<Settings> settings, string? tpmKeyName = null, bool probeHello = true)
     {
@@ -184,6 +218,8 @@ public sealed class KeyVault : IKeyVault, IDisposable
         if (string.IsNullOrEmpty(passphrase)) return false;
         lock (_gate)
         {
+            // Throttled tries are refused without running Argon2id (the _gate lock already runs one check at a time).
+            if (PassphraseThrottledLocked()) return false;
             var s = _settings();
             if (_key != null)
             {
@@ -191,6 +227,7 @@ public sealed class KeyVault : IKeyVault, IDisposable
                 {
                     // Already passphrase-wrapped: only check it, never replace it here.
                     using var check = UnwrapPassphrase(File.ReadAllBytes(_keyFile), passphrase, false);
+                    NotePassphraseLocked(check != null);
                     return check != null;
                 }
                 if (s.Security.KeyProtection == ModePassphrase)
@@ -216,6 +253,7 @@ public sealed class KeyVault : IKeyVault, IDisposable
             }
             if (_fileMode != ModePassphrase) return false;
             var unwrapped = UnwrapPassphrase(File.ReadAllBytes(_keyFile), passphrase, s.Security.MemoryIsolation);
+            NotePassphraseLocked(unwrapped != null);
             if (unwrapped == null) { Log.Info("passphrase unlock failed"); return false; }
             SetLoaded(unwrapped, ModePassphrase);
             Log.Info("data key unlocked with passphrase");
@@ -416,7 +454,9 @@ public sealed class KeyVault : IKeyVault, IDisposable
             fs.Write(file);
             fs.Flush(flushToDisk: true);
         }
-        File.Move(tmp, _keyFile, overwrite: true);
+        // Write-through rename: callers delete the old TPM key right after this returns, so the new file must be on the
+        // disk first. A rename lost to a power cut would bring back a tpm-wrapped file whose key is gone (B17).
+        Win32.MoveDurable(tmp, _keyFile);
     }
 
     private RSACng? OpenOrCreateTpmKey()

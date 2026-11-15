@@ -240,9 +240,6 @@ public sealed partial class SettingsStore : ISettingsStore
     [GeneratedRegex("^[A-Za-z0-9._-]{1,64}$")]
     private static partial Regex PipeNameRegex();
 
-    [GeneratedRegex("^[a-z]{2,3}$")]
-    private static partial Regex LanguageRegex();
-
     internal static string[] AllHotkeys(HotkeySettings h) => [h.Search, h.Pause, h.Replay, h.Panic, h.Timeline, h.Home, h.Lock];
 
     /// <summary>Empty (not assigned), or a valid combination no other action uses.</summary>
@@ -297,7 +294,7 @@ public sealed partial class SettingsStore : ISettingsStore
         ("index.dim", s => s.Index.Dim is 768 or 512 or 256),
         ("index.weakMatchBelow", s => Range(s.Index.WeakMatchBelow, 0.0, 1.0)),
         ("retention.days", s => Range(s.Retention.Days, 1, 3650)),
-        ("audio.language", s => s.Audio.Language == "auto" || (s.Audio.Language != null && LanguageRegex().IsMatch(s.Audio.Language))),
+        ("audio.language", s => WhisperLanguages.IsValid(s.Audio.Language)),
         ("audio.maxSegmentS", s => Range(s.Audio.MaxSegmentS, 5, 30)),
         ("privacy.denyProcesses", s => Strings(s.Privacy.DenyProcesses, x => x.Trim().Length is > 0 and <= 260)),
         ("privacy.denyPathPrefixes", s => Strings(s.Privacy.DenyPathPrefixes, IsAbs)),

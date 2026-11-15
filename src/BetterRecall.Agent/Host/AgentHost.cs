@@ -386,7 +386,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
                 _ = SaveReplayFromHotkeyAsync();
                 break;
             case "panic":
-                Panic();
+                PanicOffLoop();
                 break;
             case "timeline":
                 UiLauncher.Start(_opt.InstallDir, "--page", "timeline");
@@ -410,6 +410,14 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         }
     }
 
+    /// <summary>Hotkey and tray: Panic on a pool thread (as the pipe verb does). Its store purge can wait for a store
+    /// maintenance slice; on the message-loop thread that froze hotkeys, the tray and session-lock handling (N2).</summary>
+    private void PanicOffLoop() => _ = Task.Run(() =>
+    {
+        try { Panic(); }
+        catch (Exception ex) { Log.Warn("panic", ex); }
+    });
+
     private void OnTrayCommand(TrayCommand cmd)
     {
         switch (cmd)
@@ -420,7 +428,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
             case TrayCommand.PauseUntilResume: Pause(null, "user"); break;
             case TrayCommand.Resume: Resume("user"); break;
             case TrayCommand.SaveReplay: _ = SaveReplayFromHotkeyAsync(); break;
-            case TrayCommand.Panic: Panic(); break;
+            case TrayCommand.Panic: PanicOffLoop(); break;
             case TrayCommand.Settings: UiLauncher.Start(_opt.InstallDir, "--settings"); break;
             case TrayCommand.Quit: _window?.Quit(); break;
         }

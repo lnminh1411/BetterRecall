@@ -502,8 +502,10 @@ public sealed partial class EncryptedStore : IStore
             }
             catch
             {
+                int before = _deleted.Count;
                 DeleteRowsLocked([rid]);
-                _deleted.Clear();   // never visible: nothing to tell
+                // Never visible: nothing to tell. Remove only this row; earlier entries (a maintenance slice's deletes) stay.
+                _deleted.RemoveRange(before, _deleted.Count - before);
                 throw;
             }
             return id;
@@ -787,7 +789,7 @@ public sealed partial class EncryptedStore : IStore
     {
         PurgeNotice? notice;
         int n;
-        lock (_wl)
+        using (EnterWritePriority())
         {
             ThrowIfDisposed();
             var rids = SelectScope(scope);
@@ -937,8 +939,9 @@ public sealed partial class EncryptedStore : IStore
             rid = rd.GetInt64(0);
             month = rd.GetString(1);
         }
-        lock (_wl)
+        using (EnterWritePriority())
         {
+            ThrowIfDisposed();
             if (Kf(month, false) is not { } kc) return null;
             using var cmd = Cmd(kc, "SELECT mime, width, height, data FROM kf WHERE rid=$rid", ("$rid", rid));
             using var rd = cmd.ExecuteReader();
@@ -1341,45 +1344,76 @@ public sealed partial class EncryptedStore : IStore
 
     // ---------------------------------------------------------------- maintenance
 
+    /// <summary>
+    /// Hourly maintenance in short _wl slices (one retention chunk, one thinning day, one month file, ...), so capture
+    /// inserts, keyframe reads (thumbnails, detail pane, chat images) and a panic purge wait for one slice, not for the
+    /// whole run. Purge and keyframe reads enter with priority: maintenance does not start its next slice while one waits.
+    /// </summary>
     public void RunMaintenance(Settings settings)
     {
         ArgumentNullException.ThrowIfNull(settings);
         var sw = Stopwatch.StartNew();
-        PurgeNotice? notice;
-        lock (_wl)
-        {
-            ThrowIfDisposed();
-            long cutoff = DateTimeOffset.UtcNow.AddDays(-settings.Retention.Days).ToUnixTimeMilliseconds();
-            string cutoffMonth = Month(cutoff);
+        var now = DateTimeOffset.UtcNow;
+        long cutoff = now.AddDays(-settings.Retention.Days).ToUnixTimeMilliseconds();
+        string cutoffMonth = Month(cutoff);
 
-            // 1. Retention: rows older than retention.days.
-            int expired = 0;
-            while (true)
-            {
-                var rids = new List<long>();
-                using (var cmd = Cmd(_w, "SELECT rid FROM captures WHERE ts < $c LIMIT 5000", ("$c", cutoff)))
-                using (var rd = cmd.ExecuteReader())
-                    while (rd.Read()) rids.Add(rd.GetInt64(0));
-                if (rids.Count == 0) break;
-                expired += DeleteRowsLocked(rids);
-            }
+        // 1. Retention: rows older than retention.days, 5000 per slice.
+        int expired = 0;
+        while (MaintenanceSlice(() =>
+        {
+            var rids = new List<long>();
+            using (var cmd = Cmd(_w, "SELECT rid FROM captures WHERE ts < $c LIMIT 5000", ("$c", cutoff)))
+            using (var rd = cmd.ExecuteReader())
+                while (rd.Read()) rids.Add(rd.GetInt64(0));
+            if (rids.Count == 0) return false;
+            expired += DeleteRowsLocked(rids);
+            return true;
+        })) { }
+        MaintenanceSlice(() =>
+        {
             Exec(_w, "DELETE FROM audit WHERE ts < $c", ("$c", cutoff));
             // Searches and chats are memory too: retention.days covers them (a chat goes once its first message expires).
             Exec(_w, "DELETE FROM search_history WHERE ts < $c", ("$c", cutoff));
             DeleteChatsOlderLocked(cutoff);
+            return true;
+        });
 
-            // 2. Whole keyframe files from months before the cutoff month are empty now: delete the files.
-            foreach (var m in KfMonths())
-                if (string.CompareOrdinal(m, cutoffMonth) < 0 &&
-                    (long)(Scalar(_w, "SELECT count(*) FROM captures WHERE kf_month=$m AND has_keyframe=1", ("$m", m)) ?? 0L) == 0)
+        // 2. Whole keyframe files from months before the cutoff month are empty now: delete the files.
+        var months = MaintenanceSlice(KfMonths);
+        foreach (var m in months.Where(m => string.CompareOrdinal(m, cutoffMonth) < 0))
+            MaintenanceSlice(() =>
+            {
+                if ((long)(Scalar(_w, "SELECT count(*) FROM captures WHERE kf_month=$m AND has_keyframe=1", ("$m", m)) ?? 0L) == 0)
                     DeleteKfFile(m);
+                return true;
+            });
 
-            // 3. Progressive thinning (retention.progressive*). storage.maxGb and storage.minFreeGb are the
-            //    agent's storage guard (DeleteForSpace).
-            int thinned = ThinLocked(settings.Retention, DateTimeOffset.UtcNow, cutoff);
-            if (thinned > 0) Log.Info($"maintenance: {thinned} rows thinned");
-            ReleaseFreePagesLocked();
+        // 2b. Once per open: keyframe images whose row is gone. A crash between the store.db commit and the month-file
+        //     delete of a row delete leaves them behind (B13); nothing else would remove them before their month expires.
+        if (!_orphansSwept)
+        {
+            int orphans = 0;
+            foreach (var m in MaintenanceSlice(KfMonths))
+                MaintenanceSlice(() => { orphans += DeleteOrphanKeyframesLocked(m); return true; });
+            _orphansSwept = true;
+            if (orphans > 0) Log.Info($"maintenance: {orphans} orphan keyframes deleted");
+        }
 
+        // 3. Progressive thinning (retention.progressive*), one day per slice. storage.maxGb and storage.minFreeGb are
+        //    the agent's storage guard (DeleteForSpace).
+        int thinned = 0;
+        if (MaintenanceSlice(() => ThinDaysLocked(settings.Retention, now, cutoff)) is { } days)
+            for (long day = days.First; day <= days.Last; day++)
+            {
+                long d = day;
+                MaintenanceSlice(() => { thinned += ThinDayLocked(settings.Retention, now, cutoff, d); return true; });
+            }
+        if (thinned > 0) Log.Info($"maintenance: {thinned} rows thinned");
+        foreach (var m in MaintenanceSlice(KfMonths))
+            MaintenanceSlice(() => { ReleaseFreePagesLocked(m, vacuumLegacy: true); return true; });
+
+        MaintenanceSlice(() =>
+        {
             CheckpointLocked();
             lock (_rl)
             {
@@ -1393,13 +1427,78 @@ public sealed partial class EncryptedStore : IStore
                 }
             }
             try { Exec(_w, "PRAGMA optimize"); } catch { }
-            Log.Info($"maintenance: {expired} rows expired in {sw.ElapsedMilliseconds} ms");
-            notice = TakeNoticeLocked("retention");
+            return true;
+        });
+        Log.Info($"maintenance: {expired} rows expired in {sw.ElapsedMilliseconds} ms");
+        Raise(MaintenanceSlice(() => TakeNoticeLocked("retention")));
+    }
+
+    /// <summary>Count of callers waiting for _wl with priority (purge, keyframe reads).</summary>
+    private int _priorityWaiters;
+    private bool _orphansSwept;
+
+    /// <summary>Takes _wl for one maintenance step, after any priority caller that is waiting got its turn.</summary>
+    private T MaintenanceSlice<T>(Func<T> step)
+    {
+        var wait = Stopwatch.StartNew();
+        while (Volatile.Read(ref _priorityWaiters) > 0 && wait.ElapsedMilliseconds < 30_000) Thread.Sleep(2);
+        lock (_wl)
+        {
+            ThrowIfDisposed();
+            return step();
         }
-        Raise(notice);
+    }
+
+    /// <summary>_wl for a caller that must not queue behind maintenance (panic purge, keyframe reads).</summary>
+    private Lock.Scope EnterWritePriority()
+    {
+        Interlocked.Increment(ref _priorityWaiters);
+        try { return _wl.EnterScope(); }
+        finally { Interlocked.Decrement(ref _priorityWaiters); }
+    }
+
+    /// <summary>Deletes keyframe images of one month file whose capture row no longer names that month. Caller holds _wl.</summary>
+    private int DeleteOrphanKeyframesLocked(string month)
+    {
+        if (Kf(month, false) is not { } kc) return 0;
+        var rows = new HashSet<long>();
+        using (var cmd = Cmd(_w, "SELECT rid FROM captures WHERE kf_month=$m", ("$m", month)))
+        using (var rd = cmd.ExecuteReader())
+            while (rd.Read()) rows.Add(rd.GetInt64(0));
+        var orphans = new List<long>();
+        using (var cmd = Cmd(kc, "SELECT rid FROM kf"))
+        using (var rd = cmd.ExecuteReader())
+            while (rd.Read()) { long rid = rd.GetInt64(0); if (!rows.Contains(rid)) orphans.Add(rid); }
+        for (int off = 0; off < orphans.Count; off += 500)
+            Exec(kc, $"DELETE FROM kf WHERE rid IN ({InList(orphans.Skip(off).Take(500).ToList())})");
+        return orphans.Count;
     }
 
     // ---------------------------------------------------------------- test hooks
+
+    /// <summary>Tests: keyframe images stored across all month files.</summary>
+    internal long KeyframeCountForTest()
+    {
+        lock (_wl)
+        {
+            long n = 0;
+            foreach (var m in KfMonths()) if (Kf(m, false) is { } c) n += (long)(Scalar(c, "SELECT count(*) FROM kf") ?? 0L);
+            return n;
+        }
+    }
+
+    /// <summary>Tests: the state a crash between the two commits of a row delete leaves (row gone, image kept).</summary>
+    internal void DeleteRowKeepImageForTest(string id)
+    {
+        lock (_wl)
+        {
+            if (Rid(id) is not long rid) return;
+            Exec(_w, "DELETE FROM vectors WHERE rid=$r", ("$r", rid));
+            Exec(_w, "DELETE FROM jobs WHERE rid=$r", ("$r", rid));
+            Exec(_w, "DELETE FROM captures WHERE rid=$r", ("$r", rid));
+            _index.Remove(rid);
+        }
+    }
 
     /// <summary>
     /// Tests and benchmarks only: inserts ready screen rows with vectors and FTS entries in one transaction,

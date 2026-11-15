@@ -48,6 +48,7 @@ public sealed partial class MainWindow : Window
             if (_skipReload) { _skipReload = false; return; }
             (ContentFrame.Content as IDataPage)?.Reload();
         };
+        s.Reconnected += () => { if (!s.Locked) (ContentFrame.Content as IDataPage)?.Reload(); };
         Unlock.UnlockedOk += UpdateLock;
         UpdateStatus();
         UpdateOffline();

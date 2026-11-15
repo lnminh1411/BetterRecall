@@ -41,6 +41,14 @@ public sealed class RealEngine : IWorkerEngine
     private WindowsOcr? _winOcr;
     private PiiNer? _ner;
     private readonly NerGate _nerGate = new();
+    /// <summary>Accelerators that failed at run time after loading (device removed, TDR, driver update) in this process:
+    /// the next load of that component skips them. A new worker process (idle exit, restart) tries them again.</summary>
+    private readonly HashSet<string> _failedDevices = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, int> _runFailures = new(StringComparer.Ordinal);
+
+    /// <summary>Run-time failures in a row on a loaded component before it is unloaded and planned again (one bad input
+    /// alone does not move it off its device).</summary>
+    internal const int RunFailuresBeforeReplan = 2;
 
     public const string BenchText = "BetterRecall benchmark: quarterly sales spreadsheet, Tabelle mit Umsatzzahlen, bảng doanh thu.";
 
@@ -212,6 +220,7 @@ public sealed class RealEngine : IWorkerEngine
             var textDev = cached.Chosen!.TextDeviceId is { } tid ? FindDevice(tid) : dev;
             var m = cached.Chosen!.Model == ModelCatalog.Siglip ? fallback : primary;
             if (dev is { Kind: DeviceKind.Gpu } && gpu is not null && dev.Id != gpu.Id) dev = null;
+            if (dev is not null && _failedDevices.Contains(dev.Id) || textDev is not null && _failedDevices.Contains(textDev.Id)) dev = null;
             if (dev is not null && textDev is not null && m is not null)
             {
                 Embedder? e = null;
@@ -237,7 +246,7 @@ public sealed class RealEngine : IWorkerEngine
         var keep = new Dictionary<BenchOutcome, Embedder>();
         // Per-budget image timings only for the bench op (they compile every budget: slow on a first NPU run).
         var tokens = force ? new List<TokenRow>() : null;
-        var allowed = DevicePolicy.Allowed(_s.Device, Main.Devices, gpu);
+        var allowed = WithoutFailed(DevicePolicy.Allowed(_s.Device, Main.Devices, gpu));
         // ONNX Runtime main backend: its DirectML device takes the adapter's name from the GPU list.
         if (allowed.Any(d => d.Ep == "DirectML")) allowed = allowed.Select(d => Gpus.FirstOrDefault(g => g.Id == d.Id) ?? d).ToList();
         var allowedIds = allowed.Select(d => d.Id).ToHashSet(StringComparer.Ordinal);
@@ -272,7 +281,10 @@ public sealed class RealEngine : IWorkerEngine
         }
         _embedder = keep[chosen];
         _choice = new DeviceChoice(chosen.Device.Label, chosen.Device.Id, chosen.Device.Ep, chosen.Model, chosen.Split ? chosen.TextDevice!.Id : null);
-        DeviceCache.Write(cachePath, new DeviceCacheFile { Key = key, Chosen = _choice, Bench = result, WrittenUtc = DateTimeOffset.UtcNow });
+        // A choice made around a device that failed at run time is for this process only: device.json keeps the normal
+        // choice, so the next worker tries that device again (a TDR or driver update is usually over by then).
+        if (_failedDevices.Count == 0)
+            DeviceCache.Write(cachePath, new DeviceCacheFile { Key = key, Chosen = _choice, Bench = result, WrittenUtc = DateTimeOffset.UtcNow });
         Log.Info($"device chosen: {_choice.Device} ({_choice.DeviceId} {chosen.Device.Name}) {_choice.Model}{(_choice.TextDeviceId is { } t ? " text on " + t : "")}");
         return result;
     }
@@ -431,11 +443,12 @@ public sealed class RealEngine : IWorkerEngine
         {
             var gate = EnsureNsfw(nsfwDetector is not null);
             // Classifier first (cheap, stops at the first blocking tile); the detector only for frames it passed.
-            if (nsfwThreshold is { } t && gate.Classifier.Score(rgb, t, nsfwGrid) >= t) return new ImageEmbedding(null, "nsfw");
-            if (nsfwDetector is { } dt && gate.Detector!.Score(rgb) >= dt) return new ImageEmbedding(null, "nsfw");
+            if (nsfwThreshold is { } t && Guarded("nsfw", () => gate.Classifier.Score(rgb, t, nsfwGrid), DropNsfw, gate.Device) >= t) return new ImageEmbedding(null, "nsfw");
+            if (nsfwDetector is { } dt && Guarded("nsfw", () => gate.Detector!.Score(rgb), DropNsfw, gate.Device) >= dt) return new ImageEmbedding(null, "nsfw");
         }
         EnsureEmbedder();
-        return new ImageEmbedding(_embedder!.EmbedImage(rgb), null);
+        var e = _embedder!;
+        return new ImageEmbedding(Guarded("embedder", () => e.EmbedImage(rgb), DropEmbedder, e.Device, e.TextDevice), null);
     }
 
     /// <summary>The loaded gate, or a new one on the first device of <see cref="NsfwCandidates"/> that loads both
@@ -465,7 +478,7 @@ public sealed class RealEngine : IWorkerEngine
         available.Add(cpu); backends[cpu] = CpuOrt;
 
         string? ovCache = null;
-        var order = NsfwDevicePlan.Order(_s.NsfwDevice, available);
+        var order = WithoutFailed(NsfwDevicePlan.Order(_s.NsfwDevice, available));
         if (order.Any(d => d.Ep == "OpenVINO"))
             ovCache = DeviceCache.CompiledDir(DataPaths.CompiledCache(_home), "nsfw",
                 new DeviceCacheKey(Main.Name, Main.Version, Main.NpuDriverVersion, $"{cls.Hash}+{det?.Hash ?? "none"}", "", 0).CompiledId);
@@ -482,7 +495,7 @@ public sealed class RealEngine : IWorkerEngine
         OcrLine[] lines;
         string engine;
         if (_s.OcrEngine == "windows") { lines = EnsureWindowsOcr().Read(rgb); engine = "windows"; }
-        else { lines = EnsureOcr().Read(rgb); engine = "onnx"; }
+        else { var ocr = EnsureOcr(); lines = Guarded("ocr", () => ocr.Read(rgb), DropOcr, ocr.Device); engine = "onnx"; }
         Array.Clear(rgb.Rgb);
         bool entitiesMissing = false;
         if (entities && lines.Length > 0)
@@ -566,7 +579,7 @@ public sealed class RealEngine : IWorkerEngine
         if (_probeDml && (setting == "gpu" || setting == "auto" && autoDiscrete) && DmlDevice(gpuAdapter, cacheName) is { } dml) { available.Add(dml); backends[dml] = CpuOrt; }
         var cpu = CpuOrt.Devices.First(d => d.Kind == DeviceKind.Cpu);
         available.Add(cpu); backends[cpu] = CpuOrt;
-        var order = NsfwDevicePlan.Order(setting, available);
+        var order = WithoutFailed(NsfwDevicePlan.Order(setting, available));
         string? ovCache = order.Any(d => d.Ep == "OpenVINO")
             ? DeviceCache.CompiledDir(DataPaths.CompiledCache(_home), cacheName,
                 new DeviceCacheKey(Main.Name, Main.Version, Main.NpuDriverVersion, modelHash, "", 0).CompiledId)
@@ -596,7 +609,8 @@ public sealed class RealEngine : IWorkerEngine
     public float[] EmbedText(string text, TextKind kind)
     {
         EnsureEmbedder();
-        return _embedder!.EmbedText(text, kind);
+        var e = _embedder!;
+        return Guarded("embedder", () => e.EmbedText(text, kind), DropEmbedder, e.Device, e.TextDevice);
     }
 
     public TranscribeResult Transcribe(float[] pcm, string source, string language)
@@ -647,6 +661,41 @@ public sealed class RealEngine : IWorkerEngine
             sb.Append(Path.GetFileName(f)).Append(':').Append(new FileInfo(f).Length).Append('|');
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString()))).ToLowerInvariant();
     }
+
+    // ---------------- run-time device failure ----------------
+
+    /// <summary>Runs one inference on a loaded component. RunFailuresBeforeReplan DeviceFailedExceptions in a row unload
+    /// the component and mark its accelerators failed for this process, so the next request loads it on the next
+    /// candidate device (CPU last) instead of answering "Device failed" until the worker restarts.</summary>
+    private T Guarded<T>(string component, Func<T> run, Action drop, params DeviceInfo[] devices)
+    {
+        try
+        {
+            var r = run();
+            _runFailures.Remove(component);
+            return r;
+        }
+        catch (DeviceFailedException e)
+        {
+            int n = _runFailures.GetValueOrDefault(component) + 1;
+            if (n < RunFailuresBeforeReplan) { _runFailures[component] = n; throw; }
+            _runFailures.Remove(component);
+            foreach (var d in devices.Where(d => d.Kind != DeviceKind.Cpu)) _failedDevices.Add(d.Id);
+            Log.Warn($"{component} failed {n} times in a row on {string.Join("+", devices.Select(d => d.Id).Distinct())} ({e.Message}); " +
+                     "unloaded, the next request picks another device");
+            drop();
+            throw;
+        }
+    }
+
+    private void DropEmbedder() { _embedder?.Dispose(); _embedder = null; _choice = null; }
+    private void DropNsfw() { _nsfw?.Dispose(); _nsfw = null; }
+    private void DropOcr() { _ocr?.Dispose(); _ocr = null; }
+
+    /// <summary>The devices minus the ones that failed at run time in this process (the CPU is never marked).</summary>
+    private List<DeviceInfo> WithoutFailed(IEnumerable<DeviceInfo> devices) => devices.Where(d => !_failedDevices.Contains(d.Id)).ToList();
+
+    internal IReadOnlyCollection<string> FailedDevices => _failedDevices;
 
     public void Dispose()
     {
