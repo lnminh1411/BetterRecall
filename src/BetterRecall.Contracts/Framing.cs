@@ -15,6 +15,8 @@ public static class LineProtocol
     /// <summary>UI pipe only: chat questions (4000 characters, escaped in JSON) and settings arrays exceed 4 KiB.</summary>
     public const int MaxUiRequestBytes = 64 * 1024;
     public const string TooLongError = "Line exceeds 4096 bytes.";
+    /// <summary>UI client and UI pipe: the error for a line over MaxUiRequestBytes.</summary>
+    public const string TooLongUiError = "Line exceeds 65536 bytes.";
 
     /// <summary>Reads one line. Strips \r and a leading BOM. Null at end of stream.</summary>
     public static async Task<string?> ReadLineAsync(Stream stream, int maxBytes, CancellationToken ct)

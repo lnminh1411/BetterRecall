@@ -9,7 +9,8 @@ using Microsoft.Win32.SafeHandles;
 namespace BetterRecall.Core.Ipc;
 
 /// <summary>Facts about a peer process read from its token and image name.</summary>
-public sealed record PeerInfo(int Pid, uint Session, string? Sid, int IntegrityRid, bool AppContainer, string? Image);
+/// <param name="CreatedUtc">Start time of the process inspected, read from the same handle (PID reuse check). Null when unknown.</param>
+public sealed record PeerInfo(int Pid, uint Session, string? Sid, int IntegrityRid, bool AppContainer, string? Image, DateTime? CreatedUtc = null);
 
 internal static class ProcessInfo
 {
@@ -34,6 +35,21 @@ internal static class ProcessInfo
         return h.IsInvalid ? null : ImagePath(h);
     }
 
+    /// <summary>Process start time (UTC), null on failure.</summary>
+    public static DateTime? CreatedUtc(SafeProcessHandle h)
+        => Win32.GetProcessTimes(h, out var created, out _, out _, out _) && created > 0 ? DateTime.FromFileTimeUtc(created) : null;
+
+    /// <summary>
+    /// Image path of pid, but only when that process started before notAfterUtc (the moment the pipe connected).
+    /// A later start means the pid was freed and reused, so the image says nothing about the peer. One handle for both.
+    /// </summary>
+    public static string? ImagePathIfStartedBefore(int pid, DateTime notAfterUtc)
+    {
+        using var h = Win32.OpenProcess(Win32.PROCESS_QUERY_LIMITED_INFORMATION, false, (uint)pid);
+        if (h.IsInvalid || CreatedUtc(h) is not { } created || created > notAfterUtc) return null;
+        return ImagePath(h);
+    }
+
     public static uint SessionOf(int pid) => Win32.ProcessIdToSessionId((uint)pid, out var s) ? s : uint.MaxValue;
 
     /// <summary>Reads session, user SID, integrity RID, AppContainer flag and image path. Null fields on failure.</summary>
@@ -45,6 +61,7 @@ internal static class ProcessInfo
         using var h = Win32.OpenProcess(Win32.PROCESS_QUERY_LIMITED_INFORMATION, false, (uint)pid);
         if (h.IsInvalid) return new PeerInfo(pid, session, null, -1, true, null);
         image = ImagePath(h);
+        var created = CreatedUtc(h);
         if (Win32.OpenProcessToken(h, Win32.TOKEN_QUERY, out var token))
         {
             using (token)
@@ -66,7 +83,7 @@ internal static class ProcessInfo
                 finally { Marshal.FreeHGlobal(buf); }
             }
         }
-        return new PeerInfo(pid, session, sid, rid, appContainer, image);
+        return new PeerInfo(pid, session, sid, rid, appContainer, image, created);
     }
 
     public static string Normalize(string path)

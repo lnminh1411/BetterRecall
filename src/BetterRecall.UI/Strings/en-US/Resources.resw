@@ -284,6 +284,8 @@
   <data name="Replays_ExportWarning.Title" xml:space="preserve"><value>Exported copies are not encrypted</value></data>
   <data name="Replays_Exported" xml:space="preserve"><value>Saved to {0}. This copy is not encrypted.</value></data>
   <data name="Replays_ExportedTitle" xml:space="preserve"><value>Exported</value></data>
+  <data name="Replays_Exporting" xml:space="preserve"><value>Saving the clip…</value></data>
+  <data name="Replays_ExportCancelled" xml:space="preserve"><value>Saving cancelled. No file was kept.</value></data>
   <data name="Replays_FileType" xml:space="preserve"><value>MP4 video</value></data>
   <data name="Replays_List.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve"><value>Replays</value></data>
   <data name="Replays_Open" xml:space="preserve"><value>Open</value></data>
@@ -788,6 +790,8 @@
   <data name="Danger_ExportWarnBody" xml:space="preserve"><value>{0:N0} captures ({1:N0} images) will be written to a zip file that is not encrypted. Anyone who can open that folder can see them. Delete the copy when you are done.</value></data>
   <data name="Danger_ExportContinue" xml:space="preserve"><value>Choose file</value></data>
   <data name="Danger_ExportNone" xml:space="preserve"><value>Nothing was captured in that range.</value></data>
+  <data name="Danger_Exporting" xml:space="preserve"><value>Exporting… You can keep using the app.</value></data>
+  <data name="Danger_ExportCancelled" xml:space="preserve"><value>Export cancelled. No file was kept.</value></data>
   <data name="Danger_Exported" xml:space="preserve"><value>Exported {0:N0} captures to {1}. This copy is not encrypted.</value></data>
   <data name="Danger_ExportFileType" xml:space="preserve"><value>Zip archive</value></data>
   <data name="Danger_ExportOpen" xml:space="preserve"><value>Show in folder</value></data>

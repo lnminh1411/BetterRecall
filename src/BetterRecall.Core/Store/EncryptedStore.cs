@@ -774,6 +774,8 @@ public sealed partial class EncryptedStore : IStore
                     ("$from", scope.From.Value.ToUnixTimeMilliseconds()), ("$to", scope.To.Value.ToUnixTimeMilliseconds()));
                 DeleteChatsInWindowLocked(scope.From.Value, scope.To.Value);   // chats active in the window go too
             }
+            // App and site purges forget saved searches that name the app or site ("pornhub" after purge site pornhub.com).
+            if (scope.Kind is "app" or "site") DeleteHistoryContainingLocked(HistoryNeedles(scope));
             CheckpointLocked();
             Log.Info($"purge ({scope.Kind}) removed {n} rows");
             return n;
@@ -1129,6 +1131,46 @@ public sealed partial class EncryptedStore : IStore
             if (q == null) CheckpointLocked();
             return n;
         }
+    }
+
+    /// <summary>Words a saved search would use for an app or site scope: "chrome.exe" gives chrome.exe and chrome;
+    /// "www.pornhub.co.uk" gives pornhub.co.uk and pornhub. Words under 3 characters are dropped (too broad).</summary>
+    internal static List<string> HistoryNeedles(PurgeScope scope)
+    {
+        var needles = new List<string>();
+        void Add(string? w) { w = w?.Trim(); if (w is { Length: >= 3 } && !needles.Contains(w, StringComparer.OrdinalIgnoreCase)) needles.Add(w); }
+        if (scope.Kind == "app" && !string.IsNullOrWhiteSpace(scope.App))
+        {
+            var app = scope.App.Trim();
+            Add(app);
+            if (app.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) Add(app[..^4]);
+        }
+        else if (scope.Kind == "site" && NormalizeSite(scope.Site) is { Length: > 0 } host)
+        {
+            if (host.StartsWith("www.", StringComparison.Ordinal)) host = host[4..];
+            Add(host);
+            var labels = host.Split('.', StringSplitOptions.RemoveEmptyEntries);
+            // Main label: the one before the suffix ("co.uk", "com.au" count as one suffix).
+            int i = labels.Length - 2;
+            if (labels.Length >= 3 && labels[^2] is "co" or "com" or "net" or "org" or "gov" or "edu" or "ac") i--;
+            if (i >= 0) Add(labels[i]);
+        }
+        return needles;
+    }
+
+    /// <summary>Deletes saved searches containing any needle (case-insensitive). Caller holds _wl.</summary>
+    private void DeleteHistoryContainingLocked(List<string> needles)
+    {
+        if (needles.Count == 0) return;
+        var drop = new List<string>();
+        using (var cmd = Cmd(_w, "SELECT q FROM search_history"))
+        using (var rd = cmd.ExecuteReader())
+            while (rd.Read())
+            {
+                var q = rd.GetString(0);
+                if (needles.Any(n => q.Contains(n, StringComparison.OrdinalIgnoreCase))) drop.Add(q);
+            }
+        foreach (var q in drop) Exec(_w, "DELETE FROM search_history WHERE q=$q", ("$q", q));
     }
 
     internal static string Cut(string s, int max) => s.Length <= max ? s : s[..(max - 1)] + "…";

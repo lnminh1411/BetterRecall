@@ -125,8 +125,24 @@ public sealed partial class ReplaysPage : Page, IDataPage
         var picked = await picker.PickSaveFileAsync();
         if (picked is null || string.IsNullOrEmpty(picked.Path)) return;
 
+        // Own connection: the list and other pages keep working while a long clip is written, and Cancel stops it.
         Busy.IsActive = true;
-        var r = await Services.Current.Api.ReplayExportAsync(id, picked.Path);
+        using var cancel = new CancellationTokenSource();
+        Show(InfoBarSeverity.Informational, Loc.Get("Replays_Exporting"), "");
+        var stop = new Button { Content = Loc.Get("Common_Cancel") };
+        stop.Click += (_, _) => { try { cancel.Cancel(); } catch (ObjectDisposedException) { } };
+        ResultBar.ActionButton = stop;
+        AgentResult r;
+        try
+        {
+            r = await OwnConnection.RunAsync(Services.Current.CreateRunClient, (own, ct) => own.ReplayExportAsync(id, picked.Path, ct), cancel.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            Busy.IsActive = false;
+            Show(InfoBarSeverity.Informational, Loc.Get("Replays_ExportCancelled"), "");
+            return;
+        }
         Busy.IsActive = false;
         if (!r.Ok)
         {

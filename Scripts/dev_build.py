@@ -8,6 +8,8 @@ Default output: artifacts/dev. Run from anywhere; paths resolve from the repo ro
 K:\scratch\betterrecall-dev-home) and --no-autostart; --run-only starts it without building.
 The output folder gets a .devbuild marker: an agent started from it refuses the real data folder
 (%LOCALAPPDATA%\BetterRecall) unless given --allow-default-home.
+--release (implied for an output folder under artifacts/release, as package_single.py uses): no marker, third-party
+licence notices in LICENSES/third-party, no .pdb, .lib or createdump.exe (Scripts/release_layout.py).
 """
 import argparse
 import os
@@ -15,6 +17,9 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import release_layout  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 VSWHERE_DIR = r"C:\Program Files (x86)\Microsoft Visual Studio\Installer"
@@ -28,7 +33,7 @@ LAYOUT = {
     "UI": "ui",
 }
 TESTS = ["Core", "Agent", "Worker", "UI"]
-DEV_MARKER = ".devbuild"  # InstallLayout.DevBuildMarker
+DEV_MARKER = release_layout.DEV_MARKER  # InstallLayout.DevBuildMarker
 
 
 def dev_home() -> Path:
@@ -62,6 +67,7 @@ def main() -> None:
     ap.add_argument("--only", default="", help="comma list of projects from: " + ",".join(LAYOUT))
     ap.add_argument("--run", action="store_true", help="start the dev agent on its own data folder after the build")
     ap.add_argument("--run-only", action="store_true", help="start the dev agent without building")
+    ap.add_argument("--release", action="store_true", help="release layout: no dev marker, licence notices, no pdb/lib/createdump")
     a = ap.parse_args()
 
     env = os.environ.copy()
@@ -88,6 +94,13 @@ def main() -> None:
             shutil.rmtree(dest)  # subfolder belongs to one project only
         dest.mkdir(parents=True, exist_ok=True)
         run(["dotnet", "publish", f"src/BetterRecall.{p}", "-c", a.config, "-o", str(dest)], env)
+
+    if a.release or (ROOT / "artifacts" / "release") in out.parents:
+        if a.run:
+            sys.exit("--run needs a dev build (a release layout has no .devbuild marker)")
+        release_layout.finish(out, list(LAYOUT))
+        print(f"\nrelease layout: {out}")
+        return
 
     # The agent refuses the default data folder when it finds this marker next to it (InstallLayout.RefusesHome).
     (out / DEV_MARKER).write_text("dev build: needs its own BETTERRECALL_HOME\n", encoding="utf-8")

@@ -128,6 +128,7 @@ public sealed partial class CommandProcessor
     private static readonly string[] UiOnlyVerbs = ["unlock", "lock", "consent", "settings", "timeline", "keyframe", "replay", "panic", "audit", "bench", "facets", "history", "password", "ai", "describe", "export", "chat"];
 
     private readonly CommandDeps _d;
+    private readonly AuditThrottle _connectAudit = new(TimeSpan.FromMinutes(1));
     private DateTimeOffset _lastUnlock = DateTimeOffset.MinValue;
 
     internal Func<DateTimeOffset> Now { get; set; } = () => DateTimeOffset.UtcNow;
@@ -174,7 +175,8 @@ public sealed partial class CommandProcessor
     public async Task ServeAsync(PipeConnection conn, CancellationToken ct)
     {
         var session = new ClientSession(conn.Kind, conn.Peer.Pid, conn.Peer.Image ?? "");
-        Audit(session, "connect", 0, "");
+        // One connect row per client image and minute (count = connections merged), so a reconnect loop cannot grow store.db.
+        if (_connectAudit.Admit(session.PipeLabel + "|" + session.Image, Now()) is > 0 and var merged) Audit(session, "connect", merged, "");
         var stream = conn.Stream;
         var reader = new LineReader(stream, 8192);
         Task<string?>? next = null; // read started while a long request ran; it is the next request line
@@ -250,11 +252,14 @@ public sealed partial class CommandProcessor
         return ok;
     }
 
-    /// <summary>Verbs that may run for minutes (bench full, up to about 10; chat turns). UI pipe only.</summary>
+    /// <summary>Verbs that may run for minutes (bench full, up to about 10; chat turns; export and replay export of
+    /// large ranges). UI pipe only. Closing the pipe cancels them.</summary>
     internal static bool IsLongRunning(PipeKind kind, string line)
     {
         if (kind != PipeKind.Ui) return false;
         var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length >= 2 && parts[0].Equals("export", StringComparison.OrdinalIgnoreCase)) return true;
+        if (parts.Length >= 3 && parts[0].Equals("replay", StringComparison.OrdinalIgnoreCase) && parts[1].Equals("export", StringComparison.OrdinalIgnoreCase)) return true;
         if (parts.Length >= 2 && parts[0].Equals("chat", StringComparison.OrdinalIgnoreCase)
             && parts[1].ToLowerInvariant() is "send" or "approve" or "deny") return true;
         if (parts.Length == 3 && parts[0].Equals("describe", StringComparison.OrdinalIgnoreCase) && parts[1].Equals("send", StringComparison.OrdinalIgnoreCase)) return true;
@@ -861,6 +866,9 @@ public sealed partial class CommandProcessor
         string usage = ui ? UsagePurgeUi : UsagePurge;
         if (args.Length == 0) return Err(usage);
         var sub = args[0].ToLowerInvariant();
+        // UI pipe: scoped previews (row counts) and their confirms need the read gate open too. purge all has its own
+        // recent-unlock check and stays possible while locked (panic).
+        if (ui && sub is not ("all" or "confirm") && LockError(s.Kind) is { } uiLocked) return Err(uiLocked);
         PurgeScope scope;
         switch (sub)
         {
@@ -869,6 +877,7 @@ public sealed partial class CommandProcessor
                 if (args.Length != 2) return Err(usage);
                 var now = Now();
                 if (!s.PurgeTokens.Remove(args[1], out var ticket) || ticket.Expires <= now) return Err(ErrToken);
+                if (ui && ticket.Scope != null && LockError(s.Kind) is { } confirmLocked) return Err(confirmLocked);
                 if (ticket.Scope == null)
                 {
                     int all = await _d.PurgeAll(ct).ConfigureAwait(false);
@@ -1073,11 +1082,13 @@ public sealed partial class CommandProcessor
                 return Ok(JsonSerializer.Serialize(AiState(), CoreJson.Default.AiStatus));
             case "setkey" when tail.Length > 0:
                 if (store == null) return Err(ErrAiOff);
+                if (LockError(s.Kind) is { } setLocked) return Err(setLocked);
                 if (!Ai.ApiKeyStore.Valid(tail)) return Err(ErrApiKeyRule);
                 store.Set(tail, S.Ai);
                 Audit(s, "ai setkey", 1, "");
                 return Ok(JsonSerializer.Serialize(AiState(), CoreJson.Default.AiStatus));
             case "clearkey" when tail.Length == 0:
+                if (LockError(s.Kind) is { } clearLocked) return Err(clearLocked);
                 store?.Clear();
                 Audit(s, "ai clearkey", 1, "");
                 return Ok(JsonSerializer.Serialize(AiState(), CoreJson.Default.AiStatus));
@@ -1147,7 +1158,9 @@ public sealed partial class CommandProcessor
         return Err(UsageDescribe);
     }
 
-    private static readonly string[] GuardedSettingGroups = ["security", "ai", "ipc"];
+    /// <summary>Groups that change what is protected, kept or redacted, or what leaves the PC (retention.days and
+    /// storage.maxGb delete history; privacy and ocr off stop redaction; mcp opens a pipe).</summary>
+    internal static readonly string[] GuardedSettingGroups = ["security", "ai", "ipc", "mcp", "privacy", "ocr", "retention", "storage"];
 
     private Reply Settings(string rest)
     {
@@ -1162,7 +1175,7 @@ public sealed partial class CommandProcessor
                 catch (JsonException) { return Err(ErrJson); }
                 using (doc)
                 {
-                    // Security, AI and IPC settings change what is protected and what leaves the PC: not while the gate
+                    // Guarded groups change what is protected, kept or redacted and what leaves the PC: not while the gate
                     // is closed (a passphrase-wrapped key would otherwise be re-wrapped to dpapi without the passphrase).
                     if (doc.RootElement.ValueKind == JsonValueKind.Object && LockError(PipeKind.Ui) is { } locked
                         && GuardedSettingGroups.Any(g => doc.RootElement.TryGetProperty(g, out _)))
@@ -1211,6 +1224,7 @@ public sealed partial class CommandProcessor
                     return Ok("null");
                 }
                 case "delete" when args.Length == 1:
+                    if (LockError(s.Kind) is { } deleteLocked) return Err(deleteLocked);
                     _d.Agent.DeleteReplay(args[0]);
                     return Ok("null");
             }

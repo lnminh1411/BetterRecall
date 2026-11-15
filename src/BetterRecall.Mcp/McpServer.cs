@@ -172,7 +172,8 @@ public sealed class McpServer(Func<string, CancellationToken, Task<PipeAnswer>> 
     internal static string SearchJson(JsonElement args)
     {
         var buf = new ArrayBufferWriter<byte>();
-        using (var w = new Utf8JsonWriter(buf))
+        // Relaxed encoder, as for replies: a CJK character costs 3 bytes, not 6 (\uXXXX), so 1024-character queries fit.
+        using (var w = new Utf8JsonWriter(buf, new JsonWriterOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping }))
         {
             w.WriteStartObject();
             foreach (var name in new[] { "q", "limit", "from", "to", "app", "kind", "mode" })

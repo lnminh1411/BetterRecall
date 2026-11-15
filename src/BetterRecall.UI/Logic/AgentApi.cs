@@ -74,13 +74,17 @@ public sealed class AgentApi(IAgentClient client)
 {
     public IAgentClient Client => client;
 
+    /// <summary>Request JSON is a pipe line, not HTML: non-ASCII text goes out as UTF-8 (3 bytes per CJK character)
+    /// instead of \uXXXX (6 bytes), so long CJK chat questions and searches fit the request limit.</summary>
+    internal static readonly JsonWriterOptions LineJson = new() { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+
     public static string Iso(DateTimeOffset t) => t.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture);
 
     /// <summary>Lowercase JSON form of search (research.md 7.6).</summary>
     public static string BuildSearchLine(SearchQuery q)
     {
         using var ms = new MemoryStream();
-        using (var w = new Utf8JsonWriter(ms))
+        using (var w = new Utf8JsonWriter(ms, LineJson))
         {
             w.WriteStartObject();
             w.WriteString("q", q.Text.Trim());
@@ -219,7 +223,7 @@ public sealed class AgentApi(IAgentClient client)
     public static string PasswordJson(string? current, string? next)
     {
         using var ms = new MemoryStream();
-        using (var w = new Utf8JsonWriter(ms))
+        using (var w = new Utf8JsonWriter(ms, LineJson))
         {
             w.WriteStartObject();
             if (current is not null) w.WriteString("current", current);
@@ -297,7 +301,7 @@ public sealed class AgentApi(IAgentClient client)
     private static string Json(Action<Utf8JsonWriter> body)
     {
         using var ms = new MemoryStream();
-        using (var w = new Utf8JsonWriter(ms))
+        using (var w = new Utf8JsonWriter(ms, LineJson))
         {
             w.WriteStartObject();
             body(w);

@@ -119,9 +119,9 @@ public class AgentClientTests
     {
         await using var server = new FakeLineServer(_ => Envelope.Ok("null"));
         await using var c = new AgentClient(server.Name, MockHarness.OwnProcessTrust());
-        var r = await c.SendAsync("search " + new string('x', 5000));
+        var r = await c.SendAsync("search " + new string('x', LineProtocol.MaxUiRequestBytes));
         Assert.False(r.Ok);
-        Assert.Equal(LineProtocol.TooLongError, r.Error);
+        Assert.Equal(LineProtocol.TooLongUiError, r.Error);
         lock (server.Received) Assert.Empty(server.Received);
     }
 

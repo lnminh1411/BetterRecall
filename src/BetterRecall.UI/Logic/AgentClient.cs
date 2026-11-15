@@ -95,8 +95,8 @@ public sealed class AgentClient(string pipeName, IServerTrust trust, TimeSpan? c
 
     public async Task<AgentResult> SendAsync(string line, CancellationToken ct = default)
     {
-        if (Encoding.UTF8.GetByteCount(line) > LineProtocol.MaxRequestBytes)
-            return AgentResult.Fail(AgentErrorKind.Server, LineProtocol.TooLongError);
+        if (Encoding.UTF8.GetByteCount(line) > LineProtocol.MaxUiRequestBytes)
+            return AgentResult.Fail(AgentErrorKind.Server, LineProtocol.TooLongUiError);
 
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         AgentResult result;
@@ -116,8 +116,8 @@ public sealed class AgentClient(string pipeName, IServerTrust trust, TimeSpan? c
     /// </summary>
     public async Task<AgentResult> StreamAsync(string line, Func<AgentResult, bool> onLine, CancellationToken ct = default)
     {
-        if (Encoding.UTF8.GetByteCount(line) > LineProtocol.MaxRequestBytes)
-            return AgentResult.Fail(AgentErrorKind.Server, LineProtocol.TooLongError);
+        if (Encoding.UTF8.GetByteCount(line) > LineProtocol.MaxUiRequestBytes)
+            return AgentResult.Fail(AgentErrorKind.Server, LineProtocol.TooLongUiError);
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         AgentResult result;
         try

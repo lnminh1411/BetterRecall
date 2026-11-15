@@ -39,17 +39,20 @@ public sealed class PipeServer : IAsyncDisposable
     private readonly PipeKind _kind;
     private readonly Func<string?, bool> _imageAllowed;
     private readonly Func<PipeConnection, CancellationToken, Task> _handler;
-    private readonly Action<PipeKind, PeerInfo, string>? _onReject;
+    private readonly Action<PipeKind, PeerInfo, string, int>? _onReject;
+    // A same-user process can connect in a loop: one log line and audit row per reason and image per minute.
+    private readonly AuditThrottle _rejects = new(TimeSpan.FromMinutes(1), maxPerWindow: 10);
     private readonly CancellationTokenSource _cts = new();
     private readonly List<Task> _loops = [];
     private readonly Lock _gate = new();
     private readonly HashSet<NamedPipeServerStream> _live = [];
+    private readonly Dictionary<NamedPipeServerStream, PeerInfo> _admitted = [];   // trust-checked, being served
     private int _connected;
 
     public event Action<int>? ConnectedChanged;
 
     public PipeServer(string name, PipeKind kind, Func<string?, bool> imageAllowed,
-        Func<PipeConnection, CancellationToken, Task> handler, Action<PipeKind, PeerInfo, string>? onReject = null)
+        Func<PipeConnection, CancellationToken, Task> handler, Action<PipeKind, PeerInfo, string, int>? onReject = null)
     {
         _name = PipeNames.Base(name);
         _kind = kind;
@@ -133,7 +136,7 @@ public sealed class PipeServer : IAsyncDisposable
             try
             {
                 await stream.WaitForConnectionAsync(ct).ConfigureAwait(false);
-                await ServeAsync(stream, ct).ConfigureAwait(false);
+                await ServeAsync(stream, DateTime.UtcNow, ct).ConfigureAwait(false);
             }
             catch (OperationCanceledException) { }
             catch (Exception ex) { Log.Warn($"pipe {_kind}: connection ended with error", ex); }
@@ -147,17 +150,21 @@ public sealed class PipeServer : IAsyncDisposable
         }
     }
 
-    private async Task ServeAsync(NamedPipeServerStream stream, CancellationToken ct)
+    private async Task ServeAsync(NamedPipeServerStream stream, DateTime connectedUtc, CancellationToken ct)
     {
         var handle = stream.SafePipeHandle;
         Win32.GetNamedPipeClientProcessId(handle, out var pid);
         Win32.GetNamedPipeClientSessionId(handle, out var session);
         var peer = ProcessInfo.Read((int)pid, session);
-        var why = Check(peer);
+        var why = Check(peer, connectedUtc);
         if (why != null)
         {
-            Log.Warn($"pipe {_kind}: client pid {pid} rejected ({why})");
-            try { _onReject?.Invoke(_kind, peer, why); } catch (Exception ex) { Log.Warn("reject audit failed", ex); }
+            int times = _rejects.Admit(why + "|" + (peer.Image ?? ""), DateTimeOffset.UtcNow);
+            if (times > 0)
+            {
+                Log.Warn($"pipe {_kind}: client pid {pid} rejected ({why})" + (times > 1 ? $", {times} times since the last entry" : ""));
+                try { _onReject?.Invoke(_kind, peer, why, times); } catch (Exception ex) { Log.Warn("reject audit failed", ex); }
+            }
             try
             {
                 using var wto = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -169,8 +176,13 @@ public sealed class PipeServer : IAsyncDisposable
         }
         int n = Interlocked.Increment(ref _connected);
         RaiseConnected(n);
+        lock (_gate) _admitted[stream] = peer;
         try { await _handler(new PipeConnection(_kind, peer, stream), ct).ConfigureAwait(false); }
-        finally { RaiseConnected(Interlocked.Decrement(ref _connected)); }
+        finally
+        {
+            lock (_gate) _admitted.Remove(stream);
+            RaiseConnected(Interlocked.Decrement(ref _connected));
+        }
     }
 
     private void RaiseConnected(int n)
@@ -178,15 +190,27 @@ public sealed class PipeServer : IAsyncDisposable
         try { ConnectedChanged?.Invoke(n); } catch (Exception ex) { Log.Warn("ConnectedChanged handler failed", ex); }
     }
 
-    /// <summary>Null when the peer passes research 7.4 server checks, else a short reason for the log.</summary>
-    internal string? Check(PeerInfo p)
+    /// <summary>Null when the peer passes research 7.4 server checks, else a short reason for the log.
+    /// connectedUtc: when the pipe connected. The process inspected by pid must be older than that, else the client
+    /// exited and its pid went to a new process (PID reuse).</summary>
+    internal string? Check(PeerInfo p, DateTime? connectedUtc = null)
     {
+        if (connectedUtc is { } at && (p.CreatedUtc is not { } created || created > at)) return "pid reuse";
         if (p.Session != ProcessInfo.CurrentSession) return "session";
         if (p.Sid == null || !string.Equals(p.Sid, ProcessInfo.CurrentSid, StringComparison.OrdinalIgnoreCase)) return "user";
         if (p.IntegrityRid < (int)Win32.SECURITY_MANDATORY_MEDIUM_RID) return "integrity";
         if (p.AppContainer) return "appcontainer";
         if (!_imageAllowed(p.Image)) return "image";
         return null;
+    }
+
+    /// <summary>Closes every served connection whose peer matches (settings changed what it may do). Synchronous.</summary>
+    internal int DropWhere(Func<PeerInfo, bool> drop)
+    {
+        List<NamedPipeServerStream> victims;
+        lock (_gate) victims = [.. _admitted.Where(kv => drop(kv.Value)).Select(kv => kv.Key)];
+        foreach (var s in victims) { try { s.Dispose(); } catch { } }
+        return victims.Count;
     }
 
     public async Task StopAsync()
