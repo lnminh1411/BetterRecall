@@ -51,9 +51,15 @@ internal sealed class PauseController(Func<DateTimeOffset> now)
 
     public event Action? Changed;
 
+    /// <summary>Adds or updates a reason. Changed fires only when something changed: setting a reason that is already
+    /// set with the same end time re-applied every setting (and rebuilt the replay) on each storeerror retry (D29).</summary>
     public void Set(string reason, DateTimeOffset? until = null)
     {
-        lock (_gate) _reasons[reason] = until;
+        lock (_gate)
+        {
+            if (_reasons.TryGetValue(reason, out var old) && old == until) return;
+            _reasons[reason] = until;
+        }
         Changed?.Invoke();
     }
 

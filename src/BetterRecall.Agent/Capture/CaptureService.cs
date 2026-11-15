@@ -52,6 +52,9 @@ internal sealed class CaptureService : IAsyncDisposable
         _engine = new ReplayEngine(_devices, () => Outputs, Masks);
     }
 
+    /// <summary>Where the capture.monitors index list is pinned to stable monitor ids (null: not saved, tests).</summary>
+    public string? MonitorSelectionFile { get; init; }
+
     public IReadOnlyList<OutputCapture> Outputs { get { lock (_gate) return _outputs.ToList(); } }
     public ReplayEngine Engine => _engine;
     public AudioReplayEncoder? Audio => _audio;
@@ -81,8 +84,10 @@ internal sealed class CaptureService : IAsyncDisposable
         var s = _settings();
         try
         {
-            var outputs = GpuDevices.Outputs();
-            if (s.Capture.Monitors.Length > 0) outputs = outputs.Where(o => s.Capture.Monitors.Contains(o.Index)).ToList();
+            var all = GpuDevices.Outputs();
+            // By stable monitor id, not by enumeration index: a hot-plug renumbers outputs (A12).
+            var (outputs, pin) = MonitorSelection.Resolve(s.Capture.Monitors ?? [], all, MonitorSelection.StableId, MonitorSelection.Load(MonitorSelectionFile));
+            if (pin is not null) MonitorSelection.Save(MonitorSelectionFile, pin);
             var list = outputs.Select(o => new OutputCapture(o, _devices, _pipeline.Post)).ToList();
             lock (_gate) _outputs = list;
             ApplySettings();
@@ -129,21 +134,39 @@ internal sealed class CaptureService : IAsyncDisposable
             _lockMemory));
         bool replayPaused = _replayPaused();
         _engine.Paused = replayPaused;
+        SyncReplayAudio(s, replayPaused);
+    }
 
+    private readonly object _audioGate = new();
+    // A15: a failed loopback start is retried with backoff (from the 250 ms tick), not on every pause change.
+    private readonly RetryBackoff _audioRetry = new(2000, 120_000);
+
+    private void SyncReplayAudio(Settings s, bool replayPaused)
+    {
+        var r = s.Replay;
+        int clampedSeconds = Math.Clamp(r.Seconds, 15, 600);
         bool wantAudio = r.Enabled && r.Audio;
-        if (wantAudio && (_audio is null || _audio.Seconds != clampedSeconds))
+        lock (_audioGate)
         {
-            _audio?.Dispose();
-            _audio = null;
-            try { _audio = new AudioReplayEncoder(_loopback, clampedSeconds, _lockMemory); }
-            catch (Exception ex) { Log.Warn("replay audio unavailable", ex); }
+            if (wantAudio && (_audio is null || _audio.Seconds != clampedSeconds))
+            {
+                long now = Environment.TickCount64;
+                if (_audio is not null || _audioRetry.Due(now))
+                {
+                    _audio?.Dispose();
+                    _audio = null;
+                    try { _audio = new AudioReplayEncoder(_loopback, clampedSeconds, _lockMemory); _audioRetry.Succeeded(); }
+                    catch (Exception ex) { Log.Warn($"replay audio unavailable (retry in {_audioRetry.Failed(now) / 1000} s)", ex); }
+                }
+            }
+            else if (!wantAudio && _audio is not null)
+            {
+                _audio.Dispose();
+                _audio = null;
+            }
+            if (!wantAudio) _audioRetry.Succeeded();
+            if (_audio is not null) _audio.Paused = replayPaused;
         }
-        else if (!wantAudio && _audio is not null)
-        {
-            _audio.Dispose();
-            _audio = null;
-        }
-        if (_audio is not null) _audio.Paused = replayPaused;
     }
 
     public void SetLockMemory(bool on) => _lockMemory = on;
@@ -165,6 +188,7 @@ internal sealed class CaptureService : IAsyncDisposable
             bool replayPaused = _replayPaused();
             _engine.Paused = replayPaused;
             if (_audio is not null) _audio.Paused = replayPaused;
+            else if (s.Replay.Enabled && s.Replay.Audio) SyncReplayAudio(s, replayPaused);   // retry a failed start (backoff inside)
 
             // Replay samples (replay.searchable) follow the replay buffer, but not through a governance pause: fullscreen,
             // battery and storage pause keyframes and inference while the replay may keep running, and a sample costs an
@@ -215,8 +239,8 @@ internal sealed class CaptureService : IAsyncDisposable
         {
             foreach (var o in _outputs)
             {
-                if (!snap.PerMonitor.TryGetValue(o.Info.Index, out var mt)) mt = new MonitorTop(o.Info.Index, null, false);
-                if (mt.DeniedVisible) { SkippedByGuard++; continue; }
+                // A monitor the snapshot did not scan (new after a rebuild) is unknown: skip it until the next scan (A12).
+                if (!snap.PerMonitor.TryGetValue(o.Info.Index, out var mt) || mt.DeniedVisible) { SkippedByGuard++; continue; }
                 var w = mt.Window ?? (snap.Foreground is { } fg && IsOnMonitor(fg, o.Info) ? fg : null);
                 string exe = w?.ExePath ?? "";
                 string app = exe.Length == 0 ? "" : Path.GetFileNameWithoutExtension(exe);

@@ -298,7 +298,12 @@ internal sealed unsafe class MfVideoEncoder : IVideoEncoder
             {
                 IMFMediaEvent ev;
                 try { ev = _events.GetEvent(0); }
-                catch (SharpGenException) { break; }
+                catch (SharpGenException ex)
+                {
+                    // The event queue failed (device lost, MFT shut down): the encoder is dead unless we are stopping (A7).
+                    if (!_stopping) { Error = $"GetEvent 0x{ex.HResult:X8}"; Log.Warn($"encoder event loop ended: {Error}"); }
+                    break;
+                }
                 using (ev)
                 {
                     int type = (int)ev.EventType;

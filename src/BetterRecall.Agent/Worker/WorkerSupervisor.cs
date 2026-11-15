@@ -19,7 +19,7 @@ internal interface IWorkerLauncher
     bool HasExited(int pid);
 }
 
-internal sealed class ProcessWorkerLauncher(string workerExe, bool ecoQos) : IWorkerLauncher
+internal sealed class ProcessWorkerLauncher(string workerExe, Func<bool> ecoQos) : IWorkerLauncher
 {
     private Process? _process;
 
@@ -38,7 +38,7 @@ internal sealed class ProcessWorkerLauncher(string workerExe, bool ecoQos) : IWo
         psi.ArgumentList.Add(home);
         var p = Process.Start(psi) ?? throw new WorkerException("Worker failed to start.");
         _process = p;
-        if (ecoQos) Governance.ApplyEcoQos(p.Handle, idlePriority: true);
+        if (ecoQos()) Governance.ApplyEcoQos(p.Handle, idlePriority: true);   // read per start: governance.ecoQos applies at the next start
         return p.Id;
     }
 
@@ -76,6 +76,7 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
     private int _failures;
     private long _nextAttemptTicks;
     private volatile bool _disposed;
+    private string? _restartFor;
 
     public WorkerHello? Hello { get; private set; }
     public event Action<WorkerHello>? HelloReceived;
@@ -232,13 +233,31 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
 
     public void MarkHealthy() => Interlocked.Exchange(ref _failures, 0);
 
+    /// <summary>A setting the worker reads only at start changed (S4): shut the running worker down gracefully as soon as
+    /// no request is in flight; the next request starts one with the new settings. No worker running: nothing to do.</summary>
+    public void RequestRestart(string why)
+    {
+        if (_disposed) return;
+        Volatile.Write(ref _restartFor, why);
+        CheckIdle();
+    }
+
+    /// <summary>A restart is waiting for the in-flight requests to finish.</summary>
+    public bool RestartPending => Volatile.Read(ref _restartFor) is not null;
+
     /// <summary>Runs the liveness and idle checks now (the timer runs them every 5 s).</summary>
     internal void CheckNow() => CheckIdle();
 
     private void CheckIdle()
     {
         var c = _conn;
-        if (c is null || c.IsClosed) return;
+        if (c is null || c.IsClosed)
+        {
+            // Nothing running: the next start reads the new settings. A start in progress may have read the old ones,
+            // so keep the request until it is up.
+            lock (_startGate) if (_start is not { IsCompleted: false }) Volatile.Write(ref _restartFor, null);
+            return;
+        }
         if (IsUnresponsive(c.ConsecutiveTimeouts, c.NoReplyMs, c.LongOpPending, UnresponsiveTimeouts, (long)UnresponsiveAfter.TotalMilliseconds))
         {
             Log.Warn($"worker not answering ({c.ConsecutiveTimeouts} timeouts in a row, no reply for {c.NoReplyMs / 1000} s), restarting it");
@@ -246,6 +265,12 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
             return;
         }
         if (c.Pending > 0) return;
+        if (Interlocked.Exchange(ref _restartFor, null) is { } why)
+        {
+            Log.Info($"worker restart: {why} changed");
+            _ = ShutdownAsync();
+            return;
+        }
         // The worker exits by itself after inference.idleExitS; this is the backstop.
         if (c.IdleMs > (_idleExitS() + 15) * 1000L)
         {

@@ -62,6 +62,7 @@ internal sealed class FakeWorkerLauncher : IWorkerLauncher
     private Task? _serve;
     private CancellationTokenSource? _cts;
     public bool CrashOnNext;
+    public Func<WorkerRequest, bool>? CrashWhen;
     public int Kills;
 
     public int Start(string pipeName, string home)
@@ -83,6 +84,7 @@ internal sealed class FakeWorkerLauncher : IWorkerLauncher
             if (frame is null) return;
             var req = JsonSerializer.Deserialize(frame.Value.Header, ContractsJson.Default.WorkerRequest)!;
             if (CrashOnNext) { CrashOnNext = false; return; } // drop the pipe mid-request
+            if (CrashWhen?.Invoke(req) == true) return;        // crash on every such request (poison job)
             if (req.Op == "shutdown") return;
             if (NoReply?.Invoke(req) == true) continue;
             var custom = Handler?.Invoke(req, frame.Value.Payload);

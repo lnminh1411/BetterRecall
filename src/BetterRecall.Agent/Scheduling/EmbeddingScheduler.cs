@@ -24,6 +24,17 @@ internal sealed class EmbeddingScheduler : IAsyncDisposable
     private readonly CancellationTokenSource _cts = new();
     private Task? _loop;
     private EmbeddingInfo? _space;
+    // A17: the store instance that last had EnsureEmbeddingSpace(_space) succeed. Purge all or a late open swaps the
+    // store; the new one must be told the space again or every vector misses its index.
+    private IStore? _spaceStore;
+    private readonly object _spaceLock = new();
+    // S2/S3: worker attempts per job id (transient device errors, and crashes with the job in flight).
+    private readonly Dictionary<string, int> _attempts = new();
+
+    /// <summary>Transient worker errors ("Device failed:", "Internal error.") tried per job before it is settled.</summary>
+    public const int MaxTransientAttempts = 5;
+    /// <summary>Worker crashes with the same job in flight before it is set aside as poison.</summary>
+    public const int MaxCrashAttempts = 3;
 
     public string LastDecision { get; private set; } = "idle";
     public int Processed { get; private set; }
@@ -43,11 +54,58 @@ internal sealed class EmbeddingScheduler : IAsyncDisposable
 
     private void OnHello(WorkerHello h)
     {
-        var info = new EmbeddingInfo(h.Model, h.Revision, h.Dim);
-        if (_space == info) return;
-        _space = info;
-        try { _store()?.EnsureEmbeddingSpace(info); }
-        catch (Exception ex) { Log.Warn("EnsureEmbeddingSpace", ex); }
+        lock (_spaceLock)
+        {
+            var info = new EmbeddingInfo(h.Model, h.Revision, h.Dim);
+            if (_space != info) { _space = info; _spaceStore = null; }
+        }
+        EnsureSpace(_store());
+    }
+
+    /// <summary>Tells store the current embedding space unless it already has it. Only a success is remembered: a hello
+    /// before the store opened, or a failed call, is retried on the next step (A17).</summary>
+    private void EnsureSpace(IStore? store)
+    {
+        if (store is null) return;
+        lock (_spaceLock)
+        {
+            if (_space is not { } info || ReferenceEquals(_spaceStore, store)) return;
+            try
+            {
+                store.EnsureEmbeddingSpace(info);
+                _spaceStore = store;
+            }
+            catch (Exception ex) { Log.Warn("EnsureEmbeddingSpace", ex); }
+        }
+    }
+
+    /// <summary>A worker error that may pass (device lost or busy, NSFW gate failing closed, out of memory), unlike
+    /// "Bad request." for input the worker can never read (S2).</summary>
+    internal static bool IsTransient(WorkerReplyException ex) =>
+        ex.Message.StartsWith("Device failed:", StringComparison.Ordinal) || ex.Message.StartsWith("Internal error.", StringComparison.Ordinal);
+
+    /// <summary>The worker went away with the request in flight: it may have crashed on this very job (S3).</summary>
+    internal static bool IsCrash(WorkerException ex) => ex is not WorkerReplyException && ex.Message.StartsWith("Worker pipe closed", StringComparison.Ordinal);
+
+    /// <summary>Counts one more attempt for the job and returns the total.</summary>
+    private int NoteAttempt(string id)
+    {
+        lock (_attempts)
+        {
+            int n = _attempts.GetValueOrDefault(id) + 1;
+            _attempts[id] = n;
+            return n;
+        }
+    }
+
+    private int Attempts(string id)
+    {
+        lock (_attempts) return _attempts.GetValueOrDefault(id);
+    }
+
+    private void Settled(string id)
+    {
+        lock (_attempts) _attempts.Remove(id);
     }
 
     public void Start() => _loop = Task.Run(() => RunAsync(_cts.Token));
@@ -62,6 +120,7 @@ internal sealed class EmbeddingScheduler : IAsyncDisposable
             foreach (var j in _queue) if (j.Image is not null) Array.Clear(j.Image);
             _queue.Clear();
         }
+        lock (_attempts) _attempts.Clear();
     }
 
     /// <summary>Rows deleted from the store: their queued jobs (images in RAM) are zeroed and dropped. Returns jobs removed.</summary>
@@ -112,6 +171,7 @@ internal sealed class EmbeddingScheduler : IAsyncDisposable
     {
         var store = _store();
         if (store is null || _paused()) { LastDecision = store is null ? "no-store" : "paused"; return TimeSpan.FromSeconds(5); }
+        EnsureSpace(store);
         var s = _settings();
         bool haveWork;
         lock (_qlock) haveWork = _queue.Count > 0;
@@ -133,6 +193,7 @@ internal sealed class EmbeddingScheduler : IAsyncDisposable
             try
             {
                 await ProcessAsync(store, job, s, ct).ConfigureAwait(false);
+                Settled(job.Id);
             }
             catch (WorkerReplyException ex) when (ex.ModelMissing)
             {
@@ -143,15 +204,38 @@ internal sealed class EmbeddingScheduler : IAsyncDisposable
                 LastDecision = "model-missing";
                 return TimeSpan.FromMinutes(10);
             }
+            catch (WorkerReplyException ex) when (IsTransient(ex) && NoteAttempt(job.Id) < MaxTransientAttempts)
+            {
+                // Device failure, a cold NPU, a TDR, out of memory: the next try may work. Keep the job (it used to be
+                // settled as failed, hidden from search and its keyframe deleted) and back off (S2).
+                requeued = Requeue(job);
+                int n = Attempts(job.Id);
+                Log.Warn($"embedding {job.Id}: {ex.Message} (attempt {n} of {MaxTransientAttempts}, will retry)");
+                LastDecision = "worker-error";
+                return TimeSpan.FromSeconds(Math.Min(300, 15 << Math.Min(4, n - 1)));
+            }
             catch (WorkerReplyException ex)
             {
-                // The worker rejected this job (unreadable image, bad text): settle it instead of retrying forever.
+                // The worker rejected this job (unreadable image, bad text), or a transient error did not pass in
+                // MaxTransientAttempts tries: settle it instead of retrying forever.
+                Settled(job.Id);
                 store.FailEmbedding(job.Id, ex.Message);
                 Log.Debug($"embedding failed for {job.Id}: {ex.Message}");
             }
+            catch (WorkerException ex) when (IsCrash(ex) && NoteAttempt(job.Id) >= MaxCrashAttempts)
+            {
+                // The worker died with this job in flight MaxCrashAttempts times: a poison job (an image that crashes the
+                // runtime). Set it aside so the queue behind it moves again (S3).
+                Settled(job.Id);
+                store.FailEmbedding(job.Id, "worker crashed");
+                Log.Warn($"embedding {job.Id}: the worker crashed on it {MaxCrashAttempts} times; set aside");
+                LastDecision = "poison-job";
+                return TimeSpan.FromSeconds(15);
+            }
             catch (Exception ex) when (ex is WorkerException || (ex is OperationCanceledException && !ct.IsCancellationRequested))
             {
-                // Worker unavailable, restarting, or its start timed out: keep the job (image intact), try later.
+                // Worker unavailable, restarting, crashed (counted above), or its start timed out: keep the job (image
+                // intact), try later.
                 requeued = Requeue(job);
                 Log.Debug($"scheduler deferred: {ex.Message}");
                 LastDecision = "worker-unavailable";
@@ -160,6 +244,7 @@ internal sealed class EmbeddingScheduler : IAsyncDisposable
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 // Local failure (image decode): settle it so the queue moves on.
+                Settled(job.Id);
                 store.FailEmbedding(job.Id, ex.GetType().Name);
                 Log.Warn($"embedding job {job.Id}", ex);
             }
@@ -208,6 +293,7 @@ internal sealed class EmbeddingScheduler : IAsyncDisposable
                 Dropped++;
                 return;
             }
+            EnsureSpace(store);
             store.SetEmbedding(job.Id, r.Vector!, CurrentSpace(r.Vector!.Length));
             Processed++;
         }
@@ -215,6 +301,7 @@ internal sealed class EmbeddingScheduler : IAsyncDisposable
         {
             if (string.IsNullOrEmpty(job.Text)) { store.FailEmbedding(job.Id, "no text"); return; }
             var v = await _worker.EmbedTextAsync(job.Text, "document", ct).ConfigureAwait(false);
+            EnsureSpace(store);
             store.SetEmbedding(job.Id, v, CurrentSpace(v.Length));
             Processed++;
         }

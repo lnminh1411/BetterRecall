@@ -42,6 +42,9 @@ internal sealed class ReplayEngine : IDisposable
     private string? _rebuildReason;
     private long _lastBuildAttempt;
     private string? _lastError;
+    // A7: a dead encoder is rebuilt with backoff (1 s doubling to 60 s); 60 s of healthy output resets it.
+    private readonly RetryBackoff _encoderBackoff = new(1000, 60_000);
+    private long _builtAtMs;
 
     private readonly List<ReplayPipeline> _pipelines = new();
     private readonly Dictionary<string, VideoStream> _streams = new();
@@ -125,6 +128,9 @@ internal sealed class ReplayEngine : IDisposable
             lock (_gate) return _lastError;
         }
     }
+
+    /// <summary>Encoder failures in a row (reported error or no output), reset after a minute of healthy output.</summary>
+    public int EncoderFailures => _encoderBackoff.Failures;
 
     public int Save(Stream output, AudioRingSource? audio, int seconds)
     {
@@ -224,6 +230,13 @@ internal sealed class ReplayEngine : IDisposable
         ReplayEngineConfig? pending = null;
         lock (_gate)
         {
+            // Same settings again (a pause change re-applies them): keep the running encoders. The storeerror retry
+            // used to dispose and rebuild the replay every 30 s this way (D29).
+            if (_pendingConfig is not null && _pendingConfig == _currentConfig)
+            {
+                _pendingConfig = null;
+                if (_pipelines.Count == 0) _rebuildRequested = true;   // an earlier build failed: retry under the usual gates
+            }
             if (_pendingConfig is not null)
             {
                 bool immediate = _pipelines.Count == 0 ||
@@ -277,21 +290,31 @@ internal sealed class ReplayEngine : IDisposable
 
         bool sigsChanged = !_lastSignatures.SequenceEqual(currentSigs);
         bool anyNeedsRebuild = false;
+        ReplayPipeline? failed = null;
         lock (_gate)
         {
             foreach (var p in _pipelines)
             {
-                if (p.NeedsRebuild)
-                {
-                    anyNeedsRebuild = true;
-                    break;
-                }
+                if (p.EncoderFailure is not null) { failed = p; anyNeedsRebuild = true; break; }
+                if (p.NeedsRebuild) anyNeedsRebuild = true;
             }
+        }
+
+        long nowMs = Environment.TickCount64;
+        if (failed is not null)
+        {
+            OnEncoderFailed(failed, nowMs);
+            return;
+        }
+        if (_encoderBackoff.Failures > 0 && _builtAtMs != 0 && nowMs - _builtAtMs >= 60_000)
+        {
+            lock (_gate) if (_pipelines.Count > 0) { _encoderBackoff.Succeeded(); Log.Info("replay encoder healthy again"); }
         }
 
         bool shouldRebuild = _rebuildRequested || anyNeedsRebuild || sigsChanged;
         if (shouldRebuild)
         {
+            if (!_encoderBackoff.Due(nowMs)) return;
             long now = Stopwatch.GetTimestamp();
             long elapsedSinceBuild = FramePacer.ToHundredNs(now - _lastBuildAttempt, Stopwatch.Frequency);
             lock (_gate)
@@ -303,6 +326,24 @@ internal sealed class ReplayEngine : IDisposable
                     Build();
                 }
             }
+        }
+    }
+
+    /// <summary>A7: the encoder reported an error or stopped producing packets. Drop the pipelines now (the ring keeps what
+    /// it has), drop the encoder's device when the driver removed it, and rebuild once the backoff has passed.</summary>
+    private void OnEncoderFailed(ReplayPipeline failed, long nowMs)
+    {
+        long delay = _encoderBackoff.Failed(nowMs);
+        var e = failed.Encoder;
+        Log.Warn($"replay encoder {e.Codec}/{e.Api} '{e.Name}' for {failed.Spec.Key} failed ({failed.EncoderFailure}); " +
+                 $"rebuilding in {delay / 1000.0:F0} s (failure {_encoderBackoff.Failures} in a row)");
+        _devices.InvalidateIfRemoved(failed.EncoderDevice);
+        lock (_gate)
+        {
+            _lastError = $"encoder failed ({failed.EncoderFailure}), retrying";
+            _rebuildRequested = true;
+            _builtAtMs = 0;
+            DisposePipelines();
         }
     }
 
@@ -395,6 +436,7 @@ internal sealed class ReplayEngine : IDisposable
         }
 
         _lastError = null;
+        _builtAtMs = Environment.TickCount64;
         var activeKeys = new HashSet<string>(groups.Select(g => g.Key));
         var unused = _streams.Keys.Where(k => !activeKeys.Contains(k)).ToList();
         foreach (var k in unused)

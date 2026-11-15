@@ -12,8 +12,13 @@ namespace BetterRecall.Agent.Replay;
 /// </summary>
 internal sealed class ReplayLibrary(string home, Func<Settings> settings, IBlobCipher? cipher)
 {
-    public const string TimeFormat = "yyyyMMdd'T'HHmmss'Z'";
+    /// <summary>Id of a new clip: millisecond resolution, so two saves in one second do not share a file (A20).</summary>
+    public const string TimeFormat = "yyyyMMdd'T'HHmmssfff'Z'";
+    /// <summary>Ids written before 0.2.1 (one-second resolution); still listed, exported and deleted.</summary>
+    public const string LegacyTimeFormat = "yyyyMMdd'T'HHmmss'Z'";
+    private static readonly string[] IdFormats = [TimeFormat, LegacyTimeFormat];
     private readonly Dictionary<string, (long Length, int DurationMs)> _durations = new();
+    private readonly HashSet<string> _reserved = new();
 
     public string EncryptedDir => DataPaths.ReplaysDir(home);
 
@@ -27,6 +32,54 @@ internal sealed class ReplayLibrary(string home, Func<Settings> settings, IBlobC
     }
 
     public static string NewId(DateTimeOffset ts) => ts.UtcDateTime.ToString(TimeFormat, CultureInfo.InvariantCulture);
+
+    public static bool TryParseId(string id, out DateTime ts) =>
+        DateTime.TryParseExact(id, IdFormats, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out ts);
+
+    /// <summary>An id for a clip saved at ts that no clip, partial file or save in progress uses: one millisecond later
+    /// per clash. Reserved for this process; the caller saves one clip per id.</summary>
+    public string UniqueId(DateTimeOffset ts)
+    {
+        lock (_reserved)
+        {
+            for (int i = 0; ; i++)
+            {
+                var id = NewId(ts + TimeSpan.FromMilliseconds(i));
+                if (_reserved.Contains(id) || Taken(id)) continue;
+                _reserved.Add(id);
+                return id;
+            }
+        }
+    }
+
+    private bool Taken(string id)
+    {
+        foreach (var p in new[] { Path.Combine(EncryptedDir, id + ".mp4.enc"), Path.Combine(PlainDir, id + ".mp4") })
+            if (File.Exists(p) || File.Exists(p + ".partial")) return true;
+        return false;
+    }
+
+    /// <summary>Deletes *.partial files left by a failed or interrupted save (start only: no save is running yet).
+    /// In plain-export mode they hold unencrypted video. Returns how many were deleted.</summary>
+    public int DeletePartials()
+    {
+        int n = 0;
+        foreach (var (dir, pattern) in new[] { (EncryptedDir, "*.mp4.enc.partial"), (PlainDir, "*.mp4.partial") })
+        {
+            try
+            {
+                if (!Directory.Exists(dir)) continue;
+                foreach (var f in Directory.EnumerateFiles(dir, pattern))
+                {
+                    try { File.Delete(f); n++; }
+                    catch (Exception ex) { Util.Log.Warn($"replay partial {Path.GetFileName(f)}", ex); }
+                }
+            }
+            catch (Exception ex) { Util.Log.Warn("replay partial cleanup", ex); }
+        }
+        if (n > 0) Util.Log.Info($"replays: {n} unfinished save(s) deleted");
+        return n;
+    }
 
     public (string Path, bool Encrypted) TargetFor(string id)
     {
@@ -49,7 +102,7 @@ internal sealed class ReplayLibrary(string home, Func<Settings> settings, IBlobC
         {
             var name = Path.GetFileName(path);
             var id = encrypted ? name[..^".mp4.enc".Length] : name[..^".mp4".Length];
-            if (!DateTime.TryParseExact(id, TimeFormat, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var ts)) continue;
+            if (!TryParseId(id, out var ts)) continue;
             if (list.Any(c => c.Id == id)) continue;
             long len = new FileInfo(path).Length;
             list.Add(new ReplayClip(id, new DateTimeOffset(ts, TimeSpan.Zero), Duration(path, len, encrypted), len, encrypted, path));
