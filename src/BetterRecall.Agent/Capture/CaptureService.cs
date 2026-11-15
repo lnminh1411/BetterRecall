@@ -205,7 +205,9 @@ internal sealed class CaptureService : IAsyncDisposable
     public void RequestKeyframes(bool force, bool keyframe = true, bool sample = false, bool trigger = false)
     {
         var s = _settings();
-        var snap = _guard.Current();
+        // Only a snapshot scanned after the current foreground window came up: the tick fires every 250 ms, a scan can
+        // take a second, and the user may have switched to a denied window in between (A4).
+        var snap = _guard.CurrentForKeyframe();
         if (!snap.Decision.Allow) { SkippedByGuard++; LastGuardReason = snap.Decision.Reason; return; }
         LastGuardReason = GuardReason.None;
         var ts = DateTimeOffset.UtcNow;

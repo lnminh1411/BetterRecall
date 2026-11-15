@@ -24,15 +24,20 @@ namespace BetterRecall.Agent.Host;
 /// that home (its settings.json can point inference.modelDir at installed models). OCR CPU is reported apart from the
 /// encode CPU (the budget covers the encode only): the keyframe thread's own share and the worker process's.
 /// "--worker &lt;exe&gt;" overrides the worker path (default: worker\ next to this exe).
+/// "--store &lt;dir&gt;" stores each encoded keyframe, with its OCR text, in a store in that folder (a fresh random key held in
+/// memory only, so the files are unreadable afterwards). "--acg" applies Arbitrary Code Guard 8 s in ("--acg-at &lt;s&gt;" sets
+/// when), after the same
+/// SQLite callback warm-up as the agent ("--no-warm" skips it): with both, the run checks store writes under ACG.
 /// </summary>
 internal static unsafe class KeyframeBudgetRun
 {
     private sealed record Encoded(long T, EncodeLevel Level, double CpuMs, double WallMs, int Bytes);
     private sealed record OcrRun(long T, double CpuMs, double WallMs, bool Ok, int Spans);
 
-    private sealed class Item(KeyframeGrab g) : IDisposable
+    private sealed class Item(KeyframeGrab g, string? text = null) : IDisposable
     {
         public KeyframeGrab Grab { get; } = g;
+        public string? Text { get; } = text;
         public void Dispose() => Grab.Dispose();
     }
 
@@ -41,11 +46,24 @@ internal static unsafe class KeyframeBudgetRun
         Log.AlsoConsole = true;
         CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
         double minutes = args.Length > 1 && !args[1].StartsWith("--", StringComparison.Ordinal) ? double.Parse(args[1], CultureInfo.InvariantCulture) : 10;
-        string? ocrHome = null, workerExe = null;
+        string? ocrHome = null, workerExe = null, storeDir = null;
+        long acgAtMs = 8000;
         for (int i = 1; i < args.Length - 1; i++)
         {
             if (args[i] == "--ocr-home") ocrHome = Path.GetFullPath(args[++i]);
             else if (args[i] == "--worker") workerExe = Path.GetFullPath(args[++i]);
+            else if (args[i] == "--store") storeDir = Path.GetFullPath(args[++i]);
+            else if (args[i] == "--acg-at") acgAtMs = (long)(double.Parse(args[++i], CultureInfo.InvariantCulture) * 1000);
+        }
+        bool acg = args.Contains("--acg") || acgAtMs != 8000, warm = !args.Contains("--no-warm");
+        BetterRecall.Core.Store.EncryptedStore? store = null;
+        long stored = 0, storeFailed = 0;
+        string storeFirstError = "", storeLastError = "";
+        if (storeDir is not null)
+        {
+            var key = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+            store = new BetterRecall.Core.Store.EncryptedStore(storeDir, () => key.ToArray());
+            Console.WriteLine($"store on: {storeDir}");
         }
         var s = new Settings();
         WorkerSupervisor? supervisor = null;
@@ -89,8 +107,24 @@ internal static unsafe class KeyframeBudgetRun
                 var g = item.Grab;
                 double cpu0 = Win32.CurrentThreadCpuMs();
                 var sw = Stopwatch.StartNew();
-                var (bytes, format, _, _) = KeyframeEncoder.Encode(g.Pixels, g.Width, g.Height, g.Stride, s, level);
+                var (bytes, format, ew, eh) = KeyframeEncoder.Encode(g.Pixels, g.Width, g.Height, g.Stride, s, level);
                 double cpu = Win32.CurrentThreadCpuMs() - cpu0;
+                if (store is not null)
+                {
+                    try
+                    {
+                        store.AddScreenCapture(new NewScreenCapture(g.Request.Ts, "selftest", "", "", g.Monitor, ew, eh, 0, bytes.ToArray(),
+                            ImageCodec.Mime(format), true, Text: item.Text));
+                        stored++;
+                    }
+                    catch (Exception ex)
+                    {
+                        storeFailed++;
+                        storeLastError = $"{ex.GetType().Name}: {ex.Message}";
+                        if (storeFirstError.Length == 0) storeFirstError = storeLastError;
+                        Console.WriteLine($"  store failed: {storeLastError}");
+                    }
+                }
                 lock (encodes) encodes.Add(new Encoded(clock.ElapsedMilliseconds, level, cpu, sw.Elapsed.TotalMilliseconds, bytes.Length));
                 if (format == "avif" && level == EncodeLevel.Normal && compare.Count < 2)
                 {
@@ -111,6 +145,7 @@ internal static unsafe class KeyframeBudgetRun
                     var map = ChangeMap.Compute(g.Span, g.Width, g.Height, g.Stride);
                     var (reason, _) = d.Decide(map, hash, g.Request, s.Capture.DhashThreshold, s.Capture.DirtyMinPercent);
                     if (reason == KeepReason.Skip) { map.Clear(); skipped++; continue; }
+                    string? text = null;
                     if (reader is not null)
                     {
                         // As the agent: OCR the downscaled frame, paint the redaction boxes, then encode.
@@ -135,12 +170,13 @@ internal static unsafe class KeyframeBudgetRun
                             var rr = Redactor.Apply(r.Lines, [], red);
                             if (rr.Boxes.Length > 0) RedactionMasks.Fill(g.Pixels, g.Width, g.Height, g.Stride, rr.Boxes);
                             spans = rr.Spans;
+                            text = rr.Text;
                         }
                         lock (ocrs) ocrs.Add(new OcrRun(clock.ElapsedMilliseconds, Win32.CurrentThreadCpuMs() - c0, sw.Elapsed.TotalMilliseconds, r is not null, spans));
                     }
                     d.Accept(hash, g.Request.Context, map);
                     kept++;
-                    lock (governor) governor.Offer(new Item(g));
+                    lock (governor) governor.Offer(new Item(g, text));
                     owned = true;
                 }
                 finally { if (!owned) g.Dispose(); }
@@ -183,6 +219,7 @@ internal static unsafe class KeyframeBudgetRun
         foreach (var c in captures) c.Start();
         Thread.Sleep(500);
         long end = (long)(minutes * 60_000), nextTick = 0, nextReport = 10_000, lastTrigger = -10_000;
+        bool acgDone = !acg;
         nint lastFg = 0;
         var proc = Process.GetCurrentProcess();
         double procCpu0 = proc.TotalProcessorTime.TotalMilliseconds;
@@ -206,6 +243,13 @@ internal static unsafe class KeyframeBudgetRun
         while (clock.ElapsedMilliseconds < end)
         {
             long now = clock.ElapsedMilliseconds;
+            if (!acgDone && now >= acgAtMs)
+            {
+                acgDone = true;
+                if (warm) BetterRecall.Core.Store.EncryptedStore.WarmNativeCallbacks();
+                Security.MemoryIsolation.ApplyLate(dynamicCode: true);
+                Console.WriteLine($"acg: applied [{string.Join(", ", Security.MemoryIsolation.Applied)}] skipped [{string.Join(", ", Security.MemoryIsolation.Skipped)}], warm-up {(warm ? "on" : "off")}");
+            }
             nint fg = Win32.GetForegroundWindow();
             bool trigger = fg != lastFg && now - lastTrigger >= 1000;
             if (fg != lastFg) lastFg = fg;
@@ -279,6 +323,11 @@ internal static unsafe class KeyframeBudgetRun
             if (ol.Count > 0)
                 Console.WriteLine(FormattableString.Invariant($"  wall avg {ol.Average(o => o.WallMs):F0} ms (max {ol.Max(o => o.WallMs):F0}); keyframe thread CPU avg {ol.Average(o => o.CpuMs):F1} ms/frame, {ol.Sum(o => o.CpuMs) / (procs * (double)end) * 100:F3} % average, peak 10 s {oPeak10 / (procs * 10_000.0) * 100:F3} %, peak 60 s {oPeak60 / (procs * 60_000.0) * 100:F3} %"));
             Console.WriteLine(FormattableString.Invariant($"  worker process CPU (OCR plus its idle work): {workerTotal / (procs * (double)end) * 100:F3} % average, {(ok > 0 ? workerTotal / ok : 0):F0} ms per read frame"));
+        }
+        if (store is not null)
+        {
+            Console.WriteLine($"store: {stored} stored, {storeFailed} failed{(storeFirstError.Length > 0 ? $" (first: {storeFirstError}; last: {storeLastError})" : "")}");
+            store.Dispose();
         }
         Console.WriteLine(FormattableString.Invariant($"whole test process CPU (capture, smart capture, size check{(reader is null ? "" : ", OCR client side")} included; worker excluded): {procCpu / (procs * (double)end) * 100:F3} %"));
         foreach (var g in list.GroupBy(e => e.Level).OrderBy(g => g.Key))

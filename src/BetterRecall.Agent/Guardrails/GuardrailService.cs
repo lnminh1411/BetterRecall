@@ -45,8 +45,31 @@ internal sealed class GuardrailService : IDisposable
         return Environment.TickCount64 - s.TakenAtMs <= maxAgeMs ? s : GuardSnapshot.Closed;
     }
 
+    /// <summary>For keyframes: Current(), but only when its scan started after the current foreground window became
+    /// foreground. A scan can take a second or more (UI Automation badge probes); a keyframe taken on the previous
+    /// window's "allow" would store a denied window that was alt-tabbed to meanwhile. Two cheap calls, no scan.</summary>
+    public GuardSnapshot CurrentForKeyframe(long maxAgeMs = 2000)
+        => FreshForGrab(Current(maxAgeMs), Interlocked.Read(ref _fgEpoch), WindowInspector.ForegroundRoot());
+
+    internal static readonly GuardSnapshot ForegroundMoved = GuardSnapshot.Closed with { Decision = GuardDecision.Deny(GuardReason.ForegroundChanged) };
+
+    /// <summary>The snapshot when no foreground event arrived since its scan started and the foreground window is still
+    /// the one it scanned; else a deny snapshot. Pure.</summary>
+    internal static GuardSnapshot FreshForGrab(GuardSnapshot s, long fgEpochNow, nint foregroundNow)
+    {
+        if (ReferenceEquals(s, GuardSnapshot.Closed)) return s;
+        if (s.FgEpoch != fgEpochNow || (s.Foreground?.Hwnd ?? 0) != foregroundNow) return ForegroundMoved;
+        return s;
+    }
+
+    private long _fgEpoch;
+
     /// <summary>Called from the WinEvent hook on the message thread.</summary>
-    public void OnForegroundEvent() => _wake.Set();
+    public void OnForegroundEvent()
+    {
+        Interlocked.Increment(ref _fgEpoch);
+        _wake.Set();
+    }
 
     public void Refresh() => _wake.Set();
 
@@ -69,6 +92,7 @@ internal sealed class GuardrailService : IDisposable
                         catch (Exception ex) { Log.Warn("UI Automation unavailable", ex); }
                     }
                     var t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+                    long epoch = Interlocked.Read(ref _fgEpoch);   // before the foreground is read: a change during the scan makes it stale
                     var fg = WindowInspector.Foreground();
                     // Private windows on any monitor (badge results are cached per window, so this probes new windows only).
                     Func<WindowInfo, bool>? isPrivate = s.Privacy.BrowserBadgeDetection && badge is not null
@@ -101,7 +125,7 @@ internal sealed class GuardrailService : IDisposable
                         secrets = passwords?.Find(fg.Hwnd);
                         LastPasswordMs = passwords?.LastMs ?? 0;
                     }
-                    Volatile.Write(ref _snapshot, new GuardSnapshot(Environment.TickCount64, fg, decision, badgeResult, scan.AnyAffinity, masks, scan.PerMonitor, site, secrets));
+                    Volatile.Write(ref _snapshot, new GuardSnapshot(Environment.TickCount64, fg, decision, badgeResult, scan.AnyAffinity, masks, scan.PerMonitor, site, secrets, epoch));
                     if (fg?.Hwnd != lastFg)
                     {
                         lastFg = fg?.Hwnd ?? 0;

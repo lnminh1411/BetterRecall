@@ -241,6 +241,47 @@ public sealed partial class EncryptedStore : IStore
         return cmd;
     }
 
+    /// <summary>Begins a transaction on the write connection. Caller holds _wl. SqliteTransaction runs BEGIN and then
+    /// registers a native rollback hook; when the hook throws (its callback thunk refused under ACG), no transaction
+    /// object exists to roll back and the connection stays inside BEGIN, so every later write failed with "cannot start
+    /// a transaction within a transaction". Rolls back any such leftover before and after, so one error cannot wedge
+    /// the store.</summary>
+    private SqliteTransaction BeginWrite()
+    {
+        RollbackLeftover(_w);
+        try { return _w.BeginTransaction(); }
+        catch { RollbackLeftover(_w); throw; }
+    }
+
+    private static void RollbackLeftover(SqliteConnection c)
+    {
+        try
+        {
+            if (c.Handle is { } h && SQLitePCL.raw.sqlite3_get_autocommit(h) == 0)
+            {
+                Exec(c, "ROLLBACK");
+                Log.Warn("store: rolled back a transaction left open by an earlier error");
+            }
+        }
+        catch (Exception ex) { Log.Warn("store: rollback of a leftover transaction failed", ex); }
+    }
+
+    /// <summary>Creates the native callback thunks SQLite transactions need (the rollback hook bridge) on a throwaway
+    /// in-memory database. Call before Arbitrary Code Guard is applied: under ACG the runtime cannot allocate a new
+    /// thunk, and the first transaction afterwards throws PlatformNotSupportedException.</summary>
+    public static void WarmNativeCallbacks()
+    {
+        if (Interlocked.Exchange(ref _sqliteInit, 1) == 0) SQLitePCL.Batteries_V2.Init();
+        using var c = new SqliteConnection("Data Source=:memory:;Pooling=False");
+        c.Open();
+        using (var tx = c.BeginTransaction())
+        {
+            Exec(c, "CREATE TEMP TABLE warm(x)");
+            tx.Rollback();
+        }
+        using (c.BeginTransaction()) { }   // dispose path: rollback without an explicit call
+    }
+
     private static string InList(IEnumerable<long> rids) => string.Join(",", rids.Select(r => r.ToString(CultureInfo.InvariantCulture)));
 
     private static float[] ToFloats(byte[] blob) => MemoryMarshal.Cast<byte, float>(blob).ToArray();
@@ -324,7 +365,7 @@ public sealed partial class EncryptedStore : IStore
             }
             // New model: rows that can still be embedded (keyframe or transcript present) get a job again.
             long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            using (var tx = _w.BeginTransaction())
+            using (var tx = BeginWrite())
             {
                 Exec(_w, """
                     INSERT OR IGNORE INTO jobs(rid, created)
@@ -346,7 +387,7 @@ public sealed partial class EncryptedStore : IStore
         using (var cmd = Cmd(_w, "SELECT rid, vec FROM vectors WHERE dim > $d", ("$d", dim)))
         using (var rd = cmd.ExecuteReader())
             while (rd.Read()) rows.Add((rd.GetInt64(0), (byte[])rd.GetValue(1)));
-        using var tx = _w.BeginTransaction();
+        using var tx = BeginWrite();
         foreach (var (rid, vec) in rows)
         {
             var v = Normalize(ToFloats(vec).AsSpan(0, dim));
@@ -371,7 +412,7 @@ public sealed partial class EncryptedStore : IStore
             long ts = c.Ts.ToUnixTimeMilliseconds();
             var month = Month(ts);
             long rid;
-            using (var tx = _w.BeginTransaction())
+            using (var tx = BeginWrite())
             {
                 rid = (long)Scalar(_w, """
                     INSERT INTO captures(id, ts, kind, app, app_lc, exe, title, text, monitor, width, height, dhash, duration_ms, state, has_keyframe, keep_keyframe, kf_month, site, change_pct, is_switch)
@@ -411,7 +452,7 @@ public sealed partial class EncryptedStore : IStore
             long ts = f.Ts.ToUnixTimeMilliseconds();
             var month = Month(ts);
             long rid;
-            using (var tx = _w.BeginTransaction())
+            using (var tx = BeginWrite())
             {
                 rid = (long)Scalar(_w, """
                     INSERT INTO captures(id, ts, kind, app, app_lc, exe, title, monitor, width, height, dhash, duration_ms, state, has_keyframe, keep_keyframe, kf_month, site)
@@ -461,7 +502,7 @@ public sealed partial class EncryptedStore : IStore
             ThrowIfFenced(c.Ts);
             var id = Ids.New('a', c.Ts);
             long ts = c.Ts.ToUnixTimeMilliseconds();
-            using var tx = _w.BeginTransaction();
+            using var tx = BeginWrite();
             long rid = (long)Scalar(_w, """
                 INSERT INTO captures(id, ts, kind, app, app_lc, exe, title, text, source, language, monitor, width, height, dhash, duration_ms, state, has_keyframe, keep_keyframe, kf_month)
                 VALUES($id, $ts, 1, $app, $applc, '', '', $text, $src, $lang, -1, 0, 0, 0, $dur, 1, 0, 0, NULL) RETURNING rid
@@ -545,7 +586,7 @@ public sealed partial class EncryptedStore : IStore
             _inflight.Remove(rid);
             if (state == StateFailed) { Exec(_w, "DELETE FROM jobs WHERE rid=$rid", ("$rid", rid)); return; }
             if (_space == null) WriteSpace(info);
-            using (var tx = _w.BeginTransaction())
+            using (var tx = BeginWrite())
             {
                 Exec(_w, """
                     INSERT INTO vectors(rid, model_id, revision, dim, vec, bin) VALUES($rid, $m, $r, $d, $v, $b)
@@ -633,7 +674,7 @@ public sealed partial class EncryptedStore : IStore
                     if (!months.TryGetValue(m, out var l)) months[m] = l = [];
                     l.Add(rd.GetInt64(0));
                 }
-            using (var tx = _w.BeginTransaction())
+            using (var tx = BeginWrite())
             {
                 Exec(_w, $"DELETE FROM fts WHERE rowid IN ({list})");
                 Exec(_w, $"DELETE FROM vectors WHERE rid IN ({list})");
@@ -1228,7 +1269,7 @@ public sealed partial class EncryptedStore : IStore
         {
             ThrowIfDisposed();
             if (_space == null) WriteSpace(info);
-            using var tx = _w.BeginTransaction();
+            using var tx = BeginWrite();
             using var ins = Cmd(_w, """
                 INSERT INTO captures(id, ts, kind, app, app_lc, exe, title, monitor, width, height, dhash, duration_ms, state, has_keyframe, keep_keyframe, kf_month)
                 VALUES($id, $ts, 0, $app, $applc, '', $title, 0, 0, 0, 0, 0, 1, 0, 1, NULL) RETURNING rid

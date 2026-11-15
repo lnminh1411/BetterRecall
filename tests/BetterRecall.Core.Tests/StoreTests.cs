@@ -459,4 +459,27 @@ public class StoreTests
         t.Store.AddHistory("acme", DateTimeOffset.UtcNow, 10);
         Assert.Single(t.Store.History(10));
     }
+    /// <summary>D26: SqliteTransaction runs BEGIN and then registers a native rollback hook. When that throws (ACG
+    /// refused the callback thunk) the connection stayed inside BEGIN and every later write failed with "cannot start a
+    /// transaction within a transaction". The store rolls such a leftover back before the next write.</summary>
+    [Fact]
+    public void Transaction_left_open_by_a_failed_begin_does_not_wedge_writes()
+    {
+        using var t = new TempStore();
+        var w = (SqliteConnection)typeof(EncryptedStore).GetField("_w", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(t.Store)!;
+        using (var begin = w.CreateCommand()) { begin.CommandText = "BEGIN"; begin.ExecuteNonQuery(); }   // what the failed ctor leaves behind
+        var id = AddReady(t.Store, T0, "after the wedge", Vec.Seeded(3));
+        Assert.Equal(id, Find(t.Store, "wedge", mode: SearchMode.Text).Results.Single().Id);
+        t.Store.AddAudioCapture(Caps.Audio(T0.AddMinutes(1), "spoken words"));
+        t.Reopen();   // committed, not stuck in the leftover transaction
+        Assert.Equal(id, Find(t.Store, "wedge", mode: SearchMode.Text).Results.Single().Id);
+        Assert.Single(Find(t.Store, "spoken", mode: SearchMode.Text).Results);
+    }
+
+    [Fact]
+    public void Native_callback_warm_up_runs_without_a_store()
+    {
+        EncryptedStore.WarmNativeCallbacks();
+        EncryptedStore.WarmNativeCallbacks();
+    }
 }

@@ -67,19 +67,29 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
     private readonly IWorkerLauncher _launcher;
     private readonly string _home;
     private readonly Func<int> _idleExitS;
-    private readonly SemaphoreSlim _startLock = new(1, 1);
+    private readonly Lock _startGate = new();
+    private readonly CancellationTokenSource _lifetime = new();
     private readonly Timer _idleTimer;
+    private Task<WorkerConnection>? _start;
     private WorkerConnection? _conn;
     private int _pid;
     private int _failures;
     private long _nextAttemptTicks;
-    private bool _disposed;
+    private volatile bool _disposed;
 
     public WorkerHello? Hello { get; private set; }
     public event Action<WorkerHello>? HelloReceived;
     public TimeSpan ConnectTimeout { get; init; } = TimeSpan.FromSeconds(30);
     public TimeSpan HelloTimeout { get; init; } = TimeSpan.FromMinutes(10);
     public bool VerifyClientPid { get; init; } = true;
+    /// <summary>Liveness: this many caller timeouts in a row with no reply at all in between, and no reply for at least
+    /// UnresponsiveAfter, mean the worker is hung (native deadlock, stuck GenAI call). It is killed and restarted with
+    /// backoff. Without this, every new request counted as activity and a hung worker was never recycled.</summary>
+    public int UnresponsiveTimeouts { get; init; } = 3;
+    public TimeSpan UnresponsiveAfter { get; init; } = TimeSpan.FromSeconds(90);
+    /// <summary>Workers recycled because they stopped answering.</summary>
+    public int Recycled => _recycled;
+    private int _recycled;
 
     public WorkerSupervisor(IWorkerLauncher launcher, string home, Func<int> idleExitS)
     {
@@ -105,34 +115,50 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
         return sec;
     }
 
-    /// <summary>Starts the worker when it is not running. Throws WorkerException while in backoff.</summary>
-    public async Task<WorkerConnection> EnsureAsync(CancellationToken ct)
+    /// <summary>Starts the worker when it is not running. Throws WorkerException while in backoff.
+    /// The start is shared and runs under the supervisor's own lifetime with ConnectTimeout and HelloTimeout, never
+    /// under a caller's token: ct only ends this caller's wait. A keyframe OCR (30 s) used to cancel a slow hello (the
+    /// first-run device benchmark takes longer), which killed the worker, skipped the backoff and started over at the
+    /// next keyframe, for ever (A2, D28).</summary>
+    public Task<WorkerConnection> EnsureAsync(CancellationToken ct)
     {
         var c = _conn;
-        if (c is { IsClosed: false }) return c;
-        await _startLock.WaitAsync(ct).ConfigureAwait(false);
-        try
+        if (c is { IsClosed: false }) return Task.FromResult(c);
+        Task<WorkerConnection> start;
+        lock (_startGate)
         {
             c = _conn;
-            if (c is { IsClosed: false }) return c;
-            ObjectDisposedException.ThrowIf(_disposed, this);
-            long wait = Interlocked.Read(ref _nextAttemptTicks) - Environment.TickCount64;
-            if (wait > 0) throw new WorkerException($"Worker restart backoff ({wait} ms).");
-            try
+            if (c is { IsClosed: false }) return Task.FromResult(c);
+            if (_disposed) return Task.FromException<WorkerConnection>(new ObjectDisposedException(nameof(WorkerSupervisor)));
+            if (_start is not { IsCompleted: false })
             {
-                c = await StartAsync(ct).ConfigureAwait(false);
-                _conn = c;
-                return c;
+                long wait = Interlocked.Read(ref _nextAttemptTicks) - Environment.TickCount64;
+                if (wait > 0) return Task.FromException<WorkerConnection>(new WorkerException($"Worker restart backoff ({wait} ms)."));
+                _start = Task.Run(StartSharedAsync);
+                // Every waiter may have given up; the failure is logged and counted, so mark it observed.
+                _start.ContinueWith(static t => _ = t.Exception, CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
-            {
-                // A connect or hello timeout is a failure too: without backoff each 30 s timeout started another worker.
-                NoteFailure();
-                Log.Warn("worker start failed", ex);
-                throw ex as WorkerException ?? new WorkerException(ex is OperationCanceledException ? "Worker start timed out." : "Worker failed to start.");
-            }
+            start = _start;
         }
-        finally { _startLock.Release(); }
+        return ct.CanBeCanceled ? start.WaitAsync(ct) : start;
+    }
+
+    private async Task<WorkerConnection> StartSharedAsync()
+    {
+        try
+        {
+            var c = await StartAsync(_lifetime.Token).ConfigureAwait(false);
+            if (_disposed) { await c.DisposeAsync().ConfigureAwait(false); throw new ObjectDisposedException(nameof(WorkerSupervisor)); }
+            _conn = c;
+            return c;
+        }
+        catch (Exception ex) when (!_disposed)
+        {
+            // A connect or hello timeout is a failure too: without backoff each timeout started another worker.
+            NoteFailure();
+            Log.Warn("worker start failed", ex);
+            throw ex as WorkerException ?? new WorkerException(ex is OperationCanceledException ? "Worker start timed out." : "Worker failed to start.");
+        }
     }
 
     private void NoteFailure()
@@ -198,23 +224,61 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
         bool crashed = err is not null || pendingAtClose > 0;
         if (err is not null) Log.Warn($"worker pipe closed with error {err.GetType().Name}");
         else Log.Info("worker pipe closed");
-        if (crashed && !_disposed) NoteFailure();
+        if (conn.Recycled) { }   // killed for not answering: the failure is already counted, keep the backoff
+        else if (crashed && !_disposed) NoteFailure();
         else Interlocked.Exchange(ref _failures, 0);
         if (ReferenceEquals(_conn, conn)) _conn = null;
     }
 
     public void MarkHealthy() => Interlocked.Exchange(ref _failures, 0);
 
+    /// <summary>Runs the liveness and idle checks now (the timer runs them every 5 s).</summary>
+    internal void CheckNow() => CheckIdle();
+
     private void CheckIdle()
     {
         var c = _conn;
-        if (c is null || c.IsClosed || c.Pending > 0) return;
+        if (c is null || c.IsClosed) return;
+        if (IsUnresponsive(c.ConsecutiveTimeouts, c.NoReplyMs, c.LongOpPending, UnresponsiveTimeouts, (long)UnresponsiveAfter.TotalMilliseconds))
+        {
+            Log.Warn($"worker not answering ({c.ConsecutiveTimeouts} timeouts in a row, no reply for {c.NoReplyMs / 1000} s), restarting it");
+            _ = RecycleAsync(c);
+            return;
+        }
+        if (c.Pending > 0) return;
         // The worker exits by itself after inference.idleExitS; this is the backstop.
         if (c.IdleMs > (_idleExitS() + 15) * 1000L)
         {
             Log.Info("worker idle, sending shutdown");
             _ = ShutdownAsync();
         }
+    }
+
+    /// <summary>Hung: callers kept timing out with nothing at all coming back, for long enough, and no long request
+    /// (bench) explains the silence. Pure.</summary>
+    internal static bool IsUnresponsive(int consecutiveTimeouts, long noReplyMs, bool longOpPending, int timeoutsLimit, long silenceMs)
+        => !longOpPending && consecutiveTimeouts >= Math.Max(1, timeoutsLimit) && noReplyMs >= silenceMs;
+
+    /// <summary>Kills a hung worker and counts a failure, so the next request starts a new one after the backoff.</summary>
+    private async Task RecycleAsync(WorkerConnection c)
+    {
+        try
+        {
+            int pid;
+            lock (_startGate)
+            {
+                if (!ReferenceEquals(_conn, c) || c.Recycled) return;
+                // Backoff and pid before _conn is cleared: no new start can begin, so pid is still this worker's.
+                NoteFailure();
+                pid = _pid;
+                c.Recycled = true;
+                _conn = null;
+            }
+            Interlocked.Increment(ref _recycled);
+            if (pid != 0) { try { _launcher.Kill(pid); } catch (Exception ex) { Log.Debug($"worker kill: {ex.Message}"); } }
+            await c.DisposeAsync().ConfigureAwait(false);
+        }
+        catch (Exception ex) { Log.Warn("worker recycle", ex); }
     }
 
     public async Task ShutdownAsync()
@@ -242,6 +306,10 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
     {
         _disposed = true;
         await _idleTimer.DisposeAsync().ConfigureAwait(false);
+        _lifetime.Cancel();   // ends a start in progress; StartAsync kills its process
+        Task? start;
+        lock (_startGate) start = _start;
+        if (start is not null) { try { await start.ConfigureAwait(false); } catch { } }
         await ShutdownAsync().ConfigureAwait(false);
     }
 }
