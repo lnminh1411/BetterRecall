@@ -97,6 +97,8 @@ public sealed class ChatViewModel : ObservableObject
     public AiUsage? Usage { get => _usage; set => Set(ref _usage, value); }
     public bool CanSend => !Busy && !HasApproval;
     public string? LastQuestion { get; private set; }
+    /// <summary>Bumped by Reset and Load: events of a stream started before belong to a chat no longer shown.</summary>
+    public long Generation { get; private set; }
     private bool _turnOpen;   // a question is in flight: its bubbles go if the agent rolls the turn back
 
     public ChatViewModel()
@@ -209,8 +211,18 @@ public sealed class ChatViewModel : ObservableObject
         ApprovalNotice = null;
     }
 
+    /// <summary>Handles an event of the stream started at generation gen; false (ignored) when the chat was reset or
+    /// replaced since, so a late event cannot bring dropped messages back.</summary>
+    public bool Handle(long gen, ChatEvent e)
+    {
+        if (gen != Generation) return false;
+        Handle(e);
+        return true;
+    }
+
     public void Load(ChatDetail d)
     {
+        Generation++;
         ChatId = d.Chat.Id;
         Title = d.Chat.Title;
         Messages.Clear();
@@ -227,6 +239,7 @@ public sealed class ChatViewModel : ObservableObject
 
     public void Reset()
     {
+        Generation++;
         ChatId = null;
         Title = "";
         Messages.Clear();

@@ -26,8 +26,13 @@ public sealed class ClientSession(PipeKind kind, int pid, string image)
 /// confirm (the newest, often most sensitive) are deleted too.</param>
 internal sealed record PurgeTicket(PurgeScope? Scope, int Rows, DateTimeOffset Expires, TimeSpan? Span = null);
 
-/// <summary>describe preview: the exact image the confirmed send will use.</summary>
-internal sealed record DescribeTicket(string CaptureId, Ai.OutgoingImage Image, DateTimeOffset Expires);
+/// <summary>describe preview: the exact image the confirmed send will use, and the provider, endpoint and model the
+/// confirmation dialog named (a send after any of them changed is refused).</summary>
+internal sealed record DescribeTicket(string CaptureId, Ai.OutgoingImage Image, DateTimeOffset Expires, string Provider, string Endpoint, string Model)
+{
+    public bool Matches(AiSettings ai) =>
+        Provider == ai.Provider && Endpoint == AiDefaults.EffectiveEndpoint(ai) && Model == AiDefaults.EffectiveModel(ai);
+}
 
 public enum Subscription { None, Status, Captures }
 
@@ -119,6 +124,7 @@ public sealed partial class CommandProcessor
     internal const string ErrNoApiKey = "API key not set.";
     internal const string ErrApiKeyRule = "Invalid API key.";
     internal const string ErrNoImage = "No image to describe.";
+    internal const string ErrDescribeChanged = "The AI settings changed after the preview. Open the preview again.";
     internal const string ErrProviderUnreachable = "Provider unreachable.";
     internal const string ErrProviderTimeout = "Provider timed out.";
     internal static string ErrTooMany(int seconds) => ErrTooManyPrefix + seconds.ToString(CultureInfo.InvariantCulture) + " s.";
@@ -160,8 +166,9 @@ public sealed partial class CommandProcessor
                 ImageRedactor = deps.Redactor,
             });
             deps.Agent.Panicked += OnPanic;
-            // Running chat turns stop on lock and when AI is turned off (panic clears them in OnPanic).
-            deps.Agent.StatusChanged += st => { if (st.Locked) _chat.StopAll(); };
+            // Running chat turns stop on lock and when AI is turned off (panic clears them in OnPanic). Lock also forgets
+            // "Allow for this chat": after an unlock every chat asks again before it shares captures.
+            deps.Agent.StatusChanged += st => { if (st.Locked) { _chat.StopAll(); _chat.ForgetApprovals(); } };
             deps.Settings.Changed += s => { if (!s.Ai.Enabled) _chat.StopAll(); };
         }
     }
@@ -1116,7 +1123,7 @@ public sealed partial class CommandProcessor
                 catch (Ai.DescribeException ex) { Audit(s, "describe preview", 0, ""); return Err(ex.Message); }
                 while (s.DescribeTokens.Count >= 4) s.DescribeTokens.Remove(s.DescribeTokens.MinBy(kv => kv.Value.Expires).Key);
                 var token = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(16));
-                s.DescribeTokens[token] = new DescribeTicket(id, outgoing, now.AddSeconds(120));
+                s.DescribeTokens[token] = new DescribeTicket(id, outgoing, now.AddSeconds(120), ai.Provider, AiDefaults.EffectiveEndpoint(ai), AiDefaults.EffectiveModel(ai));
                 Audit(s, "describe preview", 1, "");
                 return Ok(JsonSerializer.Serialize(new DescribePreview(token, ai.Provider, AiDefaults.EffectiveModel(ai), AiDefaults.EffectiveEndpoint(ai),
                     outgoing.Mime, outgoing.Width, outgoing.Height, outgoing.Redacted, outgoing.Bytes), CoreJson.Default.DescribePreview));
@@ -1125,6 +1132,8 @@ public sealed partial class CommandProcessor
             {
                 if (!s.DescribeTokens.Remove(args[1], out var ticket) || ticket.Expires <= now) return Err(ErrToken);
                 if (LockError(s.Kind) is { } locked) return Err(locked);
+                // The user confirmed a send to the provider, endpoint and model the preview showed, nowhere else.
+                if (!ticket.Matches(ai)) return Err(ErrDescribeChanged);
                 var key = _d.AiKey.Read(ai);
                 if (keyNeeded && key == null) return Err(ErrNoApiKey);
                 var verb = "describe " + ai.Provider;

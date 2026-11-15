@@ -28,7 +28,9 @@ public sealed class ChatDeps
 /// Cloud chat: the model gets one tool, search_history, which runs the local search; ChatShareGate decides what of
 /// each hit may be sent. Approval is per chat: the first time a chat wants to send captures the turn stops with an
 /// approval event (exact items, previews); "Allow for this chat" lets that chat send without asking again until the
-/// agent restarts or a panic. Every provider request checks the local daily budget first and is audited.
+/// agent restarts, a lock or a panic. Capture text the model has read can try to steer it, so within one turn a later
+/// search that would share captures neither shown on a card nor already shared in that turn asks again, listing only
+/// the new ones. Every provider request checks the local daily budget first and is audited.
 /// A failed turn leaves the chat exactly as before it (transcript rolled back, nothing saved).
 /// </summary>
 public sealed class ChatService(ChatDeps d)
@@ -93,8 +95,9 @@ public sealed class ChatService(ChatDeps d)
     private sealed record Pending(Turn Turn, IReadOnlyList<ToolCall> Calls, IReadOnlyList<SharePlan?> Plans, int Rank, DateTimeOffset Expires);
 
     private readonly Lock _gate = new();
-    // Per chat: share level approved and the endpoint it was approved for (a new endpoint asks again).
-    private readonly Dictionary<string, (int Rank, string Endpoint)> _approved = new(StringComparer.Ordinal);
+    // Per chat: share level approved, the endpoint it was approved for (a new endpoint asks again) and the capture ids
+    // the user kept on an approval card.
+    private readonly Dictionary<string, (int Rank, string Endpoint, HashSet<string> Reviewed)> _approved = new(StringComparer.Ordinal);
 
     private bool ApprovedLocked(string chatId, int rank, string endpoint) =>
         _approved.TryGetValue(chatId, out var a) && a.Rank >= rank && a.Endpoint == endpoint;
@@ -152,6 +155,14 @@ public sealed class ChatService(ChatDeps d)
         lock (_gate) { _approved.Clear(); _pending.Clear(); _memory.Clear(); }
         StopAll();
     }
+
+    /// <summary>Lock: every chat asks again before it shares captures (pending cards go with StopAll).</summary>
+    public void ForgetApprovals()
+    {
+        lock (_gate) _approved.Clear();
+    }
+
+    internal const string MoreCapturesNote = "The assistant searched again after reading captures, and found ones you have not reviewed in this chat. Only these new captures are listed; check them before they are sent.";
 
     /// <summary>
     /// After a purge: drops unsaved chats and pending approvals that cite a deleted capture (gone(id) is true), and stops
@@ -253,8 +264,11 @@ public sealed class ChatService(ChatDeps d)
         {
             lock (_gate)
             {
-                int prior = _approved.TryGetValue(p.Turn.ChatId, out var a) && a.Endpoint == p.Turn.Endpoint ? a.Rank : -1;
-                _approved[p.Turn.ChatId] = (Math.Max(p.Rank, prior), p.Turn.Endpoint);
+                bool same = _approved.TryGetValue(p.Turn.ChatId, out var a) && a.Endpoint == p.Turn.Endpoint;
+                var reviewed = same ? a.Reviewed : new HashSet<string>(StringComparer.Ordinal);
+                foreach (var h in p.Plans.SelectMany(pl => pl?.Hits ?? []))
+                    if (!remove.Contains(h.Hit.Id)) reviewed.Add(h.Hit.Id);
+                _approved[p.Turn.ChatId] = (Math.Max(p.Rank, same ? a.Rank : -1), p.Turn.Endpoint, reviewed);
             }
             return p.Plans.Select(pl => pl == null ? null : pl with { Hits = pl.Hits.Where(h => !remove.Contains(h.Hit.Id)).ToList() }).ToList();
         });
@@ -396,12 +410,21 @@ public sealed class ChatService(ChatDeps d)
                     if (plans[i] is { } pl) plans[i] = pl with { Hits = pl.Hits.Where(h => store.Get(h.Hit.Id) != null).ToList() };
             bool sharesData = plans.Any(p => p is { Hits.Count: > 0 });
             bool approved;
-            lock (_gate) approved = ApprovedLocked(turn.ChatId, rank, turn.Endpoint);
-            if (sharesData && !approved)
+            HashSet<string> unseen;
+            lock (_gate)
+            {
+                approved = ApprovedLocked(turn.ChatId, rank, turn.Endpoint);
+                unseen = approved ? UnseenLocked(turn, plans) : [];
+            }
+            if (sharesData && (!approved || unseen.Count > 0))
             {
                 var token = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(16));
-                var items = plans.Where(p => p != null).SelectMany(p => p!.Hits).GroupBy(h => h.Hit.Id).Select(g => ChatShareGate.Item(g.First(), rank, d.TextRedactor)).ToList();
-                var note = plans.Any(p => p is { ImagesUnavailable: true }) ? ChatShareGate.ImagesUnavailableNote : null;
+                var items = plans.Where(p => p != null).SelectMany(p => p!.Hits).Where(h => !approved || unseen.Contains(h.Hit.Id))
+                    .GroupBy(h => h.Hit.Id).Select(g => ChatShareGate.Item(g.First(), rank, d.TextRedactor)).ToList();
+                var notes = new List<string>();
+                if (approved) notes.Add(MoreCapturesNote);
+                if (plans.Any(p => p is { ImagesUnavailable: true })) notes.Add(ChatShareGate.ImagesUnavailableNote);
+                var note = notes.Count > 0 ? string.Join("\n\n", notes) : null;
                 lock (_gate) _pending[token] = new Pending(turn, calls, plans, rank, Now + ApprovalLifetime);
                 emit(new ChatEvent("approval", ChatId: turn.ChatId, Token: token, Items: items, Share: AiShare.All.First(a => AiShare.Rank(a) == rank), Text: note));
                 return;
@@ -506,6 +529,20 @@ public sealed class ChatService(ChatDeps d)
     {
         lock (_gate) if (_memory.TryGetValue(id, out var m)) return m;
         return S.Ai.ChatHistory ? d.Store()?.GetChat(id) : null;
+    }
+
+    /// <summary>
+    /// Captures this round would share that the model may have been steered to: once the turn has shared captures (the
+    /// model read their text), hits that were neither kept on an approval card in this chat nor shared earlier in this
+    /// turn. The first search of a turn follows the user's own question and shares under the chat's approval.
+    /// </summary>
+    private HashSet<string> UnseenLocked(Turn turn, IReadOnlyList<SharePlan?> plans)
+    {
+        var unseen = new HashSet<string>(StringComparer.Ordinal);
+        if (turn.Sources.Count == 0 || !_approved.TryGetValue(turn.ChatId, out var a)) return unseen;
+        foreach (var h in plans.SelectMany(p => p?.Hits ?? []))
+            if (!a.Reviewed.Contains(h.Hit.Id) && turn.Sources.All(s => s.Id != h.Hit.Id)) unseen.Add(h.Hit.Id);
+        return unseen;
     }
 
     private void DropPendingLocked(string? chatId)

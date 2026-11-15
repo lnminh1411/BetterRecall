@@ -918,6 +918,72 @@ public sealed class ChatServiceTests : IDisposable
         Assert.Equal("approval", (await Send(chatId, "Again?"))[^1].Type);
     }
 
+    /// <summary>Sweep 2 B8: lock forgets "Allow for this chat".</summary>
+    [Fact]
+    public async Task ForgetApprovals_makes_the_chat_ask_again()
+    {
+        var chatId = await ApprovedChat();
+        _chat.ForgetApprovals();
+        Assert.False(_chat.Get(chatId)!.Approved);
+        _p.Turns.Enqueue(ScriptProvider.Search());
+        Assert.Equal("approval", (await Send(chatId, "Again?"))[^1].Type);
+    }
+
+    private static ProviderTurn SearchIn(string q, string app) => new(
+        new JsonObject { ["role"] = "assistant", ["search"] = q },
+        "", [new ToolCall("call1", ChatService.ToolName, new JsonObject { ["query"] = q, ["app"] = app })], 100, 10, "tool");
+
+    /// <summary>Sweep 2 B19: once the model has read capture text, a later search in the same turn that would share
+    /// captures nobody reviewed stops for approval, listing only those.</summary>
+    [Fact]
+    public async Task Later_search_in_a_turn_asks_before_sharing_unreviewed_captures()
+    {
+        var chatId = await ApprovedChat();
+        var bank = _t.Store.AddScreenCapture(Caps.Screen(_now.AddMinutes(-3), "bank.exe", "Bank statement balance"));
+        _t.Store.SetEmbedding(bank, Vec.Seeded(99), Vec.Info);
+        _emb.Map["statement"] = Vec.Seeded(99);
+        int before = _h.Bodies.Count;
+
+        _p.Turns.Enqueue(SearchIn("invoice", "chrome.exe"));    // round 1: the user's question, shared under the approval
+        _p.Turns.Enqueue(SearchIn("statement", "bank.exe"));    // round 2: what capture text might have asked for
+        var ev = await Send(chatId, "And the total?");
+        var ap = ev[^1];
+        Assert.Equal("approval", ap.Type);
+        Assert.Equal(bank, Assert.Single(ap.Items!).Id);       // only the new capture is listed
+        Assert.StartsWith(ChatService.MoreCapturesNote, ap.Text);
+        Assert.Equal(before + 2, _h.Bodies.Count);
+        Assert.DoesNotContain("Bank statement", string.Concat(_h.Bodies));
+
+        _p.Turns.Enqueue(ScriptProvider.Answer("The total [S2]."));
+        var done = await Approve(ap.Token!);
+        Assert.Equal("done", done[^1].Type);
+        Assert.Contains("Bank statement", _h.Bodies[^1]);
+
+        // Reviewed now: the same search later in another turn of this chat does not ask again.
+        _p.Turns.Enqueue(SearchIn("invoice", "chrome.exe"));
+        _p.Turns.Enqueue(SearchIn("statement", "bank.exe"));
+        _p.Turns.Enqueue(ScriptProvider.Answer("Same [S2]."));
+        var again = await Send(chatId, "Once more?");
+        Assert.Equal("done", again[^1].Type);
+    }
+
+    [Fact]
+    public async Task Later_search_in_a_turn_that_is_declined_shares_nothing_new()
+    {
+        var chatId = await ApprovedChat();
+        var bank = _t.Store.AddScreenCapture(Caps.Screen(_now.AddMinutes(-3), "bank.exe", "Bank statement balance"));
+        _t.Store.SetEmbedding(bank, Vec.Seeded(99), Vec.Info);
+        _emb.Map["statement"] = Vec.Seeded(99);
+        _p.Turns.Enqueue(SearchIn("invoice", "chrome.exe"));
+        _p.Turns.Enqueue(SearchIn("statement", "bank.exe"));
+        var ap = (await Send(chatId, "And the total?"))[^1];
+        Assert.Equal("approval", ap.Type);
+        _p.Turns.Enqueue(ScriptProvider.Answer("I could not look further."));
+        var ev = await Deny(ap.Token!);
+        Assert.Equal("done", ev[^1].Type);
+        Assert.DoesNotContain("Bank statement", string.Concat(_h.Bodies));
+    }
+
     [Fact]
     public async Task History_off_keeps_chats_in_memory_only()
     {
@@ -1152,6 +1218,28 @@ public sealed class ChatVerbTests : IDisposable
         var status = (await Call("ai")).Data;
         Assert.Equal(2, status.GetProperty("usage").GetProperty("requests").GetInt32());
         Assert.False(status.GetProperty("local").GetBoolean());
+    }
+
+    /// <summary>Sweep 2 B8: the lock handler forgets approvals, as the docs promise.</summary>
+    [Fact]
+    public async Task Lock_forgets_chat_approvals()
+    {
+        Set("""{"ai":{"enabled":true,"provider":"gemini","share":"text"}}""");
+        _keys.Set(Key, _settings.Current.Ai);
+        _h.Responses.Enqueue(ScriptHandler.Sse(GeminiSearch));
+        var first = Events(await Stream("chat send {\"text\":\"Which invoice?\"}"));
+        var chatId = first[0].GetProperty("chatId").GetString()!;
+        _h.Responses.Enqueue(ScriptHandler.Sse(GeminiAnswer));
+        await Stream("chat approve {\"token\":\"" + first[^1].GetProperty("token").GetString() + "\"}");
+        Assert.True((await Call("chat get " + chatId)).Data.GetProperty("approved").GetBoolean());
+
+        _agent.Status = _agent.Status with { Locked = true };
+        _agent.RaiseStatus();
+        _agent.Status = _agent.Status with { Locked = false };
+        Assert.False((await Call("chat get " + chatId)).Data.GetProperty("approved").GetBoolean());
+        _h.Responses.Enqueue(ScriptHandler.Sse(GeminiSearch));
+        var again = Events(await Stream("chat send {\"chatId\":\"" + chatId + "\",\"text\":\"And the total?\"}"));
+        Assert.Equal("approval", again[^1].GetProperty("type").GetString());
     }
 
     [Fact]

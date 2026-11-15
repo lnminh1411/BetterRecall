@@ -38,7 +38,7 @@ public sealed partial class TimelinePage : Page, IDataPage
         DayPicker.MaxDate = DateTime.Now.Date;
         _updating = false;
         Loaded += (_, _) => Reload();
-        Unloaded += (_, _) => { _vm.Items.Clear(); _detail.Clear(); };
+        Unloaded += (_, _) => { _vm.Clear(); _detail.Clear(); };   // a load still in flight is discarded too
     }
 
     public void Reload() => _ = LoadAsync();

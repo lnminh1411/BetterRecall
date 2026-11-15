@@ -21,6 +21,9 @@ public sealed partial class MainWindow : Window
 {
     private readonly nint _hwnd;
     private string _page = "";
+    private Type? _pageType;
+    private bool _dropped;      // the page was dropped for a lock: it is created again after the unlock
+    private bool _skipReload;   // ...and a page created that way loads by itself; the Unlocked event must not load it twice
 
     public MainWindow()
     {
@@ -40,7 +43,11 @@ public sealed partial class MainWindow : Window
         s.StatusChanged += UpdateStatus;
         s.LockedChanged += UpdateLock;
         s.ConnectionChanged += UpdateOffline;
-        s.Unlocked += () => (ContentFrame.Content as IDataPage)?.Reload();
+        s.Unlocked += () =>
+        {
+            if (_skipReload) { _skipReload = false; return; }
+            (ContentFrame.Content as IDataPage)?.Reload();
+        };
         Unlock.UnlockedOk += UpdateLock;
         UpdateStatus();
         UpdateOffline();
@@ -58,10 +65,26 @@ public sealed partial class MainWindow : Window
     private void HideMain()
     {
         AppWindow.Hide();
-        ContentFrame.Content = null;   // drop page images from memory
-        ContentFrame.BackStack.Clear();
+        DropContent();   // drop page images from memory
         _page = "";
+        _pageType = null;
+        _dropped = false;
     }
+
+    private void DropContent()
+    {
+        ContentFrame.Content = null;
+        ContentFrame.BackStack.Clear();
+    }
+
+    /// <summary>Data pages that show captured data: on lock they are dropped (their data leaves memory) and created again
+    /// after the unlock. The benchmark and danger zone show none and are only hidden, so a running benchmark goes on.</summary>
+    private static bool DropsOnLock(Type? type) =>
+        type is not null && typeof(IDataPage).IsAssignableFrom(type)
+        && !(type == typeof(BenchPage) || type == typeof(DangerZonePage));
+
+    private void NavigateFrame(Type type, string page) =>
+        ContentFrame.Navigate(type, page.Contains(':') ? page.Split(':', 2)[1] : null, new SuppressNavigationTransitionInfo());
 
     private void Navigate(string page)
     {
@@ -83,6 +106,7 @@ public sealed partial class MainWindow : Window
             _ => null,
         };
         if (type is null) { type = typeof(HomePage); page = "home"; }
+        _pageType = type;
         bool consent = type == typeof(ConsentPage);
         Nav.IsPaneVisible = !consent;
         StatusBar.Visibility = type == typeof(HomePage) ? Visibility.Collapsed : Visibility.Visible;   // home shows the same state and buttons
@@ -94,9 +118,18 @@ public sealed partial class MainWindow : Window
             shell.Show(group);
             _page = page;
         }
+        else if (Services.Current.Locked && DropsOnLock(type))
+        {
+            // Locked: the data page is not created (nothing to load, nothing to reach behind the unlock panel); the
+            // unlock creates it.
+            DropContent();
+            _dropped = true;
+            _page = page;
+        }
         else if (page != _page || ContentFrame.Content is null)
         {
-            ContentFrame.Navigate(type, page.Contains(':') ? page.Split(':', 2)[1] : null, new SuppressNavigationTransitionInfo());
+            NavigateFrame(type, page);
+            _dropped = false;
             _page = page;
         }
         SelectNavItem(page);
@@ -122,15 +155,35 @@ public sealed partial class MainWindow : Window
         else if (args.InvokedItemContainer?.Tag is string tag) Navigate(tag);
     }
 
-    /// <summary>The lock screen covers pages that show captured data. Settings stay reachable.</summary>
+    /// <summary>
+    /// The lock screen replaces pages that show captured data. The page under it is dropped (timeline, chat, replays,
+    /// audit: their decrypted data leaves memory) or, for the benchmark and danger zone, collapsed, so neither Tab nor
+    /// UI Automation reaches anything behind the panel. The unlock creates the dropped page again. Settings stay reachable.
+    /// </summary>
     private void UpdateLock()
     {
-        bool dataPage = ContentFrame.Content is IDataPage;
-        bool show = Services.Current.Locked && dataPage;
+        var s = Services.Current;
+        bool dataPage = _pageType is not null && typeof(IDataPage).IsAssignableFrom(_pageType);
+        bool show = s.Locked && dataPage;
         bool was = Unlock.Visibility == Visibility.Visible;
+        if (s.Locked) _skipReload = false;
+        if (show && DropsOnLock(_pageType) && ContentFrame.Content is not null)
+        {
+            DropContent();
+            _dropped = true;
+        }
+        if (s.Locked) s.Thumbs.Clear();
+        ContentFrame.Visibility = show ? Visibility.Collapsed : Visibility.Visible;
         Unlock.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
         if (show && !was) Unlock.Refresh();
-        LockButton.Content = Loc.Get(Services.Current.Locked ? "Main_Unlock" : "Main_Lock");
+        if (!s.Locked && _dropped && _pageType is not null && AppWindow.IsVisible)
+        {
+            _dropped = false;
+            _skipReload = true;   // the new page loads on Loaded
+            NavigateFrame(_pageType, _page);
+        }
+        LockButton.Content = Loc.Get(s.Locked ? "Main_Unlock" : "Main_Lock");
+        UpdateStatus();   // no capture counts while locked
     }
 
     private void UpdateOffline()
@@ -147,7 +200,7 @@ public sealed partial class MainWindow : Window
     private void UpdateStatus()
     {
         var st = Services.Current.Status;
-        StatusLine.Text = st is null ? "" : string.Join("  ·  ", StatusText.Describe(st, DateTimeOffset.UtcNow).Select(Loc.Text));
+        StatusLine.Text = st is null ? "" : string.Join("  ·  ", StatusText.Describe(st, DateTimeOffset.UtcNow, Services.Current.Locked).Select(Loc.Text));
         bool paused = st?.Paused == true && st.PauseReason is "user" or "ipc";
         PauseButton.Content = Loc.Get(paused ? "Main_Resume" : "Main_Pause");
         PauseButton.IsEnabled = st is not null && (st.PauseReason is null or "user" or "ipc");

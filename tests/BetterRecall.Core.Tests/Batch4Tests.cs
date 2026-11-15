@@ -290,6 +290,41 @@ public sealed class Batch4CommandTests : IAsyncDisposable
         Assert.False(File.Exists(DataPaths.AiKeyFile(_home.Path)));
     }
 
+    [Theory]
+    [InlineData("sk-ant-api03-NOT-A-REAL-KEY", AiDefaults.Claude)]
+    [InlineData("AIzaNOT-A-REAL-KEY-0123", AiDefaults.Gemini)]
+    [InlineData("sk-proj-NOT-A-REAL-KEY", AiDefaults.OpenAi)]
+    [InlineData("sk-NOT-A-REAL-KEY", AiDefaults.OpenAi)]
+    [InlineData("NOT-A-REAL-KEY", null)]
+    public void Legacy_key_shape_names_its_provider(string key, string? provider) => Assert.Equal(provider, ApiKeyStore.LegacyProvider(key));
+
+    /// <summary>Sweep 2 B9: a 0.2 key file says nothing about its provider; it goes only where its shape points.</summary>
+    [Fact]
+    public void Legacy_key_goes_only_to_the_provider_its_shape_names()
+    {
+        using var home = new TempHome(null);
+        void WriteLegacy(string key)
+        {
+            var file = DataPaths.AiKeyFile(home.Path);
+            Directory.CreateDirectory(Path.GetDirectoryName(file)!);
+            File.WriteAllBytes(file, [.. "BRA1"u8, .. ApiKeyStore.Protect(Encoding.UTF8.GetBytes(key))]);
+        }
+        var store = new ApiKeyStore(home.Path);
+        WriteLegacy("AIzaNOT-A-REAL-KEY-0123");
+        Assert.Equal("AIzaNOT-A-REAL-KEY-0123", store.Read(new AiSettings { Provider = AiDefaults.Gemini }));
+        Assert.Null(store.Read(new AiSettings { Provider = AiDefaults.Claude }));
+        Assert.Null(store.Read(new AiSettings { Provider = AiDefaults.OpenAi }));
+        Assert.Null(store.Read(new AiSettings { Provider = AiDefaults.Gemini, Endpoint = "https://proxy.example/v1beta" }));
+
+        WriteLegacy("sk-ant-api03-NOT-A-REAL-KEY");
+        Assert.Equal("sk-ant-api03-NOT-A-REAL-KEY", store.Read(new AiSettings { Provider = AiDefaults.Claude }));
+        Assert.Null(store.Read(new AiSettings { Provider = AiDefaults.OpenAi }));   // "sk-" alone is not enough for an Anthropic key
+        Assert.Null(store.Read(new AiSettings { Provider = AiDefaults.Gemini }));
+
+        WriteLegacy("NOT-A-REAL-KEY");   // unknown shape: entered again for whichever provider
+        Assert.All(AiDefaults.Providers, p => Assert.Null(store.Read(new AiSettings { Provider = p })));
+    }
+
     // ---------------- describe ----------------
 
     private void EnableAi(string provider, string? model = null)
@@ -319,6 +354,35 @@ public sealed class Batch4CommandTests : IAsyncDisposable
         Assert.Equal(CommandProcessor.ErrToken, (await Call("describe send " + token)).Error);
         Assert.Empty(_http.Requests);   // nothing left the PC
         Assert.Equal(CommandProcessor.ErrNoImage, (await Call("describe preview missing-id")).Error);
+    }
+
+    /// <summary>Sweep 2 B18: the send goes only to the provider, endpoint and model the preview dialog named.</summary>
+    [Fact]
+    public async Task Describe_send_refused_when_the_ai_settings_changed_after_the_preview()
+    {
+        EnableAi("gemini");
+        await Call("ai setkey gem-key-123");
+        var token = await PreviewToken();
+        Set("""{"ai":{"model":"gemini-other"}}""");
+        Assert.Equal(CommandProcessor.ErrDescribeChanged, (await Call("describe send " + token)).Error);
+        Assert.Equal(CommandProcessor.ErrToken, (await Call("describe send " + token)).Error);   // used up
+
+        EnableAi("gemini");
+        token = await PreviewToken();
+        Set("""{"ai":{"provider":"claude"}}""");
+        Assert.Equal(CommandProcessor.ErrDescribeChanged, (await Call("describe send " + token)).Error);
+
+        EnableAi("gemini");
+        token = await PreviewToken();
+        Set("""{"ai":{"endpoint":"https://proxy.example/v1beta"}}""");
+        Assert.Equal(CommandProcessor.ErrDescribeChanged, (await Call("describe send " + token)).Error);
+        Assert.Empty(_http.Requests);   // nothing left the PC
+
+        EnableAi("gemini");   // unchanged settings: the send goes out
+        _http.ResponseBody = """{"candidates":[{"content":{"parts":[{"text":"ok"}],"role":"model"}}]}""";
+        token = await PreviewToken();
+        Assert.True((await Call("describe send " + token)).Ok);
+        Assert.Single(_http.Requests);
     }
 
     [Fact]

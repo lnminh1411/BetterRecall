@@ -29,6 +29,14 @@ public sealed partial class ChatPage : Page, IDataPage
         ChatControl.TurnCompleted += () => DispatcherQueue.TryEnqueue(() => _ = ReloadListAsync());
 
         Loaded += (_, _) => _ = ReloadListAsync();
+        // Page left, window hidden or locked: the decrypted chat and the detail image leave memory with the page.
+        Unloaded += (_, _) =>
+        {
+            ChatControl.Stop();
+            ChatControl.ViewModel.Reset();
+            _detail.Clear();
+            SavedList.ItemsSource = null;
+        };
     }
 
     public static string FormatTime(DateTimeOffset ts) =>
