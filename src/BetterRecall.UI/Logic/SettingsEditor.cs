@@ -54,7 +54,7 @@ public sealed class SettingsEditor
         var pending = Diff();
         var one = new JsonObject();
         SettingsSchema.Set(one, key, value?.DeepClone());
-        var line = SettingsDiff.ToRequestLines(one)![0];   // one scalar key always fits
+        var line = SettingsDiff.ToRequestLine(one)!;   // one scalar key always fits
         var r = (await api.Client.SendAsync(line, ct)).As(Responses.SettingsObject);
         if (!r.Ok)
         {
@@ -87,27 +87,23 @@ public sealed class SettingsEditor
             if (!before.ContainsKey(k)) Errors.TryAdd(k, e);
         if (Errors.Count > 0) { Changed?.Invoke(); return (SaveOutcome.Invalid, null); }
 
-        var lines = SettingsDiff.ToRequestLines(diff);
-        if (lines is null) return (SaveOutcome.TooLarge, null);
+        // One request for the whole diff: the agent validates and saves it as a unit, so an error leaves nothing half saved.
+        var line = SettingsDiff.ToRequestLine(diff);
+        if (line is null) return (SaveOutcome.TooLarge, null);
 
-        AgentResult<JsonObject>? last = null;
-        foreach (var line in lines)
+        var r = (await api.Client.SendAsync(line, ct)).As(Responses.SettingsObject);
+        if (!r.Ok)
         {
-            var r = (await api.Client.SendAsync(line, ct)).As(Responses.SettingsObject);
-            last = r;
-            if (!r.Ok)
-            {
-                if (AgentErrors.InvalidKey(r.Error) is { } key) Errors[key] = r.Error!;
-                Changed?.Invoke();
-                return (AgentErrors.InvalidKey(r.Error) is null ? SaveOutcome.Failed : SaveOutcome.Invalid, r);
-            }
-            // keep later edits: rebase the working copy on what the agent saved
-            var pending = SettingsDiff.Diff(r.Value!, Working);
-            Original = (JsonObject)r.Value!.DeepClone();
-            Working = (JsonObject)r.Value!.DeepClone();
-            foreach (var key in SettingsDiff.Keys(pending)) SettingsSchema.Set(Working, key, SettingsSchema.Get(pending, key)?.DeepClone());
+            if (AgentErrors.InvalidKey(r.Error) is { } bad) Errors[bad] = r.Error!;
+            Changed?.Invoke();
+            return (AgentErrors.InvalidKey(r.Error) is null ? SaveOutcome.Failed : SaveOutcome.Invalid, r);
         }
+        // keep edits made while the request ran: rebase the working copy on what the agent saved
+        var pending = SettingsDiff.Diff(r.Value!, Working);
+        Original = (JsonObject)r.Value!.DeepClone();
+        Working = (JsonObject)r.Value!.DeepClone();
+        foreach (var key in SettingsDiff.Keys(pending)) SettingsSchema.Set(Working, key, SettingsSchema.Get(pending, key)?.DeepClone());
         Changed?.Invoke();
-        return (SaveOutcome.Saved, last);
+        return (SaveOutcome.Saved, r);
     }
 }

@@ -232,7 +232,7 @@ public sealed unsafe class OpenVinoBackend : IInferenceBackend
                 foreach (var t in feed)
                 {
                     var spec = Inputs.FirstOrDefault(s => s.Name == t.Name) ?? throw new DeviceFailedException($"unknown input {t.Name}");
-                    created.Add(SetInput(t, spec));
+                    SetInput(t, spec, created);
                 }
                 int st = ov_infer_request_infer(_request);
                 if (st != OK) throw new DeviceFailedException($"{Device.Label} infer: {LastError(st)}");
@@ -250,7 +250,9 @@ public sealed unsafe class OpenVinoBackend : IInferenceBackend
             finally { foreach (var t in created) ov_tensor_free(t); }
         }
 
-        private nint SetInput(HostTensor t, TensorSpec spec)
+        /// <summary>Creates, fills and binds one input tensor. The tensor goes into created as soon as it exists, so
+        /// Run frees it on every path (a failed copy or bind included).</summary>
+        private void SetInput(HostTensor t, TensorSpec spec, List<nint> created)
         {
             int et = spec.Type switch
             {
@@ -265,6 +267,7 @@ public sealed unsafe class OpenVinoBackend : IInferenceBackend
             nint tensor;
             try { Check(ov_tensor_create(et, shape, out tensor), "tensor"); }
             finally { ov_shape_free(&shape); }
+            created.Add(tensor);
             Check(ov_tensor_data(tensor, out var data), "tensor data");
             long n = t.Shape.Aggregate(1L, (a, b) => a * b);
             switch (spec.Type)
@@ -282,12 +285,13 @@ public sealed unsafe class OpenVinoBackend : IInferenceBackend
                 case TensorType.Int32:
                 {
                     var src = Need(t.Longs, n, t.Name); var dst = new Span<int>((void*)data, (int)n);
-                    for (int i = 0; i < n; i++) dst[i] = checked((int)src[i]);
+                    for (int i = 0; i < n; i++)
+                        dst[i] = src[i] is >= int.MinValue and <= int.MaxValue ? (int)src[i]
+                            : throw new DeviceFailedException($"input {t.Name} value out of Int32 range");
                     break;
                 }
             }
             Check(ov_infer_request_set_tensor(_request, t.Name, tensor), $"set input {t.Name}");
-            return tensor;
         }
 
         private static T[] Need<T>(T[]? a, long n, string name)

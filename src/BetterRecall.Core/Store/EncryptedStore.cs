@@ -48,7 +48,22 @@ public sealed partial class EncryptedStore : IStore
     private SqliteConnection _rv = null!; // vector rerank reader, so FTS and vector stages run in parallel
     private EmbeddingInfo? _space;
     private bool _disposed;
-    private long _fenceMs = long.MinValue;   // "purge last N" moment: older items arriving later are refused
+    // Purged time windows that refuse items still in flight (B12): "purge last N" (from = MinValue: anything stamped before
+    // its end) and ranges ending about now. Each expires FenceLifetime after it was set, by the monotonic clock, so a wall
+    // clock that steps back after the purge cannot refuse new captures for long.
+    private readonly List<(long From, long To, long SetAt)> _fences = [];
+    private readonly List<(string Id, long Ts)> _deleted = [];   // rows deleted under _wl, for the next Purged notice
+
+    /// <summary>A range purge ending this close to now (or later) fences its window like "purge last N".</summary>
+    internal static readonly TimeSpan FenceSlack = TimeSpan.FromMinutes(5);
+    /// <summary>How long a fence refuses in-flight items: longer than OCR, encode and transcription can hold one.</summary>
+    internal static readonly TimeSpan FenceLifetime = TimeSpan.FromMinutes(15);
+    /// <summary>Monotonic milliseconds for fence expiry. Tests replace it.</summary>
+    internal Func<long> MonoMs { get; set; } = () => Environment.TickCount64;
+
+    /// <summary>Raised after rows were deleted (see PurgeNotice for the reasons), outside the store lock. CoreHost forwards
+    /// it as ICoreHost.Purged.</summary>
+    public event Action<PurgeNotice>? Purged;
 
     /// <summary>Opens (or creates) the store. key returns a fresh copy of the 32-byte SQLite key; it is zeroed after use.</summary>
     public EncryptedStore(string home, Func<byte[]> key, IVectorIndex? index = null)
@@ -181,6 +196,21 @@ public sealed partial class EncryptedStore : IStore
             CREATE INDEX IF NOT EXISTS ix_replay_frames_replay ON replay_frames(replay_id);
             """);
         MigrateChats();
+        MigrateFts();
+    }
+
+    /// <summary>
+    /// FTS5 keeps the terms of deleted rows in its index segments unless the persistent secure-delete option is on.
+    /// Turned on once per store; an existing store also gets one optimize, which merges the old segments so the terms
+    /// of earlier deletes go too (PRAGMA secure_delete then zeroes the freed pages).
+    /// </summary>
+    private void MigrateFts()
+    {
+        if (Scalar(_w, "SELECT v FROM meta WHERE k='fts_secure_delete'") is not null) return;
+        Exec(_w, "INSERT INTO fts(fts, rank) VALUES('secure-delete', 1)");
+        Exec(_w, "INSERT INTO fts(fts) VALUES('optimize')");
+        Exec(_w, "INSERT OR REPLACE INTO meta(k, v) VALUES('fts_secure_delete', '1')");
+        Exec(_w, "PRAGMA wal_checkpoint(TRUNCATE)");
     }
 
     private SqliteConnection? Kf(string month, bool create)
@@ -239,6 +269,47 @@ public sealed partial class EncryptedStore : IStore
         cmd.CommandText = sql;
         foreach (var (n, v) in ps) cmd.Parameters.AddWithValue(n, v ?? DBNull.Value);
         return cmd;
+    }
+
+    /// <summary>Begins a transaction on the write connection. Caller holds _wl. SqliteTransaction runs BEGIN and then
+    /// registers a native rollback hook; when the hook throws (its callback thunk refused under ACG), no transaction
+    /// object exists to roll back and the connection stays inside BEGIN, so every later write failed with "cannot start
+    /// a transaction within a transaction". Rolls back any such leftover before and after, so one error cannot wedge
+    /// the store.</summary>
+    private SqliteTransaction BeginWrite()
+    {
+        RollbackLeftover(_w);
+        try { return _w.BeginTransaction(); }
+        catch { RollbackLeftover(_w); throw; }
+    }
+
+    private static void RollbackLeftover(SqliteConnection c)
+    {
+        try
+        {
+            if (c.Handle is { } h && SQLitePCL.raw.sqlite3_get_autocommit(h) == 0)
+            {
+                Exec(c, "ROLLBACK");
+                Log.Warn("store: rolled back a transaction left open by an earlier error");
+            }
+        }
+        catch (Exception ex) { Log.Warn("store: rollback of a leftover transaction failed", ex); }
+    }
+
+    /// <summary>Creates the native callback thunks SQLite transactions need (the rollback hook bridge) on a throwaway
+    /// in-memory database. Call before Arbitrary Code Guard is applied: under ACG the runtime cannot allocate a new
+    /// thunk, and the first transaction afterwards throws PlatformNotSupportedException.</summary>
+    public static void WarmNativeCallbacks()
+    {
+        if (Interlocked.Exchange(ref _sqliteInit, 1) == 0) SQLitePCL.Batteries_V2.Init();
+        using var c = new SqliteConnection("Data Source=:memory:;Pooling=False");
+        c.Open();
+        using (var tx = c.BeginTransaction())
+        {
+            Exec(c, "CREATE TEMP TABLE warm(x)");
+            tx.Rollback();
+        }
+        using (c.BeginTransaction()) { }   // dispose path: rollback without an explicit call
     }
 
     private static string InList(IEnumerable<long> rids) => string.Join(",", rids.Select(r => r.ToString(CultureInfo.InvariantCulture)));
@@ -324,7 +395,7 @@ public sealed partial class EncryptedStore : IStore
             }
             // New model: rows that can still be embedded (keyframe or transcript present) get a job again.
             long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            using (var tx = _w.BeginTransaction())
+            using (var tx = BeginWrite())
             {
                 Exec(_w, """
                     INSERT OR IGNORE INTO jobs(rid, created)
@@ -346,7 +417,7 @@ public sealed partial class EncryptedStore : IStore
         using (var cmd = Cmd(_w, "SELECT rid, vec FROM vectors WHERE dim > $d", ("$d", dim)))
         using (var rd = cmd.ExecuteReader())
             while (rd.Read()) rows.Add((rd.GetInt64(0), (byte[])rd.GetValue(1)));
-        using var tx = _w.BeginTransaction();
+        using var tx = BeginWrite();
         foreach (var (rid, vec) in rows)
         {
             var v = Normalize(ToFloats(vec).AsSpan(0, dim));
@@ -371,7 +442,7 @@ public sealed partial class EncryptedStore : IStore
             long ts = c.Ts.ToUnixTimeMilliseconds();
             var month = Month(ts);
             long rid;
-            using (var tx = _w.BeginTransaction())
+            using (var tx = BeginWrite())
             {
                 rid = (long)Scalar(_w, """
                     INSERT INTO captures(id, ts, kind, app, app_lc, exe, title, text, monitor, width, height, dhash, duration_ms, state, has_keyframe, keep_keyframe, kf_month, site, change_pct, is_switch)
@@ -407,11 +478,13 @@ public sealed partial class EncryptedStore : IStore
         {
             ThrowIfDisposed();
             ThrowIfFenced(f.Ts);
+            // A carry-in sample is re-stamped to the clip start: the pixels are older, and the fence checks those too (N4).
+            if (f.CapturedAt is { } grabbed && grabbed < f.Ts) ThrowIfFenced(grabbed);
             var id = Ids.New('r', f.Ts);
             long ts = f.Ts.ToUnixTimeMilliseconds();
             var month = Month(ts);
             long rid;
-            using (var tx = _w.BeginTransaction())
+            using (var tx = BeginWrite())
             {
                 rid = (long)Scalar(_w, """
                     INSERT INTO captures(id, ts, kind, app, app_lc, exe, title, monitor, width, height, dhash, duration_ms, state, has_keyframe, keep_keyframe, kf_month, site)
@@ -429,7 +502,10 @@ public sealed partial class EncryptedStore : IStore
             }
             catch
             {
+                int before = _deleted.Count;
                 DeleteRowsLocked([rid]);
+                // Never visible: nothing to tell. Remove only this row; earlier entries (a maintenance slice's deletes) stay.
+                _deleted.RemoveRange(before, _deleted.Count - before);
                 throw;
             }
             return id;
@@ -439,6 +515,8 @@ public sealed partial class EncryptedStore : IStore
     public int DeleteReplayFrames(string replayId)
     {
         if (string.IsNullOrWhiteSpace(replayId)) return 0;
+        PurgeNotice? notice;
+        int n;
         lock (_wl)
         {
             ThrowIfDisposed();
@@ -446,10 +524,12 @@ public sealed partial class EncryptedStore : IStore
             using (var cmd = Cmd(_w, "SELECT rid FROM replay_frames WHERE replay_id=$r", ("$r", replayId)))
             using (var rd = cmd.ExecuteReader())
                 while (rd.Read()) rids.Add(rd.GetInt64(0));
-            int n = DeleteRowsLocked(rids);
+            n = DeleteRowsLocked(rids);
             if (n > 0) Log.Info($"replay deleted: {n} replay frames removed");
-            return n;
+            notice = TakeNoticeLocked("replay");
         }
+        Raise(notice);
+        return n;
     }
 
     public string AddAudioCapture(NewAudioCapture c)
@@ -461,7 +541,7 @@ public sealed partial class EncryptedStore : IStore
             ThrowIfFenced(c.Ts);
             var id = Ids.New('a', c.Ts);
             long ts = c.Ts.ToUnixTimeMilliseconds();
-            using var tx = _w.BeginTransaction();
+            using var tx = BeginWrite();
             long rid = (long)Scalar(_w, """
                 INSERT INTO captures(id, ts, kind, app, app_lc, exe, title, text, source, language, monitor, width, height, dhash, duration_ms, state, has_keyframe, keep_keyframe, kf_month)
                 VALUES($id, $ts, 1, $app, $applc, '', '', $text, $src, $lang, -1, 0, 0, 0, $dur, 1, 0, 0, NULL) RETURNING rid
@@ -545,7 +625,7 @@ public sealed partial class EncryptedStore : IStore
             _inflight.Remove(rid);
             if (state == StateFailed) { Exec(_w, "DELETE FROM jobs WHERE rid=$rid", ("$rid", rid)); return; }
             if (_space == null) WriteSpace(info);
-            using (var tx = _w.BeginTransaction())
+            using (var tx = BeginWrite())
             {
                 Exec(_w, """
                     INSERT INTO vectors(rid, model_id, revision, dim, vec, bin) VALUES($rid, $m, $r, $d, $v, $b)
@@ -605,13 +685,16 @@ public sealed partial class EncryptedStore : IStore
 
     public void DropCapture(string id, string reason)
     {
+        PurgeNotice? notice;
         lock (_wl)
         {
             ThrowIfDisposed();
             if (Rid(id) is not long rid) return;
             DeleteRowsLocked([rid]);
             Log.Info($"capture dropped ({SafeReason(reason)})");
+            notice = TakeNoticeLocked("drop");
         }
+        Raise(notice);
     }
 
     // ---------------------------------------------------------------- deletes
@@ -624,6 +707,11 @@ public sealed partial class EncryptedStore : IStore
         {
             var chunk = rids.Skip(off).Take(500).ToList();
             var list = InList(chunk);
+            // Every row delete (purge of any scope, retention, thinning, space guard) drops the saved chats that quote it.
+            DeleteChatsCitingLocked(chunk);
+            using (var cmd = Cmd(_w, $"SELECT id, ts FROM captures WHERE rid IN ({list})"))
+            using (var rd = cmd.ExecuteReader())
+                while (rd.Read()) _deleted.Add((rd.GetString(0), rd.GetInt64(1)));
             var months = new Dictionary<string, List<long>>();
             using (var cmd = Cmd(_w, $"SELECT rid, kf_month FROM captures WHERE rid IN ({list}) AND +kf_month IS NOT NULL"))
             using (var rd = cmd.ExecuteReader())
@@ -633,7 +721,7 @@ public sealed partial class EncryptedStore : IStore
                     if (!months.TryGetValue(m, out var l)) months[m] = l = [];
                     l.Add(rd.GetInt64(0));
                 }
-            using (var tx = _w.BeginTransaction())
+            using (var tx = BeginWrite())
             {
                 Exec(_w, $"DELETE FROM fts WHERE rowid IN ({list})");
                 Exec(_w, $"DELETE FROM vectors WHERE rid IN ({list})");
@@ -699,17 +787,18 @@ public sealed partial class EncryptedStore : IStore
     /// <summary>Deletes the scope, then wal_checkpoint(TRUNCATE) on every open file. Purge(Last(Zero)) just checkpoints.</summary>
     public int Purge(PurgeScope scope)
     {
-        lock (_wl)
+        PurgeNotice? notice;
+        int n;
+        using (EnterWritePriority())
         {
             ThrowIfDisposed();
             var rids = SelectScope(scope);
-            // app / site / id purges: chats that cite a deleted capture quote its text, so they go too
-            // (time-window purges delete chats active in the window below).
-            if (scope.Kind is not ("last" or "range")) DeleteChatsCitingLocked(rids);
-            int n = DeleteRowsLocked(rids);
-            // Panic flush / "delete the last N": items captured before now but still being encoded, OCR'd or transcribed
-            // would otherwise be stored after this purge, inside the window it just emptied.
-            if (scope.Kind == "last" && scope.To is { } to) _fenceMs = Math.Max(_fenceMs, to.ToUnixTimeMilliseconds());
+            // DeleteRowsLocked drops chats citing a deleted capture for every scope; time-window purges also delete
+            // chats active in the window below.
+            n = DeleteRowsLocked(rids);
+            // Panic flush / "delete the last N" / a range up to about now: items captured before now but still being
+            // encoded, OCR'd or transcribed would otherwise be stored after this purge, inside the window it just emptied.
+            FenceLocked(scope);
             // A time-window purge (panic flush, "delete the last hour") also forgets searches typed in that window.
             if (scope.Kind is "last" or "range" && scope.From != null && scope.To != null)
             {
@@ -717,15 +806,68 @@ public sealed partial class EncryptedStore : IStore
                     ("$from", scope.From.Value.ToUnixTimeMilliseconds()), ("$to", scope.To.Value.ToUnixTimeMilliseconds()));
                 DeleteChatsInWindowLocked(scope.From.Value, scope.To.Value);   // chats active in the window go too
             }
+            // App and site purges forget saved searches that name the app or site ("pornhub" after purge site pornhub.com).
+            if (scope.Kind is "app" or "site") DeleteHistoryContainingLocked(HistoryNeedles(scope));
             CheckpointLocked();
             Log.Info($"purge ({scope.Kind}) removed {n} rows");
-            return n;
+            bool window = scope.Kind is "last" or "range";
+            notice = TakeNoticeLocked("purge", window ? scope.From : null, window ? scope.To : null);
+        }
+        Raise(notice);
+        return n;
+    }
+
+    /// <summary>Fences a time-window purge: "last" refuses anything stamped before its end, a range ending within
+    /// FenceSlack of now (or later) refuses its window up to now. Caller holds _wl.</summary>
+    private void FenceLocked(PurgeScope scope)
+    {
+        if (scope.To is not { } to) return;
+        var now = DateTimeOffset.UtcNow;
+        long mono = MonoMs();
+        long life = (long)FenceLifetime.TotalMilliseconds;
+        _fences.RemoveAll(x => mono - x.SetAt >= life);
+        if (scope.Kind == "last")
+            _fences.Add((long.MinValue, to.ToUnixTimeMilliseconds(), mono));
+        else if (scope.Kind == "range" && scope.From is { } from && to >= now - FenceSlack)
+        {
+            var end = to < now ? to : now;
+            if (end > from) _fences.Add((from.ToUnixTimeMilliseconds(), end.ToUnixTimeMilliseconds(), mono));
         }
     }
 
+    /// <summary>Caller holds _wl.</summary>
     private void ThrowIfFenced(DateTimeOffset ts)
     {
-        if (ts.ToUnixTimeMilliseconds() < _fenceMs) throw new PurgedWindowException(ts);
+        if (_fences.Count == 0) return;
+        long mono = MonoMs();
+        long life = (long)FenceLifetime.TotalMilliseconds;
+        _fences.RemoveAll(x => mono - x.SetAt >= life);
+        long t = ts.ToUnixTimeMilliseconds();
+        foreach (var (from, to, _) in _fences)
+            if (t >= from && t <= to) throw new PurgedWindowException(ts);
+    }
+
+    /// <summary>The rows deleted since the last notice, as a notice; null when nothing was deleted and no window was
+    /// purged. Caller holds _wl.</summary>
+    private PurgeNotice? TakeNoticeLocked(string reason, DateTimeOffset? from = null, DateTimeOffset? to = null)
+    {
+        bool window = from is { } f && to is { } t && t > f;
+        if (_deleted.Count == 0 && !window) return null;
+        var ids = _deleted.Select(d => d.Id).ToArray();
+        DateTimeOffset? newest = _deleted.Count == 0 ? null : DateTimeOffset.FromUnixTimeMilliseconds(_deleted.Max(d => d.Ts));
+        _deleted.Clear();
+        return new PurgeNotice(reason, ids, window ? from : null, window ? to : null, newest);
+    }
+
+    /// <summary>Raises Purged outside the store lock; a failing listener does not stop the others.</summary>
+    private void Raise(PurgeNotice? notice)
+    {
+        if (notice is null || Purged is not { } h) return;
+        foreach (var d in h.GetInvocationList())
+        {
+            try { ((Action<PurgeNotice>)d)(notice); }
+            catch (Exception ex) { Log.Warn("purge listener failed", ex); }
+        }
     }
 
     /// <summary>wal_checkpoint(TRUNCATE) on store.db and every open keyframe file (panic flush).</summary>
@@ -797,8 +939,9 @@ public sealed partial class EncryptedStore : IStore
             rid = rd.GetInt64(0);
             month = rd.GetString(1);
         }
-        lock (_wl)
+        using (EnterWritePriority())
         {
+            ThrowIfDisposed();
             if (Kf(month, false) is not { } kc) return null;
             using var cmd = Cmd(kc, "SELECT mime, width, height, data FROM kf WHERE rid=$rid", ("$rid", rid));
             using var rd = cmd.ExecuteReader();
@@ -1074,6 +1217,46 @@ public sealed partial class EncryptedStore : IStore
         }
     }
 
+    /// <summary>Words a saved search would use for an app or site scope: "chrome.exe" gives chrome.exe and chrome;
+    /// "www.pornhub.co.uk" gives pornhub.co.uk and pornhub. Words under 3 characters are dropped (too broad).</summary>
+    internal static List<string> HistoryNeedles(PurgeScope scope)
+    {
+        var needles = new List<string>();
+        void Add(string? w) { w = w?.Trim(); if (w is { Length: >= 3 } && !needles.Contains(w, StringComparer.OrdinalIgnoreCase)) needles.Add(w); }
+        if (scope.Kind == "app" && !string.IsNullOrWhiteSpace(scope.App))
+        {
+            var app = scope.App.Trim();
+            Add(app);
+            if (app.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) Add(app[..^4]);
+        }
+        else if (scope.Kind == "site" && NormalizeSite(scope.Site) is { Length: > 0 } host)
+        {
+            if (host.StartsWith("www.", StringComparison.Ordinal)) host = host[4..];
+            Add(host);
+            var labels = host.Split('.', StringSplitOptions.RemoveEmptyEntries);
+            // Main label: the one before the suffix ("co.uk", "com.au" count as one suffix).
+            int i = labels.Length - 2;
+            if (labels.Length >= 3 && labels[^2] is "co" or "com" or "net" or "org" or "gov" or "edu" or "ac") i--;
+            if (i >= 0) Add(labels[i]);
+        }
+        return needles;
+    }
+
+    /// <summary>Deletes saved searches containing any needle (case-insensitive). Caller holds _wl.</summary>
+    private void DeleteHistoryContainingLocked(List<string> needles)
+    {
+        if (needles.Count == 0) return;
+        var drop = new List<string>();
+        using (var cmd = Cmd(_w, "SELECT q FROM search_history"))
+        using (var rd = cmd.ExecuteReader())
+            while (rd.Read())
+            {
+                var q = rd.GetString(0);
+                if (needles.Any(n => q.Contains(n, StringComparison.OrdinalIgnoreCase))) drop.Add(q);
+            }
+        foreach (var q in drop) Exec(_w, "DELETE FROM search_history WHERE q=$q", ("$q", q));
+    }
+
     internal static string Cut(string s, int max) => s.Length <= max ? s : s[..(max - 1)] + "…";
 
     /// <summary>Screen hit: the title, unless a query token appears only in the OCR text; then the text around it.</summary>
@@ -1161,44 +1344,76 @@ public sealed partial class EncryptedStore : IStore
 
     // ---------------------------------------------------------------- maintenance
 
+    /// <summary>
+    /// Hourly maintenance in short _wl slices (one retention chunk, one thinning day, one month file, ...), so capture
+    /// inserts, keyframe reads (thumbnails, detail pane, chat images) and a panic purge wait for one slice, not for the
+    /// whole run. Purge and keyframe reads enter with priority: maintenance does not start its next slice while one waits.
+    /// </summary>
     public void RunMaintenance(Settings settings)
     {
         ArgumentNullException.ThrowIfNull(settings);
         var sw = Stopwatch.StartNew();
-        lock (_wl)
-        {
-            ThrowIfDisposed();
-            long cutoff = DateTimeOffset.UtcNow.AddDays(-settings.Retention.Days).ToUnixTimeMilliseconds();
-            string cutoffMonth = Month(cutoff);
+        var now = DateTimeOffset.UtcNow;
+        long cutoff = now.AddDays(-settings.Retention.Days).ToUnixTimeMilliseconds();
+        string cutoffMonth = Month(cutoff);
 
-            // 1. Retention: rows older than retention.days.
-            int expired = 0;
-            while (true)
-            {
-                var rids = new List<long>();
-                using (var cmd = Cmd(_w, "SELECT rid FROM captures WHERE ts < $c LIMIT 5000", ("$c", cutoff)))
-                using (var rd = cmd.ExecuteReader())
-                    while (rd.Read()) rids.Add(rd.GetInt64(0));
-                if (rids.Count == 0) break;
-                expired += DeleteRowsLocked(rids);
-            }
+        // 1. Retention: rows older than retention.days, 5000 per slice.
+        int expired = 0;
+        while (MaintenanceSlice(() =>
+        {
+            var rids = new List<long>();
+            using (var cmd = Cmd(_w, "SELECT rid FROM captures WHERE ts < $c LIMIT 5000", ("$c", cutoff)))
+            using (var rd = cmd.ExecuteReader())
+                while (rd.Read()) rids.Add(rd.GetInt64(0));
+            if (rids.Count == 0) return false;
+            expired += DeleteRowsLocked(rids);
+            return true;
+        })) { }
+        MaintenanceSlice(() =>
+        {
             Exec(_w, "DELETE FROM audit WHERE ts < $c", ("$c", cutoff));
             // Searches and chats are memory too: retention.days covers them (a chat goes once its first message expires).
             Exec(_w, "DELETE FROM search_history WHERE ts < $c", ("$c", cutoff));
             DeleteChatsOlderLocked(cutoff);
+            return true;
+        });
 
-            // 2. Whole keyframe files from months before the cutoff month are empty now: delete the files.
-            foreach (var m in KfMonths())
-                if (string.CompareOrdinal(m, cutoffMonth) < 0 &&
-                    (long)(Scalar(_w, "SELECT count(*) FROM captures WHERE kf_month=$m AND has_keyframe=1", ("$m", m)) ?? 0L) == 0)
+        // 2. Whole keyframe files from months before the cutoff month are empty now: delete the files.
+        var months = MaintenanceSlice(KfMonths);
+        foreach (var m in months.Where(m => string.CompareOrdinal(m, cutoffMonth) < 0))
+            MaintenanceSlice(() =>
+            {
+                if ((long)(Scalar(_w, "SELECT count(*) FROM captures WHERE kf_month=$m AND has_keyframe=1", ("$m", m)) ?? 0L) == 0)
                     DeleteKfFile(m);
+                return true;
+            });
 
-            // 3. Progressive thinning (retention.progressive*). storage.maxGb and storage.minFreeGb are the
-            //    agent's storage guard (DeleteForSpace).
-            int thinned = ThinLocked(settings.Retention, DateTimeOffset.UtcNow, cutoff);
-            if (thinned > 0) Log.Info($"maintenance: {thinned} rows thinned");
-            ReleaseFreePagesLocked();
+        // 2b. Once per open: keyframe images whose row is gone. A crash between the store.db commit and the month-file
+        //     delete of a row delete leaves them behind (B13); nothing else would remove them before their month expires.
+        if (!_orphansSwept)
+        {
+            int orphans = 0;
+            foreach (var m in MaintenanceSlice(KfMonths))
+                MaintenanceSlice(() => { orphans += DeleteOrphanKeyframesLocked(m); return true; });
+            _orphansSwept = true;
+            if (orphans > 0) Log.Info($"maintenance: {orphans} orphan keyframes deleted");
+        }
 
+        // 3. Progressive thinning (retention.progressive*), one day per slice. storage.maxGb and storage.minFreeGb are
+        //    the agent's storage guard (DeleteForSpace).
+        int thinned = 0;
+        if (MaintenanceSlice(() => ThinDaysLocked(settings.Retention, now, cutoff)) is { } days)
+            for (long day = days.First; day <= days.Last; day++)
+            {
+                long d = day;
+                MaintenanceSlice(() => { thinned += ThinDayLocked(settings.Retention, now, cutoff, d); return true; });
+            }
+        if (thinned > 0) Log.Info($"maintenance: {thinned} rows thinned");
+        foreach (var m in MaintenanceSlice(KfMonths))
+            MaintenanceSlice(() => { ReleaseFreePagesLocked(m, vacuumLegacy: true); return true; });
+
+        MaintenanceSlice(() =>
+        {
             CheckpointLocked();
             lock (_rl)
             {
@@ -1212,11 +1427,78 @@ public sealed partial class EncryptedStore : IStore
                 }
             }
             try { Exec(_w, "PRAGMA optimize"); } catch { }
-            Log.Info($"maintenance: {expired} rows expired in {sw.ElapsedMilliseconds} ms");
+            return true;
+        });
+        Log.Info($"maintenance: {expired} rows expired in {sw.ElapsedMilliseconds} ms");
+        Raise(MaintenanceSlice(() => TakeNoticeLocked("retention")));
+    }
+
+    /// <summary>Count of callers waiting for _wl with priority (purge, keyframe reads).</summary>
+    private int _priorityWaiters;
+    private bool _orphansSwept;
+
+    /// <summary>Takes _wl for one maintenance step, after any priority caller that is waiting got its turn.</summary>
+    private T MaintenanceSlice<T>(Func<T> step)
+    {
+        var wait = Stopwatch.StartNew();
+        while (Volatile.Read(ref _priorityWaiters) > 0 && wait.ElapsedMilliseconds < 30_000) Thread.Sleep(2);
+        lock (_wl)
+        {
+            ThrowIfDisposed();
+            return step();
         }
     }
 
+    /// <summary>_wl for a caller that must not queue behind maintenance (panic purge, keyframe reads).</summary>
+    private Lock.Scope EnterWritePriority()
+    {
+        Interlocked.Increment(ref _priorityWaiters);
+        try { return _wl.EnterScope(); }
+        finally { Interlocked.Decrement(ref _priorityWaiters); }
+    }
+
+    /// <summary>Deletes keyframe images of one month file whose capture row no longer names that month. Caller holds _wl.</summary>
+    private int DeleteOrphanKeyframesLocked(string month)
+    {
+        if (Kf(month, false) is not { } kc) return 0;
+        var rows = new HashSet<long>();
+        using (var cmd = Cmd(_w, "SELECT rid FROM captures WHERE kf_month=$m", ("$m", month)))
+        using (var rd = cmd.ExecuteReader())
+            while (rd.Read()) rows.Add(rd.GetInt64(0));
+        var orphans = new List<long>();
+        using (var cmd = Cmd(kc, "SELECT rid FROM kf"))
+        using (var rd = cmd.ExecuteReader())
+            while (rd.Read()) { long rid = rd.GetInt64(0); if (!rows.Contains(rid)) orphans.Add(rid); }
+        for (int off = 0; off < orphans.Count; off += 500)
+            Exec(kc, $"DELETE FROM kf WHERE rid IN ({InList(orphans.Skip(off).Take(500).ToList())})");
+        return orphans.Count;
+    }
+
     // ---------------------------------------------------------------- test hooks
+
+    /// <summary>Tests: keyframe images stored across all month files.</summary>
+    internal long KeyframeCountForTest()
+    {
+        lock (_wl)
+        {
+            long n = 0;
+            foreach (var m in KfMonths()) if (Kf(m, false) is { } c) n += (long)(Scalar(c, "SELECT count(*) FROM kf") ?? 0L);
+            return n;
+        }
+    }
+
+    /// <summary>Tests: the state a crash between the two commits of a row delete leaves (row gone, image kept).</summary>
+    internal void DeleteRowKeepImageForTest(string id)
+    {
+        lock (_wl)
+        {
+            if (Rid(id) is not long rid) return;
+            Exec(_w, "DELETE FROM vectors WHERE rid=$r", ("$r", rid));
+            Exec(_w, "DELETE FROM jobs WHERE rid=$r", ("$r", rid));
+            Exec(_w, "DELETE FROM captures WHERE rid=$r", ("$r", rid));
+            _index.Remove(rid);
+        }
+    }
 
     /// <summary>
     /// Tests and benchmarks only: inserts ready screen rows with vectors and FTS entries in one transaction,
@@ -1228,7 +1510,7 @@ public sealed partial class EncryptedStore : IStore
         {
             ThrowIfDisposed();
             if (_space == null) WriteSpace(info);
-            using var tx = _w.BeginTransaction();
+            using var tx = BeginWrite();
             using var ins = Cmd(_w, """
                 INSERT INTO captures(id, ts, kind, app, app_lc, exe, title, monitor, width, height, dhash, duration_ms, state, has_keyframe, keep_keyframe, kf_month)
                 VALUES($id, $ts, 0, $app, $applc, '', $title, 0, 0, 0, 0, 0, 1, 0, 1, NULL) RETURNING rid

@@ -43,16 +43,19 @@ public sealed partial class ChatView : UserControl
             ScrollToBottom();
         });
 
+        // Services is process-wide: a handler left on it would keep this view, and the chat it shows, alive for ever.
         Loaded += (_, _) =>
         {
+            Services.Current.SettingsLoaded -= OnSettingsLoaded;
+            Services.Current.SettingsLoaded += OnSettingsLoaded;
             UpdateOffState();
             UpdateBindings();
             _ = RefreshStatusAsync();
         };
-
-        var services = Services.Current;
-        services.SettingsLoaded += () => DispatcherQueue.TryEnqueue(UpdateOffState);
+        Unloaded += (_, _) => Services.Current.SettingsLoaded -= OnSettingsLoaded;
     }
+
+    private void OnSettingsLoaded() => DispatcherQueue.TryEnqueue(UpdateOffState);
 
     private static void Label(Button b, string key)
     {
@@ -66,6 +69,10 @@ public sealed partial class ChatView : UserControl
 
     public static string SourceHeader(string app, string site) =>
         string.IsNullOrEmpty(site) ? CaptureItem.AppName(app) : site;
+
+    /// <summary>Accessible name of a source's share check box: which capture it includes.</summary>
+    public static string ApprovalItemName(string app, string site, DateTimeOffset ts) =>
+        Loc.Format("Chat_ApprovalInclude", SourceHeader(app, site), FormatLongTime(ts));
 
     public static string FormatShortTime(DateTimeOffset ts) =>
         ts.ToLocalTime().ToString("t", CultureInfo.CurrentCulture);
@@ -106,7 +113,8 @@ public sealed partial class ChatView : UserControl
         if (hasError)
         {
             ErrorBar.Title = Loc.Get(ChatViewModel.ErrorTitleKey(ViewModel.ErrorCode));
-            var msg = ViewModel.ErrorText ?? "";
+            // lock and stop events carry fixed English text from the agent; show the translated message instead
+            var msg = ChatViewModel.ErrorMessageKey(ViewModel.ErrorCode) is { } own ? Loc.Get(own) : ViewModel.ErrorText ?? "";
             if (ViewModel.RetryAt is { } r)
                 msg += " " + Loc.Format("Chat_RetryAt", r.ToLocalTime().ToString("t", CultureInfo.CurrentCulture));
             ErrorBar.Message = msg;
@@ -190,16 +198,18 @@ public sealed partial class ChatView : UserControl
     {
         _cts?.Cancel();
         var cts = _cts = new CancellationTokenSource();
+        var gen = ViewModel.Generation;   // a Reset (lock, launcher hidden, page left) drops whatever this stream still sends
         UpdateBindings();
         AgentResult res = default;
         bool got = false;
         try
         {
             await using var run = Services.Current.CreateRunClient();
-            res = await AgentApi.ChatStreamAsync(run, line, ev => DispatcherQueue.TryEnqueue(() => OnEvent(ev)), cts.Token);
+            res = await AgentApi.ChatStreamAsync(run, line, ev => DispatcherQueue.TryEnqueue(() => OnEvent(gen, ev)), cts.Token);
             got = true;
         }
         catch (OperationCanceledException) { }
+        if (gen != ViewModel.Generation) { UpdateBindings(); return; }
         if (cts.IsCancellationRequested || !got)
         {
             ViewModel.Stopped();
@@ -208,16 +218,18 @@ public sealed partial class ChatView : UserControl
         {
             var msg = Loc.Text(SearchViewModel.ServerError(res.Error));
             if (string.IsNullOrWhiteSpace(msg)) msg = res.Error ?? Loc.Get("Chat_ErrGeneric");
-            OnEvent(new ChatEvent("error", Code: "generic", Text: msg));
+            OnEvent(gen, new ChatEvent("error", Code: res.Kind == AgentErrorKind.Locked ? "locked" : "generic", Text: msg));
         }
         else _ = RefreshStatusAsync();
         UpdateBindings();
     }
 
-    private void OnEvent(ChatEvent e)
+    private void OnEvent(long gen, ChatEvent e)
     {
-        ViewModel.Handle(e);
+        if (!ViewModel.Handle(gen, e)) return;
         if (e.Type == "error" && InputBox.Text.Length == 0 && ViewModel.LastQuestion is { } q) InputBox.Text = q;
+        // The run connection does not report to Services; fetch the status so the window locks like for any locked reply.
+        if (e.Type == "error" && ChatViewModel.IsLockCode(e.Code)) _ = Services.Current.RefreshStatusAsync();
         UpdateBindings();
         ScrollToBottom();
         if (e.Type is "done" or "approval") TurnCompleted?.Invoke();

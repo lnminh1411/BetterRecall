@@ -30,6 +30,9 @@ internal sealed class WorkerConnection : IAsyncDisposable
     private readonly Task _reader;
     private long _nextId;
     private long _lastActivityTicks = Environment.TickCount64;
+    private long _lastReplyTicks = Environment.TickCount64;
+    private int _consecutiveTimeouts;
+    private int _longOps;
     private int _closed;
 
     /// <summary>Error (null on clean end of stream) and the number of requests still pending at close.</summary>
@@ -44,6 +47,19 @@ internal sealed class WorkerConnection : IAsyncDisposable
     public int Pending => _pending.Count;
     public bool IsClosed => Volatile.Read(ref _closed) != 0;
     public long IdleMs => Environment.TickCount64 - Interlocked.Read(ref _lastActivityTicks);
+    /// <summary>Time since the worker last sent any frame (sends do not count, unlike IdleMs).</summary>
+    public long NoReplyMs => Environment.TickCount64 - Interlocked.Read(ref _lastReplyTicks);
+    /// <summary>Requests whose caller gave up before the reply, since the last frame from the worker.</summary>
+    public int ConsecutiveTimeouts => Volatile.Read(ref _consecutiveTimeouts);
+    /// <summary>A request that may legitimately run for minutes (bench) is in flight: replies to the others wait for it.</summary>
+    public bool LongOpPending => Volatile.Read(ref _longOps) > 0;
+    /// <summary>Set by the supervisor when it kills this worker for not answering; the failure is already counted.</summary>
+    public bool Recycled { get; set; }
+
+    /// <summary>The supervisor sent shutdown: the worker may close the pipe before it answers, which is not a crash.</summary>
+    public bool ShuttingDown { get; set; }
+
+    private static bool IsLongOp(string op) => op is "bench" or "hello";
 
     public async Task<WorkerReply> SendAsync(WorkerRequest request, ReadOnlyMemory<byte> payload, CancellationToken ct)
     {
@@ -53,6 +69,14 @@ internal sealed class WorkerConnection : IAsyncDisposable
         var tcs = new TaskCompletionSource<WorkerReply>(TaskCreationOptions.RunContinuationsAsynchronously);
         _pending[id] = tcs;
         Touch();
+        bool longOp = IsLongOp(request.Op);
+        if (longOp) Interlocked.Increment(ref _longOps);
+        try { return await SendCoreAsync(id, tcs, req, payload, ct).ConfigureAwait(false); }
+        finally { if (longOp) Interlocked.Decrement(ref _longOps); }
+    }
+
+    private async Task<WorkerReply> SendCoreAsync(long id, TaskCompletionSource<WorkerReply> tcs, WorkerRequest req, ReadOnlyMemory<byte> payload, CancellationToken ct)
+    {
         bool writing = false;
         try
         {
@@ -75,7 +99,11 @@ internal sealed class WorkerConnection : IAsyncDisposable
         }
         using var reg = ct.Register(() =>
         {
-            if (_pending.TryRemove(id, out var t)) t.TrySetCanceled(ct);
+            if (_pending.TryRemove(id, out var t))
+            {
+                Interlocked.Increment(ref _consecutiveTimeouts);
+                t.TrySetCanceled(ct);
+            }
         });
         var reply = await tcs.Task.ConfigureAwait(false);
         Touch();
@@ -99,6 +127,8 @@ internal sealed class WorkerConnection : IAsyncDisposable
                 catch (JsonException) { throw new IOException("Bad worker frame header."); }
                 if (header is null) throw new IOException("Empty worker frame header.");
                 Touch();
+                Interlocked.Exchange(ref _lastReplyTicks, Environment.TickCount64);
+                Interlocked.Exchange(ref _consecutiveTimeouts, 0);   // any frame, late replies to cancelled requests too: it is alive
                 if (_pending.TryRemove(header.Id, out var tcs)) tcs.TrySetResult(new WorkerReply(header, payload));
             }
         }

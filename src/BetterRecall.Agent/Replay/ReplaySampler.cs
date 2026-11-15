@@ -7,11 +7,13 @@ namespace BetterRecall.Agent.Replay;
 /// <summary>
 /// RAM-only ring of encoded frames taken every replay.sampleSeconds while the replay buffer runs, so a saved replay can be
 /// searched (capture kind replay) without decoding the video. Samples come from the keyframe grabs: same guardrails, same
-/// downscale, same title filter. Samples older than the replay window are zeroed and dropped; panic and lock clear all.
+/// downscale, same title filter. Samples older than the replay window are zeroed and dropped; panic, lock and a purge that
+/// reaches the replay window clear all.
 /// </summary>
 internal sealed class ReplaySampler
 {
-    internal sealed record Sample(DateTimeOffset Ts, int Monitor, string App, string Title, string Site, int Width, int Height, byte[] Bytes, string Mime);
+    /// <summary>Grabbed: when the pixels were taken, set when Take re-stamps a carry-in sample to the clip start.</summary>
+    internal sealed record Sample(DateTimeOffset Ts, int Monitor, string App, string Title, string Site, int Width, int Height, byte[] Bytes, string Mime, DateTimeOffset? Grabbed = null);
 
     private readonly object _gate = new();
     private readonly List<Sample> _ring = [];
@@ -70,7 +72,8 @@ internal sealed class ReplaySampler
                 bool early = list.Any(s => s.Monitor == mon && s.Ts < start + TimeSpan.FromSeconds(sampleSeconds));
                 if (early) continue;
                 var before = _ring.Where(s => s.Monitor == mon && s.Ts < start).MaxBy(s => s.Ts);
-                if (before is not null) list.Add(before with { Ts = start });
+                // Re-stamped to the clip start; the grab time goes along so the store's purge fence checks it (N4).
+                if (before is not null) list.Add(before with { Ts = start, Grabbed = before.Grabbed ?? before.Ts });
             }
             return list.OrderBy(s => s.Ts).ThenBy(s => s.Monitor).Select(s => s with { Bytes = s.Bytes.ToArray() }).ToList();
         }
@@ -89,5 +92,5 @@ internal sealed class ReplaySampler
     /// <summary>Frames for the store: offset from the clip start, clamped to the clip.</summary>
     public static IEnumerable<NewReplayFrame> ToFrames(string replayId, DateTimeOffset start, int durationMs, IEnumerable<Sample> samples) =>
         samples.Select(s => new NewReplayFrame(s.Ts, replayId, (int)Math.Clamp((s.Ts - start).TotalMilliseconds, 0, Math.Max(0, durationMs)),
-            s.App, s.Title, s.Monitor, s.Width, s.Height, s.Bytes, s.Mime, s.Site));
+            s.App, s.Title, s.Monitor, s.Width, s.Height, s.Bytes, s.Mime, s.Site, s.Grabbed));
 }

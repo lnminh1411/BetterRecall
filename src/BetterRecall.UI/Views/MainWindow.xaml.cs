@@ -21,6 +21,12 @@ public sealed partial class MainWindow : Window
 {
     private readonly nint _hwnd;
     private string _page = "";
+    private Type? _pageType;
+    private bool _dropped;      // the page was dropped for a lock: it is created again after the unlock
+    private bool _skipReload;   // ...and a page created that way loads by itself; the Unlocked event must not load it twice
+
+    /// <summary>Smallest window the pages are laid out for (the 640 x 480 checks).</summary>
+    private const int MinWidthDip = 640, MinHeightDip = 480;
 
     public MainWindow()
     {
@@ -35,12 +41,35 @@ public sealed partial class MainWindow : Window
         WindowHelpers.ApplyTheme(this);   // caption button colours need ExtendsContentIntoTitleBar set first
         AppWindow.Closing += (_, e) => { e.Cancel = true; HideMain(); };
         WindowHelpers.CenterOnCursorMonitor(AppWindow, 1200, 800, _hwnd);
+        if (AppWindow.Presenter is OverlappedPresenter op)
+        {
+            double scale = Math.Max(1, Win32.GetDpiForWindow(_hwnd) / 96.0);   // the presenter takes physical pixels
+            op.PreferredMinimumWidth = (int)(MinWidthDip * scale);
+            op.PreferredMinimumHeight = (int)(MinHeightDip * scale);
+        }
+        Nav.Loaded += (_, _) =>
+        {
+            // The built-in settings item shows the WinUI text in the OS language; use the app's string.
+            if (Nav.SettingsItem is NavigationViewItem si)
+            {
+                var text = Loc.Get("Nav_Settings/Content");
+                si.Content = text;
+                Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(si, text);
+                ToolTipService.SetToolTip(si, text);
+            }
+        };
 
         var s = Services.Current;
         s.StatusChanged += UpdateStatus;
         s.LockedChanged += UpdateLock;
         s.ConnectionChanged += UpdateOffline;
-        s.Unlocked += () => (ContentFrame.Content as IDataPage)?.Reload();
+        s.ConnectionChanged += UpdateStatus;   // pause and lock need a connection
+        s.Unlocked += () =>
+        {
+            if (_skipReload) { _skipReload = false; return; }
+            (ContentFrame.Content as IDataPage)?.Reload();
+        };
+        s.Reconnected += () => { if (!s.Locked) (ContentFrame.Content as IDataPage)?.Reload(); };
         Unlock.UnlockedOk += UpdateLock;
         UpdateStatus();
         UpdateOffline();
@@ -58,10 +87,26 @@ public sealed partial class MainWindow : Window
     private void HideMain()
     {
         AppWindow.Hide();
-        ContentFrame.Content = null;   // drop page images from memory
-        ContentFrame.BackStack.Clear();
+        DropContent();   // drop page images from memory
         _page = "";
+        _pageType = null;
+        _dropped = false;
     }
+
+    private void DropContent()
+    {
+        ContentFrame.Content = null;
+        ContentFrame.BackStack.Clear();
+    }
+
+    /// <summary>Data pages that show captured data: on lock they are dropped (their data leaves memory) and created again
+    /// after the unlock. The benchmark and danger zone show none and are only hidden, so a running benchmark goes on.</summary>
+    private static bool DropsOnLock(Type? type) =>
+        type is not null && typeof(IDataPage).IsAssignableFrom(type)
+        && !(type == typeof(BenchPage) || type == typeof(DangerZonePage));
+
+    private void NavigateFrame(Type type, string page) =>
+        ContentFrame.Navigate(type, page.Contains(':') ? page.Split(':', 2)[1] : null, new SuppressNavigationTransitionInfo());
 
     private void Navigate(string page)
     {
@@ -83,9 +128,12 @@ public sealed partial class MainWindow : Window
             _ => null,
         };
         if (type is null) { type = typeof(HomePage); page = "home"; }
+        _pageType = type;
         bool consent = type == typeof(ConsentPage);
         Nav.IsPaneVisible = !consent;
-        StatusBar.Visibility = type == typeof(HomePage) ? Visibility.Collapsed : Visibility.Visible;   // home shows the same state and buttons
+        // home shows the same state and buttons; first-run consent comes before pause, lock and search
+        StatusBar.Visibility = type == typeof(HomePage) || consent ? Visibility.Collapsed : Visibility.Visible;
+        ActionBar.IsOpen = false;
         // Settings is its own page with a group list; give it the room by folding the main pane to icons.
         if (key == "settings") Nav.IsPaneOpen = false;
         else if (Nav.DisplayMode == NavigationViewDisplayMode.Expanded) Nav.IsPaneOpen = true;
@@ -94,9 +142,18 @@ public sealed partial class MainWindow : Window
             shell.Show(group);
             _page = page;
         }
+        else if (Services.Current.Locked && DropsOnLock(type))
+        {
+            // Locked: the data page is not created (nothing to load, nothing to reach behind the unlock panel); the
+            // unlock creates it.
+            DropContent();
+            _dropped = true;
+            _page = page;
+        }
         else if (page != _page || ContentFrame.Content is null)
         {
-            ContentFrame.Navigate(type, page.Contains(':') ? page.Split(':', 2)[1] : null, new SuppressNavigationTransitionInfo());
+            NavigateFrame(type, page);
+            _dropped = false;
             _page = page;
         }
         SelectNavItem(page);
@@ -114,7 +171,12 @@ public sealed partial class MainWindow : Window
     private void Nav_DisplayModeChanged(NavigationView sender, NavigationViewDisplayModeChangedEventArgs args)
     {
         if (args.DisplayMode == NavigationViewDisplayMode.Expanded) sender.IsPaneOpen = !_page.StartsWith("settings", StringComparison.Ordinal);
+        // Minimal (narrow window): the menu button floats over the page's top-left corner; move the page past it.
+        ContentHost.Margin = args.DisplayMode == NavigationViewDisplayMode.Minimal ? new Thickness(MinimalIndent, 0, 0, 0) : new Thickness(0);
     }
+
+    /// <summary>Menu button width (40) plus its margin, less the 24 px page padding, plus a gap.</summary>
+    private const double MinimalIndent = 28;
 
     private void Nav_ItemInvoked(NavigationView sender, NavigationViewItemInvokedEventArgs args)
     {
@@ -122,15 +184,35 @@ public sealed partial class MainWindow : Window
         else if (args.InvokedItemContainer?.Tag is string tag) Navigate(tag);
     }
 
-    /// <summary>The lock screen covers pages that show captured data. Settings stay reachable.</summary>
+    /// <summary>
+    /// The lock screen replaces pages that show captured data. The page under it is dropped (timeline, chat, replays,
+    /// audit: their decrypted data leaves memory) or, for the benchmark and danger zone, collapsed, so neither Tab nor
+    /// UI Automation reaches anything behind the panel. The unlock creates the dropped page again. Settings stay reachable.
+    /// </summary>
     private void UpdateLock()
     {
-        bool dataPage = ContentFrame.Content is IDataPage;
-        bool show = Services.Current.Locked && dataPage;
+        var s = Services.Current;
+        bool dataPage = _pageType is not null && typeof(IDataPage).IsAssignableFrom(_pageType);
+        bool show = s.Locked && dataPage;
         bool was = Unlock.Visibility == Visibility.Visible;
+        if (s.Locked) _skipReload = false;
+        if (show && DropsOnLock(_pageType) && ContentFrame.Content is not null)
+        {
+            DropContent();
+            _dropped = true;
+        }
+        if (s.Locked) s.Thumbs.Clear();
+        ContentFrame.Visibility = show ? Visibility.Collapsed : Visibility.Visible;
         Unlock.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
         if (show && !was) Unlock.Refresh();
-        LockButton.Content = Loc.Get(Services.Current.Locked ? "Main_Unlock" : "Main_Lock");
+        if (!s.Locked && _dropped && _pageType is not null && AppWindow.IsVisible)
+        {
+            _dropped = false;
+            _skipReload = true;   // the new page loads on Loaded
+            NavigateFrame(_pageType, _page);
+        }
+        LockButton.Content = Loc.Get(s.Locked ? "Main_Unlock" : "Main_Lock");
+        UpdateStatus();   // no capture counts while locked
     }
 
     private void UpdateOffline()
@@ -147,12 +229,42 @@ public sealed partial class MainWindow : Window
     private void UpdateStatus()
     {
         var st = Services.Current.Status;
-        StatusLine.Text = st is null ? "" : string.Join("  ·  ", StatusText.Describe(st, DateTimeOffset.UtcNow).Select(Loc.Text));
-        bool paused = st?.Paused == true && st.PauseReason is "user" or "ipc";
-        PauseButton.Content = Loc.Get(paused ? "Main_Resume" : "Main_Pause");
-        PauseButton.IsEnabled = st is not null && (st.PauseReason is null or "user" or "ipc");
+        var now = DateTimeOffset.UtcNow;
+        bool locked = Services.Current.Locked;   // counts stay hidden while locked (sweep 2 D37)
+        var state = st is null ? "" : string.Join("  ·  ", PauseControl.StateParts(st, now, locked).Select(Loc.Text));
+        if (StateLine.Text != state) StateLine.Text = state;   // the live region speaks only when this changes
+        var detail = st is null ? "" : string.Join("  ·  ", PauseControl.DetailParts(st, now, locked).Select(Loc.Text));
+        StatusLine.Text = detail.Length == 0 ? "" : "  ·  " + detail;
+        bool connected = Services.Current.Connection is not (AgentErrorKind.NotRunning or AgentErrorKind.NotTrusted);
+        PauseButton.Content = Loc.Get(PauseControl.LabelKey(st));
+        PauseButton.IsEnabled = PauseControl.Enabled(st, connected);
         LockButton.Content = Loc.Get(Services.Current.Locked ? "Main_Unlock" : "Main_Lock");
+        LockButton.IsEnabled = connected;
         UpdateStorageBar(st);
+        UpdateStoreBar(st);
+    }
+
+    private string? _storeBarReason;
+
+    /// <summary>Banner while the store cannot open: keylost points at purge all in Danger zone, storeerror says it retries.</summary>
+    private void UpdateStoreBar(AgentStatus? st)
+    {
+        var reason = st?.PauseReason is "keylost" or "storeerror" ? st.PauseReason : null;
+        if (reason == _storeBarReason) return;
+        _storeBarReason = reason;
+        if (reason is null) { StoreBar.IsOpen = false; return; }
+        bool lost = reason == "keylost";
+        StoreBar.Severity = lost ? InfoBarSeverity.Error : InfoBarSeverity.Warning;
+        StoreBar.Title = Loc.Get(lost ? "StoreBar_KeyLostTitle" : "StoreBar_ErrorTitle");
+        StoreBar.Message = Loc.Get(lost ? "StoreBar_KeyLostMessage" : "StoreBar_ErrorMessage");
+        if (lost)
+        {
+            var b = new Button { Content = Loc.Get("StoreBar_OpenDanger") };
+            b.Click += (_, _) => ShowPage("danger");
+            StoreBar.ActionButton = b;
+        }
+        else StoreBar.ActionButton = null;
+        StoreBar.IsOpen = true;
     }
 
     private bool _storageBarClosed;
@@ -182,9 +294,18 @@ public sealed partial class MainWindow : Window
     private async void Pause_Click(object sender, RoutedEventArgs e)
     {
         var s = Services.Current;
-        bool paused = s.Status?.Paused == true;
-        var r = paused ? await s.Api.ResumeAsync() : await s.Api.PauseAsync();
+        var r = PauseControl.UserPaused(s.Status) ? await s.Api.ResumeAsync() : await s.Api.PauseAsync();
+        ShowActionResult(r.Ok, r.Kind, r.Error);
         if (r.Ok) await s.RefreshStatusAsync();
+    }
+
+    /// <summary>Pause and lock replies: an error shows in a bar instead of being dropped.</summary>
+    private void ShowActionResult(bool ok, AgentErrorKind kind, string? error)
+    {
+        if (ok) { ActionBar.IsOpen = false; return; }
+        ActionBar.Severity = WindowHelpers.Severity(kind);
+        ActionBar.Message = Loc.Error(kind, error);
+        ActionBar.IsOpen = true;
     }
 
     /// <summary>Shows the unlock panel over the current page (lock buttons here and on the home page).</summary>
@@ -198,7 +319,9 @@ public sealed partial class MainWindow : Window
     {
         var s = Services.Current;
         if (s.Locked) { ShowUnlock(); return; }
-        if ((await s.Api.LockAsync()).Ok) await s.RefreshStatusAsync();
+        var r = await s.Api.LockAsync();
+        ShowActionResult(r.Ok, r.Kind, r.Error);
+        if (r.Ok) await s.RefreshStatusAsync();
     }
 
     private void Search_Click(object sender, RoutedEventArgs e) => App.Current.ShowLauncher();

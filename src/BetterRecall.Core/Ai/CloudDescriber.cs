@@ -56,8 +56,10 @@ public sealed class CloudDescriber(HttpMessageHandler? handler = null)
         var model = AiDefaults.EffectiveModel(ai);
         using var req = BuildRequest(provider, AiDefaults.EffectiveEndpoint(ai), model, apiKey, image, Prompt);
         var sw = Stopwatch.StartNew();
-        using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseContentRead, ct).ConfigureAwait(false);
-        var body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+        using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+        // Capped like the chat providers (B7): a hostile or broken endpoint cannot make the agent buffer without limit.
+        var body = await ProviderHttp.ReadCappedAsync(resp.Content,
+            resp.IsSuccessStatusCode ? ProviderHttp.MaxBufferedBytes : ProviderHttp.MaxErrorBodyBytes, ct).ConfigureAwait(false);
         Log.Info($"cloud describe: {provider} {model}, {image.Bytes.Length / 1024} KiB sent, HTTP {(int)resp.StatusCode}, {sw.ElapsedMilliseconds} ms");
         if (!resp.IsSuccessStatusCode)
         {

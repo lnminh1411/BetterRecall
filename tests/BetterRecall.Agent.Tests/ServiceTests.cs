@@ -57,9 +57,13 @@ internal sealed class FakeWorkerLauncher : IWorkerLauncher
     public int Starts;
     public string? LastPipe;
     public Func<WorkerRequest, byte[], (WorkerResponse, byte[])?>? Handler;
+    /// <summary>Requests the fake reads but never answers (a hung worker).</summary>
+    public Func<WorkerRequest, bool>? NoReply;
     private Task? _serve;
     private CancellationTokenSource? _cts;
     public bool CrashOnNext;
+    public Func<WorkerRequest, bool>? CrashWhen;
+    public int Kills;
 
     public int Start(string pipeName, string home)
     {
@@ -80,7 +84,9 @@ internal sealed class FakeWorkerLauncher : IWorkerLauncher
             if (frame is null) return;
             var req = JsonSerializer.Deserialize(frame.Value.Header, ContractsJson.Default.WorkerRequest)!;
             if (CrashOnNext) { CrashOnNext = false; return; } // drop the pipe mid-request
+            if (CrashWhen?.Invoke(req) == true) return;        // crash on every such request (poison job)
             if (req.Op == "shutdown") return;
+            if (NoReply?.Invoke(req) == true) continue;
             var custom = Handler?.Invoke(req, frame.Value.Payload);
             var (resp, payload) = custom ?? Default(req, frame.Value.Payload);
             await BinaryFrame.WriteAsync(client, JsonSerializer.SerializeToUtf8Bytes(resp, ContractsJson.Default.WorkerResponse), payload, ct);
@@ -97,7 +103,7 @@ internal sealed class FakeWorkerLauncher : IWorkerLauncher
         _ => (new WorkerResponse(req.Id, false, Error: "Bad request."), []),
     };
 
-    public void Kill(int pid) => _cts?.Cancel();
+    public void Kill(int pid) { Kills++; _cts?.Cancel(); }
     public bool HasExited(int pid) => _serve is null || _serve.IsCompleted;
 }
 
@@ -168,6 +174,92 @@ public class WorkerProtocolTests
         var ex = await Assert.ThrowsAsync<WorkerReplyException>(() => new WorkerClient(sup).BenchAsync(CancellationToken.None));
         Assert.Equal("Model not installed: embeddinggemma2.", ex.Message);
     }
+
+    /// <summary>A2/D28: a caller's short timeout (keyframe OCR) ends only its own wait. The slow hello (first-run device
+    /// benchmark) goes on, and the worker it started serves the next request: no kill, no second start, no failure.</summary>
+    [Fact]
+    public async Task Caller_timeout_does_not_cancel_a_slow_worker_start()
+    {
+        var launcher = new FakeWorkerLauncher
+        {
+            Handler = (req, _) => { if (req.Op == "hello") Thread.Sleep(1500); return null; },
+        };
+        await using var sup = new WorkerSupervisor(launcher, "x", () => 120);
+        var client = new WorkerClient(sup);
+        using (var cts = new CancellationTokenSource(200))
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.EmbedTextAsync("abc", "query", cts.Token));
+        using (var cts = new CancellationTokenSource(200))
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.EmbedTextAsync("abc", "query", cts.Token));
+        var v = await client.EmbedTextAsync("abcd", "query", CancellationToken.None);   // joins the start already running
+        Assert.Equal(4f, v[0]);
+        Assert.Equal(1, launcher.Starts);
+        Assert.Equal(0, launcher.Kills);
+        Assert.Equal(0, sup.Failures);
+    }
+
+    /// <summary>C-checks-A S1: a worker that reads requests but never answers is recycled once callers keep timing out
+    /// with nothing coming back, even though new requests keep arriving; the restart goes through the backoff.</summary>
+    [Fact]
+    public async Task Hung_worker_is_recycled_after_consecutive_timeouts()
+    {
+        bool hung = true;
+        var launcher = new FakeWorkerLauncher { NoReply = req => hung && req.Op == "embed_text" };
+        await using var sup = new WorkerSupervisor(launcher, "x", () => 120) { UnresponsiveTimeouts = 3, UnresponsiveAfter = TimeSpan.FromMilliseconds(300) };
+        var client = new WorkerClient(sup);
+        await client.PrewarmAsync(CancellationToken.None);
+        for (int i = 0; i < 2; i++)
+        {
+            using var cts = new CancellationTokenSource(100);
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.EmbedTextAsync("x", "query", cts.Token));
+        }
+        await Task.Delay(350);
+        sup.CheckNow();
+        Assert.True(sup.IsRunning);   // two timeouts: not yet
+        using (var cts = new CancellationTokenSource(100))
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.EmbedTextAsync("x", "query", cts.Token));
+        sup.CheckNow();
+        await Task.Delay(100);
+        Assert.Equal(1, sup.Recycled);
+        Assert.False(sup.IsRunning);
+        Assert.Equal(1, sup.Failures);
+        await Assert.ThrowsAsync<WorkerException>(() => client.EmbedTextAsync("x", "query", CancellationToken.None));   // backoff
+        hung = false;
+        await Task.Delay(1100);
+        Assert.Equal(3f, (await client.EmbedTextAsync("abc", "query", CancellationToken.None))[0]);
+        Assert.Equal(2, launcher.Starts);
+        Assert.Equal(0, sup.Failures);
+    }
+
+    /// <summary>Cancelled requests whose replies still arrive (a healthy worker, impatient callers) are not a hang.</summary>
+    [Fact]
+    public async Task Late_replies_keep_a_slow_worker_alive()
+    {
+        var launcher = new FakeWorkerLauncher
+        {
+            Handler = (req, _) => { if (req.Op == "embed_text") Thread.Sleep(150); return null; },
+        };
+        await using var sup = new WorkerSupervisor(launcher, "x", () => 120) { UnresponsiveTimeouts = 1, UnresponsiveAfter = TimeSpan.Zero };
+        var client = new WorkerClient(sup);
+        await client.PrewarmAsync(CancellationToken.None);
+        for (int i = 0; i < 3; i++)
+        {
+            using var cts = new CancellationTokenSource(30);
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.EmbedTextAsync("x", "query", cts.Token));
+            await Task.Delay(300);   // the reply comes back late
+            sup.CheckNow();
+            Assert.True(sup.IsRunning);
+        }
+        Assert.Equal(0, sup.Recycled);
+        Assert.Equal(1, launcher.Starts);
+    }
+
+    [Theory]
+    [InlineData(3, 100_000, false, true)]
+    [InlineData(2, 100_000, false, false)]   // too few timeouts
+    [InlineData(3, 10_000, false, false)]    // a reply came recently
+    [InlineData(5, 900_000, true, false)]    // bench in flight: the silence is expected
+    public void Unresponsive_rule(int timeouts, long noReplyMs, bool longOp, bool expected)
+        => Assert.Equal(expected, WorkerSupervisor.IsUnresponsive(timeouts, noReplyMs, longOp, 3, 90_000));
 
     [Fact]
     public void Pipe_security_denies_network_and_is_protected()

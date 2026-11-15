@@ -162,6 +162,7 @@ public sealed class SearchViewModel : ObservableObject
     private LocalizedText _message = new("Search_Hint");
     private int _selectedIndex = -1;
     private long _seq;
+    private long _sideSeq;   // history and facets loads; DropAll bumps it so a late answer is thrown away
 
     public SearchViewModel(AgentApi api, TimeProvider? clock = null, TimeSpan? debounce = null)
     {
@@ -198,13 +199,15 @@ public sealed class SearchViewModel : ObservableObject
 
     public void CancelPending() => _debouncer.Cancel();
 
-    public static (DateTimeOffset? From, DateTimeOffset? To) RangeBounds(TimeRange r, DateTimeOffset now)
+    /// <summary>Today starts at local midnight with the offset in force at midnight, not now (daylight-saving change days).</summary>
+    public static (DateTimeOffset? From, DateTimeOffset? To) RangeBounds(TimeRange r, DateTimeOffset now, TimeZoneInfo? zone = null)
     {
-        var local = now.ToLocalTime();
+        zone ??= TimeZoneInfo.Local;
+        var local = TimeZoneInfo.ConvertTime(now, zone);
         return r switch
         {
             TimeRange.LastHour => (now.AddHours(-1), null),
-            TimeRange.Today => (new DateTimeOffset(local.Date, local.Offset), null),
+            TimeRange.Today => (LocalTime.At(local.Date, zone), null),
             TimeRange.Last7Days => (now.AddDays(-7), null),
             TimeRange.Last30Days => (now.AddDays(-30), null),
             _ => (null, null),
@@ -260,6 +263,21 @@ public sealed class SearchViewModel : ObservableObject
         Results.Clear();
     }
 
+    /// <summary>Launcher hidden or locked: drops results, history and facets, and makes every search, history or facets
+    /// load still in flight discard its answer, so nothing comes back into memory after this.</summary>
+    public void DropAll()
+    {
+        _debouncer.Cancel();
+        Interlocked.Increment(ref _seq);
+        Interlocked.Increment(ref _sideSeq);
+        ClearResults();
+        History.Clear();
+        Facets = new FacetsReply([], []);
+        SelectedIndex = -1;
+        IsBusy = false;
+        Message = new LocalizedText("Search_Hint");
+    }
+
     /// <summary>Rebuilds the flat list from the visible part of each section.</summary>
     private void Flatten()
     {
@@ -295,15 +313,19 @@ public sealed class SearchViewModel : ObservableObject
     /// <summary>Top apps and sites for the current time range.</summary>
     public async Task LoadFacetsAsync(CancellationToken ct = default)
     {
+        var seq = Interlocked.Read(ref _sideSeq);
         var now = _clock.GetUtcNow();
         var (from, to) = RangeBounds(Range, now);
         var r = from is { } f ? await _api.FacetsAsync(f, to ?? now.AddMinutes(1), ct) : await _api.FacetsAsync(null, null, ct);
+        if (seq != Interlocked.Read(ref _sideSeq)) return;
         Facets = r.Ok ? r.Value! : new FacetsReply([], []);
     }
 
     public async Task LoadHistoryAsync(CancellationToken ct = default)
     {
+        var seq = Interlocked.Read(ref _sideSeq);
         var r = await _api.HistoryAsync(ct);
+        if (seq != Interlocked.Read(ref _sideSeq)) return;   // hidden or locked meanwhile
         History.Clear();
         if (r.Ok) foreach (var h in r.Value!) History.Add(h.Q);
     }
@@ -313,8 +335,9 @@ public sealed class SearchViewModel : ObservableObject
     {
         var q = Query.Trim();
         if (q.Length is 0 or > 1024) return;
+        var seq = Interlocked.Read(ref _sideSeq);
         var r = await _api.HistoryAddAsync(q, ct);
-        if (!r.Ok) return;
+        if (!r.Ok || seq != Interlocked.Read(ref _sideSeq)) return;
         History.Remove(q);
         History.Insert(0, q);
     }
@@ -344,6 +367,7 @@ public sealed class SearchViewModel : ObservableObject
         AgentErrorKind.NotRunning => new LocalizedText("Err_NotRunning"),
         AgentErrorKind.NotTrusted => new LocalizedText("Err_NotTrusted"),
         AgentErrorKind.Locked => new LocalizedText("Err_Locked"),
+        AgentErrorKind.NotOpen => new LocalizedText("Err_NotOpen"),
         AgentErrorKind.Protocol => new LocalizedText("Err_Protocol"),
         _ => ServerError(error),
     };
@@ -439,6 +463,7 @@ public sealed class TimelineViewModel(AgentApi api, TimeZoneInfo? zone = null) :
     private List<CaptureMeta> _all = [];
     private bool _busy;
     private LocalizedText _message = LocalizedText.Empty;
+    private long _seq;
 
     public DateOnly Day { get => _day; set => Set(ref _day, value); }
     public int? Hour { get => _hour; private set => Set(ref _hour, value); }
@@ -454,14 +479,19 @@ public sealed class TimelineViewModel(AgentApi api, TimeZoneInfo? zone = null) :
     {
         var start = day.ToDateTime(TimeOnly.MinValue, DateTimeKind.Unspecified);
         var end = start.AddDays(1);
-        return (new DateTimeOffset(start, _zone.GetUtcOffset(start)), new DateTimeOffset(end, _zone.GetUtcOffset(end)));
+        return (LocalTime.At(start, _zone), LocalTime.At(end, _zone));
     }
+
+    /// <summary>Captures the agent still has to index (status queue). An empty day with pending work says so.</summary>
+    public int Pending { get; set; }
 
     public async Task LoadAsync(CancellationToken ct = default)
     {
+        var seq = Interlocked.Increment(ref _seq);
         IsBusy = true;
         var (from, to) = DayBounds(Day);
         var r = await api.TimelineAsync(from, to, DayLimit, ct);
+        if (seq != Interlocked.Read(ref _seq)) return;   // a newer load or Clear owns the list
         IsBusy = false;
         if (!r.Ok)
         {
@@ -480,6 +510,17 @@ public sealed class TimelineViewModel(AgentApi api, TimeZoneInfo? zone = null) :
         HourCounts = counts;
         Raise(nameof(HourCounts));
         Apply();
+    }
+
+    /// <summary>Page left or locked: drops the day's captures; a load still in flight discards its answer.</summary>
+    public void Clear()
+    {
+        Interlocked.Increment(ref _seq);
+        _all = [];
+        HourCounts = new int[24];
+        Raise(nameof(HourCounts));
+        Items.Clear();
+        IsBusy = false;
     }
 
     public void SelectHour(int? hour)
@@ -503,17 +544,42 @@ public sealed class TimelineViewModel(AgentApi api, TimeZoneInfo? zone = null) :
             if (Hour is { } h && TimeZoneInfo.ConvertTime(m.Ts, _zone).Hour != h) continue;
             Items.Add(CaptureItem.From(m));
         }
-        Message = Items.Count == 0 ? new LocalizedText("Timeline_Empty")
+        Message = Items.Count == 0 ? (Pending > 0 ? new LocalizedText("Timeline_EmptyPending", Pending) : new LocalizedText("Timeline_Empty"))
             : Truncated ? new LocalizedText("Timeline_CountTruncated", Items.Count) : new LocalizedText("Timeline_Count", Items.Count);
     }
+}
+
+/// <summary>Pause button (home page and status bar). A user pause can be added or lifted under any automatic pause
+/// (fullscreen, battery, storage, lock), so the button only needs a connection and a status.</summary>
+public static class PauseControl
+{
+    /// <summary>A user or ipc pause is set. Agents older than the UserPaused field only report it as the top reason.</summary>
+    public static bool UserPaused(AgentStatus? st) =>
+        st is not null && (st.UserPaused || (st.Paused && st.PauseReason is "user" or "ipc"));
+
+    public static bool Enabled(AgentStatus? st, bool connected) => connected && st is not null;
+
+    /// <summary>Resource key of the button text: Resume while a user pause is set.</summary>
+    public static string LabelKey(AgentStatus? st) => UserPaused(st) ? "Main_Resume" : "Main_Pause";
+
+    /// <summary>The first two status parts: capture state and lock state. Only these are announced (live region);
+    /// queue and store counts change with every capture.</summary>
+    public static IReadOnlyList<LocalizedText> StateParts(AgentStatus st, DateTimeOffset now, bool locked = false) =>
+        [.. StatusText.Describe(st, now, locked).Take(2)];
+
+    /// <summary>The rest: audio, device and, only while unlocked, queue and store counts (sweep 2 D37).</summary>
+    public static IReadOnlyList<LocalizedText> DetailParts(AgentStatus st, DateTimeOffset now, bool locked = false) =>
+        [.. StatusText.Describe(st, now, locked).Skip(2)];
 }
 
 /// <summary>Formats AgentStatus into short translated parts for the status bar.</summary>
 public static class StatusText
 {
-    public static IReadOnlyList<LocalizedText> Describe(AgentStatus s, DateTimeOffset now)
+    /// <param name="locked">The UI's own lock state (a "Store is locked." answer can arrive before the next status).</param>
+    public static IReadOnlyList<LocalizedText> Describe(AgentStatus s, DateTimeOffset now, bool locked = false)
     {
         var parts = new List<LocalizedText>();
+        locked |= s.Locked;
         if (s.Paused)
         {
             var reason = string.IsNullOrEmpty(s.PauseReason) ? "user" : s.PauseReason;
@@ -523,12 +589,13 @@ public static class StatusText
         }
         else parts.Add(new LocalizedText(s.Capturing ? "Status_Capturing" : "Status_Idle"));
 
-        parts.Add(s.Locked ? new LocalizedText("Status_Locked")
+        parts.Add(locked ? new LocalizedText("Status_Locked")
             : s.UnlockedUntil is { } u ? new LocalizedText("Status_UnlockedUntil", u.ToLocalTime().ToString("t", CultureInfo.CurrentCulture))
             : new LocalizedText("Status_Unlocked"));
         if (s.Audio.System || s.Audio.Mic)
             parts.Add(new LocalizedText(s.Audio.System && s.Audio.Mic ? "Status_AudioBoth" : s.Audio.System ? "Status_AudioSystem" : "Status_AudioMic"));
         parts.Add(new LocalizedText("Status_Device", s.Device));
+        if (locked) return parts;   // how much was captured, and how fast, is shown only while unlocked
         if (s.Queue.Pending > 0) parts.Add(new LocalizedText("Status_Queue", s.Queue.Pending));
         parts.Add(new LocalizedText("Status_Store", s.Store.Rows, FormatBytes(s.Store.Bytes)));
         return parts;
@@ -599,6 +666,29 @@ public static class PurgeFlow
     /// <summary>Typed confirmation: trimmed, case-insensitive in the current culture.</summary>
     public static bool PhraseMatches(string? typed, string phrase) =>
         !string.IsNullOrWhiteSpace(typed) && string.Compare(typed.Trim(), phrase.Trim(), CultureInfo.CurrentCulture, CompareOptions.IgnoreCase) == 0;
+
+    /// <summary>
+    /// purge range / app from the Danger zone: preview count, confirm, then a fresh preview for the token (a token lives
+    /// 30 s and the dialog may stay open longer). When the fresh count is higher, confirm that count too (at most three
+    /// rounds). Null when the user cancelled; otherwise the preview error or the purge result.
+    /// </summary>
+    public static async Task<AgentResult<int>?> ConfirmFreshAsync(AgentApi api, Func<Task<AgentResult<PurgeConfirmReply>>> ask,
+        Func<int, Task<bool>> confirm, CancellationToken ct = default)
+    {
+        var first = await ask();
+        if (!first.Ok) return new AgentResult<int>(false, 0, first.Kind, first.Error);
+        int shown = first.Value!.Rows ?? 0;
+        for (int round = 0; round < 3; round++)
+        {
+            if (!await confirm(shown)) return null;
+            var fresh = await ask();
+            if (!fresh.Ok) return new AgentResult<int>(false, 0, fresh.Kind, fresh.Error);
+            int rows = fresh.Value!.Rows ?? 0;
+            if (rows <= shown) return await api.PurgeConfirmAsync(fresh.Value.Confirm, ct);
+            shown = rows;
+        }
+        return null;
+    }
 
     /// <summary>
     /// purge all: Windows Hello unlock (purge all needs an unlock in the last 60 s), then "purge all", then "purge confirm".

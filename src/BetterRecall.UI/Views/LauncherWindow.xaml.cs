@@ -147,8 +147,7 @@ public sealed partial class LauncherWindow : Window
         AskView.Stop();
         AskView.ViewModel.Reset();
         AskToggle.IsChecked = false;
-        _vm.ClearResults();
-        _vm.History.Clear();
+        _vm.DropAll();   // also makes a search, history or facets load still in flight discard its answer
         _detail.Clear();
         Services.Current.Thumbs.Clear();
     }
@@ -279,6 +278,7 @@ public sealed partial class LauncherWindow : Window
             if (IsShown) Unlock.Refresh();
         }
         UpdateEmpty();
+        UpdateStatus();   // no capture counts while locked
     }
 
     private void UpdateOffline()
@@ -295,7 +295,7 @@ public sealed partial class LauncherWindow : Window
     private void UpdateStatus()
     {
         var st = Services.Current.Status;
-        StatusLine.Text = st is null ? "" : string.Join("  ·  ", StatusText.Describe(st, DateTimeOffset.UtcNow).Select(Loc.Text));
+        StatusLine.Text = st is null ? "" : string.Join("  ·  ", StatusText.Describe(st, DateTimeOffset.UtcNow, Services.Current.Locked).Select(Loc.Text));
     }
 
     // ---------------- input ----------------
@@ -313,6 +313,7 @@ public sealed partial class LauncherWindow : Window
         else if ((e.Key == VirtualKey.F && IsCtrl()) || e.Key == VirtualKey.F3)
         {
             e.Handled = true;
+            if (Services.Current.Locked) return;   // the search box is behind the unlock panel
             SearchBox.Focus(FocusState.Keyboard);
             SearchBox.SelectAll();
         }
@@ -325,6 +326,7 @@ public sealed partial class LauncherWindow : Window
     {
         if (_ask) return;   // the box is a question while Ask is on; Enter sends it
         _vm.Query = SearchBox.Text;
+        if (Services.Current.Locked) return;   // no searches from behind the unlock panel
         _ = _vm.ScheduleAsync();
     }
 
@@ -470,6 +472,7 @@ public sealed partial class LauncherWindow : Window
     private MenuFlyout BuildMenu(CaptureItem item)
     {
         var m = new MenuFlyout();
+        WindowHelpers.Themed(m, Root);
         // The menu is a windowed popup: opening it deactivates the launcher, which must not hide it.
         m.Opening += (_, _) => _modal++;
         m.Closed += (_, _) => _modal--;
@@ -596,6 +599,10 @@ public sealed partial class LauncherWindow : Window
         }
         finally { _modal--; }
     }
+
+    /// <summary>A narrow launcher gives the results (or the Ask chat) more room: the preview column shrinks to 280 px.</summary>
+    private void Body_SizeChanged(object sender, SizeChangedEventArgs e) =>
+        DetailColumn.Width = new GridLength(e.NewSize.Width < 900 ? 280 : 380);
 
     private void OpenTimeline_Click(object sender, RoutedEventArgs e) => App.Current.ShowMain("timeline");
     private void OpenReplays_Click(object sender, RoutedEventArgs e) => App.Current.ShowMain("replays");

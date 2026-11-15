@@ -822,6 +822,7 @@ Error strings:
 | Unknown verb | `Unknown command '<x>'.` |
 | Feature off | `Control is off (config ipc.allowControl).`, `Purge is off (config ipc.allowPurge).`, `Thumbnails are off (config ipc.allowThumbnails).` |
 | Store locked | `Store is locked.` |
+| Store not open (key lost, storage error) | `Store is not open.` |
 | Bad arguments | `Usage: search <text> \| search <json>`, `Usage: get <id>`, `Usage: pause [seconds]`, `Usage: purge last <seconds> \| purge range <from> <to> \| purge app <name> \| purge confirm <token>`, `Usage: subscribe [captures]` |
 | Bad JSON | `Invalid JSON.` |
 | Field out of range | `Invalid <field>.` |

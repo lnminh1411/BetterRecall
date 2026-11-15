@@ -97,6 +97,8 @@ public sealed class ChatViewModel : ObservableObject
     public AiUsage? Usage { get => _usage; set => Set(ref _usage, value); }
     public bool CanSend => !Busy && !HasApproval;
     public string? LastQuestion { get; private set; }
+    /// <summary>Bumped by Reset and Load: events of a stream started before belong to a chat no longer shown.</summary>
+    public long Generation { get; private set; }
     private bool _turnOpen;   // a question is in flight: its bubbles go if the agent rolls the turn back
 
     public ChatViewModel()
@@ -209,8 +211,18 @@ public sealed class ChatViewModel : ObservableObject
         ApprovalNotice = null;
     }
 
+    /// <summary>Handles an event of the stream started at generation gen; false (ignored) when the chat was reset or
+    /// replaced since, so a late event cannot bring dropped messages back.</summary>
+    public bool Handle(long gen, ChatEvent e)
+    {
+        if (gen != Generation) return false;
+        Handle(e);
+        return true;
+    }
+
     public void Load(ChatDetail d)
     {
+        Generation++;
         ChatId = d.Chat.Id;
         Title = d.Chat.Title;
         Messages.Clear();
@@ -227,6 +239,7 @@ public sealed class ChatViewModel : ObservableObject
 
     public void Reset()
     {
+        Generation++;
         ChatId = null;
         Title = "";
         Messages.Clear();
@@ -266,8 +279,22 @@ public sealed class ChatViewModel : ObservableObject
         "timeout" => "Chat_ErrTimeout",
         "budget" => "Chat_ErrBudget",
         "refused" => "Chat_ErrRefused",
+        "locked" => "Chat_ErrLocked",
+        "stopped" => "Chat_ErrStopped",
         _ => "Chat_ErrGeneric",
     };
+
+    /// <summary>Codes whose agent text is fixed English (ChatService lock and stop events): the UI shows its own
+    /// translated message instead. Null keeps the agent's text (provider errors carry useful detail).</summary>
+    public static string? ErrorMessageKey(string? code) => (code?.ToLowerInvariant()) switch
+    {
+        "locked" => "Chat_ErrLockedBody",
+        "stopped" => "Chat_ErrStoppedBody",
+        _ => null,
+    };
+
+    /// <summary>The stream ended because the store locked: the window must lock like any other locked reply.</summary>
+    public static bool IsLockCode(string? code) => string.Equals(code, "locked", StringComparison.OrdinalIgnoreCase);
 
     public static (string Requests, string RequestLimit, string Tokens, string TokenLimit)? UsageParts(AiUsage? u)
     {

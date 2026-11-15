@@ -9,6 +9,8 @@ namespace BetterRecall.Agent.Capture;
 /// <summary>
 /// GPU scale and colour conversion with the D3D11 video processor (fixed-function, no shaders):
 /// BGRA source to BGRA (keyframes) or NV12 (replay) at the target size, plus a CPU-readable staging copy.
+/// rotationDegrees (clockwise, see OutputRotation) turns the source while scaling; srcW x srcH is the unrotated source
+/// and dstW x dstH the rotated target. Throws NotSupportedException when the video processor cannot rotate.
 /// </summary>
 internal sealed unsafe class VideoScaler : IDisposable
 {
@@ -25,7 +27,7 @@ internal sealed unsafe class VideoScaler : IDisposable
     public int Height { get; }
     public Format Format { get; }
 
-    public VideoScaler(GpuDevice dev, int srcW, int srcH, int dstW, int dstH, Format dstFormat, bool withStaging = true)
+    public VideoScaler(GpuDevice dev, int srcW, int srcH, int dstW, int dstH, Format dstFormat, bool withStaging = true, int rotationDegrees = 0)
     {
         _dev = dev;
         Width = dstW;
@@ -43,6 +45,11 @@ internal sealed unsafe class VideoScaler : IDisposable
             Usage = VideoUsage.PlaybackNormal,
         };
         dev.VideoDevice.CreateVideoProcessorEnumerator(ref content, out _enum).CheckError();
+        if (rotationDegrees != 0 && (_enum.VideoProcessorCaps.FeatureCaps & VideoProcessorFeatureCaps.Rotation) == 0)
+        {
+            _enum.Dispose();
+            throw new NotSupportedException("The video processor cannot rotate.");
+        }
         dev.VideoDevice.CreateVideoProcessor(_enum, 0, out _vp).CheckError();
 
         Output = dev.Device.CreateTexture2D(new Texture2DDescription
@@ -79,6 +86,7 @@ internal sealed unsafe class VideoScaler : IDisposable
         vc.VideoProcessorSetOutputColorSpace(_vp, outCs);
         vc.VideoProcessorSetStreamFrameFormat(_vp, 0, VideoFrameFormat.Progressive);
         vc.VideoProcessorSetStreamAutoProcessingMode(_vp, 0, false);
+        if (rotationDegrees != 0) vc.VideoProcessorSetStreamRotation(_vp, 0, true, OutputRotation.ToVideoProcessor(rotationDegrees));
         vc.VideoProcessorSetStreamSourceRect(_vp, 0, true, new Vortice.RawRect(0, 0, srcW, srcH));
         vc.VideoProcessorSetStreamDestRect(_vp, 0, true, new Vortice.RawRect(0, 0, dstW, dstH));
         vc.VideoProcessorSetOutputTargetRect(_vp, true, new Vortice.RawRect(0, 0, dstW, dstH));

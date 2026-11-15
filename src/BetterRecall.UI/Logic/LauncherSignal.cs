@@ -6,7 +6,7 @@ using System.Security.Principal;
 namespace BetterRecall.UI.Logic;
 
 /// <summary>
-/// Named auto-reset event (PipeNames.ShowLauncherEvent) the agent sets to show the launcher of the running UI,
+/// Named auto-reset event (PipeNames.ShowLauncherEventFor(home)) the agent sets to show the launcher of the running UI,
 /// instead of starting a second exe. The DACL grants only the current user, so other accounts cannot signal it.
 /// A background thread waits on it and calls onSignal (off the UI thread).
 /// </summary>

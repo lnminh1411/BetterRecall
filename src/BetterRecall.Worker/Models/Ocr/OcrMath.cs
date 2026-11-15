@@ -169,7 +169,9 @@ public static class OcrMath
 
     /// <summary>Character boundaries in image pixels (Text.Length + 1 values) from CTC steps: step t of the padded
     /// input covers [t, t+1) * inputWidth / steps; contentWidth of those pixels is the crop, scaled back to cropW and
-    /// moved by cropX. Inner boundaries sit between one character's last step and the next one's first.</summary>
+    /// moved by cropX. Inner boundaries sit between one character's last step and the next one's first. The outer cuts are
+    /// the detector box edges: a CTC peak fires inside its glyph, so a cut at the first step left the left part of a line's
+    /// first glyph outside a redaction box (C1).</summary>
     public static int[] Cuts(CtcResult r, int steps, int inputWidth, int contentWidth, int cropX, int cropW)
     {
         int n = r.Text.Length;
@@ -178,10 +180,10 @@ public static class OcrMath
         double step = (double)inputWidth / steps;
         double toCrop = (double)cropW / Math.Max(1, contentWidth);
         int Px(double inputX) => cropX + (int)Math.Round(Math.Clamp(inputX, 0, contentWidth) * toCrop);
-        cuts[0] = Px(r.StepStart[0] * step);
+        cuts[0] = cropX;
         for (int i = 1; i < n; i++)
             cuts[i] = Px((r.StepEnd[i - 1] + 1 + r.StepStart[i]) * step / 2);
-        cuts[n] = Px((r.StepEnd[n - 1] + 1) * step);
+        cuts[n] = cropX + cropW;
         for (int i = 1; i <= n; i++) if (cuts[i] < cuts[i - 1]) cuts[i] = cuts[i - 1];
         return cuts;
     }

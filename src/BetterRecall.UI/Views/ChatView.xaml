@@ -107,7 +107,8 @@
                                         <ColumnDefinition Width="Auto" />
                                         <ColumnDefinition Width="*" />
                                     </Grid.ColumnDefinitions>
-                                    <CheckBox IsChecked="{x:Bind Include, Mode=TwoWay}" VerticalAlignment="Center" />
+                                    <CheckBox IsChecked="{x:Bind Include, Mode=TwoWay}" VerticalAlignment="Center"
+                                              AutomationProperties.Name="{x:Bind views:ChatView.ApprovalItemName(App, Site, Ts)}" />
                                     <Image Grid.Column="1" Width="100" Height="60" Stretch="UniformToFill"
                                            Visibility="{x:Bind HasImage}" Loaded="ApprovalThumb_Loaded" />
                                     <StackPanel Grid.Column="2" Spacing="2" VerticalAlignment="Center">

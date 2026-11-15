@@ -87,7 +87,8 @@ public sealed class EncoderView(EncoderBench e)
     public string Cpu => E.Ok ? E.CpuPercent.ToString("0.#", CultureInfo.CurrentCulture) : "—";
     public string Mb => E.Ok ? E.WorkingSetMb.ToString(CultureInfo.CurrentCulture) : "—";
     public string Result => E.Ok ? Loc.Get("BenchPage_Ok") : (E.Error ?? "");
-    public Brush ResultBrush => (Brush)Application.Current.Resources[E.Ok ? "SystemFillColorSuccessBrush" : "SystemFillColorCriticalBrush"];
+    /// <summary>A style, not a brush read in code: style setters with ThemeResource follow ui.theme.</summary>
+    public Style ResultStyle => (Style)Application.Current.Resources[E.Ok ? "SuccessTextStyle" : "CriticalTextStyle"];
 
     public string AccessibleName =>
         string.Join(", ", E.Adapter, CodecLabel, E.Api, Layout, Size, Fps + " fps", P95, Result);

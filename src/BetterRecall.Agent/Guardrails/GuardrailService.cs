@@ -45,10 +45,40 @@ internal sealed class GuardrailService : IDisposable
         return Environment.TickCount64 - s.TakenAtMs <= maxAgeMs ? s : GuardSnapshot.Closed;
     }
 
-    /// <summary>Called from the WinEvent hook on the message thread.</summary>
-    public void OnForegroundEvent() => _wake.Set();
+    /// <summary>For keyframes: Current(), but only when its scan started after the current foreground window became
+    /// foreground. A scan can take a second or more (UI Automation badge probes); a keyframe taken on the previous
+    /// window's "allow" would store a denied window that was alt-tabbed to meanwhile. Two cheap calls, no scan.</summary>
+    public GuardSnapshot CurrentForKeyframe(long maxAgeMs = 2000)
+        => FreshForGrab(Current(maxAgeMs), Interlocked.Read(ref _fgEpoch), WindowInspector.ForegroundRoot());
 
-    public void Refresh() => _wake.Set();
+    internal static readonly GuardSnapshot ForegroundMoved = GuardSnapshot.Closed with { Decision = GuardDecision.Deny(GuardReason.ForegroundChanged) };
+
+    /// <summary>The snapshot when no foreground event arrived since its scan started and the foreground window is still
+    /// the one it scanned; else a deny snapshot. Pure.</summary>
+    internal static GuardSnapshot FreshForGrab(GuardSnapshot s, long fgEpochNow, nint foregroundNow)
+    {
+        if (ReferenceEquals(s, GuardSnapshot.Closed)) return s;
+        if (s.FgEpoch != fgEpochNow || (s.Foreground?.Hwnd ?? 0) != foregroundNow) return ForegroundMoved;
+        return s;
+    }
+
+    private long _fgEpoch;
+
+    /// <summary>Called from the WinEvent hook on the message thread.</summary>
+    public void OnForegroundEvent()
+    {
+        Interlocked.Increment(ref _fgEpoch);
+        Wake();
+    }
+
+    public void Refresh() => Wake();
+
+    /// <summary>Session events and foreground hooks can still arrive during shutdown (A22).</summary>
+    private void Wake()
+    {
+        if (_stop) return;
+        try { _wake.Set(); } catch (ObjectDisposedException) { }
+    }
 
     private void Run()
     {
@@ -69,10 +99,13 @@ internal sealed class GuardrailService : IDisposable
                         catch (Exception ex) { Log.Warn("UI Automation unavailable", ex); }
                     }
                     var t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+                    long epoch = Interlocked.Read(ref _fgEpoch);   // before the foreground is read: a change during the scan makes it stale
                     var fg = WindowInspector.Foreground();
                     // Private windows on any monitor (badge results are cached per window, so this probes new windows only).
-                    Func<WindowInfo, bool>? isPrivate = s.Privacy.BrowserBadgeDetection && badge is not null
-                        ? w => w.Title.Length > 0 && GuardrailPolicy.IsChromiumBrowser(w.ProcessName) && badge.Check(w.Hwnd) == BadgeResult.Private
+                    // A failed probe, or no UI Automation at all, hides the window too: fail closed, as for the foreground (A5).
+                    Func<nint, BadgeResult>? probe = badge is null ? null : badge.Check;
+                    Func<WindowInfo, bool>? isPrivate = s.Privacy.BrowserBadgeDetection
+                        ? w => GuardrailPolicy.HidesBrowserWindow(w, probe)
                         : null;
                     var scan = WindowInspector.Scan(s.Privacy, _installDir, _ownPid, _monitors(), isPrivate);
                     LastScanMs = System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds;
@@ -87,8 +120,8 @@ internal sealed class GuardrailService : IDisposable
                         site = badge.ReadSite(fg.Hwnd);
                     var decision = GuardrailPolicy.Evaluate(fg, s.Privacy, _sessionLocked(), scan.AnyAffinity, badgeResult);
                     var masks = scan.Masks;
-                    // A private browser window found through the badge is masked in the replay as well.
-                    if (badgeResult == BadgeResult.Private && fg is not null && WindowInspector.TryGetBounds(fg.Hwnd, out var fr))
+                    // A private browser window found through the badge, or one whose probe failed, is masked in the replay as well.
+                    if (GuardrailPolicy.BadgeHides(badgeResult) && fg is not null && WindowInspector.TryGetBounds(fg.Hwnd, out var fr))
                         masks = [.. masks, fr];
                     RECT[]? secrets = null;
                     if (s.Privacy.RedactPasswords && fg is not null && decision.Allow)
@@ -101,7 +134,7 @@ internal sealed class GuardrailService : IDisposable
                         secrets = passwords?.Find(fg.Hwnd);
                         LastPasswordMs = passwords?.LastMs ?? 0;
                     }
-                    Volatile.Write(ref _snapshot, new GuardSnapshot(Environment.TickCount64, fg, decision, badgeResult, scan.AnyAffinity, masks, scan.PerMonitor, site, secrets));
+                    Volatile.Write(ref _snapshot, new GuardSnapshot(Environment.TickCount64, fg, decision, badgeResult, scan.AnyAffinity, masks, scan.PerMonitor, site, secrets, epoch));
                     if (fg?.Hwnd != lastFg)
                     {
                         lastFg = fg?.Hwnd ?? 0;
@@ -109,7 +142,8 @@ internal sealed class GuardrailService : IDisposable
                     }
                 }
                 catch (Exception ex) { Log.Warn("guardrail scan", ex); }
-                _wake.WaitOne(500);
+                try { _wake.WaitOne(500); }
+                catch (ObjectDisposedException) { break; }   // disposed while a scan ran past Dispose's join (A22)
             }
         }
         finally
@@ -123,8 +157,10 @@ internal sealed class GuardrailService : IDisposable
     public void Dispose()
     {
         _stop = true;
-        _wake.Set();
-        _thread.Join(2000);
-        _wake.Dispose();
+        try { _wake.Set(); } catch (ObjectDisposedException) { return; }
+        // A scan stuck in a long UI Automation call outlives the join: leave the event to the finalizer then, so the
+        // thread's next wait does not throw on a disposed handle (A22).
+        bool ended = !_thread.IsAlive || _thread.Join(2000);
+        if (ended) _wake.Dispose();
     }
 }

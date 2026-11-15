@@ -12,7 +12,9 @@ namespace BetterRecall.Core.Ai;
 /// Cloud API key in keys\ai-key.bin: "BRA2" + DPAPI (CurrentUser) blob of UTF-8 "provider|endpoint\nkey". Never in
 /// settings.json, never returned on a pipe, never logged. The key is read only for the moment of a send, and only for the
 /// provider and endpoint it was entered for: changing ai.provider or ai.endpoint asks for the key again, so a key never
-/// goes to a host the user did not enter it for. "BRA1" files (0.2, no binding) are used with default endpoints only.
+/// goes to a host the user did not enter it for. "BRA1" files (0.2, no binding) do not say which provider the key was
+/// entered for, so one is used only with a default endpoint and only for the provider its format names (LegacyProvider:
+/// "sk-ant-" Anthropic, "AIza" Google, other "sk-" OpenAI); a key of any other shape must be entered again.
 /// </summary>
 public sealed class ApiKeyStore(string home)
 {
@@ -83,7 +85,12 @@ public sealed class ApiKeyStore(string home)
         {
             plain = Unprotect(file.AsSpan(4));
             var text = Encoding.UTF8.GetString(plain);
-            if (legacy) return text;
+            if (legacy)
+            {
+                if (LegacyProvider(text) == a.Provider) return text;
+                Log.Info("API key predates provider binding and does not look like a key for this provider: enter it again");
+                return null;
+            }
             int nl = text.IndexOf('\n');
             if (nl < 0 || text[..nl] != Binding(a)) { Log.Info("API key was entered for another provider or endpoint"); return null; }
             return text[(nl + 1)..];
@@ -92,7 +99,15 @@ public sealed class ApiKeyStore(string home)
         finally { if (plain != null) CryptographicOperations.ZeroMemory(plain); }
     }
 
-    private static unsafe byte[] Protect(ReadOnlySpan<byte> data)
+    /// <summary>The provider a 0.2 key was most likely entered for, from its published prefix; null when the shape is
+    /// unknown (then the key is not used at all).</summary>
+    internal static string? LegacyProvider(string key) =>
+        key.StartsWith("sk-ant-", StringComparison.Ordinal) ? AiDefaults.Claude
+        : key.StartsWith("AIza", StringComparison.Ordinal) ? AiDefaults.Gemini
+        : key.StartsWith("sk-", StringComparison.Ordinal) ? AiDefaults.OpenAi
+        : null;
+
+    internal static unsafe byte[] Protect(ReadOnlySpan<byte> data)
     {
         fixed (byte* d = data)
         {

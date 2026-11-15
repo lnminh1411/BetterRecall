@@ -36,6 +36,11 @@ internal sealed unsafe class ReplayPipeline : IDisposable
     public CanvasLayout Layout { get; }
     public FramePacer Pacer { get; }
     public bool NeedsRebuild { get; private set; }
+    /// <summary>Why the encoder is considered dead (reported error, or no output while fed), else null (A7). Set together
+    /// with NeedsRebuild; the engine then invalidates <see cref="EncoderDevice"/> if it was removed and rebuilds with backoff.</summary>
+    public string? EncoderFailure { get; private set; }
+    public GpuDevice EncoderDevice => _encDev;
+    private readonly EncoderWatchdog _watchdog = new(Environment.TickCount64);
     /// <summary>Benchmark only: paint moving content over the canvas every tick (see CanvasBlit.PaintMotion).</summary>
     public bool SyntheticMotion { get; set; }
     /// <summary>Stopwatch ticks spent painting synthetic motion, so the benchmark can leave it out of the CPU cost.</summary>
@@ -277,6 +282,14 @@ internal sealed unsafe class ReplayPipeline : IDisposable
             }
         }
 
+        long nowMs = Environment.TickCount64;
+        if (_watchdog.Check(nowMs, Encoder.PacketsOut, Encoder.Error) is { } failure)
+        {
+            EncoderFailure = failure;
+            NeedsRebuild = true;
+            return;
+        }
+
         long t0 = Stopwatch.GetTimestamp();
         bool copiedAnything = false;
         bool canvasChanged = false;
@@ -475,6 +488,7 @@ internal sealed unsafe class ReplayPipeline : IDisposable
             return;
         }
 
+        _watchdog.Attempt(nowMs);
         if (!Encoder.ReadyForInput)
         {
             BusyCount++;

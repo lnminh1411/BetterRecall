@@ -7,6 +7,22 @@ namespace BetterRecall.Core.Native;
 
 internal static partial class Win32
 {
+    // ---- files ----
+    internal const uint MOVEFILE_REPLACE_EXISTING = 0x1;
+    internal const uint MOVEFILE_WRITE_THROUGH = 0x8;
+
+    [LibraryImport("kernel32.dll", SetLastError = true, StringMarshalling = StringMarshalling.Utf16, EntryPoint = "MoveFileExW")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool MoveFileEx(string existing, string replacement, uint flags);
+
+    /// <summary>Renames over the target and returns only once the rename is on the disk (MOVEFILE_WRITE_THROUGH): a
+    /// plain File.Move can still be lost on power failure after it returns.</summary>
+    internal static void MoveDurable(string source, string target)
+    {
+        if (!MoveFileEx(source, target, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+            throw new IOException($"Rename failed (error {Marshal.GetLastPInvokeError()}).");
+    }
+
     // ---- memory ----
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -110,6 +126,11 @@ internal static partial class Win32
 
     [LibraryImport("kernel32.dll", SetLastError = true)]
     internal static partial SafeProcessHandle OpenProcess(uint access, [MarshalAs(UnmanagedType.Bool)] bool inherit, uint pid);
+
+    /// <summary>FILETIME values as 100 ns ticks since 1601 (UTC).</summary>
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool GetProcessTimes(SafeProcessHandle process, out long creation, out long exit, out long kernel, out long user);
 
     [LibraryImport("kernel32.dll", SetLastError = true, StringMarshalling = StringMarshalling.Utf16, EntryPoint = "QueryFullProcessImageNameW")]
     [return: MarshalAs(UnmanagedType.Bool)]

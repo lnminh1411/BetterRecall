@@ -17,6 +17,8 @@ public static class Program
         if (parsed is null) return 2;
         var home = parsed.Home;
 
+        // Logging first, so a settings.json parse warning is written; then again at the configured level.
+        Log.Init(DataPaths.LogsDir(home), "info");
         var settings = WorkerSettings.Load(home);
         Log.Init(DataPaths.LogsDir(home), settings.LogLevel);
         Log.Info($"start fake={settings.Fake} device={settings.Device} gpuAdapter={settings.GpuAdapter} dim={settings.Dim} tokens={settings.ImageTokens} nsfwDevice={settings.NsfwDevice}");

@@ -25,6 +25,54 @@ internal sealed class WorkerKeyframeReader(WorkerClient worker) : IKeyframeReade
 }
 
 /// <summary>
+/// Health of keyframe OCR (A21): counts consecutive passing failures and remembers whether the name and address
+/// detector ran. A persistent failure (device error, internal error after a driver update) would drop every keyframe
+/// with only a debug line; after <see cref="FailingAfter"/> failures in a row it says so in the log (at most every
+/// 10 minutes) and in the status. Thread-safe; the clock is injectable for tests.
+/// </summary>
+internal sealed class OcrHealth(Func<long>? nowMs = null)
+{
+    public const int FailingAfter = 5;
+    private const long LogEveryMs = 600_000;
+    private readonly Func<long> _now = nowMs ?? (() => Environment.TickCount64);
+    private readonly Lock _gate = new();
+    private int _streak;
+    private long _lastFailLog = long.MinValue;
+    private long _lastNerLog = long.MinValue;
+    private volatile bool _entitiesMissing;
+
+    /// <summary>OCR failed FailingAfter or more times in a row.</summary>
+    public bool Failing => Volatile.Read(ref _streak) >= FailingAfter;
+    /// <summary>The last read that asked for names and addresses came back without them (model missing or broken).</summary>
+    public bool EntitiesMissing => _entitiesMissing;
+
+    /// <summary>A read succeeded. True when the "names and addresses not redacted" warning is due.</summary>
+    public bool Read(bool entitiesAsked, bool entitiesMissing)
+    {
+        Volatile.Write(ref _streak, 0);
+        _entitiesMissing = entitiesAsked && entitiesMissing;
+        return _entitiesMissing && Due(ref _lastNerLog);
+    }
+
+    /// <summary>A read failed for a passing reason. True when the "text recognition failing" warning is due.</summary>
+    public bool Failed() => Interlocked.Increment(ref _streak) >= FailingAfter && Due(ref _lastFailLog);
+
+    /// <summary>OCR is off or not installed: nothing is failing.</summary>
+    public void Reset() { Volatile.Write(ref _streak, 0); _entitiesMissing = false; }
+
+    private bool Due(ref long last)
+    {
+        long now = _now();
+        lock (_gate)
+        {
+            if (last != long.MinValue && now - last < LogEveryMs) return false;
+            last = now;
+            return true;
+        }
+    }
+}
+
+/// <summary>
 /// Receives downscaled grabs from the capture threads: smart capture (change map and dHash against the last stored
 /// keyframe, CapturePolicy), OCR (ocr.enabled), redaction (privacy.redact*: black boxes on the pixels, redacted words
 /// left out of the text), the replay sample (WebP or JPEG, redacted), then the CPU budget (EncodeGovernor) decides when
@@ -56,7 +104,9 @@ internal sealed class KeyframePipeline : IAsyncDisposable
     private string _encoderName = "";
     private Task<bool>? _wait;
     private long _lastMissingLog = -1;
-    private long _lastNerMissingLog = -1;
+
+    /// <summary>OCR failure streak and name/address detector state, for the log and the status (A21, C9).</summary>
+    public OcrHealth OcrHealth { get; } = new();
 
     // Measurements.
     public long Kept, SkippedSimilar, Dropped, Failed;
@@ -244,15 +294,14 @@ internal sealed class KeyframePipeline : IAsyncDisposable
             {
                 ocr = result;
                 Interlocked.Increment(ref OcrRead);
-                long now = Environment.TickCount64;
-                if (result.EntitiesMissing && (_lastNerMissingLog < 0 || now - _lastNerMissingLog > 600_000))
-                {
-                    _lastNerMissingLog = now;
-                    Log.Warn("ner model not installed: names and addresses are not redacted (pattern redaction still runs)");
-                }
+                // Model missing or broken (the worker returns the lines with EntitiesMissing, C9): the design's fail policy
+                // for a missing detector model applies, so the keyframe is kept with pattern redaction and a warning.
+                if (OcrHealth.Read(red.Entities, result.EntitiesMissing))
+                    Log.Warn("name and address detector unavailable (model not installed or failed to load): names and addresses are not redacted (pattern redaction still runs)");
             }
             else if (permanent)
             {
+                OcrHealth.Reset();
                 Interlocked.Increment(ref OcrUnavailable);
                 long now = Environment.TickCount64;
                 if (_lastMissingLog < 0 || now - _lastMissingLog > 600_000)
@@ -261,15 +310,21 @@ internal sealed class KeyframePipeline : IAsyncDisposable
                     Log.Warn($"ocr unavailable ({why}): keyframes stored without text; text redaction off until it is installed");
                 }
             }
-            else if (red.AnyText)
+            else
             {
-                // Never store or sample a frame whose text could not be checked.
-                map?.Clear();
-                Interlocked.Increment(ref RedactDropped);
-                Log.Debug($"keyframe dropped: ocr failed ({why})");
-                return false;
+                if (OcrHealth.Failed())
+                    Log.Warn($"text recognition failing ({OcrHealth.FailingAfter}+ reads in a row, last: {why}): "
+                        + (red.AnyText ? "keyframes are dropped while it fails" : "keyframes are stored without text"));
+                if (red.AnyText)
+                {
+                    // Never store or sample a frame whose text could not be checked.
+                    map?.Clear();
+                    Interlocked.Increment(ref RedactDropped);
+                    Log.Debug($"keyframe dropped: ocr failed ({why})");
+                    return false;
+                }
+                Interlocked.Increment(ref OcrFailed);
             }
-            else Interlocked.Increment(ref OcrFailed);
         }
 
         var title = GuardrailPolicy.FilterTitle(req.Title, s.Privacy);
@@ -283,11 +338,13 @@ internal sealed class KeyframePipeline : IAsyncDisposable
         byte[]? sampleBytes = null;
         try
         {
-            if (sample)
+            bool sampleFits;
+            lock (_governor) sampleFits = !sample || _governor.TryAdmitSample();   // A19: samples obey the CPU budget too
+            if (sample && sampleFits)
             {
                 double c0 = Win32.CurrentThreadCpuMs();
                 sampleBytes = Encode(g, sampleFormat, Math.Clamp(s.Keyframes.Quality, 30, 95));
-                lock (_governor) _governor.Charge(Math.Max(0, Win32.CurrentThreadCpuMs() - c0));
+                lock (_governor) _governor.ChargeSample(Win32.CurrentThreadCpuMs() - c0);
                 Sampler!.Add(new Replay.ReplaySampler.Sample(req.Ts, g.Monitor, req.App, r.Title, req.Site, g.Width, g.Height,
                     sampleBytes, ImageCodec.Mime(sampleFormat)), Math.Clamp(s.Replay.Seconds, 15, 600) + 10);
             }

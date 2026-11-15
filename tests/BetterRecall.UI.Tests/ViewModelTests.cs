@@ -287,7 +287,7 @@ public class ViewModelTests
         Assert.Equal("Reason_fullscreen", ((LocalizedText)parts[0].Args[0]).Key);
         Assert.Contains(parts, p => p.Key == "Status_Locked");
         Assert.Contains(parts, p => p.Key == "Status_AudioSystem");
-        Assert.Contains(parts, p => p.Key == "Status_Queue");
+        Assert.DoesNotContain(parts, p => p.Key is "Status_Queue" or "Status_Store");   // no counts while locked (sweep 2 D37)
         Assert.Equal("2 KB", StatusText.FormatBytes(2048));
         Assert.Equal("2:00", StatusText.FormatDuration(120_000));
     }

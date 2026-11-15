@@ -18,7 +18,8 @@ internal sealed record GuardSnapshot(
     RECT[] MaskRects,
     IReadOnlyDictionary<int, MonitorTop> PerMonitor,
     string Site = "",         // host in the foreground browser's address bar (privacy.recordSite), else empty
-    RECT[]? Secrets = null)   // password fields of the foreground window, desktop pixels (privacy.redactPasswords)
+    RECT[]? Secrets = null,   // password fields of the foreground window, desktop pixels (privacy.redactPasswords)
+    long FgEpoch = 0)         // GuardrailService foreground-change count when the scan started
 {
     public RECT[] SecretRects => Secrets ?? [];
 
@@ -46,6 +47,15 @@ internal static unsafe class WindowInspector
     }
 
     public static WindowInfo? Foreground() => Describe(Win32.GetForegroundWindow());
+
+    /// <summary>Top-level window that owns the foreground (the Hwnd that Foreground() reports), 0 when none. Any thread.</summary>
+    public static nint ForegroundRoot()
+    {
+        nint hwnd = Win32.GetForegroundWindow();
+        if (hwnd == 0) return 0;
+        nint root = Win32.GetAncestor(hwnd, Win32.GA_ROOT);
+        return root != 0 ? root : hwnd;
+    }
 
     public static string ProcessPath(uint pid)
     {

@@ -19,7 +19,7 @@ public sealed class ServerTrustVerifier : IServerTrust
 {
     private readonly string _expectedImage;
     private readonly Func<SafePipeHandle, int?> _serverPid;
-    private readonly Func<int, string?> _imageOf;
+    private readonly Func<int, DateTime, string?> _imageOf;
     private readonly Func<int, int?> _sessionOf;
     private readonly int _ownSession;
 
@@ -28,11 +28,15 @@ public sealed class ServerTrustVerifier : IServerTrust
         Func<SafePipeHandle, int?>? serverPid = null,
         Func<int, string?>? imageOf = null,
         Func<int, int?>? sessionOf = null,
-        int? ownSession = null)
+        int? ownSession = null,
+        Func<int, DateTime?>? startedOf = null)
     {
         _expectedImage = Normalize(expectedImage);
         _serverPid = serverPid ?? Win32Trust.ServerPid;
-        _imageOf = imageOf ?? Win32Trust.ImagePath;
+        // Default: image and start time from one process handle. A process that started after the connection is not the
+        // server that accepted it: its pid was freed and reused.
+        Func<int, DateTime, string?> image = imageOf is null ? Win32Trust.ImagePathIfStartedBefore : (pid, _) => imageOf(pid);
+        _imageOf = startedOf is null ? image : (pid, at) => startedOf(pid) is { } s && s <= at ? image(pid, at) : null;
         _sessionOf = sessionOf ?? Win32Trust.SessionOf;
         _ownSession = ownSession ?? Win32Trust.SessionOf(Environment.ProcessId) ?? -1;
     }
@@ -47,9 +51,10 @@ public sealed class ServerTrustVerifier : IServerTrust
 
     public TrustCheck Verify(SafePipeHandle pipe)
     {
+        var connectedUtc = DateTime.UtcNow;   // Verify runs right after the connect
         var pid = _serverPid(pipe);
         if (pid is null or <= 0) return new TrustCheck(false, 0);
-        var image = _imageOf(pid.Value);
+        var image = _imageOf(pid.Value, connectedUtc);
         if (image is null || !string.Equals(Normalize(image), _expectedImage, StringComparison.OrdinalIgnoreCase))
             return new TrustCheck(false, pid.Value);
         var session = _sessionOf(pid.Value);
@@ -94,6 +99,26 @@ internal static partial class Win32Trust
         if (h == 0) return null;
         try
         {
+            var buf = new char[32768];
+            uint size = (uint)buf.Length;
+            fixed (char* p = buf)
+                return QueryFullProcessImageName(h, 0, p, ref size) ? new string(buf, 0, (int)size) : null;
+        }
+        finally { CloseHandle(h); }
+    }
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool GetProcessTimes(nint process, out long creation, out long exit, out long kernel, out long user);
+
+    /// <summary>Image path of pid when that process started no later than notAfterUtc, else null (PID reuse). One handle.</summary>
+    public static unsafe string? ImagePathIfStartedBefore(int pid, DateTime notAfterUtc)
+    {
+        var h = OpenProcess(ProcessQueryLimitedInformation, false, (uint)pid);
+        if (h == 0) return null;
+        try
+        {
+            if (!GetProcessTimes(h, out var created, out _, out _, out _) || created <= 0 || DateTime.FromFileTimeUtc(created) > notAfterUtc) return null;
             var buf = new char[32768];
             uint size = (uint)buf.Length;
             fixed (char* p = buf)

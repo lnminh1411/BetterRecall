@@ -13,7 +13,8 @@ namespace BetterRecall.Agent.Privacy;
 /// Cloud describe hook (IDescribeRedactor): runs OCR and the privacy.redact* detectors again on the image about to leave
 /// the PC, with the current settings, paints black boxes and re-encodes it as WebP. The stored keyframe was already
 /// redacted when it was captured; this pass also covers keyframes stored before redaction existed or with other settings.
-/// Redacted is true when the text was checked (or no text detector is on). OCR off or not installed: the image goes out
+/// Redacted is true when the text was checked (or no text detector is on); with names or addresses on and the detector
+/// model missing or broken it is false, patterns painted all the same. OCR off or not installed: the image goes out
 /// as stored with Redacted false, so the preview says it was not checked. OCR failing otherwise: describe fails rather
 /// than sending an unchecked image.
 /// </summary>
@@ -54,14 +55,18 @@ internal sealed class DescribeRedactor(IKeyframeReader reader, Func<Settings> se
                 Log.Warn($"describe redaction: ocr failed ({ex.Message})");
                 throw new DescribeException("Text recognition failed, so the image was not checked and is not sent. Try again.");
             }
+            // Names or addresses asked for but the detector model is missing or broken: the patterns are still painted,
+            // yet the image was not fully checked, so it is not Redacted (chat sends text only, the preview says so) (N1).
+            bool checkedAll = !(red.Entities && ocr.EntitiesMissing);
+            if (!checkedAll) Log.Warn("describe redaction: name and address detector unavailable, image marked not checked");
             var r = Redactor.Apply(ocr.Lines, [], red);
-            if (r.Boxes.Length == 0) return image with { Redacted = true };
+            if (r.Boxes.Length == 0) return image with { Redacted = checkedAll };
             unsafe
             {
                 fixed (byte* p = pixels)
                 {
                     RedactionMasks.Fill(p, w, h, stride, r.Boxes);
-                    return new OutgoingImage(ImageCodec.EncodeBgra(p, w, h, stride, "webp", Quality), ImageCodec.Mime("webp"), w, h, true);
+                    return new OutgoingImage(ImageCodec.EncodeBgra(p, w, h, stride, "webp", Quality), ImageCodec.Mime("webp"), w, h, checkedAll);
                 }
             }
         }

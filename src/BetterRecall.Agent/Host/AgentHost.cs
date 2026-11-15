@@ -77,7 +77,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         _opt = opt;
         _settingsSnapshot = core.Settings.Current;
         var workerExe = InstallLayout.Full(opt.InstallDir, InstallLayout.WorkerExe);
-        _supervisor = new WorkerSupervisor(new ProcessWorkerLauncher(workerExe, S.Governance.EcoQos), opt.Home, () => S.Inference.IdleExitS);
+        _supervisor = new WorkerSupervisor(new ProcessWorkerLauncher(workerExe, () => S.Governance.EcoQos), opt.Home, () => S.Inference.IdleExitS);
         _worker = new WorkerClient(_supervisor);
         _thumbs = new Thumbnailer(() => _core.Store, () => S);
     }
@@ -109,6 +109,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         _core.Settings.Changed += OnSettingsChanged;
 
         _replays = new ReplayLibrary(_opt.Home, () => S, _core.Blobs);
+        _replays.DeletePartials();   // saves that failed or were cut off by a crash (A20)
         var encLuid = GpuDevices.Adapters().FirstOrDefault(a => a.VendorId == GpuDevices.VendorIntel)?.Luid;
         _probe = new SystemProbe(encLuid is null ? null : GpuDevices.PdhLuidToken(encLuid.Value));
         _scheduler = new EmbeddingScheduler(() => Store, () => S, _worker, ProbeLoad, () => _pause.Has("consent") || _pause.Has("keylocked") || _pause.Has("keylost") || _pause.Has("storeerror"));
@@ -119,6 +120,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         _transcriber = new Transcriber(_worker, () => Store, () => S, () => _guard?.Current().Foreground?.ProcessName.Replace(".exe", "", StringComparison.OrdinalIgnoreCase) ?? "", () => _scheduler?.Signal());
 
         if (_core is BetterRecall.Core.CoreHostImpl coreImpl) coreImpl.DescribeRedactor = new Privacy.DescribeRedactor(new WorkerKeyframeReader(_worker), () => S);
+        _core.Purged += OnPurged;
         _core.StartPipes(this, new QueryEmbedder(_worker), _thumbs);
         if (!s.Capture.Consented) _pause.Set("consent");
         _pause.Set("keylocked");
@@ -162,17 +164,19 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         catch (Exception ex)
         {
             Log.Error("store open failed", ex);
-            _pause.Clear("keylocked");
+            // The new reason goes on before keylocked comes off: in between nothing paused capture or the replay (D29).
             if (ex is BetterRecall.Core.Crypto.KeyLostException)
             {
                 // The key file cannot be unwrapped for good (TPM key gone, DPAPI cannot decrypt, file damaged): the old
                 // data is unreadable. Say so instead of "waiting for passphrase"; purge all starts a new key and store.
                 _pause.Set("keylost");
+                _pause.Clear("keylocked");
             }
             else
             {
                 // Anything else (TPM not ready at logon, file locked, database error) may pass: say so and retry.
                 _pause.Set("storeerror");
+                _pause.Clear("keylocked");
                 _ = Task.Delay(TimeSpan.FromSeconds(30), _cts.Token).ContinueWith(t => { if (!t.IsCanceled) _ = OpenStoreAsync(); }, TaskScheduler.Default);
             }
             RaiseStatus(force: true);
@@ -191,7 +195,12 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
             long ring = (long)s.Replay.BitrateKbps * 1000 / 8 * (s.Replay.Seconds + 2) * 3 + 4L * 1024 * 1024;
             MemoryIsolation.ReserveWorkingSet(ring);
         }
-        _capture = new CaptureService(() => S, KeyframesPaused, ReplayPaused, _guard!, _pipeline!, _loopback, lockMem, _redactions);
+        _capture = new CaptureService(() => S, KeyframesPaused, ReplayPaused, _guard!, _pipeline!, _loopback, lockMem, _redactions)
+        {
+            // Fullscreen and storage pauses stop keyframes and inference but not the replay: no sample OCR either (A9).
+            SamplesPaused = () => _pause.KeyframesPaused,
+            MonitorSelectionFile = Path.Combine(_opt.Home, MonitorSelection.FileName),
+        };
         _capture.Start();
         ImageCodec.Preload();
         SyncAudioSources();
@@ -202,6 +211,10 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
             if (S.Security.MemoryIsolation && !_lateIsolationDone)
             {
                 _lateIsolationDone = true;
+                // ACG refuses new native callback thunks. SQLite's rollback hook needs one on the first transaction,
+                // which with OCR on (or a store unlocked later) came after ACG and wedged the store (D26).
+                try { BetterRecall.Core.Store.EncryptedStore.WarmNativeCallbacks(); }
+                catch (Exception ex) { Log.Warn("sqlite callback warm-up", ex); }
                 MemoryIsolation.ApplyLate(dynamicCode: Environment.GetEnvironmentVariable("BETTERRECALL_NO_ACG") != "1");
             }
         });
@@ -213,42 +226,65 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
     private bool ReplayPaused() =>
         _pause.ContinuousPaused(S.Replay.DuringFullscreen) || !S.Capture.Consented;
 
-    private long _lastMicRetry;
+    // A14: a failed open is retried from the status tick with backoff (1 s doubling to 60 s), not only after a loss.
+    private readonly RetryBackoff _micRetry = new(1000, 60_000), _systemRetry = new(1000, 60_000);
+    // A16: the status timer (thread pool) and the settings path (window thread) both call SyncAudioSources.
+    private readonly object _audioGate = new();
 
     private void SyncAudioSources()
     {
         if (!_captureStarted) return;
-        var s = S;
-        bool wantSystem = s.Audio.System && s.Capture.Consented;
-        bool wantMic = s.Audio.Mic && s.Capture.Consented;
-        if (_micAudio is { MicLost: true })
+        lock (_audioGate)
         {
-            // Unplugged or default device changed: start over on the current default microphone.
-            Log.Info("microphone lost, reopening");
-            _micAudio.Dispose();
-            _micAudio = null;
-        }
-        if (wantSystem && _systemAudio is null)
-        {
-            try
+            var s = S;
+            bool wantSystem = s.Audio.System && s.Capture.Consented;
+            bool wantMic = s.Audio.Mic && s.Capture.Consented;
+            long now = Environment.TickCount64;
+            if (_micAudio is { MicLost: true })
             {
-                _systemAudio = new TranscriptSource("system", _loopback, () => S, () => _pause.ContinuousPaused(true));
-                _ = _transcriber!.RunAsync(_systemAudio, _cts.Token);
+                // Unplugged or default device changed: start over on the current default microphone.
+                Log.Info("microphone lost, reopening");
+                _micAudio.Dispose();
+                _micAudio = null;
             }
-            catch (Exception ex) { Log.Warn("system audio", ex); }
-        }
-        else if (!wantSystem && _systemAudio is not null) { _systemAudio.Dispose(); _systemAudio = null; }
-        if (wantMic && _micAudio is null)
-        {
-            try
+            if (wantSystem && _systemAudio is null)
             {
-                _micAudio = new TranscriptSource("mic", null, () => S, () => _pause.ContinuousPaused(true));
-                _ = _transcriber!.RunAsync(_micAudio, _cts.Token);
+                if (_systemRetry.Due(now))
+                {
+                    try
+                    {
+                        _systemAudio = new TranscriptSource("system", _loopback, () => S, () => _pause.ContinuousPaused(true));
+                        _ = _transcriber!.RunAsync(_systemAudio, _cts.Token);
+                        _systemRetry.Succeeded();
+                    }
+                    catch (Exception ex) { Log.Warn($"system audio (retry in {_systemRetry.Failed(now) / 1000} s)", ex); }
+                }
             }
-            catch (Exception ex) { Log.Warn("microphone", ex); }
+            else if (!wantSystem && _systemAudio is not null) { _systemAudio.Dispose(); _systemAudio = null; }
+            if (wantMic && _micAudio is null)
+            {
+                if (_micRetry.Due(now))
+                {
+                    try
+                    {
+                        _micAudio = new TranscriptSource("mic", null, () => S, () => _pause.ContinuousPaused(true));
+                        _ = _transcriber!.RunAsync(_micAudio, _cts.Token);
+                        _micRetry.Succeeded();
+                    }
+                    catch (Exception ex) { Log.Warn($"microphone (retry in {_micRetry.Failed(now) / 1000} s)", ex); }
+                }
+            }
+            else if (!wantMic && _micAudio is not null) { _micAudio.Dispose(); _micAudio = null; }
+            // Turned off: the next time it is turned on, try at once.
+            if (!wantMic) _micRetry.Succeeded();
+            if (!wantSystem) _systemRetry.Succeeded();
         }
-        else if (!wantMic && _micAudio is not null) { _micAudio.Dispose(); _micAudio = null; }
     }
+
+    /// <summary>True when the status tick should run SyncAudioSources: a lost microphone, or a wanted source that is not
+    /// open because its last open failed (A14; the backoff inside SyncAudioSources paces the retries). Pure.</summary>
+    internal static bool AudioNeedsSync(bool wantSystem, bool systemOpen, bool wantMic, bool micOpen, bool micLost)
+        => micLost || (wantMic && !micOpen) || (wantSystem && !systemOpen);
 
     private void RegisterHotkeys()
     {
@@ -288,6 +324,8 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
             RaiseStatus(force: true);
         });
         if (!StorageEqual(old.Storage, s.Storage)) _ = Task.Run(StorageCheck);
+        // S4: the worker reads these once at start; restart it (once no request is in flight) so they apply now.
+        if (WorkerSettingsDiff.Changed(old, s) is { } key) _supervisor.RequestRestart(key);
     }
 
     private static bool StorageEqual(StorageSettings a, StorageSettings b) =>
@@ -348,7 +386,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
                 _ = SaveReplayFromHotkeyAsync();
                 break;
             case "panic":
-                Panic();
+                PanicOffLoop();
                 break;
             case "timeline":
                 UiLauncher.Start(_opt.InstallDir, "--page", "timeline");
@@ -372,6 +410,14 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         }
     }
 
+    /// <summary>Hotkey and tray: Panic on a pool thread (as the pipe verb does). Its store purge can wait for a store
+    /// maintenance slice; on the message-loop thread that froze hotkeys, the tray and session-lock handling (N2).</summary>
+    private void PanicOffLoop() => _ = Task.Run(() =>
+    {
+        try { Panic(); }
+        catch (Exception ex) { Log.Warn("panic", ex); }
+    });
+
     private void OnTrayCommand(TrayCommand cmd)
     {
         switch (cmd)
@@ -382,7 +428,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
             case TrayCommand.PauseUntilResume: Pause(null, "user"); break;
             case TrayCommand.Resume: Resume("user"); break;
             case TrayCommand.SaveReplay: _ = SaveReplayFromHotkeyAsync(); break;
-            case TrayCommand.Panic: Panic(); break;
+            case TrayCommand.Panic: PanicOffLoop(); break;
             case TrayCommand.Settings: UiLauncher.Start(_opt.InstallDir, "--settings"); break;
             case TrayCommand.Quit: _window?.Quit(); break;
         }
@@ -411,6 +457,41 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         RaiseStatus(force: true);
     }
 
+    /// <summary>Slack on top of replay.seconds when deciding whether a purge reaches the replay ring.</summary>
+    internal static readonly TimeSpan RingSlack = TimeSpan.FromSeconds(60);
+
+    /// <summary>
+    /// A purge reaches the live buffers (A11): a user purge (any scope, or purge all) whose window ends, or whose newest
+    /// deleted row lies, within the replay ring span (replay.seconds + slack) of now. Retention, space, NSFW drops and
+    /// replay deletes never do. Pure.
+    /// </summary>
+    internal static bool ReachesRing(PurgeNotice n, DateTimeOffset now, int replaySeconds)
+    {
+        if (!n.ByUser) return false;
+        if (n.Reason == "all") return true;
+        var edge = now - TimeSpan.FromSeconds(Math.Clamp(replaySeconds, 15, 600)) - RingSlack;
+        return (n.To is { } to && to >= edge) || (n.Newest is { } newest && newest >= edge);
+    }
+
+    /// <summary>ICoreHost.Purged (N5): rows left the store. Their in-RAM copies go: the thumbnail cache (A10/B3), their
+    /// queued embedding jobs, and when the purge reaches the replay window the video and audio rings, the replay samples,
+    /// untranscribed audio and queued grabs (A11, N4).</summary>
+    private void OnPurged(PurgeNotice n)
+    {
+        _thumbs.ClearCache();
+        if (n.Reason == "all") _scheduler?.Clear();
+        else _scheduler?.Remove(n.Ids.ToHashSet(StringComparer.Ordinal));
+        _statsCache = default;
+        if (ReachesRing(n, DateTimeOffset.UtcNow, S.Replay.Seconds))
+        {
+            _capture?.ForgetRecent();
+            _sampler.Clear();
+            _systemAudio?.Clear();
+            _micAudio?.Clear();
+            Log.Info($"purge ({n.Reason}) reached the replay window: replay ring, samples and pending audio cleared");
+        }
+    }
+
     private void OnCaptureStored(CaptureMeta meta)
     {
         _scheduler?.Signal();
@@ -431,11 +512,16 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
             var n = SystemProbe.Notification();
             if (Governance.PauseKeyframes(n, S.Capture)) { if (!_pause.Has("fullscreen")) _pause.Set("fullscreen"); }
             else _pause.Clear("fullscreen");
-            if (_micAudio is { MicLost: true } && Environment.TickCount64 - _lastMicRetry > 10_000)
+            var st = S;
+            bool consented = st.Capture.Consented;
+            if (_captureStarted && AudioNeedsSync(st.Audio.System && consented, _systemAudio is not null,
+                    st.Audio.Mic && consented, _micAudio is not null, _micAudio is { MicLost: true })
+                && Monitor.TryEnter(_audioGate))   // busy (a device open can take seconds): next tick, do not pile up timer threads
             {
-                _lastMicRetry = Environment.TickCount64;
-                SyncAudioSources();
+                try { SyncAudioSources(); }
+                finally { Monitor.Exit(_audioGate); }
             }
+            _loopback.CheckHealth(Environment.TickCount64);   // A13: restarts a loopback stream whose thread ended
             if ((_pause.Has("keylost") || _pause.Has("storeerror")) && Store != null)
             {
                 // Purge all made a new key and store.
@@ -457,7 +543,14 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         if (reason is null)
         {
             if (!_captureStarted) return "Starting";
+            if (S.Ocr.Enabled && _pipeline?.OcrHealth.Failing == true)
+                return Privacy.RedactionOptions.From(S.Privacy).AnyText
+                    ? "Capturing (keyframes dropped: text recognition failing)"
+                    : "Capturing (keyframes without text: text recognition failing)";
             // Keyframe CPU budget: say so while frames are encoded cheaper or wait for budget.
+            // A7: the replay encoder failed and is being rebuilt; say so instead of a plain "Capturing".
+            if (S.Replay.Enabled && _capture?.Engine.LastError is { } replayErr && replayErr.StartsWith("encoder failed", StringComparison.Ordinal))
+                return "Capturing (replay " + replayErr + ")";
             var b = _pipeline?.Budget;
             return b is { } bb && (bb.Level != EncodeLevel.Normal || bb.Waiting > 0)
                 ? $"Capturing (keyframes: CPU budget, {bb.Level.ToString().ToLowerInvariant()}{(bb.Waiting > 0 ? $", {bb.Waiting} waiting" : "")})"
@@ -479,7 +572,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
     private void RaiseStatus(bool force)
     {
         var st = GetStatus();
-        var key = $"{st.Capturing}|{st.Paused}|{st.PauseReason}|{st.PausedUntil}|{st.Locked}|{st.Device}|{st.Queue.Pending}|{st.Audio}";
+        var key = $"{st.Capturing}|{st.Paused}|{st.PauseReason}|{st.PausedUntil}|{st.Locked}|{st.Device}|{st.Queue.Pending}|{st.Audio}|{st.UserPaused}|{string.Join(",", st.Warnings ?? [])}";
         if (!force && key == _lastStatusKey) return;
         _lastStatusKey = key;
         try { StatusChanged?.Invoke(st); } catch (Exception ex) { Log.Warn("StatusChanged handler", ex); }
@@ -513,12 +606,26 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
             PauseReason: reason,
             Locked: !IsUnlocked,
             UnlockedUntil: _gate.Until,
-            Audio: new AudioState(_systemAudio is not null, _micAudio is not null),
+            Audio: new AudioState(_systemAudio is not null && _loopback.Running, _micAudio is { MicLost: false }),
             Queue: new QueueState((_scheduler?.Queued ?? 0) + StoreStats().PendingEmbeddings),
             Device: _supervisor.IsRunning ? _supervisor.Hello?.Device ?? "none" : "none",
             Store: StoreStats(),
             RetentionDays: s.Retention.Days,
-            HotkeysFailed: _hotkeysFailed);
+            HotkeysFailed: _hotkeysFailed,
+            Warnings: Warnings(),
+            UserPaused: _pause.Has("user") || _pause.Has("ipc"));
+    }
+
+    /// <summary>ocr-failing: text recognition keeps failing (keyframes dropped, or stored without text) (A21).
+    /// ner-unavailable: names or addresses are on but their detector model is missing or broken (C9).</summary>
+    private string[]? Warnings()
+    {
+        var h = _pipeline?.OcrHealth;
+        if (h is null || !S.Ocr.Enabled) return null;
+        var list = new List<string>(2);
+        if (h.Failing) list.Add("ocr-failing");
+        if (h.EntitiesMissing) list.Add("ner-unavailable");
+        return list.Count > 0 ? [.. list] : null;
     }
 
     private StoreStats StoreStats()
@@ -586,22 +693,42 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         _window?.Invoke(() => { _pause.Clear("consent"); StartCapture(); RaiseStatus(force: true); });
     }
 
+    private readonly SemaphoreSlim _saveLock = new(1, 1);
+
     public async Task<ReplayClip> SaveReplayAsync(CancellationToken ct)
     {
         var capture = _capture ?? throw new InvalidOperationException("Replay is not running.");
         var lib = _replays!;
+        // One save at a time (hotkey plus tray or pipe): each gets its own id, partial file and frames (A20).
+        await _saveLock.WaitAsync(ct).ConfigureAwait(false);
+        try { return await SaveReplayLockedAsync(capture, lib, ct).ConfigureAwait(false); }
+        finally { _saveLock.Release(); }
+    }
+
+    private async Task<ReplayClip> SaveReplayLockedAsync(CaptureService capture, ReplayLibrary lib, CancellationToken ct)
+    {
         var ts = DateTimeOffset.UtcNow;
-        var id = ReplayLibrary.NewId(ts);
+        var id = lib.UniqueId(ts);
         var (path, encrypted) = lib.TargetFor(id);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         var partial = path + ".partial";
         var sw = Stopwatch.StartNew();
-        int durationMs = await Task.Run(() =>
+        int durationMs;
+        try
         {
-            using var stream = encrypted ? _core.Blobs.OpenWrite(partial) : new FileStream(partial, FileMode.Create, FileAccess.Write, FileShare.None);
-            return capture.SaveReplay(stream);
-        }, ct).ConfigureAwait(false);
-        File.Move(partial, path, overwrite: true);
+            durationMs = await Task.Run(() =>
+            {
+                using var stream = encrypted ? _core.Blobs.OpenWrite(partial) : new FileStream(partial, FileMode.Create, FileAccess.Write, FileShare.None);
+                return capture.SaveReplay(stream);
+            }, ct).ConfigureAwait(false);
+            File.Move(partial, path, overwrite: false);
+        }
+        catch
+        {
+            // Never leave a half-written clip behind (in plain-export mode it is not encrypted).
+            try { File.Delete(partial); } catch (Exception ex) { Log.Warn("replay partial delete", ex); }
+            throw;
+        }
         long bytes = new FileInfo(path).Length;
         Log.Info($"replay saved: {durationMs} ms, {bytes / 1024} KiB, encrypted={encrypted}, {sw.ElapsedMilliseconds} ms");
         if (S.Replay.Notify) _window?.Notify("Replay saved", $"Last {durationMs / 1000} s saved. Click to open the replay list.");

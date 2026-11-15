@@ -8,15 +8,33 @@ using BetterRecall.Contracts;
 
 namespace BetterRecall.Agent.Audio;
 
-/// <summary>One process-loopback stream (48 kHz stereo 16-bit, own process tree excluded) shared by the replay and system transcripts.</summary>
+/// <summary>A running capture stream (WASAPI, or a fake in tests).</summary>
+internal interface ICaptureStream : IDisposable
+{
+    /// <summary>The capture loop has exited: no more packets will come.</summary>
+    bool Ended { get; }
+}
+
+/// <summary>One process-loopback stream (48 kHz stereo 16-bit, own process tree excluded) shared by the replay and system transcripts.
+/// A stream whose thread ended (audio service restart, endpoint invalidated, loop error) is restarted with backoff while
+/// anyone is subscribed (A13); subscribers stay attached across the restart.</summary>
 internal sealed class LoopbackHub : IDisposable
 {
     private readonly object _gate = new();
     private readonly List<PcmHandler> _subs = new();
-    private WasapiCapture? _capture;
+    private readonly Func<PcmHandler, ICaptureStream> _open;
+    private readonly RetryBackoff _restart = new(1000, 60_000);
+    private ICaptureStream? _capture;
+    private long _upSinceMs;
+
+    public LoopbackHub() : this(h => WasapiCapture.Start("loopback", WAVEFORMATEX.Pcm16(48000, 2), h)) { }
+
+    internal LoopbackHub(Func<PcmHandler, ICaptureStream> open) => _open = open;
 
     public PcmFormat Format { get; } = new(48000, 2, false, 16);
-    public bool Running => _capture is not null;
+    public bool Running { get { lock (_gate) return _capture is { Ended: false }; } }
+    /// <summary>Restarts after a lost stream (tests and diagnostics).</summary>
+    public int Restarts { get; private set; }
 
     public void Subscribe(PcmHandler h)
     {
@@ -24,17 +42,56 @@ internal sealed class LoopbackHub : IDisposable
         {
             if (_subs.Contains(h)) return;
             _subs.Add(h);
+            if (_capture is { Ended: true }) { _capture.Dispose(); _capture = null; }
             if (_capture is null)
             {
-                try { _capture = WasapiCapture.Start("loopback", WAVEFORMATEX.Pcm16(48000, 2), Dispatch); }
+                try { _capture = _open(Dispatch); _restart.Succeeded(); }
                 catch (Exception ex) { Log.Warn("loopback start", ex); _subs.Remove(h); throw; }
             }
         }
     }
 
+    /// <summary>Called from the status tick: when the stream ended while subscribers remain, open a new one once the
+    /// backoff allows. Returns true when a new stream is running.</summary>
+    public bool CheckHealth(long nowMs)
+    {
+        ICaptureStream? dead = null;
+        bool restarted = false;
+        // A restart can block for seconds (device activation): a status tick that finds it busy skips its turn.
+        if (!Monitor.TryEnter(_gate)) return false;
+        try
+        {
+            if (_subs.Count == 0) return false;
+            if (_capture is { Ended: true })
+            {
+                dead = _capture;
+                _capture = null;
+                Log.Warn("loopback stream ended; restarting");
+                _restart.Failed(nowMs);   // the first restart waits one backoff step
+            }
+            if (_capture is null && _restart.Due(nowMs))
+            {
+                try
+                {
+                    _capture = _open(Dispatch);
+                    Restarts++;
+                    restarted = true;
+                    _upSinceMs = nowMs;
+                    Log.Info("loopback stream restarted");
+                }
+                catch (Exception ex) { Log.Warn($"loopback restart (next in {_restart.Failed(nowMs) / 1000} s)", ex); }
+            }
+            else if (_capture is { Ended: false } && _restart.Failures > 0 && nowMs - _upSinceMs >= 60_000)
+                _restart.Succeeded();   // a minute up: the next loss starts at 1 s again
+        }
+        finally { Monitor.Exit(_gate); }
+        dead?.Dispose();
+        return restarted;
+    }
+
     public void Unsubscribe(PcmHandler h)
     {
-        WasapiCapture? stop = null;
+        ICaptureStream? stop = null;
         lock (_gate)
         {
             _subs.Remove(h);
@@ -56,7 +113,7 @@ internal sealed class LoopbackHub : IDisposable
 
     public void Dispose()
     {
-        WasapiCapture? c;
+        ICaptureStream? c;
         lock (_gate) { c = _capture; _capture = null; _subs.Clear(); }
         c?.Dispose();
     }
@@ -83,10 +140,21 @@ internal sealed class AudioReplayEncoder : IDisposable
         Seconds = seconds;
         // 128 kbps plus slack.
         Ring = new PacketRing(16_000L * (seconds + 4) * 5 / 4, TimeSpan.FromSeconds(seconds), lockMemory);
-        _aac = new AacEncoder(Ring);
-        Source = new AudioRingSource(Ring, AacEncoder.SampleRate, AacEncoder.Channels, AacEncoder.AudioSpecificConfig);
-        _handler = OnPcm;
-        hub.Subscribe(_handler);
+        try
+        {
+            _aac = new AacEncoder(Ring);
+            Source = new AudioRingSource(Ring, AacEncoder.SampleRate, AacEncoder.Channels, AacEncoder.AudioSpecificConfig);
+            _handler = OnPcm;
+            hub.Subscribe(_handler);
+        }
+        catch
+        {
+            // Loopback unavailable (audio service down, endpoint gone): free the MFT and the ring, which leaked once per
+            // retry before (A15).
+            _aac?.Dispose();
+            Ring.Dispose();
+            throw;
+        }
     }
 
     private AudioReplayEncoder(LoopbackHub own, int seconds, bool lockMemory, bool owned) : this(own, seconds, lockMemory) { _ownHub = own; }

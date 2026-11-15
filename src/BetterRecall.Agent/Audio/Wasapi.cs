@@ -48,7 +48,7 @@ internal delegate void PcmHandler(ReadOnlySpan<byte> data, int frames, long qpc1
 /// Source "loopback": process loopback of the whole system excluding this process tree (build 20348+).
 /// Source "mic": default capture endpoint.
 /// </summary>
-internal sealed unsafe class WasapiCapture : IDisposable
+internal sealed unsafe class WasapiCapture : ICaptureStream
 {
     private static readonly Guid CLSID_MMDeviceEnumerator = new("BCDE0395-E52F-467C-8E3D-C4579291692E");
     private static readonly Guid IID_IMMDeviceEnumerator = new("A95664D2-9614-4F35-A746-DE8DB63617E6");
@@ -69,6 +69,9 @@ internal sealed unsafe class WasapiCapture : IDisposable
     /// <summary>The device went away (unplugged, default device changed, AUDCLNT_E_DEVICE_INVALIDATED): the capture
     /// thread has ended and the owner should create a new capture.</summary>
     public bool Lost { get; private set; }
+    /// <summary>The capture loop has exited for any reason (device lost, loop error, or Dispose): no more packets.</summary>
+    public bool Ended { get => _ended; private set => _ended = value; }
+    private volatile bool _ended;
     private Exception? _startError;
 
     public PcmFormat Format { get; private set; }
@@ -157,9 +160,10 @@ internal sealed unsafe class WasapiCapture : IDisposable
                 }
             }
         }
-        catch (Exception ex) { Log.Error($"audio {_source} loop", ex); }
+        catch (Exception ex) { Log.Error($"audio {_source} loop", ex); Lost = true; }   // the thread ends: as good as lost (A13)
         finally
         {
+            Ended = true;
             try { ((delegate* unmanaged[Stdcall]<nint, int>)Ole.Slot(client, 11))(client); } catch { }
             Cleanup(client, capture, evt);
             Ole.CoUninitialize();

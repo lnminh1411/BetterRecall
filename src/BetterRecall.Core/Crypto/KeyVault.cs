@@ -36,6 +36,7 @@ public sealed class KeyVault : IKeyVault, IDisposable
     private const int ArgonLanes = 4;
 
     private readonly string _keyFile;
+    private readonly string _home;
     private readonly Func<Settings> _settings;
     private readonly string _tpmKeyName;
     private readonly Lock _gate = new();
@@ -44,10 +45,45 @@ public sealed class KeyVault : IKeyVault, IDisposable
     private TaskCompletionSource _loaded = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private volatile bool _helloAvailable;
     private volatile bool _helloChecked;
+    private int _passFailures;
+    private long _passLockedUntilMs;
+
+    /// <summary>Clock of the passphrase rate limit (tests set it).</summary>
+    internal Func<DateTimeOffset> Now { get; set; } = () => DateTimeOffset.UtcNow;
+
+    /// <summary>Seconds until the next passphrase try is accepted, 0 when tries are open. Same schedule as the unlock
+    /// password (<see cref="UnlockPassword"/>): 5 free wrong tries, then 30 s doubling to 15 min. Kept in memory: every
+    /// try costs a 64 MiB Argon2id run in the agent, and an agent restart is not something a pipe client can trigger.</summary>
+    public int PassphraseRetryAfterSeconds
+    {
+        get
+        {
+            lock (_gate)
+            {
+                long wait = _passLockedUntilMs - Now().ToUnixTimeMilliseconds();
+                return wait > 0 ? (int)Math.Ceiling(wait / 1000.0) : 0;
+            }
+        }
+    }
+
+    /// <summary>Caller holds _gate.</summary>
+    private bool PassphraseThrottledLocked() => Now().ToUnixTimeMilliseconds() < _passLockedUntilMs;
+
+    /// <summary>Counts one passphrase check. Caller holds _gate.</summary>
+    private void NotePassphraseLocked(bool ok)
+    {
+        if (ok) { _passFailures = 0; _passLockedUntilMs = 0; return; }
+        _passFailures++;
+        if (_passFailures < UnlockPassword.FreeTries) return;
+        int extra = Math.Min(_passFailures - UnlockPassword.FreeTries, 5);
+        _passLockedUntilMs = (Now() + TimeSpan.FromSeconds(Math.Min(30 * Math.Pow(2, extra), 900))).ToUnixTimeMilliseconds();
+        Log.Info($"passphrase wrong ({_passFailures} in a row), tries paused");
+    }
 
     public KeyVault(string home, Func<Settings> settings, string? tpmKeyName = null, bool probeHello = true)
     {
         _keyFile = DataPaths.KeyFile(home);
+        _home = home;
         _settings = settings;
         _tpmKeyName = tpmKeyName ?? TpmKeyNameFor(home);
         try { _fileMode = ReadFileMode(); }
@@ -117,14 +153,28 @@ public sealed class KeyVault : IKeyVault, IDisposable
             lock (_gate)
             {
                 if (_key != null) return false;
+                if (_fileMode == null && DataExists()) return false;   // key file missing: lost, not waiting for a passphrase
                 return (_fileMode ?? (_settings().Security.KeyProtection == ModePassphrase ? ModePassphrase : null)) == ModePassphrase;
             }
         }
     }
 
+    /// <summary>store.db or a keyframe file exists: a missing key file then means the key is lost, never a first run.</summary>
+    private bool DataExists()
+    {
+        try
+        {
+            if (File.Exists(DataPaths.StoreDb(_home))) return true;
+            var kf = DataPaths.KeyframesDir(_home);
+            return Directory.Exists(kf) && Directory.EnumerateFiles(kf, "*.db").Any();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return true; }
+    }
+
     /// <summary>
     /// Loads the key without any prompt: unwraps a tpm or dpapi file, or creates a new key when none exists
-    /// and the configured mode is not passphrase. Returns false when a passphrase is needed.
+    /// and the configured mode is not passphrase. Returns false when a passphrase is needed. Throws KeyLostException
+    /// when the key file is damaged, or missing while store data exists (a new key would not open that data).
     /// </summary>
     public bool TryLoadSilent()
     {
@@ -135,6 +185,7 @@ public sealed class KeyVault : IKeyVault, IDisposable
             bool iso = s.Security.MemoryIsolation;
             if (_fileMode == null)
             {
+                if (DataExists()) throw new KeyLostException("The key file is missing.");
                 var mode = ResolveNewMode(s.Security.KeyProtection, probe: true);
                 if (mode == ModePassphrase) return false;
                 var key = SecureKey.Random(iso);
@@ -167,6 +218,8 @@ public sealed class KeyVault : IKeyVault, IDisposable
         if (string.IsNullOrEmpty(passphrase)) return false;
         lock (_gate)
         {
+            // Throttled tries are refused without running Argon2id (the _gate lock already runs one check at a time).
+            if (PassphraseThrottledLocked()) return false;
             var s = _settings();
             if (_key != null)
             {
@@ -174,6 +227,7 @@ public sealed class KeyVault : IKeyVault, IDisposable
                 {
                     // Already passphrase-wrapped: only check it, never replace it here.
                     using var check = UnwrapPassphrase(File.ReadAllBytes(_keyFile), passphrase, false);
+                    NotePassphraseLocked(check != null);
                     return check != null;
                 }
                 if (s.Security.KeyProtection == ModePassphrase)
@@ -190,6 +244,7 @@ public sealed class KeyVault : IKeyVault, IDisposable
             }
             if (_fileMode == null)
             {
+                if (DataExists()) return false;   // key file missing next to existing data: lost, never replaced here
                 var key = SecureKey.Random(s.Security.MemoryIsolation);
                 WriteWrapped(key, ModePassphrase, passphrase);
                 SetLoaded(key, ModePassphrase);
@@ -198,6 +253,7 @@ public sealed class KeyVault : IKeyVault, IDisposable
             }
             if (_fileMode != ModePassphrase) return false;
             var unwrapped = UnwrapPassphrase(File.ReadAllBytes(_keyFile), passphrase, s.Security.MemoryIsolation);
+            NotePassphraseLocked(unwrapped != null);
             if (unwrapped == null) { Log.Info("passphrase unlock failed"); return false; }
             SetLoaded(unwrapped, ModePassphrase);
             Log.Info("data key unlocked with passphrase");
@@ -318,15 +374,65 @@ public sealed class KeyVault : IKeyVault, IDisposable
         try
         {
             if (!File.Exists(_keyFile)) return null;
-            var head = new byte[5];
-            using var fs = File.OpenRead(_keyFile);
-            if (fs.Read(head) != 5 || !head.AsSpan(0, 4).SequenceEqual(Magic)) throw new InvalidDataException("Bad key file.");
-            return head[4] switch { 1 => ModeTpm, 2 => ModePassphrase, 3 => ModeDpapi, _ => throw new InvalidDataException("Bad key file mode.") };
+            var file = File.ReadAllBytes(_keyFile);
+            if (file.Length < 5 || !file.AsSpan(0, 4).SequenceEqual(Magic)) throw new InvalidDataException("Bad key file.");
+            var mode = file[4] switch { 1 => ModeTpm, 2 => ModePassphrase, 3 => ModeDpapi, _ => throw new InvalidDataException("Bad key file mode.") };
+            if (!PayloadValid(file, mode)) throw new InvalidDataException("Truncated or damaged key file.");
+            return mode;
         }
         catch (IOException ex) { Log.Error("key file unreadable", ex); throw; }
     }
 
     // ---- wrap / unwrap ----
+
+    private const int PassphrasePayload = 12 + 16 + 12 + 32 + 16;
+
+    /// <summary>Lengths and parameters of a key file payload fit its mode: a cut or garbled file is lost, not locked.</summary>
+    internal static bool PayloadValid(byte[] file, string mode)
+    {
+        var p = file.AsSpan(Math.Min(5, file.Length));
+        switch (mode)
+        {
+            case ModeTpm:
+            {
+                if (p.Length < 2) return false;
+                int nameLen = BinaryPrimitives.ReadUInt16LittleEndian(p);
+                if (nameLen == 0 || p.Length < 2 + nameLen + 4) return false;
+                int len = BinaryPrimitives.ReadInt32LittleEndian(p.Slice(2 + nameLen));
+                return len > 0 && len <= p.Length - 6 - nameLen;
+            }
+            case ModeDpapi:
+            {
+                if (p.Length < 4) return false;
+                int len = BinaryPrimitives.ReadInt32LittleEndian(p);
+                return len > 0 && len <= p.Length - 4;
+            }
+            case ModePassphrase:
+            {
+                if (p.Length < PassphrasePayload) return false;
+                int mem = BinaryPrimitives.ReadInt32LittleEndian(p);
+                int passes = BinaryPrimitives.ReadInt32LittleEndian(p.Slice(4));
+                int lanes = BinaryPrimitives.ReadInt32LittleEndian(p.Slice(8));
+                return mem is >= 8192 and <= 4 * 1024 * 1024 && passes is >= 1 and <= 64 && lanes is >= 1 and <= 64;
+            }
+        }
+        return false;
+    }
+
+    private static void RequireValid(byte[] file, string mode)
+    {
+        if (!PayloadValid(file, mode)) throw new KeyLostException("The key file is damaged.");
+    }
+
+    private static SecureKey Checked32(byte[] plain, bool iso)
+    {
+        try
+        {
+            if (plain.Length != 32) throw new KeyLostException("The key file is damaged.");
+            return new SecureKey(plain, iso);
+        }
+        finally { CryptographicOperations.ZeroMemory(plain); }
+    }
 
     private void WriteWrapped(SecureKey key, string mode, string? passphrase)
     {
@@ -348,7 +454,9 @@ public sealed class KeyVault : IKeyVault, IDisposable
             fs.Write(file);
             fs.Flush(flushToDisk: true);
         }
-        File.Move(tmp, _keyFile, overwrite: true);
+        // Write-through rename: callers delete the old TPM key right after this returns, so the new file must be on the
+        // disk first. A rename lost to a power cut would bring back a tpm-wrapped file whose key is gone (B17).
+        Win32.MoveDurable(tmp, _keyFile);
     }
 
     private RSACng? OpenOrCreateTpmKey()
@@ -391,6 +499,7 @@ public sealed class KeyVault : IKeyVault, IDisposable
 
     private static SecureKey UnwrapTpm(byte[] file, bool iso)
     {
+        RequireValid(file, ModeTpm);
         var p = file.AsSpan(5);
         int nameLen = BinaryPrimitives.ReadUInt16LittleEndian(p);
         var name = Encoding.UTF8.GetString(p.Slice(2, nameLen));
@@ -404,9 +513,20 @@ public sealed class KeyVault : IKeyVault, IDisposable
         }
         using var _ = key;
         using var rsa = new RSACng(key);
-        var plain = rsa.Decrypt(wrapped, RSAEncryptionPadding.OaepSHA1);
-        try { return new SecureKey(plain, iso); }
-        finally { CryptographicOperations.ZeroMemory(plain); }
+        byte[] plain;
+        try { plain = rsa.Decrypt(wrapped, RSAEncryptionPadding.OaepSHA1); }
+        catch (CryptographicException ex) when (!TpmTransient(ex.HResult))
+        {
+            throw new KeyLostException("The TPM cannot unwrap the data key (damaged key file or a cleared TPM).", ex);
+        }
+        return Checked32(plain, iso);
+    }
+
+    /// <summary>TPM busy or not ready (TBS and TPM facilities, NTE_DEVICE_NOT_READY): may pass, so not a lost key.</summary>
+    internal static bool TpmTransient(int hr)
+    {
+        int facility = (hr >> 16) & 0x1FFF;
+        return facility is 0x28 or 0x29 || hr == unchecked((int)0x80090030);
     }
 
     private static byte[] WrapPassphrase(SecureKey key, string passphrase)
@@ -434,11 +554,11 @@ public sealed class KeyVault : IKeyVault, IDisposable
 
     private static SecureKey? UnwrapPassphrase(byte[] file, string passphrase, bool iso)
     {
+        RequireValid(file, ModePassphrase);
         var p = file.AsSpan(5);
         int mem = BinaryPrimitives.ReadInt32LittleEndian(p);
         int passes = BinaryPrimitives.ReadInt32LittleEndian(p.Slice(4));
         int lanes = BinaryPrimitives.ReadInt32LittleEndian(p.Slice(8));
-        if (mem is < 8192 or > 4 * 1024 * 1024 || passes is < 1 or > 64 || lanes is < 1 or > 64) throw new InvalidDataException("Bad key file.");
         var salt = p.Slice(12, 16).ToArray();
         var kek = Argon(passphrase, salt, mem, passes, lanes);
         var plain = new byte[32];
@@ -469,11 +589,10 @@ public sealed class KeyVault : IKeyVault, IDisposable
 
     private static SecureKey UnwrapDpapi(byte[] file, bool iso)
     {
+        RequireValid(file, ModeDpapi);
         var p = file.AsSpan(5);
         int len = BinaryPrimitives.ReadInt32LittleEndian(p);
-        var plain = DpapiUnprotect(p.Slice(4, len));
-        try { return new SecureKey(plain, iso); }
-        finally { CryptographicOperations.ZeroMemory(plain); }
+        return Checked32(DpapiUnprotect(p.Slice(4, len)), iso);
     }
 
     private static unsafe byte[] DpapiProtect(ReadOnlySpan<byte> data)

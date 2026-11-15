@@ -26,8 +26,13 @@ public sealed class ClientSession(PipeKind kind, int pid, string image)
 /// confirm (the newest, often most sensitive) are deleted too.</param>
 internal sealed record PurgeTicket(PurgeScope? Scope, int Rows, DateTimeOffset Expires, TimeSpan? Span = null);
 
-/// <summary>describe preview: the exact image the confirmed send will use.</summary>
-internal sealed record DescribeTicket(string CaptureId, Ai.OutgoingImage Image, DateTimeOffset Expires);
+/// <summary>describe preview: the exact image the confirmed send will use, and the provider, endpoint and model the
+/// confirmation dialog named (a send after any of them changed is refused).</summary>
+internal sealed record DescribeTicket(string CaptureId, Ai.OutgoingImage Image, DateTimeOffset Expires, string Provider, string Endpoint, string Model)
+{
+    public bool Matches(AiSettings ai) =>
+        Provider == ai.Provider && Endpoint == AiDefaults.EffectiveEndpoint(ai) && Model == AiDefaults.EffectiveModel(ai);
+}
 
 public enum Subscription { None, Status, Captures }
 
@@ -92,6 +97,9 @@ public sealed partial class CommandProcessor
     internal const string UsageBench = "Usage: bench | bench full | bench last";
     internal const string UsageExport = "Usage: export <json>";
     internal const string ErrLocked = "Store is locked.";
+    /// <summary>The read gate is open (or not required) but the store did not open: key lost or storage error. Not a lock,
+    /// so clients show the pause reason instead of asking for an unlock.</summary>
+    internal const string ErrNotOpen = "Store is not open.";
     internal const string ErrNotFound = "Not found.";
     internal const string ErrInternal = "Internal error.";
     internal const string ErrRate = "Rate limit exceeded.";
@@ -116,6 +124,7 @@ public sealed partial class CommandProcessor
     internal const string ErrNoApiKey = "API key not set.";
     internal const string ErrApiKeyRule = "Invalid API key.";
     internal const string ErrNoImage = "No image to describe.";
+    internal const string ErrDescribeChanged = "The AI settings changed after the preview. Open the preview again.";
     internal const string ErrProviderUnreachable = "Provider unreachable.";
     internal const string ErrProviderTimeout = "Provider timed out.";
     internal static string ErrTooMany(int seconds) => ErrTooManyPrefix + seconds.ToString(CultureInfo.InvariantCulture) + " s.";
@@ -125,6 +134,7 @@ public sealed partial class CommandProcessor
     private static readonly string[] UiOnlyVerbs = ["unlock", "lock", "consent", "settings", "timeline", "keyframe", "replay", "panic", "audit", "bench", "facets", "history", "password", "ai", "describe", "export", "chat"];
 
     private readonly CommandDeps _d;
+    private readonly AuditThrottle _connectAudit = new(TimeSpan.FromMinutes(1));
     private DateTimeOffset _lastUnlock = DateTimeOffset.MinValue;
 
     internal Func<DateTimeOffset> Now { get; set; } = () => DateTimeOffset.UtcNow;
@@ -134,6 +144,16 @@ public sealed partial class CommandProcessor
 
     /// <summary>Panic: forget chat approvals and unsaved chats, and delete saved chats. The read gate is already closed,
     /// so this goes to the store directly.</summary>
+    /// <summary>Rows left the store for any reason (ICoreHost.Purged): unsaved chats, approvals and running turns that
+    /// quote them go too. purge confirm already does this with its window; this covers the panic flush, retention,
+    /// thinning, the space guard, NSFW drops and replay deletes (N5).</summary>
+    internal void OnStorePurged(PurgeNotice n)
+    {
+        if (_chat is null || (n.Ids.Count == 0 && n.From is null)) return;
+        var gone = n.Ids.ToHashSet(StringComparer.Ordinal);
+        _chat.ForgetCaptures(gone.Contains, n.From, n.To);
+    }
+
     private void OnPanic()
     {
         _chat?.Clear();
@@ -157,8 +177,9 @@ public sealed partial class CommandProcessor
                 ImageRedactor = deps.Redactor,
             });
             deps.Agent.Panicked += OnPanic;
-            // Running chat turns stop on lock and when AI is turned off (panic clears them in OnPanic).
-            deps.Agent.StatusChanged += st => { if (st.Locked) _chat.StopAll(); };
+            // Running chat turns stop on lock and when AI is turned off (panic clears them in OnPanic). Lock also forgets
+            // "Allow for this chat": after an unlock every chat asks again before it shares captures.
+            deps.Agent.StatusChanged += st => { if (st.Locked) { _chat.StopAll(); _chat.ForgetApprovals(); } };
             deps.Settings.Changed += s => { if (!s.Ai.Enabled) _chat.StopAll(); };
         }
     }
@@ -171,7 +192,8 @@ public sealed partial class CommandProcessor
     public async Task ServeAsync(PipeConnection conn, CancellationToken ct)
     {
         var session = new ClientSession(conn.Kind, conn.Peer.Pid, conn.Peer.Image ?? "");
-        Audit(session, "connect", 0, "");
+        // One connect row per client image and minute (count = connections merged), so a reconnect loop cannot grow store.db.
+        if (_connectAudit.Admit(session.PipeLabel + "|" + session.Image, Now()) is > 0 and var merged) Audit(session, "connect", merged, "");
         var stream = conn.Stream;
         var reader = new LineReader(stream, 8192);
         Task<string?>? next = null; // read started while a long request ran; it is the next request line
@@ -247,11 +269,14 @@ public sealed partial class CommandProcessor
         return ok;
     }
 
-    /// <summary>Verbs that may run for minutes (bench full, up to about 10; chat turns). UI pipe only.</summary>
+    /// <summary>Verbs that may run for minutes (bench full, up to about 10; chat turns; export and replay export of
+    /// large ranges). UI pipe only. Closing the pipe cancels them.</summary>
     internal static bool IsLongRunning(PipeKind kind, string line)
     {
         if (kind != PipeKind.Ui) return false;
         var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length >= 2 && parts[0].Equals("export", StringComparison.OrdinalIgnoreCase)) return true;
+        if (parts.Length >= 3 && parts[0].Equals("replay", StringComparison.OrdinalIgnoreCase) && parts[1].Equals("export", StringComparison.OrdinalIgnoreCase)) return true;
         if (parts.Length >= 2 && parts[0].Equals("chat", StringComparison.OrdinalIgnoreCase)
             && parts[1].ToLowerInvariant() is "send" or "approve" or "deny") return true;
         if (parts.Length == 3 && parts[0].Equals("describe", StringComparison.OrdinalIgnoreCase) && parts[1].Equals("send", StringComparison.OrdinalIgnoreCase)) return true;
@@ -471,14 +496,21 @@ public sealed partial class CommandProcessor
     // ------------------------------------------------------------ gate, audit
 
     /// <summary>Read gate: store not open, or security.requireUnlock with the gate closed (ipc.requireUnlocked for IPC and MCP).</summary>
-    internal bool IsLocked(PipeKind kind)
+    internal bool IsLocked(PipeKind kind) => LockError(kind) != null;
+
+    /// <summary>Null when data verbs may read. "Store is locked." while the gate is closed or the key waits for its
+    /// passphrase; "Store is not open." when the gate is open but the store did not open (keylost, storeerror).</summary>
+    internal string? LockError(PipeKind kind)
     {
-        if (_d.Store() == null) return true;
         var s = S;
-        if (!s.Security.RequireUnlock) return false;
-        if (kind != PipeKind.Ui && !s.Ipc.RequireUnlocked) return false;
-        return !_d.Agent.IsUnlocked;
+        if (s.Security.RequireUnlock && (kind == PipeKind.Ui || s.Ipc.RequireUnlocked) && !_d.Agent.IsUnlocked) return ErrLocked;
+        return _d.Store() == null ? NotOpenError : null;
     }
+
+    private bool KeyNeedsPassphrase => _d.Keys is Crypto.KeyVault kv ? kv.NeedsPassphrase : (!_d.Keys.KeyLoaded && _d.Keys.Protection == Crypto.KeyVault.ModePassphrase);
+
+    /// <summary>Error for a store that is not open: locked while the key waits for its passphrase, else not open.</summary>
+    private string NotOpenError => KeyNeedsPassphrase ? ErrLocked : ErrNotOpen;
 
     private void Audit(ClientSession s, string verb, int count, string sha)
     {
@@ -606,10 +638,10 @@ public sealed partial class CommandProcessor
         int max = s.Kind == PipeKind.Ui ? Math.Max(ipc.MaxResults, UiMaxResults) : ipc.MaxResults;
         var (req, error) = ParseSearch(rest, Math.Min(ipc.DefaultResults, max), max);
         if (req == null) return Err(error!);
-        if (IsLocked(s.Kind)) return Err(ErrLocked);
+        if (LockError(s.Kind) is { } locked) return Err(locked);
         if (RateLimited(s)) return Err(ErrRate);
         var store = _d.Store();
-        if (store == null) return Err(ErrLocked);
+        if (store == null) return Err(NotOpenError);
 
         float[] qv = [];
         if (req.Mode != SearchMode.Text)
@@ -641,7 +673,7 @@ public sealed partial class CommandProcessor
     private Reply Get(ClientSession s, string[] args)
     {
         if (args.Length != 1) return Err(UsageGet);
-        if (IsLocked(s.Kind)) return Err(ErrLocked);
+        if (LockError(s.Kind) is { } locked) return Err(locked);
         var d = _d.Store()!.Get(args[0]);
         Audit(s, "get", d == null ? 0 : 1, "");
         if (d == null) return Err(ErrNotFound);
@@ -675,7 +707,7 @@ public sealed partial class CommandProcessor
             if (!int.TryParse(args[1], NumberStyles.None, CultureInfo.InvariantCulture, out width)) return Err(UsageThumb);
             if (width is < 64 or > 1280) return Err("Invalid width.");
         }
-        if (IsLocked(s.Kind)) return Err(ErrLocked);
+        if (LockError(s.Kind) is { } locked) return Err(locked);
         var t = await _d.Thumbnailer.GetThumbAsync(args[0], width, ct).ConfigureAwait(false);
         Audit(s, "thumb", t == null ? 0 : 1, "");
         if (t == null) return Err(ErrNotFound);
@@ -685,7 +717,7 @@ public sealed partial class CommandProcessor
     private Reply Keyframe(ClientSession s, string[] args)
     {
         if (args.Length != 1) return Err(UsageKeyframe);
-        if (IsLocked(s.Kind)) return Err(ErrLocked);
+        if (LockError(s.Kind) is { } locked) return Err(locked);
         var t = _d.Store()!.GetKeyframe(args[0]);
         Audit(s, "keyframe", t == null ? 0 : 1, "");
         if (t == null) return Err(ErrNotFound);
@@ -711,7 +743,7 @@ public sealed partial class CommandProcessor
         if (!r.DryRun && (string.IsNullOrWhiteSpace(r.Path) || !Path.IsPathFullyQualified(r.Path)
             || !r.Path.EndsWith(".zip", StringComparison.OrdinalIgnoreCase) || r.Path.IndexOfAny(Path.GetInvalidPathChars()) >= 0))
             return Err("Invalid path.");
-        if (IsLocked(s.Kind)) return Err(ErrLocked);
+        if (LockError(s.Kind) is { } locked) return Err(locked);
         var store = _d.Store()!;
         if (r.DryRun) return Ok(JsonSerializer.Serialize(Store.CaptureExporter.Count(store, r), CoreJson.Default.ExportResult));
         try
@@ -738,7 +770,7 @@ public sealed partial class CommandProcessor
             limit = Math.Min(limit, 5000);
         }
         if (from >= to) return Err("Invalid from.");
-        if (IsLocked(s.Kind)) return Err(ErrLocked);
+        if (LockError(s.Kind) is { } locked) return Err(locked);
         var items = _d.Store()!.Timeline(from, to, limit);
         Audit(s, "timeline", items.Count, "");
         return Ok(JsonSerializer.Serialize(new ItemsReply<CaptureMeta>(items), CoreJson.Default.ItemsReplyCaptureMeta));
@@ -749,7 +781,7 @@ public sealed partial class CommandProcessor
         int limit = 200;
         if (args.Length > 1 || (args.Length == 1 && !int.TryParse(args[0], NumberStyles.None, CultureInfo.InvariantCulture, out limit))) return Err(UsageAudit);
         if (limit is < 1 or > 10000) return Err("Invalid limit.");
-        if (IsLocked(s.Kind)) return Err(ErrLocked);
+        if (LockError(s.Kind) is { } locked) return Err(locked);
         var items = _d.Store()!.ReadAudit(limit);
         return Ok(JsonSerializer.Serialize(new ItemsReply<AuditEntry>(items), CoreJson.Default.ItemsReplyAuditEntry));
     }
@@ -764,7 +796,7 @@ public sealed partial class CommandProcessor
             from = f; to = t;
         }
         else if (args.Length != 0) return Err(UsageFacets);
-        if (IsLocked(s.Kind)) return Err(ErrLocked);
+        if (LockError(s.Kind) is { } locked) return Err(locked);
         var r = _d.Store()!.Facets(from, to, 30);
         return Ok(JsonSerializer.Serialize(r, CoreJson.Default.FacetsReply));
     }
@@ -776,7 +808,7 @@ public sealed partial class CommandProcessor
     private Reply History(ClientSession s, string rest)
     {
         var (sub, text) = SplitVerb(rest);
-        if (IsLocked(s.Kind)) return Err(ErrLocked);
+        if (LockError(s.Kind) is { } locked) return Err(locked);
         var store = _d.Store()!;
         var p = S.Privacy;
         switch (sub.ToLowerInvariant())
@@ -804,7 +836,7 @@ public sealed partial class CommandProcessor
         if (args.Length == 0) return new Reply(Envelope.Ok(JsonSerializer.Serialize(new SubscribedStatus(true), CoreJson.Default.SubscribedStatus)), Subscription.Status);
         if (args.Length == 1 && args[0].Equals("captures", StringComparison.OrdinalIgnoreCase))
         {
-            if (IsLocked(s.Kind)) return Err(ErrLocked);
+            if (LockError(s.Kind) is { } locked) return Err(locked);
             Audit(s, "subscribe captures", 0, "");
             return new Reply(Envelope.Ok(JsonSerializer.Serialize(new SubscribedCaptures("captures"), CoreJson.Default.SubscribedCaptures)), Subscription.Captures);
         }
@@ -846,11 +878,14 @@ public sealed partial class CommandProcessor
             if (!S.Ipc.AllowControl) return Err(ErrControlOff);
             if (!S.Ipc.AllowPurge) return Err(ErrPurgeOff);
             // Row counts reveal visited sites and apps: scripts need the read gate open, like search.
-            if (IsLocked(s.Kind)) return Err(ErrLocked);
+            if (LockError(s.Kind) is { } locked) return Err(locked);
         }
         string usage = ui ? UsagePurgeUi : UsagePurge;
         if (args.Length == 0) return Err(usage);
         var sub = args[0].ToLowerInvariant();
+        // UI pipe: scoped previews (row counts) and their confirms need the read gate open too. purge all has its own
+        // recent-unlock check and stays possible while locked (panic).
+        if (ui && sub is not ("all" or "confirm") && LockError(s.Kind) is { } uiLocked) return Err(uiLocked);
         PurgeScope scope;
         switch (sub)
         {
@@ -859,6 +894,7 @@ public sealed partial class CommandProcessor
                 if (args.Length != 2) return Err(usage);
                 var now = Now();
                 if (!s.PurgeTokens.Remove(args[1], out var ticket) || ticket.Expires <= now) return Err(ErrToken);
+                if (ui && ticket.Scope != null && LockError(s.Kind) is { } confirmLocked) return Err(confirmLocked);
                 if (ticket.Scope == null)
                 {
                     int all = await _d.PurgeAll(ct).ConfigureAwait(false);
@@ -866,8 +902,12 @@ public sealed partial class CommandProcessor
                     return Ok(JsonSerializer.Serialize(new PurgeResult(all), CoreJson.Default.PurgeResult));
                 }
                 var st = _d.Store();
-                if (st == null) return Err(ErrLocked);
-                int n = st.Purge(ticket.Span is { } span ? PurgeScope.Last(span) : ticket.Scope);
+                if (st == null) return Err(NotOpenError);
+                var scope2 = ticket.Span is { } span ? PurgeScope.Last(span) : ticket.Scope;
+                int n = st.Purge(scope2);
+                // Unsaved chats, approval cards and running turns that quote a deleted capture go too.
+                bool window = scope2.Kind is "last" or "range";
+                _chat?.ForgetCaptures(id => st.Get(id) == null, window ? scope2.From : null, window ? scope2.To : null);
                 Audit(s, "purge", n, "");
                 return Ok(JsonSerializer.Serialize(new PurgeResult(n), CoreJson.Default.PurgeResult));
             }
@@ -903,7 +943,7 @@ public sealed partial class CommandProcessor
                 return Err(usage);
         }
         var store = _d.Store();
-        if (store == null) return Err(ErrLocked);
+        if (store == null) return Err(NotOpenError);
         int rows = store.CountPurge(scope);
         return Ok(JsonSerializer.Serialize(new PurgeConfirmReply(NewToken(s, scope, rows), rows), CoreJson.Default.PurgeConfirmReply));
     }
@@ -913,19 +953,27 @@ public sealed partial class CommandProcessor
     private bool UsesPassword => S.Security.UnlockMethod == "password";
 
     /// <summary>
-    /// unlock [secret]. Data key still passphrase-wrapped: the secret is the passphrase. Otherwise with
+    /// unlock [secret]. Data key still passphrase-wrapped: the secret is the passphrase; an empty one runs Windows Hello
+    /// only, which is enough for purge all (a forgotten passphrase can start over) but opens no data. Otherwise with
     /// security.unlockMethod password the secret is the unlock password (rate-limited, no Hello prompt); with hello an
     /// optional passphrase check comes first, then Windows Hello. With the password method a passphrase that loads the
-    /// key also opens the gate: it is the stronger secret of the two.
+    /// key also opens the gate: it is the stronger secret of the two. A key that is not loaded (keylost, storeerror)
+    /// ignores the secret.
     /// </summary>
     private async Task<Reply> UnlockAsync(ClientSession s, string rest, CancellationToken ct)
     {
         var keys = _d.Keys;
-        bool needPass = keys is Crypto.KeyVault kv ? kv.NeedsPassphrase : (!keys.KeyLoaded && keys.Protection == Crypto.KeyVault.ModePassphrase);
-        if (needPass)
+        bool rewrap = false;
+        // Passphrase guesses are rate-limited like the unlock password (each one is a 64 MiB Argon2id run).
+        bool passphraseTry = rest.Length > 0 && (KeyNeedsPassphrase || !UsesPassword && keys.KeyLoaded && keys.Protection == Crypto.KeyVault.ModePassphrase);
+        if (passphraseTry && keys.PassphraseRetryAfterSeconds is > 0 and var passWait) return Err(ErrTooMany(passWait));
+        if (KeyNeedsPassphrase)
         {
-            if (rest.Length == 0 || !keys.UnlockWithPassphrase(rest)) return Err(ErrWrongPassphrase);
-            if (UsesPassword) return OpenVerified(s, "unlock passphrase");
+            if (rest.Length > 0)
+            {
+                if (!keys.UnlockWithPassphrase(rest)) return Err(ErrWrongPassphrase);
+                if (UsesPassword) return OpenVerified(s, "unlock passphrase");
+            }
         }
         else if (UsesPassword)
         {
@@ -942,14 +990,16 @@ public sealed partial class CommandProcessor
             }
             return OpenVerified(s, "unlock password");
         }
-        // security.keyProtection = passphrase while the key file is still tpm/dpapi: the passphrase re-wraps the key.
-        // keys.Protection reports the file's mode, so the setting has to be checked too.
-        else if (rest.Length > 0 && (keys.Protection == Crypto.KeyVault.ModePassphrase || S.Security.KeyProtection == Crypto.KeyVault.ModePassphrase)
-                 && !keys.UnlockWithPassphrase(rest))
+        else if (rest.Length > 0 && keys.KeyLoaded)
         {
-            return Err(ErrWrongPassphrase);
+            // Already passphrase-wrapped: check the passphrase before Hello. security.keyProtection = passphrase while the
+            // key file is still tpm/dpapi (keys.Protection reports the file's mode): the passphrase re-wraps the key, but
+            // only after Hello passed, so a cancelled Hello leaves the key file as it was.
+            if (keys.Protection == Crypto.KeyVault.ModePassphrase) { if (!keys.UnlockWithPassphrase(rest)) return Err(ErrWrongPassphrase); }
+            else rewrap = S.Security.KeyProtection == Crypto.KeyVault.ModePassphrase;
         }
         if (!await _d.Agent.UnlockAsync(ct).ConfigureAwait(false)) return Err(ErrUnlockCancelled);
+        if (rewrap && !keys.UnlockWithPassphrase(rest)) return Err(ErrWrongPassphrase);
         _lastUnlock = Now();
         var until = _d.Agent.GetStatus().UnlockedUntil;
         return Ok(JsonSerializer.Serialize(new UnlockReply(true, until), CoreJson.Default.UnlockReply));
@@ -1052,11 +1102,13 @@ public sealed partial class CommandProcessor
                 return Ok(JsonSerializer.Serialize(AiState(), CoreJson.Default.AiStatus));
             case "setkey" when tail.Length > 0:
                 if (store == null) return Err(ErrAiOff);
+                if (LockError(s.Kind) is { } setLocked) return Err(setLocked);
                 if (!Ai.ApiKeyStore.Valid(tail)) return Err(ErrApiKeyRule);
                 store.Set(tail, S.Ai);
                 Audit(s, "ai setkey", 1, "");
                 return Ok(JsonSerializer.Serialize(AiState(), CoreJson.Default.AiStatus));
             case "clearkey" when tail.Length == 0:
+                if (LockError(s.Kind) is { } clearLocked) return Err(clearLocked);
                 store?.Clear();
                 Audit(s, "ai clearkey", 1, "");
                 return Ok(JsonSerializer.Serialize(AiState(), CoreJson.Default.AiStatus));
@@ -1085,7 +1137,7 @@ public sealed partial class CommandProcessor
             case "preview":
             {
                 if (keyNeeded && _d.AiKey.Read(ai) == null) return Err(ErrNoApiKey);
-                if (IsLocked(s.Kind)) return Err(ErrLocked);
+                if (LockError(s.Kind) is { } locked) return Err(locked);
                 var id = args[1];
                 ThumbData? img = _d.Store()!.GetKeyframe(id);
                 if (img != null && !SendableMimes.Contains(img.Mime)) img = await _d.Thumbnailer.GetThumbAsync(id, 1280, ct).ConfigureAwait(false);
@@ -1095,7 +1147,7 @@ public sealed partial class CommandProcessor
                 catch (Ai.DescribeException ex) { Audit(s, "describe preview", 0, ""); return Err(ex.Message); }
                 while (s.DescribeTokens.Count >= 4) s.DescribeTokens.Remove(s.DescribeTokens.MinBy(kv => kv.Value.Expires).Key);
                 var token = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(16));
-                s.DescribeTokens[token] = new DescribeTicket(id, outgoing, now.AddSeconds(120));
+                s.DescribeTokens[token] = new DescribeTicket(id, outgoing, now.AddSeconds(120), ai.Provider, AiDefaults.EffectiveEndpoint(ai), AiDefaults.EffectiveModel(ai));
                 Audit(s, "describe preview", 1, "");
                 return Ok(JsonSerializer.Serialize(new DescribePreview(token, ai.Provider, AiDefaults.EffectiveModel(ai), AiDefaults.EffectiveEndpoint(ai),
                     outgoing.Mime, outgoing.Width, outgoing.Height, outgoing.Redacted, outgoing.Bytes), CoreJson.Default.DescribePreview));
@@ -1103,7 +1155,9 @@ public sealed partial class CommandProcessor
             case "send":
             {
                 if (!s.DescribeTokens.Remove(args[1], out var ticket) || ticket.Expires <= now) return Err(ErrToken);
-                if (IsLocked(s.Kind)) return Err(ErrLocked);
+                if (LockError(s.Kind) is { } locked) return Err(locked);
+                // The user confirmed a send to the provider, endpoint and model the preview showed, nowhere else.
+                if (!ticket.Matches(ai)) return Err(ErrDescribeChanged);
                 var key = _d.AiKey.Read(ai);
                 if (keyNeeded && key == null) return Err(ErrNoApiKey);
                 var verb = "describe " + ai.Provider;
@@ -1126,7 +1180,9 @@ public sealed partial class CommandProcessor
         return Err(UsageDescribe);
     }
 
-    private static readonly string[] GuardedSettingGroups = ["security", "ai", "ipc"];
+    /// <summary>Groups that change what is protected, kept or redacted, or what leaves the PC (retention.days and
+    /// storage.maxGb delete history; privacy and ocr off stop redaction; mcp opens a pipe).</summary>
+    internal static readonly string[] GuardedSettingGroups = ["security", "ai", "ipc", "mcp", "privacy", "ocr", "retention", "storage"];
 
     private Reply Settings(string rest)
     {
@@ -1141,11 +1197,11 @@ public sealed partial class CommandProcessor
                 catch (JsonException) { return Err(ErrJson); }
                 using (doc)
                 {
-                    // Security, AI and IPC settings change what is protected and what leaves the PC: not while the gate
+                    // Guarded groups change what is protected, kept or redacted and what leaves the PC: not while the gate
                     // is closed (a passphrase-wrapped key would otherwise be re-wrapped to dpapi without the passphrase).
-                    if (doc.RootElement.ValueKind == JsonValueKind.Object && IsLocked(PipeKind.Ui)
+                    if (doc.RootElement.ValueKind == JsonValueKind.Object && LockError(PipeKind.Ui) is { } locked
                         && GuardedSettingGroups.Any(g => doc.RootElement.TryGetProperty(g, out _)))
-                        return Err(ErrLocked);
+                        return Err(locked);
                     // The password method needs a password first, or nobody could unlock.
                     if (doc.RootElement.ValueKind == JsonValueKind.Object && doc.RootElement.TryGetProperty("security", out var sec)
                         && JsonString(sec, "unlockMethod") == "password" && _d.Password?.IsSet != true)
@@ -1175,7 +1231,7 @@ public sealed partial class CommandProcessor
                 case "save" when args.Length == 0:
                     return Ok(JsonSerializer.Serialize(await _d.Agent.SaveReplayAsync(ct).ConfigureAwait(false), CoreJson.Default.ReplayClip));
                 case "list" when args.Length == 0:
-                    if (IsLocked(s.Kind)) return Err(ErrLocked);
+                    if (LockError(s.Kind) is { } locked) return Err(locked);
                     var items = _d.Agent.ListReplays();
                     Audit(s, "replay list", items.Count, "");
                     return Ok(JsonSerializer.Serialize(new ItemsReply<ReplayClip>(items), CoreJson.Default.ItemsReplyReplayClip));
@@ -1184,12 +1240,13 @@ public sealed partial class CommandProcessor
                     var (id, path) = SplitVerb(tail);
                     path = path.Trim(); // rest of the line, spaces included, no quoting
                     if (!Path.IsPathFullyQualified(path)) return Err(UsageReplay);
-                    if (IsLocked(s.Kind)) return Err(ErrLocked);
+                    if (LockError(s.Kind) is { } exportLocked) return Err(exportLocked);
                     await _d.Agent.ExportReplayAsync(id, path, ct).ConfigureAwait(false);
                     Audit(s, "replay export", 1, "");
                     return Ok("null");
                 }
                 case "delete" when args.Length == 1:
+                    if (LockError(s.Kind) is { } deleteLocked) return Err(deleteLocked);
                     _d.Agent.DeleteReplay(args[0]);
                     return Ok("null");
             }

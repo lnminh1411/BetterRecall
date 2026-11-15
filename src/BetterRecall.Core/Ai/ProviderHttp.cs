@@ -38,7 +38,7 @@ public static class ProviderErrors
     {
         var (type, code, gstatus, message, retryDelay, reason) = ParseBody(body);
         message = Scrub(message, apiKey);
-        var retryAt = RetryAfter(headers, now) ?? (retryDelay is { } d ? now + d : null);
+        var retryAt = RetryAfter(headers, now) ?? (retryDelay is { } d ? now + Clamp(d) : null);
         string Say(string text) => message.Length > 0 ? text + " (" + message + ")" : text;
         bool ctx = Has(code, "context_length_exceeded") || Has(type, "request_too_large") || status == 413
             || message.Contains("prompt is too long", StringComparison.OrdinalIgnoreCase)
@@ -128,10 +128,13 @@ public static class ProviderErrors
         return null;
     }
 
+    /// <summary>Retry hints from the server are clamped to 0..1 day, so date arithmetic cannot overflow.</summary>
+    internal static TimeSpan Clamp(TimeSpan d) => d < TimeSpan.Zero ? TimeSpan.Zero : d > TimeSpan.FromDays(1) ? TimeSpan.FromDays(1) : d;
+
     internal static DateTimeOffset? RetryAfter(HttpResponseHeaders? h, DateTimeOffset now)
     {
         if (h?.RetryAfter is not { } ra) return null;
-        if (ra.Delta is { } d) return now + d;
+        if (ra.Delta is { } d) return now + Clamp(d);
         if (ra.Date is { } at) return at;
         return null;
     }
@@ -180,8 +183,9 @@ public static class ProviderErrors
                     foreach (var d in det.EnumerateArray())
                     {
                         if (d.ValueKind != JsonValueKind.Object) continue;
-                        if (S(d, "retryDelay") is { } rd && rd.EndsWith('s') && double.TryParse(rd[..^1], NumberStyles.Float, CultureInfo.InvariantCulture, out var sec))
-                            delay = TimeSpan.FromSeconds(sec);
+                        if (S(d, "retryDelay") is { } rd && rd.EndsWith('s') && double.TryParse(rd[..^1], NumberStyles.Float, CultureInfo.InvariantCulture, out var sec)
+                            && double.IsFinite(sec))
+                            delay = TimeSpan.FromSeconds(Math.Clamp(sec, 0, 86400));
                         reason ??= S(d, "reason");
                     }
                 else if (det.ValueKind == JsonValueKind.Object) reason = S(det, "error_code");
@@ -198,9 +202,14 @@ public static class ProviderErrors
 public sealed class ProviderHttp(HttpMessageHandler? handler = null, Func<DateTimeOffset>? now = null, Func<TimeSpan, CancellationToken, Task>? delay = null)
 {
     public static readonly TimeSpan HeaderTimeout = TimeSpan.FromSeconds(90);
+    /// <summary>Buffered bodies (anything not read as a stream). Streams are capped by SseReader.</summary>
+    public const int MaxBufferedBytes = 4 << 20;
+    /// <summary>Error bodies: only the start is parsed (type, code, message).</summary>
+    public const int MaxErrorBodyBytes = 64 << 10;
     private readonly HttpClient _http = new(handler ?? new SocketsHttpHandler { AllowAutoRedirect = false, PooledConnectionLifetime = TimeSpan.FromMinutes(2) })
     {
         Timeout = Timeout.InfiniteTimeSpan,   // per request below; streams may run longer than the header wait
+        MaxResponseContentBufferSize = MaxBufferedBytes,
     };
     private readonly Func<DateTimeOffset> _now = now ?? (() => DateTimeOffset.UtcNow);
     private readonly Func<TimeSpan, CancellationToken, Task> _delay = delay ?? Task.Delay;
@@ -231,7 +240,7 @@ public sealed class ProviderHttp(HttpMessageHandler? handler = null, Func<DateTi
                 using (resp)
                 {
                     string body;
-                    try { body = await resp.Content.ReadAsStringAsync(to.Token).ConfigureAwait(false); }
+                    try { body = await ReadCappedAsync(resp.Content, MaxErrorBodyBytes, to.Token).ConfigureAwait(false); }
                     catch (Exception ex) when (ex is IOException or HttpRequestException or OperationCanceledException && !ct.IsCancellationRequested) { body = ""; }
                     failure = ProviderErrors.FromHttp((int)resp.StatusCode, body, resp.Headers, model, _now(), apiKey);
                     Log.Info($"cloud request: HTTP {(int)resp.StatusCode} -> {failure.Code} (attempt {attempt + 1})");
@@ -241,6 +250,16 @@ public sealed class ProviderHttp(HttpMessageHandler? handler = null, Func<DateTi
             onRetry?.Invoke(failure, wait);
             await _delay(wait, ct).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>UTF-8 text of at most maxBytes from the start of the body; the rest is not read.</summary>
+    internal static async Task<string> ReadCappedAsync(HttpContent content, int maxBytes, CancellationToken ct)
+    {
+        await using var s = await content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+        var buf = new byte[maxBytes];
+        int n = 0;
+        while (n < maxBytes && await s.ReadAsync(buf.AsMemory(n), ct).ConfigureAwait(false) is var r and > 0) n += r;
+        return System.Text.Encoding.UTF8.GetString(buf, 0, n);
     }
 
     internal static bool IsLoopback(string endpoint) =>

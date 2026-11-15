@@ -37,7 +37,14 @@ internal sealed class Services
     public event Action? Unlocked;
     public event Action? StatusChanged;
     public event Action? ConnectionChanged;
+    /// <summary>The agent answers again after the connection was marked down (agent restart): data pages reload, since
+    /// what they show is from before the restart and their last request may have failed. Raised on the UI thread.</summary>
+    public event Action? Reconnected;
     public event Action? SettingsLoaded;
+    /// <summary>The agent process this UI talked to exited (tray Quit, quit event, crash). Raised on the UI thread.</summary>
+    public event Action? AgentExited;
+
+    private readonly AgentExitWatch _agentWatch = new();
 
     private Services(AppArgs args, DispatcherQueue ui)
     {
@@ -55,7 +62,7 @@ internal sealed class Services
         }
         else
         {
-            pipe = PipeNames.Ui(PipeNames.UserSid());
+            pipe = PipeNames.Ui(PipeNames.UserSid(), DataPaths.Home());   // the agent of this UI's data folder only
             trust = new ServerTrustVerifier(ServerTrustVerifier.InstalledAgentPath(AppContext.BaseDirectory));
         }
         _pipe = pipe;
@@ -70,6 +77,13 @@ internal sealed class Services
         MediaClient.ResponseClassified += k => ui.TryEnqueue(() => OnClassified(k));
         Subscription.StatusReceived += s => ui.TryEnqueue(() => { SetConnection(AgentErrorKind.None); ApplyStatus(s); });
         Subscription.Disconnected += k => ui.TryEnqueue(() => SetConnection(k));
+        _agentWatch.Exited += () => ui.TryEnqueue(() => AgentExited?.Invoke());
+    }
+
+    /// <summary>Watches the agent behind the main connection (mock mode: none, the server is this process).</summary>
+    private void WatchAgent()
+    {
+        if (_mock is null) _agentWatch.Watch(MainClient.ServerPid);
     }
 
     /// <summary>A fresh connection for one long request (bench full). The caller disposes it; disposing closes the pipe.</summary>
@@ -145,6 +159,7 @@ internal sealed class Services
 
     private void ApplyStatus(AgentStatus s)
     {
+        WatchAgent();
         Status = s;
         SetLocked(s.Locked);
         StatusChanged?.Invoke();
@@ -158,6 +173,11 @@ internal sealed class Services
                 SetConnection(AgentErrorKind.None);
                 SetLocked(true);
                 break;
+            case AgentErrorKind.NotOpen:
+                // Key lost or storage error: not a lock. The status (pause reason) drives the banner; ask for a fresh one.
+                SetConnection(AgentErrorKind.None);
+                _ = RefreshStatusAsync();
+                break;
             case AgentErrorKind.NotRunning:
             case AgentErrorKind.NotTrusted:
                 SetConnection(kind);
@@ -166,13 +186,16 @@ internal sealed class Services
                 SetConnection(AgentErrorKind.None);
                 break;
         }
+        if (kind is not (AgentErrorKind.NotRunning or AgentErrorKind.NotTrusted)) WatchAgent();
     }
 
     private void SetConnection(AgentErrorKind kind)
     {
         if (Connection == kind) return;
+        bool wasDown = Connection is AgentErrorKind.NotRunning or AgentErrorKind.NotTrusted;
         Connection = kind;
         ConnectionChanged?.Invoke();
+        if (wasDown && kind == AgentErrorKind.None) Reconnected?.Invoke();
     }
 
     private void SetLocked(bool locked)
@@ -199,6 +222,7 @@ internal sealed class Services
 
     public async Task ShutdownAsync()
     {
+        _agentWatch.Dispose();
         await Subscription.DisposeAsync();
         await MainClient.DisposeAsync();
         await MediaClient.DisposeAsync();

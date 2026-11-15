@@ -95,8 +95,8 @@ public sealed class AgentClient(string pipeName, IServerTrust trust, TimeSpan? c
 
     public async Task<AgentResult> SendAsync(string line, CancellationToken ct = default)
     {
-        if (Encoding.UTF8.GetByteCount(line) > LineProtocol.MaxRequestBytes)
-            return AgentResult.Fail(AgentErrorKind.Server, LineProtocol.TooLongError);
+        if (Encoding.UTF8.GetByteCount(line) > LineProtocol.MaxUiRequestBytes)
+            return AgentResult.Fail(AgentErrorKind.Server, LineProtocol.TooLongUiError);
 
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         AgentResult result;
@@ -116,12 +116,13 @@ public sealed class AgentClient(string pipeName, IServerTrust trust, TimeSpan? c
     /// </summary>
     public async Task<AgentResult> StreamAsync(string line, Func<AgentResult, bool> onLine, CancellationToken ct = default)
     {
-        if (Encoding.UTF8.GetByteCount(line) > LineProtocol.MaxRequestBytes)
-            return AgentResult.Fail(AgentErrorKind.Server, LineProtocol.TooLongError);
+        if (Encoding.UTF8.GetByteCount(line) > LineProtocol.MaxUiRequestBytes)
+            return AgentResult.Fail(AgentErrorKind.Server, LineProtocol.TooLongUiError);
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         AgentResult result;
         try
         {
+            bool reused = _conn is not null;
             if (_conn is null)
             {
                 var (c, err) = await AgentConnection.ConnectAsync(pipeName, trust, _timeout, ct).ConfigureAwait(false);
@@ -130,7 +131,16 @@ public sealed class AgentClient(string pipeName, IServerTrust trust, TimeSpan? c
             }
             try
             {
-                await _conn.WriteLineAsync(line, ct).ConfigureAwait(false);
+                try { await _conn.WriteLineAsync(line, ct).ConfigureAwait(false); }
+                catch (Exception ex) when (reused && ex is IOException or ObjectDisposedException or InvalidOperationException)
+                {
+                    // A stale cached connection: the agent never saw the line, so send it on a fresh one.
+                    await DropAsync().ConfigureAwait(false);
+                    var (c, err) = await AgentConnection.ConnectAsync(pipeName, trust, _timeout, ct).ConfigureAwait(false);
+                    if (c is null) { result = AgentResult.Fail(err); goto done; }
+                    _conn = c;
+                    await _conn.WriteLineAsync(line, ct).ConfigureAwait(false);
+                }
                 while (true)
                 {
                     var response = await _conn.ReadLineAsync(ct).ConfigureAwait(false);
@@ -156,19 +166,34 @@ public sealed class AgentClient(string pipeName, IServerTrust trust, TimeSpan? c
         return result;
     }
 
+    /// <summary>
+    /// One request. A cached connection can be dead without anyone knowing (the agent restarted since the last request):
+    /// then the request is sent once more on a fresh connection when that is safe, that is when the write itself failed
+    /// (the agent never saw the line) or the verb only reads (C20, D30). A failure on a fresh connection is final.
+    /// </summary>
     private async Task<AgentResult> SendLockedAsync(string line, CancellationToken ct)
+    {
+        bool reused = _conn is not null;
+        var (result, retry) = await SendOnceAsync(line, ct).ConfigureAwait(false);
+        if (!retry || !reused) return result;
+        return (await SendOnceAsync(line, ct).ConfigureAwait(false)).Result;
+    }
+
+    private async Task<(AgentResult Result, bool Retry)> SendOnceAsync(string line, CancellationToken ct)
     {
         if (_conn is null)
         {
             var (c, err) = await AgentConnection.ConnectAsync(pipeName, trust, _timeout, ct).ConfigureAwait(false);
-            if (c is null) return AgentResult.Fail(err);
+            if (c is null) return (AgentResult.Fail(err), false);
             _conn = c;
         }
 
+        bool written = false;
         string? response;
         try
         {
             await _conn.WriteLineAsync(line, ct).ConfigureAwait(false);
+            written = true;
             response = await _conn.ReadLineAsync(ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
@@ -180,15 +205,28 @@ public sealed class AgentClient(string pipeName, IServerTrust trust, TimeSpan? c
         catch (Exception ex) when (ex is IOException or ObjectDisposedException or InvalidOperationException)
         {
             await DropAsync().ConfigureAwait(false);
-            return AgentResult.Fail(AgentErrorKind.NotRunning);
+            return (AgentResult.Fail(AgentErrorKind.NotRunning), !written || IsReadOnly(line));
         }
 
         if (response is null)
         {
             await DropAsync().ConfigureAwait(false);
-            return AgentResult.Fail(AgentErrorKind.NotRunning);
+            return (AgentResult.Fail(AgentErrorKind.NotRunning), IsReadOnly(line));
         }
-        return Parse(response);
+        return (Parse(response), false);
+    }
+
+    private static readonly string[] ReadOnlyVerbs = ["version", "status", "search", "get", "thumb", "keyframe", "timeline", "facets", "audit"];
+    private static readonly string[] ReadOnlyLines = ["history", "password", "ai", "settings get", "replay list", "bench last", "chat list"];
+
+    /// <summary>Verbs that change nothing on the agent, so sending them twice is harmless.</summary>
+    public static bool IsReadOnly(string line)
+    {
+        int sp = line.IndexOf(' ');
+        string verb = sp < 0 ? line : line[..sp];
+        if (Array.IndexOf(ReadOnlyVerbs, verb) >= 0) return true;
+        if (Array.IndexOf(ReadOnlyLines, line) >= 0) return true;
+        return line.StartsWith("chat get ", StringComparison.Ordinal);
     }
 
     public static AgentResult Parse(string response)

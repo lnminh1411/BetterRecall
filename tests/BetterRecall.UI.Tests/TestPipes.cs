@@ -30,7 +30,7 @@ public sealed class FakeLineServer : IAsyncDisposable
                     await using var s = server;
                     try
                     {
-                        while (await LineProtocol.ReadLineAsync(s, 4096, _cts.Token) is { } line)
+                        while (await LineProtocol.ReadLineAsync(s, LineProtocol.MaxUiRequestBytes, _cts.Token) is { } line)
                         {
                             lock (Received) Received.Add(line);
                             var a = answer(line);

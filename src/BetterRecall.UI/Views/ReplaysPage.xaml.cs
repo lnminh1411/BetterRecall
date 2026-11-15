@@ -71,6 +71,7 @@ public sealed partial class ReplaysPage : Page, IDataPage
         {
             Show(InfoBarSeverity.Error, Loc.Error(r.Kind, r.Error));
             List.ItemsSource = null;
+            EmptyText.Visibility = Visibility.Collapsed;   // "no saved replays" would be wrong: the list did not load
             return;
         }
         _rows.AddRange(r.Value!.OrderByDescending(c => c.Ts).Select(c => new ReplayRow(c)));
@@ -125,8 +126,24 @@ public sealed partial class ReplaysPage : Page, IDataPage
         var picked = await picker.PickSaveFileAsync();
         if (picked is null || string.IsNullOrEmpty(picked.Path)) return;
 
+        // Own connection: the list and other pages keep working while a long clip is written, and Cancel stops it.
         Busy.IsActive = true;
-        var r = await Services.Current.Api.ReplayExportAsync(id, picked.Path);
+        using var cancel = new CancellationTokenSource();
+        Show(InfoBarSeverity.Informational, Loc.Get("Replays_Exporting"), "");
+        var stop = new Button { Content = Loc.Get("Common_Cancel") };
+        stop.Click += (_, _) => { try { cancel.Cancel(); } catch (ObjectDisposedException) { } };
+        ResultBar.ActionButton = stop;
+        AgentResult r;
+        try
+        {
+            r = await OwnConnection.RunAsync(Services.Current.CreateRunClient, (own, ct) => own.ReplayExportAsync(id, picked.Path, ct), cancel.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            Busy.IsActive = false;
+            Show(InfoBarSeverity.Informational, Loc.Get("Replays_ExportCancelled"), "");
+            return;
+        }
         Busy.IsActive = false;
         if (!r.Ok)
         {
@@ -147,7 +164,10 @@ public sealed partial class ReplaysPage : Page, IDataPage
 
     private async Task PlayInAppAsync(string path, int offsetMs, string when)
     {
-        var player = new MediaPlayerElement { AreTransportControlsEnabled = true, MinWidth = 640, MinHeight = 360, AutoPlay = true };
+        // 640 x 360 when the window has room; smaller windows get a player that fits inside the dialog
+        double room = XamlRoot is { } xr ? Math.Max(240, xr.Size.Width - 120) : 640;
+        double w = Math.Min(640, room);
+        var player = new MediaPlayerElement { AreTransportControlsEnabled = true, MinWidth = w, MinHeight = w * 9 / 16, AutoPlay = true };
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(player, Loc.Format("Replays_PlayerName", when));
         var mp = new Windows.Media.Playback.MediaPlayer { Source = Windows.Media.Core.MediaSource.CreateFromUri(new Uri(path)) };
         mp.MediaOpened += (s, _) => s.PlaybackSession.Position = TimeSpan.FromMilliseconds(offsetMs);

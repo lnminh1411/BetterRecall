@@ -17,6 +17,7 @@ public sealed class PipeManager : IAsyncDisposable
     private readonly Func<PipeKind, Settings, string> _nameFor;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private PipeServer? _ui, _public, _mcp;
+    private IpcSettings? _publicIpc;   // permission switches the live public connections were admitted under
     private bool _stopped;
     private int _uiCount, _publicCount, _mcpCount;
 
@@ -36,11 +37,12 @@ public sealed class PipeManager : IAsyncDisposable
     public static string DefaultName(PipeKind kind, Settings s)
     {
         var sid = PipeNames.UserSid();
+        var home = DataPaths.Home();   // the agent's own data folder: every client resolves it the same way
         return kind switch
         {
-            PipeKind.Ui => PipeNames.Ui(sid),
-            PipeKind.Mcp => PipeNames.Mcp(sid),
-            _ => PipeNames.Public(s.Ipc.PipeName, sid),
+            PipeKind.Ui => PipeNames.Ui(sid, home),
+            PipeKind.Mcp => PipeNames.Mcp(sid, home),
+            _ => PipeNames.Public(s.Ipc.PipeName, sid, home),
         };
     }
 
@@ -85,10 +87,11 @@ public sealed class PipeManager : IAsyncDisposable
         return server;
     }
 
-    private void OnReject(PipeKind kind, PeerInfo peer, string why)
+    /// <summary>count: rejections this row stands for (PipeServer merges repeats, at most one row per image a minute).</summary>
+    private void OnReject(PipeKind kind, PeerInfo peer, string why, int count)
     {
         var label = kind switch { PipeKind.Ui => "ui", PipeKind.Mcp => "mcp", _ => "ipc" };
-        _store()?.AppendAudit(new AuditEntry(DateTimeOffset.UtcNow, label, peer.Pid, peer.Image ?? "", "rejected", 0, ""));
+        _store()?.AppendAudit(new AuditEntry(DateTimeOffset.UtcNow, label, peer.Pid, peer.Image ?? "", "rejected", count, ""));
     }
 
     private async Task ApplyAsync(Settings s)
@@ -98,6 +101,17 @@ public sealed class PipeManager : IAsyncDisposable
         {
             if (_stopped) return;
             if (_ui == null) _ui = TryCreate(PipeKind.Ui, s);
+
+            // The client checks run at connect only. Before any await (this runs inside the settings change when the
+            // gate is free): a client removed from ipc.allowClients loses its live connection, and turning a
+            // permission off drops every live public connection (subscribe streams included).
+            if (_public != null && _publicIpc != null)
+            {
+                bool revoked = Revoked(_publicIpc, s.Ipc);
+                int dropped = _public.DropWhere(peer => revoked || !ImageAllowed(PipeKind.Public, peer.Image));
+                if (dropped > 0) Log.Info($"pipe Public: {dropped} connection(s) dropped after an ipc settings change");
+            }
+            _publicIpc = Snapshot(s.Ipc);
 
             var wantPublic = s.Ipc.Enabled ? _nameFor(PipeKind.Public, s) : null;
             if (_public != null && _public.Name != (wantPublic == null ? null : PipeNames.Base(wantPublic)))
@@ -113,6 +127,16 @@ public sealed class PipeManager : IAsyncDisposable
         catch (Exception ex) { Log.Error("pipe settings apply failed", ex); }
         finally { _gate.Release(); }
     }
+
+    private static IpcSettings Snapshot(IpcSettings i) => new()
+    {
+        AllowControl = i.AllowControl, AllowPurge = i.AllowPurge, AllowThumbnails = i.AllowThumbnails, RequireUnlocked = i.RequireUnlocked,
+    };
+
+    /// <summary>True when a permission went from on to off (or the read gate became required).</summary>
+    internal static bool Revoked(IpcSettings before, IpcSettings now) =>
+        (before.AllowControl && !now.AllowControl) || (before.AllowPurge && !now.AllowPurge)
+        || (before.AllowThumbnails && !now.AllowThumbnails) || (!before.RequireUnlocked && now.RequireUnlocked);
 
     private PipeServer? TryCreate(PipeKind kind, Settings s)
     {

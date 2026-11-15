@@ -40,23 +40,14 @@ public static class SettingsDiff
     }
 
     /// <summary>
-    /// Request lines for a diff. One line when it fits the 4096-byte request limit, else one per section.
-    /// Returns null when a single section is still too large (a deny list that long has to be shortened).
+    /// The one request line for a diff, so a save is applied whole or not at all (a split save stopped at the first
+    /// error after earlier sections were already saved). Null when the line exceeds the UI pipe's request limit
+    /// (a list that long has to be shortened); "" when there is nothing to send.
     /// </summary>
-    public static List<string>? ToRequestLines(JsonObject diff)
+    public static string? ToRequestLine(JsonObject diff)
     {
-        if (diff.Count == 0) return [];
-        var whole = "settings set " + diff.ToJsonString();
-        if (Encoding.UTF8.GetByteCount(whole) <= LineProtocol.MaxRequestBytes) return [whole];
-
-        var lines = new List<string>();
-        foreach (var (section, value) in diff)
-        {
-            var part = new JsonObject { [section] = value?.DeepClone() };
-            var line = "settings set " + part.ToJsonString();
-            if (Encoding.UTF8.GetByteCount(line) > LineProtocol.MaxRequestBytes) return null;
-            lines.Add(line);
-        }
-        return lines;
+        if (diff.Count == 0) return "";
+        var line = "settings set " + diff.ToJsonString();
+        return Encoding.UTF8.GetByteCount(line) <= LineProtocol.MaxUiRequestBytes ? line : null;
     }
 }

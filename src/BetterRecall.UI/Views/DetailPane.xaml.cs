@@ -12,6 +12,7 @@ namespace BetterRecall.UI.Views;
 public sealed partial class DetailPane : UserControl
 {
     private DetailViewModel? _vm;
+    private long _imageVersion;   // bumped on every image change: a slow decode of an older image is thrown away
 
     public DetailPane()
     {
@@ -25,6 +26,8 @@ public sealed partial class DetailPane : UserControl
         set
         {
             if (_vm is not null) _vm.PropertyChanged -= OnChanged;
+            _imageVersion++;
+            KeyframeImage.Source = null;
             _vm = value;
             if (_vm is not null) _vm.PropertyChanged += OnChanged;
             Render();
@@ -37,10 +40,17 @@ public sealed partial class DetailPane : UserControl
         else Render();
     }
 
+    /// <summary>Selection can move on (or Clear run on lock or hide) while a keyframe decodes: only the newest image,
+    /// and only if it is still the one shown, may land in the pane.</summary>
     private async Task ShowImageAsync()
     {
+        var version = ++_imageVersion;
         var bytes = _vm?.Image;
-        KeyframeImage.Source = bytes is null ? null : await Images.DecodeAsync(bytes);
+        if (bytes is null) { KeyframeImage.Source = null; return; }
+        KeyframeImage.Source = null;   // never the previous capture's image under this one's title
+        var bmp = await Images.DecodeAsync(bytes);
+        if (version != _imageVersion || !ReferenceEquals(bytes, _vm?.Image)) return;
+        KeyframeImage.Source = bmp;
     }
 
     private void Render()
@@ -50,7 +60,7 @@ public sealed partial class DetailPane : UserControl
         EmptyText.Visibility = has ? Visibility.Collapsed : Visibility.Visible;
         ImageHost.Visibility = Meta.Visibility = has ? Visibility.Visible : Visibility.Collapsed;
         Busy.IsActive = _vm?.IsBusy == true;
-        if (_vm?.Image is null) KeyframeImage.Source = null;
+        if (_vm?.Image is null) { _imageVersion++; KeyframeImage.Source = null; }
         if (!has)
         {
             TranscriptScroll.Visibility = Visibility.Collapsed;

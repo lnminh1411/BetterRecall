@@ -38,7 +38,7 @@ public sealed partial class TimelinePage : Page, IDataPage
         DayPicker.MaxDate = DateTime.Now.Date;
         _updating = false;
         Loaded += (_, _) => Reload();
-        Unloaded += (_, _) => { _vm.Items.Clear(); _detail.Clear(); };
+        Unloaded += (_, _) => { _vm.Clear(); _detail.Clear(); };   // a load still in flight is discarded too
     }
 
     public void Reload() => _ = LoadAsync();
@@ -46,6 +46,7 @@ public sealed partial class TimelinePage : Page, IDataPage
     private async Task LoadAsync()
     {
         _detail.Clear();
+        _vm.Pending = Services.Current.Status?.Queue.Pending ?? 0;   // an empty day may only be waiting for indexing
         await _vm.LoadAsync();
     }
 
@@ -125,10 +126,38 @@ public sealed partial class TimelinePage : Page, IDataPage
     private void NextDay_Click(object sender, RoutedEventArgs e) => SetDay(_vm.Day.AddDays(1));
     private void Today_Click(object sender, RoutedEventArgs e) => SetDay(DateOnly.FromDateTime(DateTime.Now));
 
-    /// <summary>Narrow windows give the tiles and toolbar room: the detail pane shrinks from 380 to 280 px.</summary>
-    private void Root_SizeChanged(object sender, SizeChangedEventArgs e)
-        => DetailColumn.Width = new GridLength(e.NewSize.Width < 900 ? 280 : 380);
+    private bool _narrow;
 
-    private void Items_SelectionChanged(object sender, SelectionChangedEventArgs e) =>
+    /// <summary>Narrow windows give the tiles and toolbar room: the detail pane shrinks from 380 to 280 px, and under
+    /// 720 px it leaves its column and opens over the tiles only while a capture is selected.</summary>
+    private void Root_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        _narrow = e.NewSize.Width < 720;
+        DetailColumn.Width = new GridLength(_narrow ? 0 : e.NewSize.Width < 900 ? 280 : 380);
+        Grid.SetColumn(DetailHost, _narrow ? 0 : 1);
+        Grid.SetRow(DetailHost, _narrow ? 3 : 0);
+        Grid.SetRowSpan(DetailHost, _narrow ? 1 : 4);
+        DetailHost.HorizontalAlignment = _narrow ? HorizontalAlignment.Right : HorizontalAlignment.Stretch;
+        DetailHost.Width = _narrow ? Math.Min(380, Math.Max(0, e.NewSize.Width - 24)) : double.NaN;
+        DetailHost.BorderThickness = new Thickness(1, _narrow ? 1 : 0, 0, 0);
+        CloseDetail.Visibility = _narrow ? Visibility.Visible : Visibility.Collapsed;
+        UpdateDetailHost();
+    }
+
+    private void UpdateDetailHost() =>
+        DetailHost.Visibility = !_narrow || Items.SelectedItem is not null ? Visibility.Visible : Visibility.Collapsed;
+
+    private void CloseDetail_Click(object sender, RoutedEventArgs e)
+    {
+        var index = Items.SelectedIndex;
+        Items.SelectedItem = null;
+        if (index >= 0 && Items.ContainerFromIndex(index) is Control c) c.Focus(FocusState.Programmatic);
+        else Items.Focus(FocusState.Programmatic);
+    }
+
+    private void Items_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        UpdateDetailHost();
         _ = _detail.LoadAsync(Items.SelectedItem as CaptureItem);
+    }
 }
