@@ -40,6 +40,7 @@ public sealed class RealEngine : IWorkerEngine
     private PaddleOcr? _ocr;
     private WindowsOcr? _winOcr;
     private PiiNer? _ner;
+    private readonly NerGate _nerGate = new();
 
     public const string BenchText = "BetterRecall benchmark: quarterly sales spreadsheet, Tabelle mit Umsatzzahlen, bảng doanh thu.";
 
@@ -486,16 +487,9 @@ public sealed class RealEngine : IWorkerEngine
         bool entitiesMissing = false;
         if (entities && lines.Length > 0)
         {
-            // A missing NER model must not throw away the OCR lines: without them every pattern redaction (cards, IBANs,
-            // birth dates) would be skipped too. Report it instead; the agent warns that names and addresses stay.
-            PiiNer? ner = null;
-            try { ner = EnsureNer(); }
-            catch (ModelNotInstalledException) { entitiesMissing = true; }
-            if (ner is not null)
-            {
-                var found = ner.Find(lines.Select(l => l.Text).ToList());
-                lines = lines.Select((l, i) => l with { Entities = found[i] ?? [] }).ToArray();
-            }
+            // A missing or broken NER model must not throw away the OCR lines: without them every pattern redaction (cards,
+            // IBANs, birth dates) would be skipped too. Report it instead; the agent warns that names and addresses stay.
+            (lines, entitiesMissing) = _nerGate.Apply(lines, () => EnsureNer().Find);
         }
         return new OcrResult(lines, engine, Math.Round(sw.Elapsed.TotalMilliseconds, 2), entitiesMissing);
     }

@@ -119,6 +119,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         _transcriber = new Transcriber(_worker, () => Store, () => S, () => _guard?.Current().Foreground?.ProcessName.Replace(".exe", "", StringComparison.OrdinalIgnoreCase) ?? "", () => _scheduler?.Signal());
 
         if (_core is BetterRecall.Core.CoreHostImpl coreImpl) coreImpl.DescribeRedactor = new Privacy.DescribeRedactor(new WorkerKeyframeReader(_worker), () => S);
+        _core.Purged += OnPurged;
         _core.StartPipes(this, new QueryEmbedder(_worker), _thumbs);
         if (!s.Capture.Consented) _pause.Set("consent");
         _pause.Set("keylocked");
@@ -191,7 +192,11 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
             long ring = (long)s.Replay.BitrateKbps * 1000 / 8 * (s.Replay.Seconds + 2) * 3 + 4L * 1024 * 1024;
             MemoryIsolation.ReserveWorkingSet(ring);
         }
-        _capture = new CaptureService(() => S, KeyframesPaused, ReplayPaused, _guard!, _pipeline!, _loopback, lockMem, _redactions);
+        _capture = new CaptureService(() => S, KeyframesPaused, ReplayPaused, _guard!, _pipeline!, _loopback, lockMem, _redactions)
+        {
+            // Fullscreen and storage pauses stop keyframes and inference but not the replay: no sample OCR either (A9).
+            SamplesPaused = () => _pause.KeyframesPaused,
+        };
         _capture.Start();
         ImageCodec.Preload();
         SyncAudioSources();
@@ -415,6 +420,41 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         RaiseStatus(force: true);
     }
 
+    /// <summary>Slack on top of replay.seconds when deciding whether a purge reaches the replay ring.</summary>
+    internal static readonly TimeSpan RingSlack = TimeSpan.FromSeconds(60);
+
+    /// <summary>
+    /// A purge reaches the live buffers (A11): a user purge (any scope, or purge all) whose window ends, or whose newest
+    /// deleted row lies, within the replay ring span (replay.seconds + slack) of now. Retention, space, NSFW drops and
+    /// replay deletes never do. Pure.
+    /// </summary>
+    internal static bool ReachesRing(PurgeNotice n, DateTimeOffset now, int replaySeconds)
+    {
+        if (!n.ByUser) return false;
+        if (n.Reason == "all") return true;
+        var edge = now - TimeSpan.FromSeconds(Math.Clamp(replaySeconds, 15, 600)) - RingSlack;
+        return (n.To is { } to && to >= edge) || (n.Newest is { } newest && newest >= edge);
+    }
+
+    /// <summary>ICoreHost.Purged (N5): rows left the store. Their in-RAM copies go: the thumbnail cache (A10/B3), their
+    /// queued embedding jobs, and when the purge reaches the replay window the video and audio rings, the replay samples,
+    /// untranscribed audio and queued grabs (A11, N4).</summary>
+    private void OnPurged(PurgeNotice n)
+    {
+        _thumbs.ClearCache();
+        if (n.Reason == "all") _scheduler?.Clear();
+        else _scheduler?.Remove(n.Ids.ToHashSet(StringComparer.Ordinal));
+        _statsCache = default;
+        if (ReachesRing(n, DateTimeOffset.UtcNow, S.Replay.Seconds))
+        {
+            _capture?.ForgetRecent();
+            _sampler.Clear();
+            _systemAudio?.Clear();
+            _micAudio?.Clear();
+            Log.Info($"purge ({n.Reason}) reached the replay window: replay ring, samples and pending audio cleared");
+        }
+    }
+
     private void OnCaptureStored(CaptureMeta meta)
     {
         _scheduler?.Signal();
@@ -461,6 +501,10 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         if (reason is null)
         {
             if (!_captureStarted) return "Starting";
+            if (S.Ocr.Enabled && _pipeline?.OcrHealth.Failing == true)
+                return Privacy.RedactionOptions.From(S.Privacy).AnyText
+                    ? "Capturing (keyframes dropped: text recognition failing)"
+                    : "Capturing (keyframes without text: text recognition failing)";
             // Keyframe CPU budget: say so while frames are encoded cheaper or wait for budget.
             var b = _pipeline?.Budget;
             return b is { } bb && (bb.Level != EncodeLevel.Normal || bb.Waiting > 0)
@@ -483,7 +527,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
     private void RaiseStatus(bool force)
     {
         var st = GetStatus();
-        var key = $"{st.Capturing}|{st.Paused}|{st.PauseReason}|{st.PausedUntil}|{st.Locked}|{st.Device}|{st.Queue.Pending}|{st.Audio}";
+        var key = $"{st.Capturing}|{st.Paused}|{st.PauseReason}|{st.PausedUntil}|{st.Locked}|{st.Device}|{st.Queue.Pending}|{st.Audio}|{string.Join(",", st.Warnings ?? [])}";
         if (!force && key == _lastStatusKey) return;
         _lastStatusKey = key;
         try { StatusChanged?.Invoke(st); } catch (Exception ex) { Log.Warn("StatusChanged handler", ex); }
@@ -522,7 +566,20 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
             Device: _supervisor.IsRunning ? _supervisor.Hello?.Device ?? "none" : "none",
             Store: StoreStats(),
             RetentionDays: s.Retention.Days,
-            HotkeysFailed: _hotkeysFailed);
+            HotkeysFailed: _hotkeysFailed,
+            Warnings: Warnings());
+    }
+
+    /// <summary>ocr-failing: text recognition keeps failing (keyframes dropped, or stored without text) (A21).
+    /// ner-unavailable: names or addresses are on but their detector model is missing or broken (C9).</summary>
+    private string[]? Warnings()
+    {
+        var h = _pipeline?.OcrHealth;
+        if (h is null || !S.Ocr.Enabled) return null;
+        var list = new List<string>(2);
+        if (h.Failing) list.Add("ocr-failing");
+        if (h.EntitiesMissing) list.Add("ner-unavailable");
+        return list.Count > 0 ? [.. list] : null;
     }
 
     private StoreStats StoreStats()

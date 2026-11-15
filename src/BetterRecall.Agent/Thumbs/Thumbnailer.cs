@@ -89,6 +89,7 @@ internal sealed class Thumbnailer : IThumbnailer
     private readonly Func<Settings> _settings;
     private readonly ByteLruCache<(string, int)> _cache;
     private readonly SemaphoreSlim _encodeSlots = new(2, 2);
+    private long _generation;   // bumped by ClearCache: a thumbnail read before a purge is not cached after it
 
     public Thumbnailer(Func<IStore?> store, Func<Settings> settings)
     {
@@ -103,6 +104,7 @@ internal sealed class Thumbnailer : IThumbnailer
     {
         width = Math.Clamp(width, 64, 1280);
         _cache.Resize(_settings().Keyframes.ThumbCacheMb * 1024L * 1024L);
+        long gen = Interlocked.Read(ref _generation);
         if (_cache.TryGet((id, width), out var hit)) return hit;
         var store = _store() ?? throw new InvalidOperationException("Store is locked.");
         await _encodeSlots.WaitAsync(ct).ConfigureAwait(false);
@@ -116,7 +118,8 @@ internal sealed class Thumbnailer : IThumbnailer
                 {
                     var (bytes, w, h) = ImageCodec.ResizeToWebp(kf.Bytes, kf.Mime, width, 70);
                     var thumb = new ThumbData(id, "image/webp", w, h, bytes);
-                    _cache.Put((id, width), thumb);
+                    // A purge (ClearCache) ran while this was read: the row may be gone, so it is not cached (A10).
+                    if (Interlocked.Read(ref _generation) == gen) _cache.Put((id, width), thumb);
                     return thumb;
                 }
                 finally { Array.Clear(kf.Bytes); }
@@ -125,7 +128,12 @@ internal sealed class Thumbnailer : IThumbnailer
         finally { _encodeSlots.Release(); }
     }
 
-    public void ClearCache() => _cache.Clear();
+    /// <summary>Lock, panic and every purge or delete (ICoreHost.Purged): cached thumbnails are zeroed and dropped.</summary>
+    public void ClearCache()
+    {
+        Interlocked.Increment(ref _generation);
+        _cache.Clear();
+    }
 
     /// <summary>"ui": AVIF and JPEG XL become WebP (quality 90), others pass through; "jpeg": JPEG (quality 90).
     /// The input is not cleared: the caller owns it.</summary>

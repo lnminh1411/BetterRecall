@@ -64,6 +64,31 @@ internal sealed class EmbeddingScheduler : IAsyncDisposable
         }
     }
 
+    /// <summary>Rows deleted from the store: their queued jobs (images in RAM) are zeroed and dropped. Returns jobs removed.</summary>
+    public int Remove(IReadOnlySet<string> ids)
+    {
+        if (ids.Count == 0) return 0;
+        lock (_qlock)
+        {
+            int before = _queue.Count;
+            var keep = new List<PendingJob>(before);
+            foreach (var j in _queue)
+            {
+                if (ids.Contains(j.Id)) { if (j.Image is not null) Array.Clear(j.Image); }
+                else keep.Add(j);
+            }
+            _queue.Clear();
+            foreach (var j in keep) _queue.Enqueue(j);
+            return before - keep.Count;
+        }
+    }
+
+    /// <summary>Tests: puts jobs in the queue as TakePendingEmbeddings would.</summary>
+    internal void EnqueueForTest(IEnumerable<PendingJob> jobs)
+    {
+        lock (_qlock) foreach (var j in jobs) _queue.Enqueue(j);
+    }
+
     private async Task RunAsync(CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)

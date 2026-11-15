@@ -83,8 +83,9 @@ public interface IStore : IDisposable
     void AddAiUsage(string day, int requests, long tokens) { }
 }
 
-/// <summary>Thrown by Add*Capture/AddReplayFrame for an item stamped before the last "purge last N" (panic flush):
-/// frames, OCR and transcripts still in flight when the purge ran must not land inside the purged window.</summary>
+/// <summary>Thrown by Add*Capture/AddReplayFrame for an item stamped inside a time window that was just purged ("purge last N",
+/// panic flush, or a range ending about now): frames, OCR and transcripts still in flight when the purge ran must not land
+/// inside the purged window.</summary>
 public sealed class PurgedWindowException(DateTimeOffset ts) : InvalidOperationException($"Capture at {ts:O} is inside a purged window.");
 
 public sealed record PurgeScope(string Kind, DateTimeOffset? From = null, DateTimeOffset? To = null, string? App = null, string? Site = null, string? Id = null)
@@ -94,6 +95,19 @@ public sealed record PurgeScope(string Kind, DateTimeOffset? From = null, DateTi
     public static PurgeScope Last(TimeSpan span) => new("last", DateTimeOffset.UtcNow - span, DateTimeOffset.UtcNow);
     public static PurgeScope Range(DateTimeOffset from, DateTimeOffset to) => new("range", from, to);
     public static PurgeScope ForApp(string app) => new("app", App: app);
+}
+
+/// <summary>
+/// Rows left the store (ICoreHost.Purged). Reason: purge (a user purge of any scope, incl. delete one, by app or site, and
+/// the panic flush), all (purge all), retention (retention.days and progressive thinning), space (storage.overwrite),
+/// drop (NSFW gate), replay (a saved replay deleted). Ids are the deleted capture ids. From/To: the purged time window
+/// (purge last/range/all). Newest: the newest timestamp among the deleted rows. In-RAM copies (thumbnail cache, replay
+/// ring, replay samples, queued embedding jobs, chats) must go too.
+/// </summary>
+public sealed record PurgeNotice(string Reason, IReadOnlyList<string> Ids, DateTimeOffset? From = null, DateTimeOffset? To = null, DateTimeOffset? Newest = null)
+{
+    /// <summary>A user purge (reason purge or all): live buffers that may hold the content go as well, not only stored rows.</summary>
+    public bool ByUser => Reason is "purge" or "all";
 }
 
 /// <summary>On-demand preview from the stored keyframe, cached in RAM only. Implemented in the agent.</summary>
@@ -203,6 +217,11 @@ public interface ICoreHost : IAsyncDisposable
 
     /// <summary>Connected IPC/MCP client count changed (tray indicator).</summary>
     event Action<int>? ClientsChanged { add { } remove { } }
+
+    /// <summary>Raised after every delete of stored rows (any purge scope, purge all, panic flush, retention, thinning,
+    /// space guard, NSFW drop, replay delete), on the thread that deleted, after the store lock is released. The agent
+    /// drops its in-RAM copies (thumbnail cache, replay ring, samples, queued jobs); Core drops chat state.</summary>
+    event Action<PurgeNotice>? Purged { add { } remove { } }
 }
 
 public sealed record CoreHostOptions(string Home, string InstallDir);

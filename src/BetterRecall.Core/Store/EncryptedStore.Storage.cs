@@ -133,10 +133,11 @@ public sealed partial class EncryptedStore
     public int DeleteForSpace(int maxRows)
     {
         if (maxRows <= 0) return 0;
+        PurgeNotice? notice;
+        int total = 0;
         lock (_wl)
         {
             ThrowIfDisposed();
-            int total = 0;
             // The oldest day may hold fewer rows than asked for: continue with the next one.
             while (total < maxRows)
             {
@@ -150,8 +151,10 @@ public sealed partial class EncryptedStore
                 ReleaseFreePagesLocked(vacuumLegacy: false);
                 Log.Info($"storage: {total} oldest rows deleted for space");
             }
-            return total;
+            notice = TakeNoticeLocked("space");
         }
+        Raise(notice);
+        return total;
     }
 
     /// <summary>Deletes keyframe files whose month has no keyframe left (frees the disk at once). Caller holds _wl.</summary>
