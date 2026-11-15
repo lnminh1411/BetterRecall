@@ -66,10 +66,16 @@ internal sealed unsafe class OutputCapture : IDisposable
     private volatile bool _stop;
     private GpuDevice? _dev;
     private IDXGIOutputDuplication? _dup;
-    private ID3D11Texture2D? _latest;
-    private int _srcW, _srcH;
+    private ID3D11Texture2D? _latest;   // desktop orientation, _srcW x _srcH
+    private int _srcW, _srcH;           // desktop size of the output
+    private int _texW, _texH;           // duplication texture size (scan-out orientation)
+    private int _rotation;              // degrees clockwise from the texture to the desktop (OutputRotation)
+    private bool _rotationBlocked;      // rotated output the video processor cannot turn: black, no keyframes
+    private ID3D11Texture2D? _raw;      // rotated outputs: copy of the acquired texture, input of _rotator
+    private VideoScaler? _rotator;
     private VideoScaler? _kfScaler;
-    private int _kfScalerWidth;
+    private GpuDevice? _kfScalerDev;
+    private int _kfScalerWidth, _kfScalerSrcW, _kfScalerSrcH;
     private RawRectBuffer _dirtyBuf = new();
     private MoveRectBuffer _moveBuf = new();
     private long _lastRetry;
@@ -89,8 +95,11 @@ internal sealed unsafe class OutputCapture : IDisposable
     public volatile Action<KeyframeGrab>? GrabOverride;
     public GpuDevice? Device => _dev;
     public ID3D11Texture2D? Latest => _latest;
+    /// <summary>Desktop-oriented size of Latest: a rotated output is turned upright on the capture thread.</summary>
     public int SourceWidth => _srcW;
     public int SourceHeight => _srcH;
+    /// <summary>Degrees clockwise from the duplication texture to the desktop (0, 90, 180, 270).</summary>
+    public int Rotation => _rotation;
     public int FeedGeneration { get; private set; }
     public bool Disposed { get; private set; }
     public string State { get; private set; } = "starting";
@@ -162,13 +171,19 @@ internal sealed unsafe class OutputCapture : IDisposable
             }
             catch (Exception ex)
             {
-                Log.Warn($"capture {Info.Index}", ex);
-                ResetDuplication("error");
-                DropDeviceIfRemoved();
+                // Nothing may leave this handler: an exception out of a capture thread ends the agent. With two outputs
+                // on one GPU the other output's recovery can dispose the shared device under this one (A1).
+                try
+                {
+                    Log.Warn($"capture {Info.Index}", ex);
+                    ResetDuplication("error");
+                    DropDeviceIfRemoved();
+                }
+                catch (Exception inner) { try { Log.Warn($"capture {Info.Index} recovery", inner); } catch { } }
                 Thread.Sleep(500);
             }
         }
-        ResetDuplication("stop");
+        try { ResetDuplication("stop"); } catch { }
     }
 
     public static long Qpc100ns(long stopwatchTicks) => FramePacer.ToHundredNs(stopwatchTicks, Stopwatch.Frequency);
@@ -180,6 +195,8 @@ internal sealed unsafe class OutputCapture : IDisposable
         _lastRetry = now;
         try
         {
+            // Another output on this adapter may have dropped and replaced the shared device since this one last ran.
+            if (_dev is { } held && !_devices.IsCurrent(held)) DropDevice();
             _dev ??= _devices.Get(Info.AdapterLuid);
             using var factory = DXGI.CreateDXGIFactory1<IDXGIFactory1>();
             using var adapter = GpuDevices.FindAdapter(factory, Info.AdapterLuid) ?? throw new InvalidOperationException("adapter gone");
@@ -203,25 +220,20 @@ internal sealed unsafe class OutputCapture : IDisposable
                     }
                 }
                 var desc = dup.Description;
-                _srcW = (int)desc.ModeDescription.Width;
-                _srcH = (int)desc.ModeDescription.Height;
-                lock (_dev.Gate)
-                {
-                    _latest?.Dispose();
-                    _latest = _dev.Device.CreateTexture2D(new Texture2DDescription
-                    {
-                        Width = (uint)_srcW, Height = (uint)_srcH, MipLevels = 1, ArraySize = 1, Format = Format.B8G8R8A8_UNorm,
-                        SampleDescription = new SampleDescription(1, 0), Usage = ResourceUsage.Default,
-                        BindFlags = BindFlags.ShaderResource | BindFlags.RenderTarget,
-                    });
-                    FeedGeneration++;
-                    _feedDirty = new RECT(0, 0, _srcW, _srcH);
-                }
+                var desk = output.Description.DesktopCoordinates;
+                int rotation = OutputRotation.Degrees(desc.Rotation);
+                var (texW, texH) = OutputRotation.TextureSizeFor((int)desc.ModeDescription.Width, (int)desc.ModeDescription.Height,
+                    desk.Right - desk.Left, desk.Bottom - desk.Top, rotation);
+                var (deskW, deskH) = OutputRotation.DesktopSize(texW, texH, rotation);
+                try { SetUpFrames(texW, texH, deskW, deskH, rotation); }
+                catch { try { dup.Dispose(); } catch { } throw; }
                 _dup = dup;
                 _framesSinceGrab = true;
                 _dirtyPctSinceGrab = 100;
-                State = "running";
-                Log.Info($"duplication up on output {Info.Index} ({_srcW}x{_srcH}, vendor 0x{Info.VendorId:X4})");
+                State = _rotationBlocked ? "rotation unsupported" : "running";
+                Log.Info($"duplication up on output {Info.Index} ({_srcW}x{_srcH}{(rotation != 0 ? $", rotated {rotation}" : "")}, vendor 0x{Info.VendorId:X4})");
+                if (_rotationBlocked)
+                    Log.Warn($"output {Info.Index} is rotated {rotation} degrees and the GPU's video processor cannot rotate: it is recorded black and gets no keyframes");
                 return true;
             }
         }
@@ -234,13 +246,74 @@ internal sealed unsafe class OutputCapture : IDisposable
         }
     }
 
+    /// <summary>Creates Latest (desktop orientation) and, for a rotated output, the texture copy and the rotating video
+    /// processor. A rotation the GPU cannot do fails closed: Latest stays black and keyframes are skipped.</summary>
+    private void SetUpFrames(int texW, int texH, int deskW, int deskH, int rotation)
+    {
+        var dev = _dev!;
+        lock (dev.Gate)
+        {
+            DisposeFrameResources();
+            _texW = texW; _texH = texH; _srcW = deskW; _srcH = deskH; _rotation = rotation;
+            _rotationBlocked = false;
+            _latest = dev.Device.CreateTexture2D(new Texture2DDescription
+            {
+                Width = (uint)deskW, Height = (uint)deskH, MipLevels = 1, ArraySize = 1, Format = Format.B8G8R8A8_UNorm,
+                SampleDescription = new SampleDescription(1, 0), Usage = ResourceUsage.Default,
+                BindFlags = BindFlags.ShaderResource | BindFlags.RenderTarget,
+            });
+            if (rotation != 0)
+            {
+                try
+                {
+                    _rotator = new VideoScaler(dev, texW, texH, deskW, deskH, Format.B8G8R8A8_UNorm, withStaging: false, rotationDegrees: rotation);
+                    _raw = dev.Device.CreateTexture2D(new Texture2DDescription
+                    {
+                        Width = (uint)texW, Height = (uint)texH, MipLevels = 1, ArraySize = 1, Format = Format.B8G8R8A8_UNorm,
+                        SampleDescription = new SampleDescription(1, 0), Usage = ResourceUsage.Default,
+                        BindFlags = BindFlags.ShaderResource | BindFlags.RenderTarget,
+                    });
+                }
+                catch (NotSupportedException)
+                {
+                    _rotationBlocked = true;
+                    using var rtv = dev.Device.CreateRenderTargetView(_latest);
+                    dev.Context.ClearRenderTargetView(rtv, new Vortice.Mathematics.Color4(0, 0, 0, 1));
+                }
+            }
+            FeedGeneration++;
+            _feedDirty = new RECT(0, 0, _srcW, _srcH);
+        }
+    }
+
+    /// <summary>Releases everything created on the current device. Caller holds its gate (or the device is gone).</summary>
+    private void DisposeFrameResources()
+    {
+        _pendingGrab = null;
+        try { _kfScaler?.Dispose(); } catch { }
+        _kfScaler = null;
+        _kfScalerDev = null;
+        try { _rotator?.Dispose(); } catch { }
+        _rotator = null;
+        try { _raw?.Dispose(); } catch { }
+        _raw = null;
+        try { _latest?.Dispose(); } catch { }
+        _latest = null;
+    }
+
+    /// <summary>Stops using the current device: removed by the driver, or already dropped or replaced by another
+    /// output on the same adapter. Never throws.</summary>
     private void DropDeviceIfRemoved()
     {
-        if (_dev is { } d && _devices.InvalidateIfRemoved(d))
-        {
-            lock (d.Gate) { _latest?.Dispose(); _latest = null; }
-            _dev = null;
-        }
+        if (_dev is { } d && _devices.InvalidateIfRemoved(d)) DropDevice();
+    }
+
+    private void DropDevice()
+    {
+        if (_dev is not { } d) return;
+        try { lock (d.Gate) DisposeFrameResources(); }
+        catch { DisposeFrameResources(); }
+        _dev = null;
     }
 
     private void ResetDuplication(string why)
@@ -265,7 +338,26 @@ internal sealed unsafe class OutputCapture : IDisposable
             using var tex = resource!.QueryInterface<ID3D11Texture2D>();
             lock (_dev!.Gate)
             {
-                _dev.Context.CopyResource(_latest!, tex);
+                if (_rotationBlocked) return;   // stays black
+                if (_rotator is not null)
+                {
+                    var td = tex.Description;
+                    if (td.Width != (uint)_texW || td.Height != (uint)_texH)
+                    {
+                        // Sizes guessed wrong: CopyResource would silently copy nothing. Fail closed.
+                        _rotationBlocked = true;
+                        using var rtv = _dev.Device.CreateRenderTargetView(_latest!);
+                        _dev.Context.ClearRenderTargetView(rtv, new Vortice.Mathematics.Color4(0, 0, 0, 1));
+                        Log.Warn($"output {Info.Index}: rotated frame is {td.Width}x{td.Height}, expected {_texW}x{_texH}; recorded black");
+                        return;
+                    }
+                    // Scan-out orientation to desktop orientation: copy (the duplication texture is not a safe processor
+                    // input), turn on the video processor, then into Latest.
+                    _dev.Context.CopyResource(_raw!, tex);
+                    _rotator.Run(_raw!, copyToStaging: false);
+                    _dev.Context.CopyResource(_latest!, _rotator.Output);
+                }
+                else _dev.Context.CopyResource(_latest!, tex);
                 var (dirtyRect, dirtyPct) = ProcessChanges(info.TotalMetadataBufferSize);
                 _feedDirty = DirtyMapper.Union(_feedDirty, dirtyRect);
                 _dirtyPctSinceGrab = Math.Min(100, _dirtyPctSinceGrab + dirtyPct);
@@ -323,6 +415,9 @@ internal sealed unsafe class OutputCapture : IDisposable
         double pct = 100.0 * dirtyArea / Math.Max(1L, (long)_srcW * _srcH);
         double dirtyPct = (dirtyN == 0 && moveN == 0) ? 1.0 : pct;
 
+        // Dirty and move rectangles are in texture pixels; Latest and the replay feed are in desktop orientation.
+        if (_rotation != 0 && !DirtyMapper.IsEmpty(unionRect))
+            unionRect = OutputRotation.TextureToDesktop(unionRect, _texW, _texH, _rotation);
         return (unionRect, dirtyPct);
     }
 
@@ -348,7 +443,7 @@ internal sealed unsafe class OutputCapture : IDisposable
     /// </summary>
     private void Grab(KeyframeRequest req)
     {
-        if (_latest is null) return;
+        if (_latest is null || _dev is null || _rotationBlocked) return;
         if (_pendingGrab is not null) FinishGrab();
         bool changed = _framesSinceGrab && _dirtyPctSinceGrab >= req.DirtyMinPercent;
         if (!req.Force && !changed) { SkippedNoChange++; return; }
@@ -357,11 +452,18 @@ internal sealed unsafe class OutputCapture : IDisposable
         int h = Math.Max(2, (int)((long)_srcH * w / _srcW) & ~1);
         lock (_dev!.Gate)
         {
-            if (_kfScaler is null || _kfScalerWidth != w || _kfScaler.Height != h)
+            // Keyed on the device and the source size too: after a device loss the old scaler holds the dead device's
+            // video processor and failed every grab (A6).
+            if (_kfScaler is null || _kfScalerWidth != w || _kfScaler.Height != h || !ReferenceEquals(_kfScalerDev, _dev)
+                || _kfScalerSrcW != _srcW || _kfScalerSrcH != _srcH)
             {
-                _kfScaler?.Dispose();
+                try { _kfScaler?.Dispose(); } catch { }
+                _kfScaler = null;
                 _kfScaler = new VideoScaler(_dev, _srcW, _srcH, w, h, Format.B8G8R8A8_UNorm);
                 _kfScalerWidth = w;
+                _kfScalerDev = _dev;
+                _kfScalerSrcW = _srcW;
+                _kfScalerSrcH = _srcH;
             }
             _kfScaler.Run(_latest, copyToStaging: true);
         }
@@ -375,7 +477,7 @@ internal sealed unsafe class OutputCapture : IDisposable
     {
         var (req, w, h) = _pendingGrab!.Value;
         _pendingGrab = null;
-        if (_kfScaler?.Staging is null) return;
+        if (_kfScaler?.Staging is null || _dev is null || !ReferenceEquals(_kfScalerDev, _dev)) return;
         long t0 = Stopwatch.GetTimestamp();
         var grab = KeyframeGrab.Alloc(Info.Index, req, w, h, 0);
         try
@@ -405,12 +507,10 @@ internal sealed unsafe class OutputCapture : IDisposable
     {
         _stop = true;
         if (_thread.IsAlive) _thread.Join(3000);
-        _kfScaler?.Dispose();
         lock (_dev?.Gate ?? new object())
         {
             Disposed = true;
-            _latest?.Dispose();
-            _latest = null;
+            DisposeFrameResources();
         }
         _timer.Dispose();
     }

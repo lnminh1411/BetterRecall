@@ -202,6 +202,10 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
             if (S.Security.MemoryIsolation && !_lateIsolationDone)
             {
                 _lateIsolationDone = true;
+                // ACG refuses new native callback thunks. SQLite's rollback hook needs one on the first transaction,
+                // which with OCR on (or a store unlocked later) came after ACG and wedged the store (D26).
+                try { BetterRecall.Core.Store.EncryptedStore.WarmNativeCallbacks(); }
+                catch (Exception ex) { Log.Warn("sqlite callback warm-up", ex); }
                 MemoryIsolation.ApplyLate(dynamicCode: Environment.GetEnvironmentVariable("BETTERRECALL_NO_ACG") != "1");
             }
         });

@@ -38,8 +38,15 @@ internal sealed class GpuDevice : IDisposable
     /// <summary>Serialises immediate-context use across the threads that share this device.</summary>
     public readonly object Gate = new();
 
+    private int _disposed;
+
+    /// <summary>Set before the COM wrappers are released. A disposed Vortice wrapper throws NullReferenceException (not
+    /// ObjectDisposedException), so users of a shared device check this instead of catching.</summary>
+    public bool IsDisposed => Volatile.Read(ref _disposed) != 0;
+
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         VideoContext.Dispose();
         VideoDevice.Dispose();
         Multithread.Dispose();
@@ -154,24 +161,48 @@ internal sealed class GpuDeviceCache : IDisposable
     {
         lock (_gate)
         {
-            if (_devices.Remove(luid, out var d)) d.Dispose();
+            if (_devices.Remove(luid, out var d)) DisposeShared(d);
         }
     }
 
+    /// <summary>True while <paramref name="dev"/> is the live device for its adapter (not disposed, not replaced).</summary>
+    public bool IsCurrent(GpuDevice dev)
+    {
+        lock (_gate) return !dev.IsDisposed && _devices.TryGetValue(dev.Luid, out var d) && ReferenceEquals(d, dev);
+    }
+
     /// <summary>Drops <paramref name="dev"/> when the driver removed or reset it (TDR, driver update), so the next Get
-    /// creates a working device. Only that instance: another caller may already have replaced it.</summary>
+    /// creates a working device. Only that instance: another caller may already have replaced it. True when the caller
+    /// must stop using dev: removed, already disposed by another output on the same adapter, or replaced. Never throws:
+    /// it runs inside the capture thread's catch blocks.</summary>
     public bool InvalidateIfRemoved(GpuDevice dev)
     {
-        bool removed;
-        try { removed = dev.Device.DeviceRemovedReason.Failure; }
-        catch (ObjectDisposedException) { return true; }   // already invalidated by another output
-        if (!removed) return false;
-        lock (_gate)
+        try
         {
-            if (_devices.TryGetValue(dev.Luid, out var d) && ReferenceEquals(d, dev)) { _devices.Remove(dev.Luid); d.Dispose(); }
+            if (!IsCurrent(dev)) return true;   // another output on this adapter already invalidated or replaced it
+            bool removed;
+            try { removed = dev.Device.DeviceRemovedReason.Failure; }
+            catch (Exception) { removed = true; }   // disposed under us: Vortice throws NullReferenceException
+            if (!removed) return false;
+            lock (_gate)
+            {
+                if (_devices.TryGetValue(dev.Luid, out var d) && ReferenceEquals(d, dev)) { _devices.Remove(dev.Luid); DisposeShared(d); }
+            }
+            Log.Warn($"d3d11 device on adapter {dev.Luid:X} was removed; recreating");
+            return true;
         }
-        Log.Warn($"d3d11 device on adapter {dev.Luid:X} was removed; recreating");
-        return true;
+        catch (Exception ex)
+        {
+            Log.Warn("d3d11 device check", ex);
+            return true;
+        }
+    }
+
+    /// <summary>Takes the device gate, so no other output is inside an immediate-context call while it is released.</summary>
+    private static void DisposeShared(GpuDevice d)
+    {
+        try { lock (d.Gate) d.Dispose(); }
+        catch (Exception ex) { Log.Warn("d3d11 device dispose", ex); }
     }
 
     public void Dispose()

@@ -23,6 +23,7 @@ internal enum GuardReason
     DisplayAffinity,
     PrivateBadge,
     BadgeCheckFailed,
+    ForegroundChanged,   // the foreground window changed after the snapshot's scan started: wait for a fresh one
 }
 
 internal readonly record struct GuardDecision(bool Allow, GuardReason Reason)
