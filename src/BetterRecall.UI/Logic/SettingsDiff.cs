@@ -40,21 +40,21 @@ public static class SettingsDiff
     }
 
     /// <summary>
-    /// Request lines for a diff. One line when it fits the 4096-byte request limit, else one per section.
+    /// Request lines for a diff. One line when it fits the UI pipe request limit (64 KiB), else one per section.
     /// Returns null when a single section is still too large (a deny list that long has to be shortened).
     /// </summary>
     public static List<string>? ToRequestLines(JsonObject diff)
     {
         if (diff.Count == 0) return [];
         var whole = "settings set " + diff.ToJsonString();
-        if (Encoding.UTF8.GetByteCount(whole) <= LineProtocol.MaxRequestBytes) return [whole];
+        if (Encoding.UTF8.GetByteCount(whole) <= LineProtocol.MaxUiRequestBytes) return [whole];
 
         var lines = new List<string>();
         foreach (var (section, value) in diff)
         {
             var part = new JsonObject { [section] = value?.DeepClone() };
             var line = "settings set " + part.ToJsonString();
-            if (Encoding.UTF8.GetByteCount(line) > LineProtocol.MaxRequestBytes) return null;
+            if (Encoding.UTF8.GetByteCount(line) > LineProtocol.MaxUiRequestBytes) return null;
             lines.Add(line);
         }
         return lines;

@@ -178,8 +178,17 @@ internal sealed class ReplayLibrary(string home, Func<Settings> settings, IBlobC
         await using var src = clip.Encrypted
             ? (cipher ?? throw new InvalidOperationException("Store is locked.")).OpenRead(clip.Path)
             : File.OpenRead(clip.Path);
-        await using var dst = new FileStream(full, FileMode.Create, FileAccess.Write, FileShare.None);
-        await src.CopyToAsync(dst, ct).ConfigureAwait(false);
+        var dst = new FileStream(full, FileMode.Create, FileAccess.Write, FileShare.None);
+        try
+        {
+            await using (dst) await src.CopyToAsync(dst, ct).ConfigureAwait(false);
+        }
+        catch
+        {
+            // Cancelled or failed: do not leave a partial decrypted copy behind.
+            try { File.Delete(full); } catch { }
+            throw;
+        }
     }
 
     public void Delete(string id)

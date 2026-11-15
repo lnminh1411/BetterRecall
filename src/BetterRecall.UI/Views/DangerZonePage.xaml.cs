@@ -84,8 +84,24 @@ public sealed partial class DangerZonePage : Page, IDataPage
             if (picked is null || string.IsNullOrEmpty(picked.Path)) return;
             var path = picked.Path;
 
+            // Own connection: other pages keep working during a long export, and Cancel stops it on the agent.
             ExportBusy.IsActive = true;
-            var r = await api.ExportAsync(request with { Path = path, DryRun = false });
+            using var cancel = new CancellationTokenSource();
+            Show(InfoBarSeverity.Informational, Loc.Get("Danger_Exporting"));
+            var stop = new Button { Content = Loc.Get("Common_Cancel") };
+            stop.Click += (_, _) => { try { cancel.Cancel(); } catch (ObjectDisposedException) { } };
+            ResultBar.ActionButton = stop;
+            AgentResult<ExportResult> r;
+            try
+            {
+                r = await OwnConnection.RunAsync(Services.Current.CreateRunClient,
+                    (own, ct) => own.ExportAsync(request with { Path = path, DryRun = false }, ct), cancel.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                Show(InfoBarSeverity.Informational, Loc.Get("Danger_ExportCancelled"));
+                return;
+            }
             ExportBusy.IsActive = false;
             if (!r.Ok)
             {

@@ -64,10 +64,10 @@ public sealed class MockPipeServer(MockAgent agent, string pipeName) : IAsyncDis
             while (!ct.IsCancellationRequested)
             {
                 string? line;
-                try { line = await LineProtocol.ReadLineAsync(pipe, LineProtocol.MaxRequestBytes, ct).ConfigureAwait(false); }
+                try { line = await LineProtocol.ReadLineAsync(pipe, LineProtocol.MaxUiRequestBytes, ct).ConfigureAwait(false); }
                 catch (LineTooLongException)
                 {
-                    await LineProtocol.WriteLineAsync(pipe, Envelope.Error(LineProtocol.TooLongError), ct).ConfigureAwait(false);
+                    await LineProtocol.WriteLineAsync(pipe, Envelope.Error(LineProtocol.TooLongUiError), ct).ConfigureAwait(false);
                     return;
                 }
                 if (line is null) return;

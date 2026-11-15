@@ -121,6 +121,13 @@ public sealed class PaddleOcr : IDisposable
         Read(new RgbImage(w, h, rgb));
     }
 
+    /// <summary>False when any value is NaN or infinite.</summary>
+    internal static bool AllFinite(ReadOnlySpan<float> values)
+    {
+        foreach (var v in values) if (!float.IsFinite(v)) return false;
+        return true;
+    }
+
     public OcrLine[] Read(RgbImage img)
     {
         var (dw, dh) = OcrMath.DetSize(img.Width, img.Height, _det.MaxSide);
@@ -128,8 +135,8 @@ public sealed class PaddleOcr : IDisposable
         var outp = _detGraph.For([1, 3, dh, dw]).Run([HostTensor.F(_det.Input, OcrMath.BgrTensor(sized, _det.Mean, _det.Std), 1, 3, dh, dw)]);
         var prob = outp.Values.FirstOrDefault()?.Floats ?? throw new DeviceFailedException("ocr detector output missing");
         if (prob.Length < dw * dh) throw new DeviceFailedException("ocr detector output too small");
-        foreach (var v in prob.AsSpan(0, Math.Min(prob.Length, 4096)))
-            if (!float.IsFinite(v)) throw new DeviceFailedException($"{Device.Label} ocr detector output not finite");
+        // The whole map: an FP16 overflow anywhere would read as background, so that text would go undetected and unredacted.
+        if (!AllFinite(prob.AsSpan(0, dw * dh))) throw new DeviceFailedException($"{Device.Label} ocr detector output not finite");
         var boxes = OcrMath.Boxes(prob, dw, dh, img.Width, img.Height, _det.Thresh, _det.BoxThresh, _det.Unclip);
         if (boxes.Count == 0) return [];
 
@@ -172,6 +179,8 @@ public sealed class PaddleOcr : IDisposable
             for (int k = 0; k < idx.Count; k++)
             {
                 var probs = t.Floats.AsSpan(k * steps * classes, steps * classes);
+                // A NaN row would read as blank (characters silently dropped): fail like the detector instead.
+                if (!AllFinite(probs)) throw new DeviceFailedException($"{Device.Label} ocr recogniser output not finite");
                 var ctc = OcrMath.Ctc(probs, steps, classes, r.Table);
                 if (ctc.Text.Length == 0) continue;
                 if (!float.IsFinite(ctc.Confidence)) throw new DeviceFailedException($"{Device.Label} ocr recogniser output not finite");

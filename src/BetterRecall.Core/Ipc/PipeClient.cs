@@ -33,9 +33,12 @@ public sealed class PipeClient : IAsyncDisposable, IDisposable
         string pipeName, string expectedServerImage, int timeoutMs = 1000, CancellationToken ct = default)
     {
         var stream = new NamedPipeClientStream(".", PipeNames.Base(pipeName), PipeDirection.InOut, PipeOptions.Asynchronous, TokenImpersonationLevel.Anonymous);
+        DateTime connectedUtc;
         try
         {
             await stream.ConnectAsync(timeoutMs, ct).ConfigureAwait(false);
+            // The server process existed when we connected: a pid whose process started later was freed and reused.
+            connectedUtc = DateTime.UtcNow;
         }
         catch (TimeoutException) { await stream.DisposeAsync().ConfigureAwait(false); return (PipeConnectResult.NotRunning, null); }
         catch (IOException) { await stream.DisposeAsync().ConfigureAwait(false); return (PipeConnectResult.NotRunning, null); }
@@ -45,7 +48,7 @@ public sealed class PipeClient : IAsyncDisposable, IDisposable
             !Win32.GetNamedPipeServerSessionId(stream.SafePipeHandle, out var session) ||
             session != ProcessInfo.CurrentSession ||
             ProcessInfo.SessionOf((int)pid) != ProcessInfo.CurrentSession ||
-            !ProcessInfo.SamePath(ProcessInfo.ImagePath((int)pid), expectedServerImage))
+            !ProcessInfo.SamePath(ProcessInfo.ImagePathIfStartedBefore((int)pid, connectedUtc), expectedServerImage))
         {
             await stream.DisposeAsync().ConfigureAwait(false);
             return (PipeConnectResult.NotTrusted, null);

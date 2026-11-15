@@ -77,18 +77,18 @@ public class SettingsTests
     public void RequestLines_SplitPerSection_WhenTooLong()
     {
         var edited = Defaults();
-        SettingsSchema.Set(edited, "privacy.denyProcesses", new JsonArray(Enumerable.Range(0, 160).Select(i => (JsonNode)$"process{i:D4}.exe").ToArray()));
-        SettingsSchema.Set(edited, "ipc.allowClients", new JsonArray(Enumerable.Range(0, 60).Select(i => (JsonNode)$@"C:\Tools\client{i:D3}\c.exe").ToArray()));
+        SettingsSchema.Set(edited, "privacy.denyProcesses", new JsonArray(Enumerable.Range(0, 2600).Select(i => (JsonNode)$"process{i:D4}.exe").ToArray()));
+        SettingsSchema.Set(edited, "ipc.allowClients", new JsonArray(Enumerable.Range(0, 1000).Select(i => (JsonNode)$@"C:\Tools\client{i:D4}\c.exe").ToArray()));
         var lines = SettingsDiff.ToRequestLines(SettingsDiff.Diff(Defaults(), edited))!;
         Assert.Equal(2, lines.Count);
-        Assert.All(lines, l => Assert.True(System.Text.Encoding.UTF8.GetByteCount(l) <= LineProtocol.MaxRequestBytes));
+        Assert.All(lines, l => Assert.True(System.Text.Encoding.UTF8.GetByteCount(l) <= LineProtocol.MaxUiRequestBytes));
     }
 
     [Fact]
     public void RequestLines_NullWhenOneSectionIsTooLong()
     {
         var edited = Defaults();
-        SettingsSchema.Set(edited, "privacy.denyProcesses", new JsonArray(Enumerable.Range(0, 400).Select(i => (JsonNode)$"process{i:D4}.exe").ToArray()));
+        SettingsSchema.Set(edited, "privacy.denyProcesses", new JsonArray(Enumerable.Range(0, 4000).Select(i => (JsonNode)$"process{i:D4}.exe").ToArray()));
         Assert.Null(SettingsDiff.ToRequestLines(SettingsDiff.Diff(Defaults(), edited)));
     }
 
