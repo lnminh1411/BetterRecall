@@ -83,33 +83,44 @@ public sealed partial class EncryptedStore
     /// </summary>
     private int ThinLocked(RetentionSettings r, DateTimeOffset now, long cutoffMs)
     {
-        long nowMs = now.ToUnixTimeMilliseconds();
+        int deleted = 0;
+        if (ThinDaysLocked(r, now, cutoffMs) is { } days)
+            for (long day = days.First; day <= days.Last; day++) deleted += ThinDayLocked(r, now, cutoffMs, day);
+        return deleted;
+    }
+
+    /// <summary>Drops thin_days rows older than the cutoff and returns the days thinning covers (null when it is off).
+    /// Caller holds _wl.</summary>
+    private (long First, long Last)? ThinDaysLocked(RetentionSettings r, DateTimeOffset now, long cutoffMs)
+    {
         long cutoffDay = Math.DivRem(cutoffMs, DayMs, out _);
         Exec(_w, "DELETE FROM thin_days WHERE day < $d", ("$d", cutoffDay));
-        if (r.ProgressiveAfterDays <= 0) return 0;
+        if (r.ProgressiveAfterDays <= 0) return null;
+        long lastDay = (now.ToUnixTimeMilliseconds() - (long)r.ProgressiveAfterDays * DayMs) / DayMs;
+        return (cutoffDay, lastDay);
+    }
+
+    /// <summary>Thins one day. Caller holds _wl. Returns rows deleted.</summary>
+    private int ThinDayLocked(RetentionSettings r, DateTimeOffset now, long cutoffMs, long day)
+    {
+        long nowMs = now.ToUnixTimeMilliseconds();
         int over = Math.Max(1, r.ProgressiveOverDays);
-        long lastDay = (nowMs - (long)r.ProgressiveAfterDays * DayMs) / DayMs;
-        int deleted = 0;
-        for (long day = cutoffDay; day <= lastDay; day++)
+        long start = day * DayMs;
+        double ageDays = (nowMs - (start + DayMs / 2)) / (double)DayMs;
+        double p = (ageDays - r.ProgressiveAfterDays) / over;
+        if (p <= 0) return 0;
+        var candidates = ScreenRowsLocked(Math.Max(start, cutoffMs), start + DayMs).Where(x => !x.Switch).ToList();
+        var total = Scalar(_w, "SELECT total FROM thin_days WHERE day=$d", ("$d", day)) as long?;
+        if (total is null)
         {
-            long start = day * DayMs;
-            double ageDays = (nowMs - (start + DayMs / 2)) / (double)DayMs;
-            double p = (ageDays - r.ProgressiveAfterDays) / over;
-            if (p <= 0) continue;
-            var candidates = ScreenRowsLocked(Math.Max(start, cutoffMs), start + DayMs).Where(x => !x.Switch).ToList();
-            var total = Scalar(_w, "SELECT total FROM thin_days WHERE day=$d", ("$d", day)) as long?;
-            if (total is null)
-            {
-                if (candidates.Count == 0) continue;
-                total = candidates.Count;
-                Exec(_w, "INSERT INTO thin_days(day, total) VALUES($d, $n)", ("$d", day), ("$n", total.Value));
-            }
-            int drop = candidates.Count - ThinTarget((int)Math.Min(int.MaxValue, total.Value), p);
-            if (drop <= 0) continue;
-            var rids = candidates.OrderBy(x => x.Change).ThenBy(x => x.Ts).Take(drop).Select(x => x.Rid).ToList();
-            deleted += DeleteRowsLocked(rids);
+            if (candidates.Count == 0) return 0;
+            total = candidates.Count;
+            Exec(_w, "INSERT INTO thin_days(day, total) VALUES($d, $n)", ("$d", day), ("$n", total.Value));
         }
-        return deleted;
+        int drop = candidates.Count - ThinTarget((int)Math.Min(int.MaxValue, total.Value), p);
+        if (drop <= 0) return 0;
+        var rids = candidates.OrderBy(x => x.Change).ThenBy(x => x.Ts).Take(drop).Select(x => x.Rid).ToList();
+        return DeleteRowsLocked(rids);
     }
 
     /// <summary>
@@ -175,32 +186,35 @@ public sealed partial class EncryptedStore
     /// </summary>
     private void ReleaseFreePagesLocked(bool vacuumLegacy = true)
     {
-        foreach (var m in KfMonths())
+        foreach (var m in KfMonths()) ReleaseFreePagesLocked(m, vacuumLegacy);
+    }
+
+    /// <summary>ReleaseFreePagesLocked for one month file. Caller holds _wl.</summary>
+    private void ReleaseFreePagesLocked(string m, bool vacuumLegacy)
+    {
+        if (Kf(m, false) is not { } c) return;
+        try
         {
-            if (Kf(m, false) is not { } c) continue;
-            try
+            long free = (long)(Scalar(c, "PRAGMA freelist_count") ?? 0L);
+            if (free == 0) return;
+            long mode = (long)(Scalar(c, "PRAGMA auto_vacuum") ?? 0L);
+            if (mode == 2)
             {
-                long free = (long)(Scalar(c, "PRAGMA freelist_count") ?? 0L);
-                if (free == 0) continue;
-                long mode = (long)(Scalar(c, "PRAGMA auto_vacuum") ?? 0L);
-                if (mode == 2)
-                {
-                    Exec(c, "PRAGMA incremental_vacuum");
-                    Exec(c, "PRAGMA wal_checkpoint(TRUNCATE)");
-                    continue;
-                }
-                if (!vacuumLegacy) continue;
-                long pages = (long)(Scalar(c, "PRAGMA page_count") ?? 0L);
-                long pageSize = (long)(Scalar(c, "PRAGMA page_size") ?? 4096L);
-                if (pages > 0 && free * 4 > pages && free * pageSize > 64L * 1024 * 1024)
-                {
-                    Exec(c, "PRAGMA wal_checkpoint(TRUNCATE)");
-                    Exec(c, "VACUUM");
-                    Log.Info("keyframe file vacuumed");
-                }
+                Exec(c, "PRAGMA incremental_vacuum");
+                Exec(c, "PRAGMA wal_checkpoint(TRUNCATE)");
+                return;
             }
-            catch (SqliteException ex) { Log.Warn("keyframe file compaction failed", ex); }
+            if (!vacuumLegacy) return;
+            long pages = (long)(Scalar(c, "PRAGMA page_count") ?? 0L);
+            long pageSize = (long)(Scalar(c, "PRAGMA page_size") ?? 4096L);
+            if (pages > 0 && free * 4 > pages && free * pageSize > 64L * 1024 * 1024)
+            {
+                Exec(c, "PRAGMA wal_checkpoint(TRUNCATE)");
+                Exec(c, "VACUUM");
+                Log.Info("keyframe file vacuumed");
+            }
         }
+        catch (SqliteException ex) { Log.Warn("keyframe file compaction failed", ex); }
     }
 
     public StorageUse GetStorageUse()

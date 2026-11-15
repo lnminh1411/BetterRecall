@@ -141,6 +141,9 @@ public interface IKeyVault
     /// <summary>Passphrase mode: unwraps the key. False on a wrong passphrase.</summary>
     bool UnlockWithPassphrase(string passphrase);
 
+    /// <summary>Seconds until the next passphrase try is accepted after too many wrong ones (0 = open).</summary>
+    int PassphraseRetryAfterSeconds => 0;
+
     /// <summary>Shows Windows Hello (or UserConsentVerifier) owned by hwnd. True when the user passed.</summary>
     Task<bool> VerifyUserAsync(nint hwnd, string reason, CancellationToken ct);
 

@@ -25,11 +25,14 @@ public static class WorkerLoop
                 idle.CancelAfter(idleExit);
                 try
                 {
-                    frame = await BinaryFrame.ReadAsync(pipe, idle.Token).ConfigureAwait(false);
+                    // The idle timer only covers the wait for a frame's first byte: a frame that has started is read to
+                    // its end, so a timer firing mid-frame cannot leave the stream out of step.
+                    frame = await BinaryFrame.ReadAsync(pipe, ct, idle.Token).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException)
                 {
                     if (ct.IsCancellationRequested) return LoopExit.Cancelled;
+                    // No byte of a frame was consumed, so a request that arrived just now is still whole in the pipe.
                     if (hasPendingInput?.Invoke() == true) { Log.Info("idle exit skipped: a request arrived"); continue; }
                     Log.Info($"idle for {idleExit.TotalSeconds:F0} s, exiting");
                     return LoopExit.Idle;

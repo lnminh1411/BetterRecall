@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) BetterRecall contributors
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using BetterRecall.Contracts;
 
 namespace BetterRecall.Worker.Hosting;
@@ -53,16 +54,45 @@ public sealed record WorkerSettings(
         var file = DataPaths.SettingsFile(home);
         try
         {
-            s = File.Exists(file)
-                ? JsonSerializer.Deserialize(File.ReadAllBytes(file), ContractsJson.Default.Settings) ?? new Settings()
-                : new Settings();
+            s = File.Exists(file) ? Parse(File.ReadAllText(file)) : new Settings();
         }
-        catch (Exception e) when (e is JsonException or IOException or UnauthorizedAccessException or NotSupportedException)
+        catch (Exception e) when (e is JsonException or IOException or UnauthorizedAccessException or NotSupportedException or InvalidOperationException)
         {
             Log.Warn($"settings.json unreadable ({e.GetType().Name}); using defaults");
             s = new Settings();
         }
         return From(s, home);
+    }
+
+    /// <summary>Reads settings.json as leniently as the agent's SettingsStore: a UTF-8 BOM (ReadAllText strips it),
+    /// comments and trailing commas are accepted, and a key whose value has the wrong type keeps its default instead
+    /// of discarding the whole file. Throws JsonException when the text is not a JSON object.</summary>
+    internal static Settings Parse(string json)
+    {
+        var node = JsonNode.Parse(json, documentOptions: new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true });
+        if (node is not JsonObject obj) throw new JsonException("Not an object.");
+        if (TryDeserialize(obj) is { } whole) return whole;
+        var schema = (JsonObject)JsonSerializer.SerializeToNode(new Settings(), ContractsJson.Default.Settings)!;
+        var merged = (JsonObject)schema.DeepClone();
+        foreach (var (section, sectionNode) in obj)
+        {
+            if (merged[section] is not JsonObject || sectionNode is not JsonObject sec) continue;
+            foreach (var (key, value) in sec)
+            {
+                var candidate = (JsonObject)merged.DeepClone();
+                ((JsonObject)candidate[section]!)[key] = value?.DeepClone();
+                if (TryDeserialize(candidate) is null) { Log.Warn($"settings: {section}.{key} unreadable, default kept"); continue; }
+                merged = candidate;
+            }
+        }
+        return TryDeserialize(merged) ?? new Settings();
+    }
+
+    private static Settings? TryDeserialize(JsonObject node)
+    {
+        try { return node.Deserialize(ContractsJson.Default.Settings); }
+        catch (JsonException) { return null; }
+        catch (InvalidOperationException) { return null; }
     }
 
     public static WorkerSettings From(Settings s, string home)
@@ -74,7 +104,8 @@ public sealed record WorkerSettings(
         int dim = Array.IndexOf(Dims, s.Index?.Dim ?? 768) >= 0 ? s.Index!.Dim : 768;
         int idle = Math.Clamp(inf.IdleExitS, 10, 3600);
         string modelDir = Path.GetFullPath(DataPaths.ModelsDir(home, s));
-        string lang = string.IsNullOrWhiteSpace(s.Audio?.Language) ? "auto" : s.Audio!.Language.Trim();
+        string lang = string.IsNullOrWhiteSpace(s.Audio?.Language) ? "auto" : s.Audio!.Language.Trim().ToLowerInvariant();
+        if (!WhisperLanguages.IsValid(lang)) lang = "auto";
         var pv = s.Privacy ?? new PrivacySettings();
         string nsfwDevice = (pv.NsfwDevice ?? "auto").Trim().ToLowerInvariant();
         if (Array.IndexOf(Inference.NsfwDevicePlan.Values, nsfwDevice) < 0) nsfwDevice = "auto";

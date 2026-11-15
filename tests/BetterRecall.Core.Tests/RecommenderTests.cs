@@ -199,10 +199,30 @@ public class RecommenderTests
         Assert.False(r.ContainsKey("replay.enabled"));
     }
 
+    /// <summary>The NPU row too slow for the keyframe rate: 1200 ms x 0.45/s = 54% duty, over the 50% limit.</summary>
+    private static BenchReport SlowNpu(BenchReport rep)
+        => rep with { Inference = rep.Inference! with { Devices = rep.Inference.Devices.Select(d => d.Device == "NPU" ? d with { ImageMs = 1200 } : d).ToArray() } };
+
+    [Fact]
+    public void Multi_gpu_keeps_auto_when_the_npu_keeps_up()
+    {
+        // D36: the RTX is faster (80 ms) but the worker's auto runs on the NPU (330 ms, 15% duty): the bench must not
+        // propose a GPU while the status bar shows the NPU.
+        var r = Run(Profiles.MultiGpu());
+        Assert.False(r.ContainsKey("inference.device"));
+        Assert.False(r.ContainsKey("inference.gpuAdapter"));
+        // A user on "gpu" is pointed back to auto, the device the worker picks.
+        var s = new Settings();
+        s.Inference.Device = "gpu";
+        r = Run(Profiles.MultiGpu(), s);
+        Assert.Equal("\"auto\"", r["inference.device"].Value);
+        Assert.Equal(["NPU", "330"], r["inference.device"].Args);
+    }
+
     [Fact]
     public void Multi_gpu_recommends_the_fastest_graphics_card_by_name()
     {
-        var r = Run(Profiles.MultiGpu());
+        var r = Run(SlowNpu(Profiles.MultiGpu()));
         Assert.Equal("\"gpu\"", r["inference.device"].Value);
         Assert.Equal(["GPU (NVIDIA GeForce RTX 3050)", "80"], r["inference.device"].Args);
         Assert.Equal("\"NVIDIA GeForce RTX 3050\"", r["inference.gpuAdapter"].Value);
@@ -216,17 +236,17 @@ public class RecommenderTests
         Apply(s, r["inference.device"]);
         Apply(s, r["inference.gpuAdapter"]);
         Assert.Equal(("gpu", Profiles.Rtx), (s.Inference.Device, s.Inference.GpuAdapter));
-        Assert.DoesNotContain(Recommender.Recommend(Profiles.MultiGpu(), s), x => x.Key.StartsWith("inference.", StringComparison.Ordinal));
+        Assert.DoesNotContain(Recommender.Recommend(SlowNpu(Profiles.MultiGpu()), s), x => x.Key.StartsWith("inference.", StringComparison.Ordinal));
 
         // A current value that already names this card (part of its name) stays.
         s.Inference.GpuAdapter = "rtx 3050";
-        Assert.DoesNotContain(Recommender.Recommend(Profiles.MultiGpu(), s), x => x.Key == "inference.gpuAdapter");
+        Assert.DoesNotContain(Recommender.Recommend(SlowNpu(Profiles.MultiGpu()), s), x => x.Key == "inference.gpuAdapter");
     }
 
     [Fact]
     public void Multi_gpu_auto_pick_sets_adapter_auto_and_tokens_follow_the_chosen_adapter()
     {
-        var rep = Profiles.MultiGpu();
+        var rep = SlowNpu(Profiles.MultiGpu());
         var rows = rep.Inference!.Devices.Select(d => d.Adapter == Profiles.ArcOv ? d with { ImageMs = 60 } : d).ToArray();
         // The worker chose the iGPU (inference.device = gpu) and timed the budgets there.
         rep = rep with { Inference = rep.Inference with { Devices = rows, Chosen = "GPU", ChosenAdapter = Profiles.ArcOv,
@@ -234,7 +254,7 @@ public class RecommenderTests
         var s = new Settings();
         s.Inference.GpuAdapter = "RTX 3050";
         var r = Run(rep, s);
-        Assert.Equal("\"gpu\"", r["inference.device"].Value);        // NPU exists: a GPU is never the auto policy
+        Assert.Equal("\"gpu\"", r["inference.device"].Value);        // NPU exists (too slow here): a GPU is never the auto policy
         Assert.Equal("\"auto\"", r["inference.gpuAdapter"].Value);   // the iGPU is what auto picks
         Assert.Equal("280", r["inference.imageTokens"].Value);         // tokens of the chosen adapter are used
 
@@ -371,7 +391,7 @@ public class RecommenderTests
         laptop.Governance.PauseOnBattery = false;
         foreach (var (rep, s) in new[] { (Profiles.ThisPc(), new Settings()), (Profiles.NvidiaDesktop(), new Settings()), (Profiles.AmdLaptop(), laptop),
                                           (Profiles.OldIntel(), new Settings()), (Profiles.NoEncoder(), new Settings()), (Profiles.Ultrawide(), new Settings()),
-                                          (Profiles.MultiGpu(), new Settings()) })
+                                          (Profiles.MultiGpu(), new Settings()), (SlowNpu(Profiles.MultiGpu()), new Settings()) })
             foreach (var rec in Recommender.Recommend(rep, s)) seen.Add(rec.Reason);
         Assert.Equal(new[]
         {

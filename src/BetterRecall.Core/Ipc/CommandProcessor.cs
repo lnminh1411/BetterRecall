@@ -938,6 +938,9 @@ public sealed partial class CommandProcessor
     {
         var keys = _d.Keys;
         bool rewrap = false;
+        // Passphrase guesses are rate-limited like the unlock password (each one is a 64 MiB Argon2id run).
+        bool passphraseTry = rest.Length > 0 && (KeyNeedsPassphrase || !UsesPassword && keys.KeyLoaded && keys.Protection == Crypto.KeyVault.ModePassphrase);
+        if (passphraseTry && keys.PassphraseRetryAfterSeconds is > 0 and var passWait) return Err(ErrTooMany(passWait));
         if (KeyNeedsPassphrase)
         {
             if (rest.Length > 0)

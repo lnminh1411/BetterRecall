@@ -41,6 +41,7 @@ public sealed partial class MainWindow : Window
         s.LockedChanged += UpdateLock;
         s.ConnectionChanged += UpdateOffline;
         s.Unlocked += () => (ContentFrame.Content as IDataPage)?.Reload();
+        s.Reconnected += () => { if (!s.Locked) (ContentFrame.Content as IDataPage)?.Reload(); };
         Unlock.UnlockedOk += UpdateLock;
         UpdateStatus();
         UpdateOffline();

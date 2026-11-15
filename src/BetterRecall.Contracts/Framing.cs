@@ -115,21 +115,28 @@ public static class BinaryFrame
     {
         if (header.Length > MaxHeaderBytes) throw new IOException("Frame header too large.");
         if (payload.Length > MaxPayloadBytes) throw new IOException("Frame payload too large.");
-        var len = new byte[4];
-        BinaryPrimitives.WriteUInt32LittleEndian(len, (uint)header.Length);
-        await stream.WriteAsync(len, ct).ConfigureAwait(false);
-        await stream.WriteAsync(header, ct).ConfigureAwait(false);
-        BinaryPrimitives.WriteUInt32LittleEndian(len, (uint)payload.Length);
-        await stream.WriteAsync(len, ct).ConfigureAwait(false);
+        // Lengths and header in one write (the payload follows): on the 0-byte-buffer worker pipe every write waits for
+        // the reader, so fewer writes means fewer points where a frame sits half sent.
+        var head = new byte[8 + header.Length];
+        BinaryPrimitives.WriteUInt32LittleEndian(head, (uint)header.Length);
+        header.Span.CopyTo(head.AsSpan(4));
+        BinaryPrimitives.WriteUInt32LittleEndian(head.AsSpan(4 + header.Length), (uint)payload.Length);
+        await stream.WriteAsync(head, ct).ConfigureAwait(false);
         if (payload.Length > 0) await stream.WriteAsync(payload, ct).ConfigureAwait(false);
         await stream.FlushAsync(ct).ConfigureAwait(false);
     }
 
     /// <summary>Null at clean end of stream before a frame starts.</summary>
-    public static async Task<(byte[] Header, byte[] Payload)?> ReadAsync(Stream stream, CancellationToken ct)
+    public static Task<(byte[] Header, byte[] Payload)?> ReadAsync(Stream stream, CancellationToken ct) => ReadAsync(stream, ct, ct);
+
+    /// <summary>startCt only covers the wait for the first byte of a frame: once a byte is consumed the frame is read to
+    /// its end under ct, so cancelling startCt (an idle timer) never leaves the stream part-way into a frame.</summary>
+    public static async Task<(byte[] Header, byte[] Payload)?> ReadAsync(Stream stream, CancellationToken ct, CancellationToken startCt)
     {
         var len = new byte[4];
-        if (!await FillAsync(stream, len, allowEof: true, ct).ConfigureAwait(false)) return null;
+        int first = await stream.ReadAsync(len.AsMemory(0, 4), startCt).ConfigureAwait(false);
+        if (first == 0) return null;
+        if (first < 4) await FillAsync(stream, len.AsMemory(first), allowEof: false, ct).ConfigureAwait(false);
         int headerLen = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(len));
         if (headerLen > MaxHeaderBytes) throw new IOException("Frame header too large.");
         var header = new byte[headerLen];
@@ -142,12 +149,15 @@ public static class BinaryFrame
         return (header, payload);
     }
 
-    private static async Task<bool> FillAsync(Stream stream, byte[] buffer, bool allowEof, CancellationToken ct)
+    private static Task<bool> FillAsync(Stream stream, byte[] buffer, bool allowEof, CancellationToken ct)
+        => FillAsync(stream, buffer.AsMemory(), allowEof, ct);
+
+    private static async Task<bool> FillAsync(Stream stream, Memory<byte> buffer, bool allowEof, CancellationToken ct)
     {
         int read = 0;
         while (read < buffer.Length)
         {
-            int n = await stream.ReadAsync(buffer.AsMemory(read), ct).ConfigureAwait(false);
+            int n = await stream.ReadAsync(buffer[read..], ct).ConfigureAwait(false);
             if (n == 0)
             {
                 if (allowEof && read == 0) return false;

@@ -281,6 +281,27 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
         catch (Exception ex) { Log.Warn("worker recycle", ex); }
     }
 
+    /// <summary>Stops this worker without counting a failure (no backoff): used when a long request was cancelled
+    /// and the serial worker would stay busy with it. The next request starts a fresh worker.</summary>
+    public async Task AbortAsync(WorkerConnection c, string why)
+    {
+        try
+        {
+            int pid;
+            lock (_startGate)
+            {
+                if (!ReferenceEquals(_conn, c) || c.Recycled) return;
+                pid = _pid;
+                c.Recycled = true;   // OnClosed then neither counts a failure nor resets the count
+                _conn = null;
+            }
+            Log.Info($"worker stopped: {why}");
+            if (pid != 0) { try { _launcher.Kill(pid); } catch (Exception ex) { Log.Debug($"worker kill: {ex.Message}"); } }
+            await c.DisposeAsync().ConfigureAwait(false);
+        }
+        catch (Exception ex) { Log.Warn("worker abort", ex); }
+    }
+
     public async Task ShutdownAsync()
     {
         var c = _conn;

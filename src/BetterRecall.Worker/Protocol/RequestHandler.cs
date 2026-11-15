@@ -138,9 +138,9 @@ public sealed class RequestHandler(IWorkerEngine engine, Func<WorkerSettings> se
         return new ImageInput(r.Format, r.Width ?? 0, r.Height ?? 0, 0, payload);
     }
 
-    /// <summary>"auto", or a Whisper language code: 2 or 3 lower-case letters, or "haw"/"yue"-style codes.</summary>
-    internal static bool IsLanguage(string lang)
-        => lang == "auto" || (lang.Length is >= 2 and <= 3 && lang.All(c => c is >= 'a' and <= 'z'));
+    /// <summary>"auto", or a code Whisper has a language token for (<see cref="WhisperLanguages"/>): an unknown code
+    /// is a bad request, not a "Device failed" from the Whisper runtime.</summary>
+    internal static bool IsLanguage(string lang) => WhisperLanguages.IsValid(lang);
 
     private static float[] Finish(float[] full, int dim)
     {

@@ -72,9 +72,20 @@ internal sealed class WorkerClient(WorkerSupervisor supervisor)
         return reply.Header.Ocr ?? throw new WorkerException("Internal error.");
     }
 
+    /// <summary>The worker serves one request at a time and cannot be interrupted, so a bench whose caller went away
+    /// (UI closed mid-run) stops the worker instead of leaving it benching for minutes with embeds queued behind it.</summary>
     public async Task<BenchResult> BenchAsync(CancellationToken ct)
     {
-        var reply = await CallAsync(new WorkerRequest(0, "bench"), ReadOnlyMemory<byte>.Empty, ct).ConfigureAwait(false);
+        var conn = await supervisor.EnsureAsync(ct).ConfigureAwait(false);
+        WorkerReply reply;
+        try { reply = await conn.SendAsync(new WorkerRequest(0, "bench"), ReadOnlyMemory<byte>.Empty, ct).ConfigureAwait(false); }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            await supervisor.AbortAsync(conn, "bench cancelled").ConfigureAwait(false);
+            throw;
+        }
+        if (!reply.Header.Ok) throw new WorkerReplyException(reply.Header.Error ?? "Internal error.");
+        supervisor.MarkHealthy();
         return reply.Header.Bench ?? throw new WorkerException("Internal error.");
     }
 }

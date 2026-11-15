@@ -37,6 +37,9 @@ internal sealed class Services
     public event Action? Unlocked;
     public event Action? StatusChanged;
     public event Action? ConnectionChanged;
+    /// <summary>The agent answers again after the connection was marked down (agent restart): data pages reload, since
+    /// what they show is from before the restart and their last request may have failed. Raised on the UI thread.</summary>
+    public event Action? Reconnected;
     public event Action? SettingsLoaded;
     /// <summary>The agent process this UI talked to exited (tray Quit, quit event, crash). Raised on the UI thread.</summary>
     public event Action? AgentExited;
@@ -189,8 +192,10 @@ internal sealed class Services
     private void SetConnection(AgentErrorKind kind)
     {
         if (Connection == kind) return;
+        bool wasDown = Connection is AgentErrorKind.NotRunning or AgentErrorKind.NotTrusted;
         Connection = kind;
         ConnectionChanged?.Invoke();
+        if (wasDown && kind == AgentErrorKind.None) Reconnected?.Invoke();
     }
 
     private void SetLocked(bool locked)
