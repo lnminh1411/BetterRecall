@@ -93,7 +93,7 @@ public sealed partial class EncryptedStore
         lock (_wl)
         {
             ThrowIfDisposed();
-            using var tx = _w.BeginTransaction();
+            using var tx = BeginWrite();
             Exec(_w, """
                 INSERT INTO chats(id, title, created, updated, provider, model, transcript, endpoint) VALUES($id, $t, $c, $u, $p, $m, $x, $e)
                 ON CONFLICT(id) DO UPDATE SET title=excluded.title, updated=excluded.updated, provider=excluded.provider,
