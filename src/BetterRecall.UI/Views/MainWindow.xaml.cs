@@ -153,6 +153,30 @@ public sealed partial class MainWindow : Window
         PauseButton.IsEnabled = st is not null && (st.PauseReason is null or "user" or "ipc");
         LockButton.Content = Loc.Get(Services.Current.Locked ? "Main_Unlock" : "Main_Lock");
         UpdateStorageBar(st);
+        UpdateStoreBar(st);
+    }
+
+    private string? _storeBarReason;
+
+    /// <summary>Banner while the store cannot open: keylost points at purge all in Danger zone, storeerror says it retries.</summary>
+    private void UpdateStoreBar(AgentStatus? st)
+    {
+        var reason = st?.PauseReason is "keylost" or "storeerror" ? st.PauseReason : null;
+        if (reason == _storeBarReason) return;
+        _storeBarReason = reason;
+        if (reason is null) { StoreBar.IsOpen = false; return; }
+        bool lost = reason == "keylost";
+        StoreBar.Severity = lost ? InfoBarSeverity.Error : InfoBarSeverity.Warning;
+        StoreBar.Title = Loc.Get(lost ? "StoreBar_KeyLostTitle" : "StoreBar_ErrorTitle");
+        StoreBar.Message = Loc.Get(lost ? "StoreBar_KeyLostMessage" : "StoreBar_ErrorMessage");
+        if (lost)
+        {
+            var b = new Button { Content = Loc.Get("StoreBar_OpenDanger") };
+            b.Click += (_, _) => ShowPage("danger");
+            StoreBar.ActionButton = b;
+        }
+        else StoreBar.ActionButton = null;
+        StoreBar.IsOpen = true;
     }
 
     private bool _storageBarClosed;

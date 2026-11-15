@@ -74,7 +74,13 @@ public sealed class CoreHostImpl : ICoreHost
                 Log.Info("data key needs the passphrase; waiting for unlock");
                 await loaded.WaitAsync(ct).ConfigureAwait(false);
             }
-            _store = await Task.Run(() => new EncryptedStore(_options.Home, () => _vault.Derive("betterrecall-sqlite")), ct).ConfigureAwait(false);
+            try { _store = await Task.Run(() => new EncryptedStore(_options.Home, () => _vault.Derive("betterrecall-sqlite")), ct).ConfigureAwait(false); }
+            catch (Microsoft.Data.Sqlite.SqliteException ex) when (ex.SqliteErrorCode == 26)   // SQLITE_NOTADB
+            {
+                // The loaded key does not decrypt store.db (a key file swapped in from elsewhere, or a replaced key): a retry
+                // cannot help, only purge all.
+                throw new KeyLostException("The data key does not open this store.", ex);
+            }
             Log.Info("store opened");
         }
         finally { _storeGate.Release(); }

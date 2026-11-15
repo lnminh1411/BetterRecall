@@ -36,11 +36,12 @@ public sealed class PipeManager : IAsyncDisposable
     public static string DefaultName(PipeKind kind, Settings s)
     {
         var sid = PipeNames.UserSid();
+        var home = DataPaths.Home();   // the agent's own data folder: every client resolves it the same way
         return kind switch
         {
-            PipeKind.Ui => PipeNames.Ui(sid),
-            PipeKind.Mcp => PipeNames.Mcp(sid),
-            _ => PipeNames.Public(s.Ipc.PipeName, sid),
+            PipeKind.Ui => PipeNames.Ui(sid, home),
+            PipeKind.Mcp => PipeNames.Mcp(sid, home),
+            _ => PipeNames.Public(s.Ipc.PipeName, sid, home),
         };
     }
 

@@ -82,6 +82,12 @@ public sealed class ChatService(ChatDeps d)
         public bool BudgetWarned;
         public int SharedNow;   // captures shared since the last audited request
         public required Action<string, int, string> Audit;   // the requesting connection's audit log writer
+        public CancellationTokenSource? Cancel;   // set while the turn runs: a purge of a capture it cites stops it
+        public bool Purged;
+
+        /// <summary>Capture ids the turn quotes: sources of earlier messages and of this answer so far.</summary>
+        public IEnumerable<string> Cited() =>
+            Messages.SelectMany(m => m.Sources ?? []).Select(s => s.Id).Concat(Sources.Select(s => s.Id));
     }
 
     private sealed record Pending(Turn Turn, IReadOnlyList<ToolCall> Calls, IReadOnlyList<SharePlan?> Plans, int Rank, DateTimeOffset Expires);
@@ -95,6 +101,8 @@ public sealed class ChatService(ChatDeps d)
     private readonly Dictionary<string, Pending> _pending = new(StringComparer.Ordinal);
     private readonly Dictionary<string, ChatRecord> _memory = new(StringComparer.Ordinal);
     private readonly HashSet<string> _busy = new(StringComparer.Ordinal);
+    private readonly HashSet<Turn> _running = [];
+    private int _purgeGen;   // bumped by every purge, so a search that ran across one rechecks its hits
 
     private Settings S => d.Settings();
     private DateTimeOffset Now => d.Http.Now;
@@ -145,6 +153,39 @@ public sealed class ChatService(ChatDeps d)
         StopAll();
     }
 
+    /// <summary>
+    /// After a purge: drops unsaved chats and pending approvals that cite a deleted capture (gone(id) is true), and stops
+    /// running turns that cite one, so the deleted text is neither sent again nor saved again. Time-window purges also
+    /// drop unsaved chats and stop turns with a message in [from, to], as the store does for saved chats.
+    /// </summary>
+    public void ForgetCaptures(Func<string, bool> gone, DateTimeOffset? from = null, DateTimeOffset? to = null)
+    {
+        bool InWindow(IEnumerable<ChatMessage> ms) => from is { } f && to is { } t && ms.Any(m => m.Ts >= f && m.Ts <= t);
+        bool Cites(IEnumerable<string> ids) => ids.Distinct(StringComparer.Ordinal).Any(gone);
+        var stop = new List<CancellationTokenSource>();
+        lock (_gate)
+        {
+            _purgeGen++;
+            foreach (var (id, rec) in _memory.ToList())
+                if (InWindow(rec.Messages) || Cites(rec.Messages.SelectMany(m => m.Sources ?? []).Select(s => s.Id)))
+                {
+                    _memory.Remove(id);
+                    _approved.Remove(id);
+                }
+            foreach (var (token, p) in _pending.ToList())
+                if (InWindow(p.Turn.Messages) || Cites(p.Turn.Cited().Concat(p.Plans.SelectMany(pl => pl?.Hits ?? []).Select(h => h.Hit.Id))))
+                    _pending.Remove(token);
+            foreach (var t in _running)
+                if (t.Cancel is { } c && (InWindow(t.Messages) || Cites(t.Cited())))
+                {
+                    t.Purged = true;
+                    stop.Add(c);
+                }
+        }
+        foreach (var c in stop)
+            try { c.Cancel(); } catch (ObjectDisposedException) { }
+    }
+
     private CancellationTokenSource _stop = new();
 
     /// <summary>Panic, lock or AI off: cancels every running turn and drops approvals still waiting for an answer. A
@@ -156,9 +197,9 @@ public sealed class ChatService(ChatDeps d)
         try { old.Cancel(); } catch (ObjectDisposedException) { }
     }
 
-    private CancellationToken StopToken { get { lock (_gate) return _stop.Token; } }
-
     private static readonly ChatEvent Stopped = new("error", Code: "stopped", Text: "The answer was stopped: BetterRecall was locked, panic flushed, or AI was turned off.");
+    private static readonly ChatEvent StoppedPurged = new("error", Code: "stopped", Text: "The answer was stopped: captures this chat quotes were deleted.");
+    internal const string FreshNote = "The AI provider, model or endpoint changed since this chat began, so its earlier messages were not sent. The model starts fresh with this question.";
 
     // ------------------------------------------------------------ turns
 
@@ -183,13 +224,13 @@ public sealed class ChatService(ChatDeps d)
             var model = AiDefaults.EffectiveModel(ai);
             var transcript = new JsonArray();
             var messages = rec?.Messages.ToList() ?? [];
-            var sendText = question;
-            // The saved transcript holds capture text shared earlier: resend it only to the endpoint it went to.
+            bool fresh = false;
+            // The saved transcript holds capture text shared earlier: resend it only to the endpoint it went to. Earlier
+            // answers restate capture content too, so a new provider, model or endpoint gets no recap of them either.
             if (rec != null && rec.Provider == ai.Provider && rec.Model == model && rec.Endpoint == AiDefaults.EffectiveEndpoint(ai)
                 && JsonNode.Parse(rec.Transcript) is JsonArray saved)
                 transcript = saved;
-            else if (rec != null && messages.Count > 0)
-                sendText = Recap(messages) + "\n\nNew question: " + question;   // provider or model changed: start a fresh transcript
+            else fresh = rec != null && messages.Count > 0;
             var turn = new Turn
             {
                 ChatId = id, Title = rec?.Title ?? Cut(question.ReplaceLineEndings(" "), 60), Created = rec?.Created ?? Now,
@@ -198,7 +239,8 @@ public sealed class ChatService(ChatDeps d)
                 Audit = audit ?? d.Audit,
             };
             emit(new ChatEvent("start", ChatId: id));
-            provider.AppendUser(turn.Transcript, sendText);
+            if (fresh) emit(new ChatEvent("warning", Code: "fresh", Text: FreshNote));
+            provider.AppendUser(turn.Transcript, question);
             turn.Messages.Add(new ChatMessage(NextSeq(turn), Now, "user", question));
             await RunStoppableAsync(turn, provider, emit, ct).ConfigureAwait(false);
         }
@@ -240,6 +282,9 @@ public sealed class ChatService(ChatDeps d)
             emit(new ChatEvent("start", ChatId: p.Turn.ChatId));
             if (audit != null) p.Turn.Audit = audit;
             var plans = decide(p);
+            // A purge may have run between the approval card and this answer: never send a capture that is gone now.
+            if (plans != null && d.Store() is { } st)
+                plans = plans.Select(pl => pl == null ? null : pl with { Hits = pl.Hits.Where(h => st.Get(h.Hit.Id) != null).ToList() }).ToList();
             AppendResults(p.Turn, provider, p.Calls, plans);
             await RunStoppableAsync(p.Turn, provider, emit, ct).ConfigureAwait(false);
         }
@@ -248,10 +293,27 @@ public sealed class ChatService(ChatDeps d)
 
     private async Task RunStoppableAsync(Turn turn, IChatProvider provider, Action<ChatEvent> emit, CancellationToken ct)
     {
-        var stop = StopToken;
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, stop);
-        try { await RunAsync(turn, provider, emit, linked.Token, stop).ConfigureAwait(false); }
-        catch (OperationCanceledException) when (stop.IsCancellationRequested && !ct.IsCancellationRequested) { emit(Stopped); }
+        using var mine = new CancellationTokenSource();
+        CancellationToken stop;
+        lock (_gate)
+        {
+            stop = _stop.Token;
+            turn.Cancel = mine;
+            turn.Purged = false;
+            _running.Add(turn);
+        }
+        using var halt = CancellationTokenSource.CreateLinkedTokenSource(stop, mine.Token);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, halt.Token);
+        try { await RunAsync(turn, provider, emit, linked.Token, halt.Token).ConfigureAwait(false); }
+        catch (OperationCanceledException) when (halt.IsCancellationRequested && !ct.IsCancellationRequested) { emit(turn.Purged ? StoppedPurged : Stopped); }
+        finally
+        {
+            lock (_gate)
+            {
+                _running.Remove(turn);
+                turn.Cancel = null;
+            }
+        }
     }
 
     private async Task RunAsync(Turn turn, IChatProvider provider, Action<ChatEvent> emit, CancellationToken ct, CancellationToken halt)
@@ -261,8 +323,8 @@ public sealed class ChatService(ChatDeps d)
         var key = d.ApiKey();
         while (true)
         {
-            // Lock, panic or AI off since the last round: send nothing more (the store func returns null while locked).
-            if (halt.IsCancellationRequested || !S.Ai.Enabled || d.Store() is null) { emit(Stopped); return; }
+            // Lock, panic, purge or AI off since the last round: send nothing more (the store func returns null while locked).
+            if (halt.IsCancellationRequested || !S.Ai.Enabled || d.Store() is null) { emit(turn.Purged ? StoppedPurged : Stopped); return; }
             if (turn.Rounds++ >= MaxRounds)
             {
                 emit(new ChatEvent("warning", Code: "rounds", Text: $"Stopped after {MaxRounds} model calls."));
@@ -314,6 +376,8 @@ public sealed class ChatService(ChatDeps d)
             var calls = result.Calls;
             var plans = new List<SharePlan?>();
             int rank = Math.Max(0, AiShare.Rank(ai.Share));
+            int gen;
+            lock (_gate) gen = _purgeGen;
             for (int i = 0; i < calls.Count; i++)
             {
                 var call = calls[i];
@@ -324,6 +388,12 @@ public sealed class ChatService(ChatDeps d)
                 plans.Add(await ChatShareGate.BuildAsync(hits, ai.Share, ai.ChatMaxHits, ai.ChatMaxImages, store.Get, d.Thumbnailer.GetThumbAsync,
                     d.ImageRedactor, d.TextRedactor, ct).ConfigureAwait(false));
             }
+            // A purge ran while searching: drop hits it deleted (they are not yet in turn.Sources for ForgetCaptures to see).
+            bool purgedMeanwhile;
+            lock (_gate) purgedMeanwhile = gen != _purgeGen;
+            if (purgedMeanwhile)
+                for (int i = 0; i < plans.Count; i++)
+                    if (plans[i] is { } pl) plans[i] = pl with { Hits = pl.Hits.Where(h => store.Get(h.Hit.Id) != null).ToList() };
             bool sharesData = plans.Any(p => p is { Hits.Count: > 0 });
             bool approved;
             lock (_gate) approved = ApprovedLocked(turn.ChatId, rank, turn.Endpoint);
@@ -389,7 +459,9 @@ public sealed class ChatService(ChatDeps d)
     private void Finish(Turn turn, Action<ChatEvent> emit, IStore store, CancellationToken halt)
     {
         // Panic deletes all chats and lock closes the store: a turn still finishing must not save its transcript again.
-        if (halt.IsCancellationRequested || d.Store() is null) { emit(Stopped); return; }
+        if (halt.IsCancellationRequested || d.Store() is null) { emit(turn.Purged ? StoppedPurged : Stopped); return; }
+        // Nor may it save a quote of a capture a purge deleted meanwhile.
+        if (turn.Cited().Distinct(StringComparer.Ordinal).Any(id => store.Get(id) == null)) { emit(StoppedPurged); return; }
         var answer = turn.Text.ToString().Trim();
         turn.Messages.Add(new ChatMessage(NextSeq(turn), Now, "assistant", answer, turn.Sources.ToList()));
         var rec = new ChatRecord(turn.ChatId, turn.Title, turn.Created, Now, turn.Provider, turn.Model, turn.Transcript.ToJsonString(), turn.Messages, turn.Endpoint);
@@ -446,13 +518,6 @@ public sealed class ChatService(ChatDeps d)
     private static int NextSeq(Turn t) => t.Messages.Count == 0 ? 0 : t.Messages[^1].Seq + 1;
 
     private static string NewId() => "c_" + Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(12));
-
-    private static string Recap(List<ChatMessage> messages)
-    {
-        var sb = new StringBuilder("Earlier in this chat (for context):");
-        foreach (var m in messages.TakeLast(10)) sb.Append('\n').Append(m.Role == "user" ? "User: " : "Assistant: ").Append(Cut(m.Text, 1000));
-        return sb.ToString();
-    }
 
     private static string Str(JsonObject o, string name)
     {

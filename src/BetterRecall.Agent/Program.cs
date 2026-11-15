@@ -25,6 +25,7 @@ internal static class Program
         int devReplayAt = 0;
         string? devExport = null;
         string? devBench = null;
+        bool allowDefaultHome = false;
         for (int i = 0; i < args.Length; i++)
         {
             switch (args[i])
@@ -37,15 +38,26 @@ internal static class Program
                 case "--dev-replay-at" when i + 1 < args.Length: devReplayAt = int.Parse(args[++i]); break;
                 case "--dev-export" when i + 1 < args.Length: devExport = args[++i]; break;
                 case "--dev-bench" when i + 1 < args.Length: devBench = args[++i]; break;
+                case InstallLayout.AllowDefaultHomeFlag: allowDefaultHome = true; break;
             }
         }
         installDir = Path.GetFullPath(installDir).TrimEnd('\\');
 
         var home = DataPaths.Home();
+        if (InstallLayout.RefusesHome(installDir, home, allowDefaultHome))
+        {
+            // A dev build (Scripts/dev_build.py) on the user's real data folder would run dev code on their store.
+            Console.Error.WriteLine($"Dev build: set {DataPaths.HomeEnv} to a scratch folder (or pass {InstallLayout.AllowDefaultHomeFlag}).");
+            return 3;
+        }
         using var mutex = new Mutex(true, PipeNames.AgentMutexFor(home), out bool first);
         if (!first) return 0; // single instance per data folder
 
         Directory.CreateDirectory(home);
+        // Lets the launcher find the agent of this data folder (not just any process with the agent's name).
+        var pidFile = DataPaths.AgentPidFile(home);
+        try { File.WriteAllText(pidFile, Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture)); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
         Log.Init(DataPaths.LogsDir(home), "info");
         Log.Info($"agent start, pid {Environment.ProcessId}");
         AppDomain.CurrentDomain.UnhandledException += (_, e) =>
@@ -89,6 +101,8 @@ internal static class Program
             try { core.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(10)); } catch (Exception ex) { Log.Warn("core shutdown", ex); }
             Log.Info($"agent stopped in {sw.ElapsedMilliseconds} ms");
             Log.Flush();
+            try { if (File.ReadAllText(pidFile).Trim() == Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture)) File.Delete(pidFile); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
         }
         return 0;
     }

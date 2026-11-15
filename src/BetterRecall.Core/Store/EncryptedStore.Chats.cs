@@ -8,7 +8,8 @@ namespace BetterRecall.Core.Store;
 
 /// <summary>
 /// Saved cloud chats (ai.chatHistory) and the local daily AI budget counter, in store.db so they are encrypted with
-/// the store. A time-window purge deletes chats with a message in the window; purge all deletes the store.
+/// the store. Any capture delete drops the chats citing it, a time-window purge also deletes chats with a message in the
+/// window, and purge all deletes the store.
 /// </summary>
 public sealed partial class EncryptedStore
 {
@@ -24,6 +25,18 @@ public sealed partial class EncryptedStore
         using (var rd = cmd.ExecuteReader())
             while (rd.Read()) has |= rd.GetString(0) == "endpoint";
         if (!has) Exec(_w, "ALTER TABLE chats ADD COLUMN endpoint TEXT NOT NULL DEFAULT ''");
+        // 0.2.1: range purges, retention and thinning used to keep chats quoting the captures they deleted. Once per
+        // store, drop the saved chats that cite a capture which no longer exists.
+        if (Scalar(_w, "SELECT v FROM meta WHERE k='chat_cite_sweep'") is null)
+        {
+            Exec(_w, """
+                DELETE FROM chats WHERE id IN (
+                    SELECT DISTINCT m.chat_id FROM chat_messages m, json_each(m.sources) j
+                    WHERE json_extract(j.value, '$.id') NOT IN (SELECT id FROM captures))
+                """);
+            Exec(_w, "DELETE FROM chat_messages WHERE chat_id NOT IN (SELECT id FROM chats)");
+            Exec(_w, "INSERT OR REPLACE INTO meta(k, v) VALUES('chat_cite_sweep', '1')");
+        }
     }
 
     private void MigrateChatTables() => Exec(_w, """

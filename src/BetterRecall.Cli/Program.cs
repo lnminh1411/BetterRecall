@@ -14,8 +14,9 @@ if (args.Length < 2 || !args[0].Equals("ipc", StringComparison.OrdinalIgnoreCase
 }
 
 var line = string.Join(' ', args.Skip(1));
-var settings = SettingsStore.ReadOnly(DataPaths.Home());
-var pipe = PipeNames.Public(settings.Ipc.PipeName, PipeNames.UserSid());
+var home = DataPaths.Home();
+var settings = SettingsStore.ReadOnly(home);
+var pipe = PipeNames.Public(settings.Ipc.PipeName, PipeNames.UserSid(), home);   // the agent of this data folder only
 var agentExe = InstallLayout.Full(AppContext.BaseDirectory, InstallLayout.AgentExe);
 
 using var cts = new CancellationTokenSource();

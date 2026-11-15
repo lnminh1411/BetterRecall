@@ -190,9 +190,9 @@ public sealed class CommandProcessorTests : IDisposable
         Assert.True((await Call(Pub, "subscribe")).Ok); // status stream is not gated
         Set("{\"security\":{\"requireUnlock\":false}}");
         Assert.True((await Call(Pub, "search acme")).Ok);
-        // Store not open at all: locked whatever the settings say.
+        // Store not open at all (key lost, storage error): its own error whatever the settings say, not a lock.
         _storeOpen = false;
-        Assert.Equal("Store is locked.", await Err(Pub, "search acme"));
+        Assert.Equal("Store is not open.", await Err(Pub, "search acme"));
     }
 
     [Fact]
@@ -299,7 +299,7 @@ public sealed class CommandProcessorTests : IDisposable
     public async Task Locked_gate_blocks_public_purge_and_security_settings()
     {
         Set("{\"ipc\":{\"allowControl\":true,\"allowPurge\":true}}");
-        _storeOpen = false;   // read gate closed
+        _agent.Unlocked = false;   // read gate closed
         Assert.Equal(CommandProcessor.ErrLocked, await Err(Pub, "purge app chrome.exe"));
         Assert.Equal(CommandProcessor.ErrLocked, await Err(Ui, "settings set {\"security\":{\"keyProtection\":\"dpapi\"}}"));
         Assert.Equal(CommandProcessor.ErrLocked, await Err(Ui, "settings set {\"ai\":{\"enabled\":true}}"));
@@ -421,7 +421,9 @@ public sealed class CommandProcessorTests : IDisposable
             Settings = s, Store = () => null, Keys = vault, Agent = _agent, Embedder = _embed, Thumbnailer = _thumbs,
             PurgeAll = _ => Task.FromResult(0),
         });
-        Assert.Equal("Wrong passphrase.", Envelope.Parse((await p.HandleAsync(Ui, "unlock", default)).Line).Error);
+        // No passphrase: Windows Hello only (enough for purge all), the key stays wrapped.
+        Assert.True(Envelope.Parse((await p.HandleAsync(Ui, "unlock", default)).Line).Ok);
+        Assert.False(vault.KeyLoaded);
         Assert.True(Envelope.Parse((await p.HandleAsync(Ui, "unlock  my pass phrase ", default)).Line).Ok);
         Assert.True(vault.KeyLoaded);
         vault.Dispose();

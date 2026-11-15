@@ -136,6 +136,7 @@
   <data name="Err_InvalidKey" xml:space="preserve"><value>Invalid value for {0}.</value></data>
   <data name="Err_InvalidToken" xml:space="preserve"><value>The confirmation expired. Start again.</value></data>
   <data name="Err_Locked" xml:space="preserve"><value>The store is locked.</value></data>
+  <data name="Err_NotOpen" xml:space="preserve"><value>Your history cannot be shown because the store is not open. The banner says why.</value></data>
   <data name="Err_NotFound" xml:space="preserve"><value>That item no longer exists.</value></data>
   <data name="Err_NotRunning" xml:space="preserve"><value>BetterRecall is not running</value></data>
   <data name="Err_NotRunning_Detail" xml:space="preserve"><value>Start BetterRecall, then try again.</value></data>
@@ -768,6 +769,11 @@
   <data name="StorageBar_Title" xml:space="preserve"><value>Capture is paused: storage limit</value></data>
   <data name="StorageBar_Message" xml:space="preserve"><value>Free up space on the data drive, raise the maximum size, or turn on Overwrite oldest.</value></data>
   <data name="StorageBar_Open" xml:space="preserve"><value>Storage settings</value></data>
+  <data name="StoreBar_KeyLostTitle" xml:space="preserve"><value>Your history cannot be opened: the data key is missing or damaged</value></data>
+  <data name="StoreBar_KeyLostMessage" xml:space="preserve"><value>Without its key the saved history cannot be read. To start over with an empty history, delete everything in Danger zone.</value></data>
+  <data name="StoreBar_OpenDanger" xml:space="preserve"><value>Open Danger zone</value></data>
+  <data name="StoreBar_ErrorTitle" xml:space="preserve"><value>Storage could not be opened</value></data>
+  <data name="StoreBar_ErrorMessage" xml:space="preserve"><value>Capture is paused. BetterRecall tries again every 30 seconds. If this stays, check the log in the logs folder.</value></data>
   <data name="Danger_ExportTitle.Text" xml:space="preserve"><value>Export captures</value></data>
   <data name="Danger_ExportBody.Text" xml:space="preserve"><value>Writes the captures of a time range, optionally of one app, to a zip file: the images plus captures.json with time, app, title and text.</value></data>
   <data name="Danger_ExportFrom.Header" xml:space="preserve"><value>From</value></data>

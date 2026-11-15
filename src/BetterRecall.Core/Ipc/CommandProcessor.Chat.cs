@@ -19,7 +19,7 @@ public sealed partial class CommandProcessor
         var (sub, tail) = SplitVerb(rest);
         sub = sub.ToLowerInvariant();
         if (chat == null) return Err(ErrAiOff);
-        if (IsLocked(s.Kind)) return Err(ErrLocked);
+        if (LockError(s.Kind) is { } locked) return Err(locked);
         switch (sub)
         {
             case "list" when tail.Length == 0:

@@ -36,7 +36,7 @@ public partial class App : Application
 
         _launcher = new LauncherWindow();
         // Fast path for the search hotkey: the agent sets this event instead of starting a second exe.
-        var eventName = BetterRecall.Contracts.PipeNames.ShowLauncherEvent + (_args.Mock ? ".mock" : "");
+        var eventName = BetterRecall.Contracts.PipeNames.ShowLauncherEventFor(BetterRecall.Contracts.DataPaths.Home()) + (_args.Mock ? ".mock" : "");
         try
         {
             _signal = new LauncherSignal(eventName, () =>
@@ -47,7 +47,18 @@ public partial class App : Application
             // Someone else holds the name with a DACL we cannot use; the second-exe path still works.
         }
         Handle(_args, firstLaunch: true);
+        services.AgentExited += OnAgentExited;
         _ = InitAsync(services);
+    }
+
+    /// <summary>The agent quit (tray Quit, quit event) or died: a hidden UI has nothing left to serve, so it exits too. A
+    /// window the user has open stays, with the offline banner.</summary>
+    private void OnAgentExited()
+    {
+        if (_launcher?.IsShown == true || _main?.AppWindow.IsVisible == true) return;
+        _signal?.Dispose();
+        _signal = null;
+        Exit();
     }
 
     private async Task InitAsync(Services services)

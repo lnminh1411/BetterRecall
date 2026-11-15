@@ -56,7 +56,7 @@ internal static class StartupRegistration
 }
 
 /// <summary>
-/// Shows the WinUI launcher: sets PipeNames.ShowLauncherEvent when the UI is running (its single instance waits on it),
+/// Shows the WinUI launcher: sets PipeNames.ShowLauncherEventFor(home) when the UI is running (its single instance waits on it),
 /// otherwise starts ui\BetterRecall.UI.exe. Either way the UI gets foreground rights.
 /// </summary>
 internal static partial class UiLauncher
@@ -67,7 +67,7 @@ internal static partial class UiLauncher
     public static bool ShowLauncher(string installDir)
     {
         AllowRunningUi(installDir);
-        nint ev = OpenEventW(EVENT_MODIFY_STATE, 0, PipeNames.ShowLauncherEvent);
+        nint ev = OpenEventW(EVENT_MODIFY_STATE, 0, PipeNames.ShowLauncherEventFor(DataPaths.Home()));   // this data folder's UI only
         if (ev != 0)
         {
             try { return SetEvent(ev) != 0; }

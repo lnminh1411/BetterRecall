@@ -344,6 +344,7 @@ public sealed class SearchViewModel : ObservableObject
         AgentErrorKind.NotRunning => new LocalizedText("Err_NotRunning"),
         AgentErrorKind.NotTrusted => new LocalizedText("Err_NotTrusted"),
         AgentErrorKind.Locked => new LocalizedText("Err_Locked"),
+        AgentErrorKind.NotOpen => new LocalizedText("Err_NotOpen"),
         AgentErrorKind.Protocol => new LocalizedText("Err_Protocol"),
         _ => ServerError(error),
     };
