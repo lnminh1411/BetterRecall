@@ -18,3 +18,29 @@ It also keeps an instant replay buffer, so you can save the last minutes of your
 Screenshots show the real app running on demo data (`--mock`).
 
 **Status:** early development, Windows 11 x64. There is no installer yet; build from source and download the models from [Hugging Face](https://huggingface.co/lnminh1411/BetterRecall-models). **Docs:** [`docs/`](docs/documentations_summary.md). **Licences:** the WinUI app and contracts are MIT, the rest is AGPL-3.0 ([`LICENSING.md`](LICENSING.md)); models keep their own licences.
+
+## System requirements
+
+Estimates for 0.2.3-dev-part1, from the code's defaults and the dev PC's measurements. The first run's benchmark adjusts settings to the machine; the reasons below say what it changes.
+
+**Minimum**
+
+| Part | Requirement | Why |
+|---|---|---|
+| OS | Windows 11 (build 22000 or later), x64 | The exes target build 20348 or later, which no Windows 10 release reached; system audio uses process loopback, which needs it. Windows on Arm is untested (x64 build only) |
+| CPU | 4 cores, x64 | With no NPU or usable GPU, embeddings, screen text (OCR) and speech run on the CPU: it works, but indexing lags behind and costs more power (OCR alone is about 1 s of CPU per screen) |
+| RAM | 8 GB | Below 8 GB the benchmark cuts the replay to 60 s and, with long retention, the vectors to 512 dimensions. The replay ring stays in RAM (about 90 MB per monitor at the default 120 s and 6 Mbit/s) |
+| GPU | DirectX 11 GPU with a WDDM driver | Screen capture uses Desktop Duplication. Replay also needs a hardware video encoder (H.264, HEVC or AV1); with none the benchmark turns replay off |
+| Disk | SSD with about 35 GB free | The app takes about 0.6 GB and the models 4 to 6 GB. The history may grow to `storage.maxGb` (20 GB by default), and capture pauses when free space drops under `storage.minFreeGb` (25 GB by default); lower both on a small disk |
+| Security | TPM 2.0 recommended | Without a TPM the data key is protected with DPAPI or a passphrase. Without Windows Hello, an unlock password can guard reads |
+
+**Recommended**
+
+| Part | Recommendation | Why |
+|---|---|---|
+| OS | Windows 11 24H2 or later | The tested path |
+| CPU | Intel Core Ultra (Meteor Lake or later) | Its NPU runs embeddings, OCR and the NSFW check through OpenVINO at almost no CPU cost (OCR about 0.1 s of CPU per screen). Keyframe encoding measured 0.45% CPU on average. AMD and NVIDIA systems use the GPU through DirectML instead; other NPUs are not used yet |
+| RAM | 16 GB | Full 768-dimension vectors, the 120 s replay and room for the worker's models |
+| GPU | GPU with an AV1 encoder (Intel Arc or Xe, NVIDIA RTX 40, AMD RX 7000) | Smallest replay clips, with encoding off the CPU |
+| Disk | NVMe SSD with 64 GB or more free | Room for the default 20 GB history cap, the 25 GB free-space reserve, models and replay clips |
+| Security | TPM 2.0 plus Windows Hello (face or fingerprint) | Silent key unlock and a quick read gate |
