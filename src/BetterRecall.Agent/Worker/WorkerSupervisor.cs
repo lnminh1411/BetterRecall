@@ -226,7 +226,7 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
         if (err is not null) Log.Warn($"worker pipe closed with error {err.GetType().Name}");
         else Log.Info("worker pipe closed");
         if (conn.Recycled) { }   // killed for not answering: the failure is already counted, keep the backoff
-        else if (crashed && !_disposed) NoteFailure();
+        else if (crashed && !_disposed && !conn.ShuttingDown) NoteFailure();
         else Interlocked.Exchange(ref _failures, 0);
         if (ReferenceEquals(_conn, conn)) _conn = null;
     }
@@ -311,6 +311,7 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
         var c = _conn;
         if (c is null) return;
         _conn = null;
+        c.ShuttingDown = true;   // the shutdown request may still be pending when the worker closes the pipe
         try
         {
             using var cts = new CancellationTokenSource(2000);

@@ -56,6 +56,9 @@ internal sealed class WorkerConnection : IAsyncDisposable
     /// <summary>Set by the supervisor when it kills this worker for not answering; the failure is already counted.</summary>
     public bool Recycled { get; set; }
 
+    /// <summary>The supervisor sent shutdown: the worker may close the pipe before it answers, which is not a crash.</summary>
+    public bool ShuttingDown { get; set; }
+
     private static bool IsLongOp(string op) => op is "bench" or "hello";
 
     public async Task<WorkerReply> SendAsync(WorkerRequest request, ReadOnlyMemory<byte> payload, CancellationToken ct)
