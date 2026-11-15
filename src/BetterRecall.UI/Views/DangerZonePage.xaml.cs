@@ -33,6 +33,13 @@ public sealed partial class DangerZonePage : Page, IDataPage
 
     public void Reload() => ResultBar.IsOpen = false;
 
+    /// <summary>Narrow windows: the date and time pickers (242 px each) stack instead of overflowing the card.</summary>
+    private void Root_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        var o = e.NewSize.Width < 620 ? Orientation.Vertical : Orientation.Horizontal;
+        foreach (var row in new[] { ExportFromRow, ExportToRow, FromRow, ToRow, AppRow }) row.Orientation = o;
+    }
+
     private void Show(InfoBarSeverity sev, string message)
     {
         ResultBar.Severity = sev;
@@ -124,31 +131,29 @@ public sealed partial class DangerZonePage : Page, IDataPage
             Show(InfoBarSeverity.Error, Loc.Get("Danger_RangeInvalid"));
             return;
         }
-        var preview = await Services.Current.Api.PurgeRangeAsync(from, to);
-        await ConfirmAsync(preview, Loc.Format("Danger_RangeConfirm", from.ToString("g"), to.ToString("g")));
+        await ConfirmAsync(() => Services.Current.Api.PurgeRangeAsync(from, to), Loc.Format("Danger_RangeConfirm", from.ToString("g"), to.ToString("g")));
     }
 
     private async void PurgeApp_Click(object sender, RoutedEventArgs e)
     {
         var app = AppName.Text.Trim();
         if (app.Length == 0) return;
-        var preview = await Services.Current.Api.PurgeAppAsync(app);
-        await ConfirmAsync(preview, Loc.Format("Danger_AppConfirm", app));
+        await ConfirmAsync(() => Services.Current.Api.PurgeAppAsync(app), Loc.Format("Danger_AppConfirm", app));
     }
 
-    private async Task ConfirmAsync(AgentResult<PurgeConfirmReply> preview, string what)
+    /// <summary>Count, confirm, then purge with a token asked after the dialog closed: tokens expire after 30 s and the
+    /// dialog can stay open longer. If more captures match by then, the new count is confirmed first.</summary>
+    private async Task ConfirmAsync(Func<Task<AgentResult<PurgeConfirmReply>>> ask, string what)
     {
-        if (!preview.Ok)
+        var r = await PurgeFlow.ConfirmFreshAsync(Services.Current.Api, ask, async rows =>
         {
-            Show(InfoBarSeverity.Error, Loc.Error(preview.Kind, preview.Error));
-            return;
-        }
-        var body = new TextBlock { TextWrapping = TextWrapping.Wrap, Text = what + "\n\n" + Loc.Format("Danger_RowsCount", preview.Value!.Rows ?? 0) };
-        var dialog = WindowHelpers.Dialog(XamlRoot, Loc.Get("Danger_ConfirmTitle"), body, Loc.Get("Danger_ConfirmDelete"), danger: true);
-        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
-        var r = await Services.Current.Api.PurgeConfirmAsync(preview.Value.Confirm);
-        if (r.Ok) Show(InfoBarSeverity.Success, Loc.Format("Danger_Purged", r.Value));
-        else Show(InfoBarSeverity.Error, Loc.Error(r.Kind, r.Error));
+            var body = new TextBlock { TextWrapping = TextWrapping.Wrap, Text = what + "\n\n" + Loc.Format("Danger_RowsCount", rows) };
+            var dialog = WindowHelpers.Dialog(XamlRoot, Loc.Get("Danger_ConfirmTitle"), body, Loc.Get("Danger_ConfirmDelete"), danger: true);
+            return await dialog.ShowAsync() == ContentDialogResult.Primary;
+        });
+        if (r is null) return;   // cancelled
+        if (r.Value.Ok) Show(InfoBarSeverity.Success, Loc.Format("Danger_Purged", r.Value.Value));
+        else Show(InfoBarSeverity.Error, Loc.Error(r.Value.Kind, r.Value.Error));
         await Services.Current.RefreshStatusAsync();
     }
 

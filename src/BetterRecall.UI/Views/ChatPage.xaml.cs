@@ -28,7 +28,33 @@ public sealed partial class ChatPage : Page, IDataPage
         ChatControl.SourceInvoked += OnSourceInvoked;
         ChatControl.TurnCompleted += () => DispatcherQueue.TryEnqueue(() => _ = ReloadListAsync());
 
-        Loaded += (_, _) => _ = ReloadListAsync();
+        Loaded += (_, _) =>
+        {
+            Services.Current.SettingsLoaded += UpdateAiState;
+            UpdateAiState();
+            _ = ReloadListAsync();
+        };
+        Unloaded += (_, _) => Services.Current.SettingsLoaded -= UpdateAiState;
+    }
+
+    /// <summary>With ai.enabled off the chat column shows how to turn it on; saved chats cannot be opened or started
+    /// then, but Delete all stays so old chats can still be removed.</summary>
+    private void UpdateAiState()
+    {
+        bool on = Services.Current.AiEnabled;
+        NewChatButton.IsEnabled = on;
+        SavedList.IsEnabled = on;
+    }
+
+    /// <summary>Narrow windows: a smaller chat list, and the source detail opens over the chat instead of beside it.</summary>
+    private void Root_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        bool narrow = e.NewSize.Width < 900;
+        SidebarColumn.Width = new GridLength(narrow ? 200 : 260);
+        Grid.SetColumn(DetailHost, narrow ? 1 : 2);
+        Grid.SetColumnSpan(DetailHost, narrow ? 2 : 1);
+        DetailHost.HorizontalAlignment = narrow ? HorizontalAlignment.Right : HorizontalAlignment.Stretch;
+        DetailHost.Width = Math.Min(380, Math.Max(0, e.NewSize.Width - (narrow ? 200 : 260) - 24));
     }
 
     public static string FormatTime(DateTimeOffset ts) =>
@@ -82,21 +108,43 @@ public sealed partial class ChatPage : Page, IDataPage
         DetailHost.Visibility = Visibility.Collapsed;
     }
 
-    private void Chat_ContextRequested(UIElement sender, Microsoft.UI.Xaml.Input.ContextRequestedEventArgs args)
+    /// <summary>The chat a context request is about: the row under the pointer, or the focused row for Shift+F10 and the
+    /// menu key (raised on the ListViewItem, not on the template inside it).</summary>
+    private ChatSummary? ChatAt(object? source)
     {
-        if (sender is not FrameworkElement fe || fe.Tag is not ChatSummary summary) return;
-        var menu = new MenuFlyout();
+        for (var d = source as DependencyObject; d is not null && !ReferenceEquals(d, SavedList); d = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(d))
+        {
+            if (d is ListViewItem li) return SavedList.ItemFromContainer(li) as ChatSummary;
+            if (d is FrameworkElement { DataContext: ChatSummary c }) return c;
+        }
+        return SavedList.SelectedItem as ChatSummary;
+    }
 
-        var renameItem = new MenuFlyoutItem { Text = Loc.Get("Chat_Rename") };
+    private void SavedList_KeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
+    {
+        if (e.Key is not (Windows.System.VirtualKey.F2 or Windows.System.VirtualKey.Delete) || ChatAt(e.OriginalSource) is not { } summary) return;
+        e.Handled = true;
+        _ = e.Key == Windows.System.VirtualKey.F2 ? RenameChatAsync(summary) : DeleteChatAsync(summary);
+    }
+
+    private void SavedList_ContextRequested(UIElement sender, Microsoft.UI.Xaml.Input.ContextRequestedEventArgs args)
+    {
+        if (ChatAt(args.OriginalSource) is not { } summary) return;
+        args.Handled = true;
+        var fe = (args.OriginalSource as FrameworkElement) ?? SavedList;
+        var menu = new MenuFlyout();
+        WindowHelpers.Themed(menu, SavedList);
+
+        var renameItem = new MenuFlyoutItem { Text = Loc.Get("Chat_Rename"), KeyboardAcceleratorTextOverride = "F2" };
         renameItem.Click += async (_, _) => await RenameChatAsync(summary);
         menu.Items.Add(renameItem);
 
-        var deleteItem = new MenuFlyoutItem { Text = Loc.Get("Chat_Delete") };
+        var deleteItem = new MenuFlyoutItem { Text = Loc.Get("Chat_Delete"), KeyboardAcceleratorTextOverride = Loc.Get("Key_Delete") };
         deleteItem.Click += async (_, _) => await DeleteChatAsync(summary);
         menu.Items.Add(deleteItem);
 
-        if (args.TryGetPosition(sender, out var pos))
-            menu.ShowAt(sender, pos);
+        if (args.TryGetPosition(fe, out var pos))
+            menu.ShowAt(fe, pos);
         else
             menu.ShowAt(fe);
     }

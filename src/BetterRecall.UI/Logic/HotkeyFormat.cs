@@ -51,6 +51,10 @@ public static class HotkeyFormat
         return string.Join('+', parts);
     }
 
+    /// <summary>Tab (VK 9) without Ctrl, Alt or Win moves focus out of a recorder instead of being recorded; it cannot
+    /// start a valid hotkey anyway. Both recorders (settings and the Shortcuts dialog) use this rule.</summary>
+    public static bool LeavesRecorder(int vk, bool ctrl, bool alt, bool win) => vk == 9 && !(ctrl || alt || win);
+
     /// <summary>Canonical form of a stored hotkey, or null when it is not valid.</summary>
     public static string? Normalize(string? text)
     {

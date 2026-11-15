@@ -26,7 +26,7 @@
                         <TextBlock VerticalAlignment="Center" TextTrimming="CharacterEllipsis" MaxLines="1" FontSize="13">
                             <Run x:Uid="Card_Found" /><Run Text="{x:Bind Query}" FontWeight="SemiBold" /><Run Text="  ·  " Foreground="{ThemeResource TextFillColorTertiaryBrush}" /><Run Text="{x:Bind Ago}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                         </TextBlock>
-                        <Button x:Uid="Card_More" Grid.Column="1" Width="32" Height="30" Padding="0" Background="Transparent" BorderThickness="0"
+                        <Button x:Uid="Card_More" Grid.Column="1" Width="32" Height="30" Padding="0" Style="{StaticResource SubtleButtonStyle}"
                                 Click="More_Click">
                             <FontIcon Glyph="&#xE712;" FontSize="14" />
                         </Button>
@@ -79,7 +79,7 @@
                 <FontIcon Glyph="&#xE8BD;" FontSize="16" />
             </ToggleButton>
             <Button x:Name="CloseButton" Grid.Column="2" VerticalAlignment="Stretch" Width="44" Padding="0"
-                    Background="Transparent" BorderThickness="0" Click="Close_Click">
+                    Style="{StaticResource SubtleButtonStyle}" Click="Close_Click">
                 <FontIcon Glyph="&#xE711;" FontSize="14" />
             </Button>
         </Grid>
@@ -110,10 +110,10 @@
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" AutomationProperties.LiveSetting="Polite" />
         </Grid>
 
-        <Grid Grid.Row="2">
+        <Grid Grid.Row="2" SizeChanged="Body_SizeChanged">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />
-                <ColumnDefinition Width="380" />
+                <ColumnDefinition x:Name="DetailColumn" Width="380" />
             </Grid.ColumnDefinitions>
             <GridView x:Name="ResultsGrid" x:Uid="Launcher_Results" Padding="12,0,4,8" SelectionMode="Single"
                       ItemTemplate="{StaticResource ResultCardTemplate}"
@@ -161,7 +161,7 @@
                                 </Grid.ColumnDefinitions>
                                 <FontIcon Glyph="&#xE81C;" FontSize="14" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                                 <TextBlock Grid.Column="1" Text="{x:Bind}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
-                                <Button x:Uid="History_Delete" Grid.Column="2" Width="32" Height="28" Padding="0" Background="Transparent" BorderThickness="0"
+                                <Button x:Uid="History_Delete" Grid.Column="2" Width="32" Height="28" Padding="0" Style="{StaticResource SubtleButtonStyle}"
                                         Tag="{x:Bind}" Click="DeleteHistory_Click">
                                     <FontIcon Glyph="&#xE711;" FontSize="11" />
                                 </Button>

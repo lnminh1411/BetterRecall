@@ -146,8 +146,15 @@ internal static class WindowHelpers
         if (w.Content is not FrameworkElement root || Services.Current is not { } s) return;
         root.RequestedTheme = s.Theme;
         if (!w.ExtendsContentIntoTitleBar) return;
-        bool dark = root.ActualTheme == ElementTheme.Dark;
         var tb = w.AppWindow.TitleBar;
+        if (HighContrast)
+        {
+            // High contrast: the system caption colours, not fixed black/white with alpha hover fills.
+            tb.ButtonBackgroundColor = tb.ButtonInactiveBackgroundColor = tb.ButtonForegroundColor = tb.ButtonHoverForegroundColor = null;
+            tb.ButtonPressedForegroundColor = tb.ButtonInactiveForegroundColor = tb.ButtonHoverBackgroundColor = tb.ButtonPressedBackgroundColor = null;
+            return;
+        }
+        bool dark = root.ActualTheme == ElementTheme.Dark;
         var fg = dark ? Colors.White : Colors.Black;
         tb.ButtonBackgroundColor = Colors.Transparent;
         tb.ButtonInactiveBackgroundColor = Colors.Transparent;
@@ -172,11 +179,35 @@ internal static class WindowHelpers
         aw.MoveAndResize(new RectInt32(work.X + (work.Width - w) / 2, work.Y + (work.Height - h) / 3, w, h));
     }
 
+    public static bool HighContrast
+    {
+        get
+        {
+            try { return new Windows.UI.ViewManagement.AccessibilitySettings().HighContrast; }
+            catch { return false; }
+        }
+    }
+
+    /// <summary>The theme a popup must request to match its window: popups (dialogs, flyouts) live in the XamlRoot
+    /// popup layer and do not inherit ui.theme from the window's root element.</summary>
+    public static ElementTheme PopupTheme(XamlRoot? root) =>
+        root?.Content is FrameworkElement fe ? fe.ActualTheme : Services.Current?.Theme ?? ElementTheme.Default;
+
+    /// <summary>Menu flyouts follow the window's ui.theme (see PopupTheme).</summary>
+    public static void Themed(MenuFlyout menu, FrameworkElement target)
+    {
+        var st = new Style(typeof(MenuFlyoutPresenter));
+        if (Application.Current.Resources.TryGetValue("DefaultMenuFlyoutPresenterStyle", out var b) && b is Style based) st.BasedOn = based;
+        st.Setters.Add(new Setter(FrameworkElement.RequestedThemeProperty, PopupTheme(target.XamlRoot)));
+        menu.MenuFlyoutPresenterStyle = st;
+    }
+
     public static ContentDialog Dialog(XamlRoot root, string title, object content, string primary, string? close = null, bool danger = false)
     {
         var d = new ContentDialog
         {
             XamlRoot = root,
+            RequestedTheme = PopupTheme(root),
             Title = title,
             Content = content,
             PrimaryButtonText = primary,

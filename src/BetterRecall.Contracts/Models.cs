@@ -170,7 +170,8 @@ public sealed record AgentStatus(
     string Device,           // NPU | GPU | CPU | none
     StoreStats Store,
     int RetentionDays,
-    string[]? HotkeysFailed = null);   // hotkey actions whose RegisterHotKey failed (combination taken by another app)
+    string[]? HotkeysFailed = null,    // hotkey actions whose RegisterHotKey failed (combination taken by another app)
+    bool UserPaused = false);          // a user or ipc pause is set, even when a higher-priority reason is reported
 
 public sealed record AuditEntry(
     DateTimeOffset Ts,

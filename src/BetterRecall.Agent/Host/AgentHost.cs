@@ -483,7 +483,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
     private void RaiseStatus(bool force)
     {
         var st = GetStatus();
-        var key = $"{st.Capturing}|{st.Paused}|{st.PauseReason}|{st.PausedUntil}|{st.Locked}|{st.Device}|{st.Queue.Pending}|{st.Audio}";
+        var key = $"{st.Capturing}|{st.Paused}|{st.PauseReason}|{st.PausedUntil}|{st.Locked}|{st.Device}|{st.Queue.Pending}|{st.Audio}|{st.UserPaused}";
         if (!force && key == _lastStatusKey) return;
         _lastStatusKey = key;
         try { StatusChanged?.Invoke(st); } catch (Exception ex) { Log.Warn("StatusChanged handler", ex); }
@@ -522,7 +522,8 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
             Device: _supervisor.IsRunning ? _supervisor.Hello?.Device ?? "none" : "none",
             Store: StoreStats(),
             RetentionDays: s.Retention.Days,
-            HotkeysFailed: _hotkeysFailed);
+            HotkeysFailed: _hotkeysFailed,
+            UserPaused: _pause.Has("user") || _pause.Has("ipc"));
     }
 
     private StoreStats StoreStats()

@@ -56,8 +56,9 @@ internal sealed partial class StringListEditor : Grid
         SetColumn(add, 1);
         Children.Add(add);
 
-        var remove = new Button { Content = Loc.Get("List_Remove") };
+        var remove = new Button { Content = Loc.Get("List_Remove"), IsEnabled = false };
         remove.Click += (_, _) => RemoveSelected();
+        _list.SelectionChanged += (_, _) => remove.IsEnabled = _list.SelectedIndex >= 0;
         SetRow(remove, 1);
         SetColumn(remove, 2);
         Children.Add(remove);
@@ -136,10 +137,13 @@ internal sealed partial class HotkeyRecorder : StackPanel
     private void OnKey(object sender, KeyRoutedEventArgs e)
     {
         if (!_recording) return;
+        bool win = Down(VirtualKey.LeftWindows) || Down(VirtualKey.RightWindows);
+        bool ctrl = Down(VirtualKey.Control), alt = Down(VirtualKey.Menu);
+        // Tab leaves the recorder (focus moves on, LostFocus stops recording) instead of being trapped.
+        if (HotkeyFormat.LeavesRecorder((int)e.Key, ctrl, alt, win)) return;
         e.Handled = true;
         if (e.Key == VirtualKey.Escape) { Stop(); return; }
-        bool win = Down(VirtualKey.LeftWindows) || Down(VirtualKey.RightWindows);
-        var hk = HotkeyFormat.FromKeyPress((int)e.Key, Down(VirtualKey.Control), Down(VirtualKey.Menu), Down(VirtualKey.Shift), win);
+        var hk = HotkeyFormat.FromKeyPress((int)e.Key, ctrl, alt, Down(VirtualKey.Shift), win);
         if (hk is null)
         {
             if (e.Key is not (VirtualKey.Control or VirtualKey.Menu or VirtualKey.Shift or VirtualKey.LeftWindows or VirtualKey.RightWindows

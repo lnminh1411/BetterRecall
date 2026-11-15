@@ -8,7 +8,7 @@
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
         <ScrollViewer x:Name="Scroller" VerticalScrollBarVisibility="Auto">
-            <StackPanel x:Name="Cards" Padding="24,8,24,24" Spacing="4" />
+            <StackPanel x:Name="Cards" Style="{StaticResource PageStackStyle}" Spacing="4" />
         </ScrollViewer>
         <Grid x:Name="Footer" Grid.Row="1" Visibility="Collapsed" Padding="24,8" ColumnSpacing="8" Background="{ThemeResource LayerFillColorDefaultBrush}"
               BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="0,1,0,0">

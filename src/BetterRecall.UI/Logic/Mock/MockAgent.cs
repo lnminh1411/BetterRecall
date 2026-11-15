@@ -652,7 +652,8 @@ public sealed class MockAgent
                 Queue: new QueueState(_pending),
                 Device: "NPU",
                 Store: new StoreStats(_rows.Count, _rows.Count * 41_000L, 0, oldest, newest, _pending, _rows.Count(r => r.Meta.Embedded)),
-                RetentionDays: SettingsSchema.Get(_settings, "retention.days")?.GetValue<int>() ?? 30);
+                RetentionDays: SettingsSchema.Get(_settings, "retention.days")?.GetValue<int>() ?? 30,
+                UserPaused: _paused && _pauseReason is "user" or "ipc");
         }
     }
 

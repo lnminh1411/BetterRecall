@@ -198,13 +198,15 @@ public sealed class SearchViewModel : ObservableObject
 
     public void CancelPending() => _debouncer.Cancel();
 
-    public static (DateTimeOffset? From, DateTimeOffset? To) RangeBounds(TimeRange r, DateTimeOffset now)
+    /// <summary>Today starts at local midnight with the offset in force at midnight, not now (daylight-saving change days).</summary>
+    public static (DateTimeOffset? From, DateTimeOffset? To) RangeBounds(TimeRange r, DateTimeOffset now, TimeZoneInfo? zone = null)
     {
-        var local = now.ToLocalTime();
+        zone ??= TimeZoneInfo.Local;
+        var local = TimeZoneInfo.ConvertTime(now, zone);
         return r switch
         {
             TimeRange.LastHour => (now.AddHours(-1), null),
-            TimeRange.Today => (new DateTimeOffset(local.Date, local.Offset), null),
+            TimeRange.Today => (LocalTime.At(local.Date, zone), null),
             TimeRange.Last7Days => (now.AddDays(-7), null),
             TimeRange.Last30Days => (now.AddDays(-30), null),
             _ => (null, null),
@@ -455,8 +457,11 @@ public sealed class TimelineViewModel(AgentApi api, TimeZoneInfo? zone = null) :
     {
         var start = day.ToDateTime(TimeOnly.MinValue, DateTimeKind.Unspecified);
         var end = start.AddDays(1);
-        return (new DateTimeOffset(start, _zone.GetUtcOffset(start)), new DateTimeOffset(end, _zone.GetUtcOffset(end)));
+        return (LocalTime.At(start, _zone), LocalTime.At(end, _zone));
     }
+
+    /// <summary>Captures the agent still has to index (status queue). An empty day with pending work says so.</summary>
+    public int Pending { get; set; }
 
     public async Task LoadAsync(CancellationToken ct = default)
     {
@@ -504,9 +509,29 @@ public sealed class TimelineViewModel(AgentApi api, TimeZoneInfo? zone = null) :
             if (Hour is { } h && TimeZoneInfo.ConvertTime(m.Ts, _zone).Hour != h) continue;
             Items.Add(CaptureItem.From(m));
         }
-        Message = Items.Count == 0 ? new LocalizedText("Timeline_Empty")
+        Message = Items.Count == 0 ? (Pending > 0 ? new LocalizedText("Timeline_EmptyPending", Pending) : new LocalizedText("Timeline_Empty"))
             : Truncated ? new LocalizedText("Timeline_CountTruncated", Items.Count) : new LocalizedText("Timeline_Count", Items.Count);
     }
+}
+
+/// <summary>Pause button (home page and status bar). A user pause can be added or lifted under any automatic pause
+/// (fullscreen, battery, storage, lock), so the button only needs a connection and a status.</summary>
+public static class PauseControl
+{
+    /// <summary>A user or ipc pause is set. Agents older than the UserPaused field only report it as the top reason.</summary>
+    public static bool UserPaused(AgentStatus? st) =>
+        st is not null && (st.UserPaused || (st.Paused && st.PauseReason is "user" or "ipc"));
+
+    public static bool Enabled(AgentStatus? st, bool connected) => connected && st is not null;
+
+    /// <summary>Resource key of the button text: Resume while a user pause is set.</summary>
+    public static string LabelKey(AgentStatus? st) => UserPaused(st) ? "Main_Resume" : "Main_Pause";
+
+    /// <summary>The first two status parts: capture state and lock state. Only these are announced (live region);
+    /// queue and store counts change with every capture.</summary>
+    public static IReadOnlyList<LocalizedText> StateParts(AgentStatus st, DateTimeOffset now) => [.. StatusText.Describe(st, now).Take(2)];
+
+    public static IReadOnlyList<LocalizedText> DetailParts(AgentStatus st, DateTimeOffset now) => [.. StatusText.Describe(st, now).Skip(2)];
 }
 
 /// <summary>Formats AgentStatus into short translated parts for the status bar.</summary>
@@ -600,6 +625,29 @@ public static class PurgeFlow
     /// <summary>Typed confirmation: trimmed, case-insensitive in the current culture.</summary>
     public static bool PhraseMatches(string? typed, string phrase) =>
         !string.IsNullOrWhiteSpace(typed) && string.Compare(typed.Trim(), phrase.Trim(), CultureInfo.CurrentCulture, CompareOptions.IgnoreCase) == 0;
+
+    /// <summary>
+    /// purge range / app from the Danger zone: preview count, confirm, then a fresh preview for the token (a token lives
+    /// 30 s and the dialog may stay open longer). When the fresh count is higher, confirm that count too (at most three
+    /// rounds). Null when the user cancelled; otherwise the preview error or the purge result.
+    /// </summary>
+    public static async Task<AgentResult<int>?> ConfirmFreshAsync(AgentApi api, Func<Task<AgentResult<PurgeConfirmReply>>> ask,
+        Func<int, Task<bool>> confirm, CancellationToken ct = default)
+    {
+        var first = await ask();
+        if (!first.Ok) return new AgentResult<int>(false, 0, first.Kind, first.Error);
+        int shown = first.Value!.Rows ?? 0;
+        for (int round = 0; round < 3; round++)
+        {
+            if (!await confirm(shown)) return null;
+            var fresh = await ask();
+            if (!fresh.Ok) return new AgentResult<int>(false, 0, fresh.Kind, fresh.Error);
+            int rows = fresh.Value!.Rows ?? 0;
+            if (rows <= shown) return await api.PurgeConfirmAsync(fresh.Value.Confirm, ct);
+            shown = rows;
+        }
+        return null;
+    }
 
     /// <summary>
     /// purge all: Windows Hello unlock (purge all needs an unlock in the last 60 s), then "purge all", then "purge confirm".

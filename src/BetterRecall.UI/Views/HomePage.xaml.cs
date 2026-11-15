@@ -48,6 +48,7 @@ public sealed partial class HomePage : Page
     {
         InitializeComponent();
         AppName.Text = Loc.Get("App_Name");
+        ScaleForText();
         BuildTiles();
         BuildFeatures();
         Loaded += (_, _) =>
@@ -73,6 +74,20 @@ public sealed partial class HomePage : Page
     /// <summary>App styles with ThemeResource setters: they follow ui.theme, unlike brushes read in code.</summary>
     private static Style St(string key) => (Style)Application.Current.Resources[key];
 
+    /// <summary>The wrap grids need fixed item sizes; grow them with the Windows text size so labels and values are not cut.</summary>
+    private void ScaleForText()
+    {
+        double scale = 1;
+        try { scale = Math.Max(1, new Windows.UI.ViewManagement.UISettings().TextScaleFactor); } catch { }
+        Stats.ItemHeight = Math.Ceiling(48 * scale);
+        Stats.ItemWidth = Math.Ceiling(150 * scale);
+        Tiles.ItemHeight = Math.Ceiling(68 + 24 * scale);   // icon and spacing stay; the label line grows
+        Tiles.ItemWidth = Math.Ceiling(124 * scale);
+        _tileLabelWidth = Tiles.ItemWidth - 16;
+    }
+
+    private double _tileLabelWidth = 108;
+
     private void BuildTiles()
     {
         foreach (var (glyph, label, page) in TileList)
@@ -80,15 +95,14 @@ public sealed partial class HomePage : Page
             var text = Loc.Get(label);
             var content = new StackPanel { Spacing = 8, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
             content.Children.Add(new FontIcon { Glyph = glyph, FontSize = 24, Style = St("AccentIconStyle") });
-            content.Children.Add(new TextBlock { Text = text, TextAlignment = TextAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis, MaxWidth = 108 });
+            content.Children.Add(new TextBlock { Text = text, TextAlignment = TextAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis, MaxWidth = _tileLabelWidth });
             var b = new Button
             {
                 Content = content,
                 HorizontalAlignment = HorizontalAlignment.Stretch,
                 VerticalAlignment = VerticalAlignment.Stretch,
                 Margin = new Thickness(0, 0, 8, 8),
-                Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
-                BorderBrush = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
+                Style = St("SubtleButtonStyle"),   // keeps a visible edge in high contrast
             };
             AutomationProperties.SetName(b, text);
             b.Click += (_, _) =>
@@ -130,8 +144,7 @@ public sealed partial class HomePage : Page
                 Content = new FontIcon { Glyph = "\uE76C", FontSize = 12 },
                 Padding = new Thickness(10, 8, 10, 8),
                 VerticalAlignment = VerticalAlignment.Center,
-                Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
-                BorderBrush = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
+                Style = St("SubtleButtonStyle"),
             };
             var tip = Loc.Format("Home_OpenGroup", Loc.Get("G_" + d.Group));
             ToolTipService.SetToolTip(open, tip);
@@ -177,10 +190,16 @@ public sealed partial class HomePage : Page
         var s = Services.Current;
         var st = s.Status;
         bool offline = s.Connection is AgentErrorKind.NotRunning or AgentErrorKind.NotTrusted;
-        if (offline || st is null)
+        if (offline)
         {
-            StateText.Text = offline ? Loc.Error(s.Connection, null) : "";
+            StateText.Text = Loc.Error(s.Connection, null);
             StateDot.Style = St("DotCriticalStyle");
+        }
+        else if (st is null)
+        {
+            // first status still on its way: not an error
+            StateText.Text = Loc.Get("Home_Connecting");
+            StateDot.Style = St("DotNeutralStyle");
         }
         else
         {
@@ -190,12 +209,12 @@ public sealed partial class HomePage : Page
             StateDot.Style = St(st.Paused ? "DotCautionStyle" : st.Capturing ? "DotSuccessStyle" : "DotNeutralStyle");
         }
 
-        bool paused = st?.Paused == true && st.PauseReason is "user" or "ipc";
-        PauseButton.Content = Loc.Get(paused ? "Main_Resume" : "Main_Pause");
-        PauseButton.IsEnabled = !offline && st is not null && (st.PauseReason is null or "user" or "ipc");
+        PauseButton.Content = Loc.Get(PauseControl.LabelKey(st));
+        PauseButton.IsEnabled = PauseControl.Enabled(st, !offline);
         LockButton.Content = Loc.Get(s.Locked ? "Main_Unlock" : "Main_Lock");
         LockButton.IsEnabled = !offline;
 
+        SyncSettings();   // connection changes enable or disable the switches, also while offline
         Stats.Children.Clear();
         if (st is null || offline) return;
         Stat("Home_Captures", st.Store.Rows.ToString("N0", CultureInfo.CurrentCulture));
@@ -203,8 +222,7 @@ public sealed partial class HomePage : Page
         Stat("Home_Since", st.Store.Oldest is { } o ? o.ToLocalTime().ToString("d", CultureInfo.CurrentCulture) : "-");
         Stat("Home_Waiting", st.Queue.Pending.ToString("N0", CultureInfo.CurrentCulture));
         Stat("Home_Device", st.Device);
-        Stat("Home_Retention", Loc.Format("Home_Days", st.RetentionDays));
-        SyncSettings();   // connection changes enable or disable the switches
+        Stat("Home_Retention", Loc.Format(st.RetentionDays == 1 ? "Home_Day" : "Home_Days", st.RetentionDays));
     }
 
     private void Stat(string labelKey, string value)
@@ -250,15 +268,27 @@ public sealed partial class HomePage : Page
     private async void Pause_Click(object sender, RoutedEventArgs e)
     {
         var s = Services.Current;
-        var r = s.Status?.Paused == true ? await s.Api.ResumeAsync() : await s.Api.PauseAsync();
+        var r = PauseControl.UserPaused(s.Status) ? await s.Api.ResumeAsync() : await s.Api.PauseAsync();
+        ShowResult(r.Ok, r.Kind, r.Error);
         if (r.Ok) await s.RefreshStatusAsync();
+    }
+
+    /// <summary>Pause and lock replies: an error shows in the bar instead of being dropped.</summary>
+    private void ShowResult(bool ok, AgentErrorKind kind, string? error)
+    {
+        if (ok) { ErrorBar.IsOpen = false; return; }
+        ErrorBar.Severity = WindowHelpers.Severity(kind);
+        ErrorBar.Message = Loc.Error(kind, error);
+        ErrorBar.IsOpen = true;
     }
 
     private async void Lock_Click(object sender, RoutedEventArgs e)
     {
         var s = Services.Current;
         if (s.Locked) { App.Current.ShowUnlock(); return; }
-        if ((await s.Api.LockAsync()).Ok) await s.RefreshStatusAsync();
+        var r = await s.Api.LockAsync();
+        ShowResult(r.Ok, r.Kind, r.Error);
+        if (r.Ok) await s.RefreshStatusAsync();
     }
 
     private void EditShortcuts_Click(object sender, RoutedEventArgs e) => App.Current.ShowMain("shortcuts");
