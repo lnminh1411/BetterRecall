@@ -116,6 +116,11 @@ public static class PipeNames
     /// sets it when a different version is already running, so the new one can take over.</summary>
     public const string AgentQuitEvent = @"Local\BetterRecall.Agent.Quit";
 
+    /// <summary>Auto-reset event that asks the running UI to exit even with a window open. The single-file launcher sets
+    /// it when it replaces another version: a UI the launcher started is not in the old agent's process tree, and a
+    /// visible one outlived its agent, holding the old folder and the AppInstance key (C5).</summary>
+    public const string UiQuitEvent = @"Local\BetterRecall.UI.Quit";
+
     /// <summary>Single-instance mutex and quit event for one data folder. The installed folder keeps the plain names
     /// (older launchers and agents use them); any other folder gets a suffix, so a dev or test agent never blocks or
     /// stops the user's real one.</summary>
@@ -123,6 +128,7 @@ public static class PipeNames
     public static string AgentQuitEventFor(string home) => Scoped(AgentQuitEvent, home);
     public static string ShowLauncherEventFor(string home) => Scoped(ShowLauncherEvent, home);
     public static string UiInstanceKeyFor(string home) => Scoped(UiInstanceKey, home);
+    public static string UiQuitEventFor(string home) => Scoped(UiQuitEvent, home);
 
     /// <summary>name for the default data folder, else name + "." + 16 hex of SHA-256 over the full upper-case path.</summary>
     public static string Scoped(string name, string home) => DataPaths.IsDefaultHome(home) ? name

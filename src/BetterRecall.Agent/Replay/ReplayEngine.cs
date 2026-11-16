@@ -329,6 +329,9 @@ internal sealed class ReplayEngine : IDisposable
             {
                 if (_pipelines.Count > 0 || elapsedSinceBuild >= 10_000_000L)
                 {
+                    // T3: the reason, so a rebuild loop can be traced.
+                    if (_pipelines.Count > 0)
+                        Log.Info($"replay rebuild: {(sigsChanged ? "outputs changed" : anyNeedsRebuild ? "pipeline asked" : _rebuildReason ?? "requested")}");
                     _rebuildRequested = false;
                     DisposePipelines();
                     Build();

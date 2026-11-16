@@ -698,6 +698,9 @@ public sealed partial class CommandProcessor
         }
     }
 
+    /// <summary>How long a search waits for the query embedding while the worker is not running.</summary>
+    internal static readonly TimeSpan ColdEmbedWait = TimeSpan.FromSeconds(3);
+
     private async Task<Reply> SearchAsync(ClientSession s, string rest, CancellationToken ct)
     {
         var sw = Stopwatch.StartNew();
@@ -711,12 +714,15 @@ public sealed partial class CommandProcessor
         if (store == null) return Err(NotOpenError);
 
         float[] qv = [];
+        bool embedFailed = false;
         if (req.Mode != SearchMode.Text)
         {
             try
             {
                 using var to = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                to.CancelAfter(TimeSpan.FromSeconds(15));
+                // A cold worker takes 10-15 s to start: wait only briefly and answer from text (flagged); the start goes
+                // on, so the next search ranks visually again (D5). Vector-only mode has no text answer to give.
+                to.CancelAfter(_d.Embedder.Warm || req.Mode == SearchMode.Vector ? TimeSpan.FromSeconds(15) : ColdEmbedWait);
                 qv = await _d.Embedder.EmbedQueryAsync(req.Q, to.Token).ConfigureAwait(false) ?? [];
             }
             catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
@@ -724,9 +730,11 @@ public sealed partial class CommandProcessor
                 if (req.Mode == SearchMode.Vector) throw;
                 Log.Warn("query embedding failed, text-only search", ex);
                 qv = [];
+                embedFailed = true;
             }
         }
         var resp = store.Search(req, qv, max, MaxResponseBytes(s.Kind));
+        if (embedFailed) resp = resp with { Degraded = "vector" };
         double weakBelow = S.Index.WeakMatchBelow;
         if (weakBelow > 0)
             resp = resp with { Results = resp.Results.Select(h => h with { Weak = !h.TextMatch && (h.Cosine ?? 0) < weakBelow }).ToList() };

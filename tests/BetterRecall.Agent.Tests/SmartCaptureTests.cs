@@ -343,13 +343,41 @@ public class StorageGuardTests
     [Fact]
     public void Overwrite_pauses_when_nothing_is_left_to_delete()
     {
-        var (g, store, _, _) = Make(10 * Gb, 1 * Gb, 0, overwrite: true);
+        var (g, store, _, _) = Make(24 * Gb, 5 * Gb, 0, overwrite: true);
         store.Deletable = 3;
         store.FreedPerRow = 1024;
         var d = g.Check();
         Assert.True(d.Pause);
         Assert.Equal(3, d.Deleted);
         Assert.Equal("disk", d.Why);
+    }
+
+    /// <summary>A13: other apps took the space. The whole store (1 GB) cannot cover the 16 GB shortfall, so nothing is
+    /// deleted: capture pauses instead of emptying the history with the disk still low.</summary>
+    [Fact]
+    public void Overwrite_keeps_the_store_when_deleting_cannot_free_enough()
+    {
+        var (g, store, _, _) = Make(10 * Gb, 1 * Gb, 0, overwrite: true);
+        store.Deletable = 100_000;
+        store.FreedPerRow = 1024 * 1024;
+        var d = g.Check();
+        Assert.True(d.Pause);
+        Assert.True(d.Notify);
+        Assert.Equal(0, d.Deleted);
+        Assert.Equal(0, store.DeleteCalls);
+        Assert.Equal("disk", d.Why);
+    }
+
+    [Fact]
+    public void Overwrite_deletes_for_disk_when_the_store_covers_the_shortfall()
+    {
+        var (g, store, _, _) = Make(24 * Gb, 5 * Gb, 0, overwrite: true);
+        store.Deletable = 100_000;
+        store.FreedPerRow = 1024 * 1024;
+        var d = g.Check();
+        Assert.False(d.Pause);
+        Assert.True(d.Deleted > 0);
+        Assert.True(store.Deletable > 0);   // only what the shortfall needed
     }
 
     [Fact]

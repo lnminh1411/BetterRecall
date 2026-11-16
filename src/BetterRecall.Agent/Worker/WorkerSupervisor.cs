@@ -34,6 +34,7 @@ internal sealed class ProcessWorkerLauncher(string workerExe, Func<bool> ecoQos)
     public int Start(string pipeName, string home)
     {
         if (!File.Exists(workerExe)) throw new WorkerException($"Worker not found: {Path.GetFileName(workerExe)}.");
+        if (!VcRuntime.Present) throw new WorkerException(VcRuntime.MissingMessage);   // T2: say why instead of a silent loop
         var psi = new ProcessStartInfo(workerExe)
         {
             UseShellExecute = false,
@@ -95,11 +96,13 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
     public TimeSpan ConnectTimeout { get; init; } = TimeSpan.FromSeconds(30);
     public TimeSpan HelloTimeout { get; init; } = TimeSpan.FromMinutes(10);
     public bool VerifyClientPid { get; init; } = true;
-    /// <summary>Liveness: this many caller timeouts in a row with no reply at all in between, and no reply for at least
-    /// UnresponsiveAfter, mean the worker is hung (native deadlock, stuck GenAI call). It is killed and restarted with
-    /// backoff. Without this, every new request counted as activity and a hung worker was never recycled.</summary>
-    public int UnresponsiveTimeouts { get; init; } = 3;
+    /// <summary>Liveness: the worker has owed its oldest request a reply for this long with no frame at all (native
+    /// deadlock, stuck GenAI call), so it is hung. It is killed and restarted with backoff. The old rule counted caller
+    /// timeouts, which could never reach its limit against the serial worker and missed untimed callers (scheduler,
+    /// transcriber) (A5, CA-S1).</summary>
     public TimeSpan UnresponsiveAfter { get; init; } = TimeSpan.FromSeconds(90);
+    /// <summary>The same for transcribe: the first Whisper call compiles for minutes on an NPU.</summary>
+    public TimeSpan TranscribeUnresponsiveAfter { get; init; } = TimeSpan.FromMinutes(10);
     /// <summary>Workers recycled because they stopped answering.</summary>
     public int Recycled => _recycled;
     private int _recycled;
@@ -279,9 +282,9 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
             lock (_startGate) if (_start is not { IsCompleted: false }) Volatile.Write(ref _restartFor, null);
             return;
         }
-        if (IsUnresponsive(c.ConsecutiveTimeouts, c.NoReplyMs, c.LongOpPending, UnresponsiveTimeouts, (long)UnresponsiveAfter.TotalMilliseconds))
+        if (c.Oldest is { } sv && IsUnresponsive(sv.Op, sv.Ms, (long)UnresponsiveAfter.TotalMilliseconds, (long)TranscribeUnresponsiveAfter.TotalMilliseconds))
         {
-            Log.Warn($"worker not answering ({c.ConsecutiveTimeouts} timeouts in a row, no reply for {c.NoReplyMs / 1000} s), restarting it");
+            Log.Warn($"worker not answering ({sv.Op} for {sv.Ms / 1000} s, {c.Pending} waiting), restarting it");
             _ = RecycleAsync(c);
             return;
         }
@@ -300,10 +303,12 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
         }
     }
 
-    /// <summary>Hung: callers kept timing out with nothing at all coming back, for long enough, and no long request
-    /// (bench) explains the silence. Pure.</summary>
-    internal static bool IsUnresponsive(int consecutiveTimeouts, long noReplyMs, bool longOpPending, int timeoutsLimit, long silenceMs)
-        => !longOpPending && consecutiveTimeouts >= Math.Max(1, timeoutsLimit) && noReplyMs >= silenceMs;
+    /// <summary>Hung: the oldest request the worker owes has waited its allowance with no frame coming back. The serial
+    /// worker serves requests in order, so that is the one it is working on (or stuck before). Transcribe gets longer
+    /// (cold Whisper compile); bench and hello may legitimately run for many minutes (device benchmark, NPU compile)
+    /// and are never judged. Pure.</summary>
+    internal static bool IsUnresponsive(string servingOp, long servingMs, long silenceMs, long transcribeSilenceMs)
+        => servingOp is not ("bench" or "hello") && servingMs >= (servingOp == "transcribe" ? transcribeSilenceMs : silenceMs);
 
     /// <summary>Kills a hung worker and counts a failure, so the next request starts a new one after the backoff.</summary>
     private async Task RecycleAsync(WorkerConnection c)
@@ -350,9 +355,16 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
 
     public async Task ShutdownAsync()
     {
-        var c = _conn;
-        if (c is null) return;
-        _conn = null;
+        WorkerConnection? c;
+        int pid;
+        lock (_startGate)
+        {
+            // pid with c, before _conn is cleared: read after the 2 s wait it could be a worker started since (A4).
+            c = _conn;
+            if (c is null) return;
+            pid = _pid;
+            _conn = null;
+        }
         c.ShuttingDown = true;   // the shutdown request may still be pending when the worker closes the pipe
         try
         {
@@ -362,7 +374,6 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
         }
         catch { }
         await c.DisposeAsync().ConfigureAwait(false);
-        int pid = _pid;
         if (pid != 0)
         {
             for (int i = 0; i < 20 && !_launcher.HasExited(pid); i++) await Task.Delay(100).ConfigureAwait(false);

@@ -107,6 +107,49 @@ internal sealed class FakeWorkerLauncher : IWorkerLauncher
     public bool HasExited(int pid) => _serve is null || _serve.IsCompleted;
 }
 
+/// <summary>Fake worker with a pid per start that lingers after shutdown, so a late kill can hit the wrong one (A4).</summary>
+internal sealed class PidWorkerLauncher : IWorkerLauncher
+{
+    private int _nextPid = 1000;
+    public readonly System.Collections.Concurrent.ConcurrentDictionary<int, CancellationTokenSource> Alive = new();
+    public readonly System.Collections.Concurrent.ConcurrentQueue<int> Killed = new();
+
+    public int Start(string pipeName, string home)
+    {
+        int pid = Interlocked.Increment(ref _nextPid);
+        var cts = new CancellationTokenSource();
+        Alive[pid] = cts;
+        _ = Task.Run(() => Serve(pid, pipeName, cts.Token));
+        return pid;
+    }
+
+    private async Task Serve(int pid, string pipe, CancellationToken ct)
+    {
+        try
+        {
+            using var client = new NamedPipeClientStream(".", pipe, PipeDirection.InOut, PipeOptions.Asynchronous);
+            await client.ConnectAsync(5000, ct);
+            while (!ct.IsCancellationRequested)
+            {
+                var frame = await BinaryFrame.ReadAsync(client, ct);
+                if (frame is null) return;
+                var req = JsonSerializer.Deserialize(frame.Value.Header, ContractsJson.Default.WorkerRequest)!;
+                if (req.Op == "shutdown") { await Task.Delay(600, CancellationToken.None); return; }
+                var resp = req.Op == "hello"
+                    ? new WorkerResponse(req.Id, true, Hello: new WorkerHello(1, "CPU", "fake", "m", "r", 4, true, true, []))
+                    : new WorkerResponse(req.Id, true, Dim: 4, Ms: 1);
+                byte[] payload = req.Op == "embed_text" ? BinaryFrame.FloatsToBytes([1, 0, 0, 0]) : [];
+                await BinaryFrame.WriteAsync(client, JsonSerializer.SerializeToUtf8Bytes(resp, ContractsJson.Default.WorkerResponse), payload, ct);
+            }
+        }
+        catch { }
+        finally { Alive.TryRemove(pid, out _); }
+    }
+
+    public void Kill(int pid) { Killed.Enqueue(pid); if (Alive.TryRemove(pid, out var c)) c.Cancel(); }
+    public bool HasExited(int pid) => !Alive.ContainsKey(pid);
+}
+
 public class WorkerProtocolTests
 {
     [Fact]
@@ -197,29 +240,26 @@ public class WorkerProtocolTests
         Assert.Equal(0, sup.Failures);
     }
 
-    /// <summary>C-checks-A S1: a worker that reads requests but never answers is recycled once callers keep timing out
-    /// with nothing coming back, even though new requests keep arriving; the restart goes through the backoff.</summary>
+    /// <summary>A5 + C-checks-A S1: a worker that reads a request but never answers is recycled once it has served that
+    /// request for UnresponsiveAfter with no frame, even when the caller has no timeout (scheduler, transcriber): the old
+    /// rule needed 3 caller timeouts, which a serial worker never lets happen. The restart goes through the backoff.</summary>
     [Fact]
-    public async Task Hung_worker_is_recycled_after_consecutive_timeouts()
+    public async Task Hung_worker_is_recycled_with_untimed_callers()
     {
         bool hung = true;
         var launcher = new FakeWorkerLauncher { NoReply = req => hung && req.Op == "embed_text" };
-        await using var sup = new WorkerSupervisor(launcher, "x", () => 120) { UnresponsiveTimeouts = 3, UnresponsiveAfter = TimeSpan.FromMilliseconds(300) };
+        await using var sup = new WorkerSupervisor(launcher, "x", () => 120) { UnresponsiveAfter = TimeSpan.FromMilliseconds(300) };
         var client = new WorkerClient(sup);
         await client.PrewarmAsync(CancellationToken.None);
-        for (int i = 0; i < 2; i++)
-        {
-            using var cts = new CancellationTokenSource(100);
-            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.EmbedTextAsync("x", "query", cts.Token));
-        }
-        await Task.Delay(350);
-        sup.CheckNow();
-        Assert.True(sup.IsRunning);   // two timeouts: not yet
-        using (var cts = new CancellationTokenSource(100))
-            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.EmbedTextAsync("x", "query", cts.Token));
-        sup.CheckNow();
+        var job = client.EmbedTextAsync("x", "document", CancellationToken.None);
         await Task.Delay(100);
+        sup.CheckNow();
+        Assert.True(sup.IsRunning);   // 100 ms on it: not yet
+        await Task.Delay(300);
+        sup.CheckNow();
+        await Assert.ThrowsAsync<WorkerException>(() => job.WaitAsync(TimeSpan.FromSeconds(5)));
         Assert.Equal(1, sup.Recycled);
+        Assert.Equal(1, launcher.Kills);
         Assert.False(sup.IsRunning);
         Assert.Equal(1, sup.Failures);
         await Assert.ThrowsAsync<WorkerException>(() => client.EmbedTextAsync("x", "query", CancellationToken.None));   // backoff
@@ -230,6 +270,44 @@ public class WorkerProtocolTests
         Assert.Equal(0, sup.Failures);
     }
 
+    /// <summary>A request the caller gave up on is still being served by the worker: it keeps counting.</summary>
+    [Fact]
+    public async Task Hung_worker_is_recycled_after_caller_timeouts()
+    {
+        var launcher = new FakeWorkerLauncher { NoReply = req => req.Op == "embed_text" };
+        await using var sup = new WorkerSupervisor(launcher, "x", () => 120) { UnresponsiveAfter = TimeSpan.FromMilliseconds(300) };
+        var client = new WorkerClient(sup);
+        await client.PrewarmAsync(CancellationToken.None);
+        using (var cts = new CancellationTokenSource(50))
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.EmbedTextAsync("x", "query", cts.Token));
+        await Task.Delay(350);
+        sup.CheckNow();
+        await Task.Delay(100);
+        Assert.Equal(1, sup.Recycled);
+        Assert.False(sup.IsRunning);
+    }
+
+    /// <summary>A4: ShutdownAsync takes the pid with the connection. The worker started while it waits for the old one to
+    /// exit is not killed.</summary>
+    [Fact]
+    public async Task Shutdown_does_not_kill_the_worker_started_after_it()
+    {
+        var l = new PidWorkerLauncher();
+        await using var sup = new WorkerSupervisor(l, "x", () => 120) { VerifyClientPid = false };
+        var client = new WorkerClient(sup);
+        await client.EmbedTextAsync("a", "query", CancellationToken.None);
+        int first = sup.Pid;
+        var shut = sup.ShutdownAsync();
+        await Task.Delay(100);
+        await client.EmbedTextAsync("b", "query", CancellationToken.None);
+        int second = sup.Pid;
+        await shut;
+        Assert.NotEqual(first, second);
+        Assert.DoesNotContain(second, l.Killed);
+        Assert.True(l.Alive.ContainsKey(second));
+        Assert.True(sup.IsRunning);
+    }
+
     /// <summary>Cancelled requests whose replies still arrive (a healthy worker, impatient callers) are not a hang.</summary>
     [Fact]
     public async Task Late_replies_keep_a_slow_worker_alive()
@@ -238,7 +316,7 @@ public class WorkerProtocolTests
         {
             Handler = (req, _) => { if (req.Op == "embed_text") Thread.Sleep(150); return null; },
         };
-        await using var sup = new WorkerSupervisor(launcher, "x", () => 120) { UnresponsiveTimeouts = 1, UnresponsiveAfter = TimeSpan.Zero };
+        await using var sup = new WorkerSupervisor(launcher, "x", () => 120) { UnresponsiveAfter = TimeSpan.FromMilliseconds(100) };
         var client = new WorkerClient(sup);
         await client.PrewarmAsync(CancellationToken.None);
         for (int i = 0; i < 3; i++)
@@ -254,12 +332,46 @@ public class WorkerProtocolTests
     }
 
     [Theory]
-    [InlineData(3, 100_000, false, true)]
-    [InlineData(2, 100_000, false, false)]   // too few timeouts
-    [InlineData(3, 10_000, false, false)]    // a reply came recently
-    [InlineData(5, 900_000, true, false)]    // bench in flight: the silence is expected
-    public void Unresponsive_rule(int timeouts, long noReplyMs, bool longOp, bool expected)
-        => Assert.Equal(expected, WorkerSupervisor.IsUnresponsive(timeouts, noReplyMs, longOp, 3, 90_000));
+    [InlineData("embed_image", 90_000, true)]
+    [InlineData("embed_text", 89_000, false)]   // not long enough
+    [InlineData("transcribe", 300_000, false)]  // the first Whisper call compiles for minutes
+    [InlineData("transcribe", 600_000, true)]
+    [InlineData("bench", 3_600_000, false)]     // bench and hello are never judged
+    [InlineData("hello", 3_600_000, false)]
+    public void Unresponsive_rule(string op, long servingMs, bool expected)
+        => Assert.Equal(expected, WorkerSupervisor.IsUnresponsive(op, servingMs, 90_000, 600_000));
+
+    /// <summary>A long transcribe (cold Whisper compile) is judged by its own allowance: an embed queued behind it
+    /// waits longer than UnresponsiveAfter without the worker being recycled.</summary>
+    [Fact]
+    public async Task Slow_transcribe_with_requests_queued_behind_it_is_not_a_hang()
+    {
+        var launcher = new FakeWorkerLauncher
+        {
+            Handler = (req, _) => { if (req.Op == "transcribe") Thread.Sleep(1500); return null; },
+        };
+        await using var sup = new WorkerSupervisor(launcher, "x", () => 120)
+        { UnresponsiveAfter = TimeSpan.FromMilliseconds(300), TranscribeUnresponsiveAfter = TimeSpan.FromSeconds(30) };
+        var client = new WorkerClient(sup);
+        await client.PrewarmAsync(CancellationToken.None);
+        var t = client.TranscribeAsync(new float[1600], "mic", "auto", CancellationToken.None);
+        await Task.Delay(100);
+        var e = client.EmbedTextAsync("abc", "document", CancellationToken.None);
+        await Task.Delay(600);
+        sup.CheckNow();
+        Assert.True(sup.IsRunning);
+        Assert.Equal("1600 samples", (await t).Text);
+        Assert.Equal(3f, (await e)[0]);
+        Assert.Equal(0, sup.Recycled);
+    }
+
+    /// <summary>T2: the runtime probe loads present DLLs and reports a missing one.</summary>
+    [Fact]
+    public void Vc_runtime_probe_reports_missing_dlls()
+    {
+        Assert.True(VcRuntime.Probe(["kernel32.dll"]));
+        Assert.False(VcRuntime.Probe(["kernel32.dll", "br-no-such-runtime-140.dll"]));
+    }
 
     [Fact]
     public void Pipe_security_denies_network_and_is_protected()

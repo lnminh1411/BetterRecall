@@ -183,9 +183,9 @@ public sealed partial class EncryptedStore
 
     /// <summary>
     /// Gives free pages back to the disk: incremental_vacuum on month files created with auto_vacuum=INCREMENTAL;
-    /// with vacuumLegacy a full VACUUM of older month files whose free pages pass a quarter of the file and 64 MiB
-    /// (needs about the file size in temporary space, so the hourly maintenance does it, not the space guard).
-    /// Caller holds _wl.
+    /// with vacuumLegacy a rebuild of older month files whose free pages pass a quarter of the file and
+    /// LegacyRebuildMinFreeBytes (needs the live size in disk space, so the hourly maintenance does it, not the space
+    /// guard). Caller holds _wl.
     /// </summary>
     private void ReleaseFreePagesLocked(bool vacuumLegacy = true)
     {
@@ -210,14 +210,74 @@ public sealed partial class EncryptedStore
             if (!vacuumLegacy) return;
             long pages = (long)(Scalar(c, "PRAGMA page_count") ?? 0L);
             long pageSize = (long)(Scalar(c, "PRAGMA page_size") ?? 4096L);
-            if (pages > 0 && free * 4 > pages && free * pageSize > 64L * 1024 * 1024)
-            {
-                Exec(c, "PRAGMA wal_checkpoint(TRUNCATE)");
-                Exec(c, "VACUUM");
-                Log.Info("keyframe file vacuumed");
-            }
+            if (pages > 0 && free * 4 > pages && free * pageSize > LegacyRebuildMinFreeBytes)
+                RebuildMonthLocked(m, c);
         }
         catch (SqliteException ex) { Log.Warn("keyframe file compaction failed", ex); }
+    }
+
+    /// <summary>Free bytes a legacy month file needs before it is rebuilt (64 MiB; tests lower it).</summary>
+    internal long LegacyRebuildMinFreeBytes { get; set; } = 64L * 1024 * 1024;
+
+    /// <summary>
+    /// Compacts a legacy month file (auto_vacuum NONE) without VACUUM: copies its keyframes a few at a time into a new
+    /// file created with auto_vacuum=INCREMENTAL, then moves that over the old one. VACUUM built its temporary copy in
+    /// RAM, about the file's live size (GBs for an old month), because the SQLite3MC bundle has SQLITE_TEMP_STORE=2; a
+    /// file temp_store is not encrypted, so it is no way out (B4). Until the move the old file is untouched, and a crash
+    /// leaves only the temporary file, which the next rebuild deletes. Caller holds _wl.
+    /// </summary>
+    private void RebuildMonthLocked(string m, SqliteConnection old)
+    {
+        var path = KfPath(m);
+        var tmp = Path.Combine(_kfDir, m + ".rebuild.tmp");   // never matches the ????-??.db month pattern
+        DeleteDbFiles(tmp);
+        long rows = 0;
+        try
+        {
+            using (var dst = OpenEncrypted(tmp, incrementalVacuum: true))
+            {
+                Exec(dst, "CREATE TABLE IF NOT EXISTS kf(rid INTEGER PRIMARY KEY, mime TEXT NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL, data BLOB NOT NULL)");
+                long last = long.MinValue;
+                while (true)
+                {
+                    int n = 0;
+                    using var tx = dst.BeginTransaction();
+                    using (var cmd = Cmd(old, "SELECT rid, mime, width, height, data FROM kf WHERE rid > $r ORDER BY rid LIMIT 32", ("$r", last)))
+                    using (var rd = cmd.ExecuteReader())
+                        while (rd.Read())
+                        {
+                            last = rd.GetInt64(0);
+                            Exec(dst, "INSERT INTO kf(rid, mime, width, height, data) VALUES($rid, $mime, $w, $h, $data)",
+                                ("$rid", last), ("$mime", rd.GetString(1)), ("$w", rd.GetInt64(2)), ("$h", rd.GetInt64(3)), ("$data", (byte[])rd.GetValue(4)));
+                            n++;
+                        }
+                    tx.Commit();
+                    if (n == 0) break;
+                    rows += n;
+                }
+                Exec(dst, "PRAGMA wal_checkpoint(TRUNCATE)");
+            }
+            _kf.Remove(m);
+            try { Exec(old, "PRAGMA wal_checkpoint(TRUNCATE)"); } catch { }
+            old.Dispose();
+            SqliteConnection.ClearAllPools();
+            // A WAL left next to the old file would be replayed into the new one.
+            foreach (var x in new[] { path + "-wal", path + "-shm", tmp + "-wal", tmp + "-shm" })
+                if (File.Exists(x)) File.Delete(x);
+            File.Move(tmp, path, overwrite: true);
+            Log.Info($"keyframe file rebuilt ({rows} keyframes)");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or SqliteException)
+        {
+            Log.Warn("keyframe file rebuild failed", ex);
+            DeleteDbFiles(tmp);
+        }
+    }
+
+    private static void DeleteDbFiles(string path)
+    {
+        foreach (var x in new[] { path, path + "-wal", path + "-shm" })
+            try { if (File.Exists(x)) File.Delete(x); } catch (Exception ex) { Log.Warn("temporary file delete failed", ex); }
     }
 
     public StorageUse GetStorageUse()

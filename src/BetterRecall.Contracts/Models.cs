@@ -127,7 +127,9 @@ public sealed record SearchHit(
     string? ReplayId = null,  // kind replay: open this replay at ReplayOffsetMs
     int? ReplayOffsetMs = null);
 
-public sealed record SearchResponse(int Count, bool Truncated, long TookMs, IReadOnlyList<SearchHit> Results);
+/// <summary>Degraded: "vector" when the query could not be embedded in time (worker starting or down), so the results
+/// come from text matching only (D5). Null otherwise.</summary>
+public sealed record SearchResponse(int Count, bool Truncated, long TookMs, IReadOnlyList<SearchHit> Results, string? Degraded = null);
 
 /// <summary>Result of get: hit plus full stored text (screen: redacted OCR text when read, else the title; audio: transcript).</summary>
 public sealed record CaptureDetail(
@@ -172,7 +174,7 @@ public sealed record AgentStatus(
     StoreStats Store,
     int RetentionDays,
     string[]? HotkeysFailed = null,    // hotkey actions whose RegisterHotKey failed (combination taken by another app)
-    string[]? Warnings = null,         // ocr-failing (keyframes dropped or stored without text), ner-unavailable (names and addresses not redacted)
+    string[]? Warnings = null,         // ocr-failing (keyframes dropped or stored without text), ner-unavailable (names and addresses not redacted), settings-unreadable (settings.json did not parse: defaults in use, file kept until a save), vc-runtime-missing (worker needs the Visual C++ 2015-2022 x64 runtime)
     bool UserPaused = false);          // a user or ipc pause is set, even when a higher-priority reason is reported
 
 public sealed record AuditEntry(

@@ -27,12 +27,20 @@ public sealed partial class SettingsStore : ISettingsStore
 
     public string FilePath => _path;
 
-    /// <summary>Loads settings.json from home. Missing file: defaults, written out. Bad keys are reset to defaults and logged.</summary>
+    /// <summary>settings.json could not be read at load: defaults are in use and the file is left as it was (a copy is
+    /// kept as settings.json.bad) until the next save. Null when it loaded. Shown as the status warning
+    /// settings-unreadable (D3).</summary>
+    public string? LoadError { get; private set; }
+
+    /// <summary>Loads settings.json from home. Missing file: defaults, written out. Bad keys are reset to defaults and
+    /// logged. A file that does not parse at all is not overwritten: a hand edit with one typo (an unescaped backslash)
+    /// used to replace every choice (consent, IPC, key protection) with defaults for good (D3).</summary>
     public static SettingsStore Load(string home)
     {
         var path = DataPaths.SettingsFile(home);
         Settings s = new();
         bool write = false;
+        string? loadError = null;
         if (File.Exists(path))
         {
             try
@@ -44,15 +52,15 @@ public sealed partial class SettingsStore : ISettingsStore
             }
             catch (Exception ex)
             {
-                Log.Warn("settings.json unreadable, defaults used; bad file kept as settings.json.bad", ex);
+                Log.Warn("settings.json unreadable, defaults used until the next save; file left as it is, copy kept as settings.json.bad", ex);
                 try { File.Copy(path, path + ".bad", overwrite: true); } catch { }
                 s = new Settings();
-                write = true;
+                loadError = ex is JsonException ? "settings.json is not valid JSON." : "settings.json could not be read.";
             }
         }
         else write = true;
 
-        var store = new SettingsStore(path, s);
+        var store = new SettingsStore(path, s) { LoadError = loadError };
         if (write) { try { store.Save(); } catch (Exception ex) { Log.Warn("settings.json could not be written", ex); } }
         return store;
     }
@@ -169,6 +177,7 @@ public sealed partial class SettingsStore : ISettingsStore
             next = parsed;
             WriteFile(next);
             _current = next;
+            LoadError = null;
         }
         RaiseChanged(next);
         return null;
@@ -188,7 +197,7 @@ public sealed partial class SettingsStore : ISettingsStore
     public void Save()
     {
         Settings snapshot;
-        lock (_gate) { snapshot = _current; WriteFile(snapshot); }
+        lock (_gate) { snapshot = _current; WriteFile(snapshot); LoadError = null; }
     }
 
     /// <summary>Replaces the settings in code (agent use, for example capture.consented). Validates first.</summary>
@@ -196,7 +205,7 @@ public sealed partial class SettingsStore : ISettingsStore
     {
         var bad = Validate(next);
         if (bad != null) return $"Invalid {bad}.";
-        lock (_gate) { WriteFile(next); _current = next; }
+        lock (_gate) { WriteFile(next); _current = next; LoadError = null; }
         RaiseChanged(next);
         return null;
     }
