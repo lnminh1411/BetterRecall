@@ -10,6 +10,10 @@
   So do the runtime packs a self-contained or AOT publish downloads (project.frameworks.*.downloadDependencies) when
   the build ships them: the .NET runtime (NETCore.App, NativeAOT, ILCompiler) and the Windows SDK projection
   (Windows.SDK.NET.Ref). AspNetCore and WindowsDesktop packs are downloaded but not framework-referenced, so not shipped.
+- Visual C++ runtime, app-local: the worker (OpenVINO, ONNX Runtime) and the agent's libvpl.dll import the VC++ 2015-2022
+  runtime, which a clean Windows lacks (the worker then cannot start). The DLLs they import are copied from the Visual
+  Studio redist folder (VCToolsRedistDir, else the newest Microsoft.VC14*.CRT under Program Files) next to them, in the
+  layout root and worker/. Visual Studio's licence terms allow that as distributable code; README.txt lists it.
 
 Self-test: python Scripts/release_layout.py --self-test
 """
@@ -26,6 +30,9 @@ JUNK_NAMES = {"createdump.exe", DEV_MARKER}
 JUNK_SUFFIXES = {".pdb", ".lib"}
 NOTICE_WORDS = ("license", "licence", "notice", "copying", "copyright")
 THIRD_PARTY = Path("LICENSES") / "third-party"
+# Imported by worker/*.dll (msvcp140_1 and _codecvt_ids by OpenVINO GenAI) and by the agent's libvpl.dll (dumpbin /dependents).
+VC_RUNTIME_DLLS = ("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "msvcp140_1.dll", "msvcp140_codecvt_ids.dll")
+VC_RUNTIME_DIRS = (".", "worker")
 
 
 def is_shipped(rel: Path) -> bool:
@@ -162,6 +169,35 @@ def native_notice_files() -> list[Path]:
     return found
 
 
+def vc_runtime_dir() -> Path:
+    """Folder holding the x64 VC++ runtime DLLs to ship: VCToolsRedistDir from a VS developer shell, else the newest
+    Visual Studio install's Microsoft.VC14*.CRT folder."""
+    import os
+    env = os.environ.get("VCToolsRedistDir")
+    cands = sorted(Path(env).glob("x64/Microsoft.VC14*.CRT")) if env else []
+    if not cands:
+        pf = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Microsoft Visual Studio"
+        cands = sorted(pf.glob("*/*/VC/Redist/MSVC/*/x64/Microsoft.VC14*.CRT"),
+                       key=lambda p: [int(x) if x.isdigit() else 0 for x in p.parent.parent.name.split(".")])
+    for c in reversed(cands):
+        if all((c / d).is_file() for d in VC_RUNTIME_DLLS):
+            return c
+    raise SystemExit("release layout: Visual C++ runtime redist folder not found (install the VS C++ workload)")
+
+
+def copy_vc_runtime(layout: Path, src: Path) -> list[Path]:
+    """Copies VC_RUNTIME_DLLS from src into each VC_RUNTIME_DIRS folder present in the layout."""
+    out = []
+    for d in VC_RUNTIME_DIRS:
+        target = layout / d
+        if not target.is_dir():
+            continue
+        for dll in VC_RUNTIME_DLLS:
+            shutil.copy2(src / dll, target / dll)
+            out.append(target / dll)
+    return out
+
+
 def finish(layout: Path, projects: list[str]) -> None:
     """Release layout: own licences, third-party notices, junk removed."""
     for f in ("LICENSE", "LICENSING.md"):
@@ -171,8 +207,13 @@ def finish(layout: Path, projects: list[str]) -> None:
         shutil.rmtree(lic)
     shutil.copytree(ROOT / "LICENSES", lic)
     n = write_notices(layout, assets_for(projects), native_notice_files())
+    vc = vc_runtime_dir()
+    copied = copy_vc_runtime(layout, vc)
+    with open(layout / THIRD_PARTY / "README.txt", "a", encoding="utf-8") as f:
+        f.write(f"\nMicrosoft Visual C++ 2015-2022 runtime ({vc.parent.parent.name}, x64), app-local: "
+                + ", ".join(VC_RUNTIME_DLLS) + "; Microsoft Visual Studio licence terms, distributable code\n")
     removed = prune(layout)
-    print(f"release layout: {n} third-party packages listed, {len(removed)} files removed"
+    print(f"release layout: {n} third-party packages listed, {len(copied)} VC++ runtime files, {len(removed)} files removed"
           + (f" ({', '.join(sorted({r.name for r in removed})[:6])}...)" if removed else ""))
 
 
@@ -221,6 +262,15 @@ def _self_test() -> None:
         removed = {r.as_posix() for r in prune(layout)}
         assert removed == {"worker/createdump.exe", "worker/onnxruntime.lib", DEV_MARKER, "x.pdb"}, removed
         assert (layout / "worker" / "a.dll").exists()
+        # VC++ runtime copied next to the root and worker binaries (T2)
+        crt = t / "crt"
+        crt.mkdir()
+        for dll in VC_RUNTIME_DLLS:
+            (crt / dll).write_bytes(b"MZ")
+        copied = copy_vc_runtime(layout, crt)
+        assert len(copied) == 2 * len(VC_RUNTIME_DLLS), copied
+        assert (layout / "worker" / "vcruntime140.dll").is_file() and (layout / "msvcp140.dll").is_file()
+        assert is_shipped(Path("worker/msvcp140.dll"))
     print("release_layout self-test ok")
 
 
