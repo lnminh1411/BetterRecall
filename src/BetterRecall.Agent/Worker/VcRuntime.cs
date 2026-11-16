@@ -25,12 +25,17 @@ internal static class VcRuntime
         get
         {
             long now = Environment.TickCount64;
-            if (now - Volatile.Read(ref _checkedAt) < 60_000) return _present;
+            if (Fresh(Volatile.Read(ref _checkedAt), now)) return _present;
             _present = Probe(WorkerDir, Environment.SystemDirectory);
             Volatile.Write(ref _checkedAt, now);
             return _present;
         }
     }
+
+    /// <summary>The cached answer is under a minute old. long.MinValue (never checked) must not reach the subtraction:
+    /// now - long.MinValue overflowed to a negative number, so the probe never ran and a missing runtime read as present
+    /// (sweep 3 verification, T2).</summary>
+    internal static bool Fresh(long checkedAt, long now) => checkedAt != long.MinValue && now - checkedAt < 60_000;
 
     /// <summary>Every DLL is a file in one of the folders. A file check, not a load.</summary>
     internal static bool Probe(string? workerDir, string systemDir, IEnumerable<string>? dlls = null)

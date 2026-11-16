@@ -449,6 +449,16 @@ public class WorkerProtocolTests
         Assert.Equal(1, sup.Recycled);
     }
 
+    /// <summary>T2 (sweep 3 verification): the never-checked sentinel must not overflow into "fresh", or the probe never runs.</summary>
+    [Fact]
+    public void Vc_runtime_cache_is_stale_before_the_first_check()
+    {
+        long now = Environment.TickCount64;
+        Assert.False(VcRuntime.Fresh(long.MinValue, now));
+        Assert.True(VcRuntime.Fresh(now - 1_000, now));
+        Assert.False(VcRuntime.Fresh(now - 61_000, now));
+    }
+
     /// <summary>T2 + K review N2: the runtime probe finds DLLs in the worker folder or System32 only, never on PATH.</summary>
     [Fact]
     public void Vc_runtime_probe_reports_missing_dlls()
