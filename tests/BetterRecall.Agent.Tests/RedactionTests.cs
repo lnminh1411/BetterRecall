@@ -133,7 +133,8 @@ public class RedactorTests
         Assert.Equal(22, Redactor.IbanSpan("NL91 ABNA 0417 1643 00 BIC"));
         Assert.Null(Redactor.IbanSpan("NL91ABNA0417164301"));
         Assert.Null(Redactor.IbanSpan("ZZ91ABNA0417164300"));
-        Assert.Null(Redactor.CardSpan("4111 1111 1111 1111 2"));
+        Assert.Null(Redactor.CardSpan("41111111111111112"));            // no separator: no cut inside the digits
+        Assert.Equal((0, 19), Redactor.CardSpan("4111 1111 1111 1111 2"));   // A3: whole groups only
     }
 }
 

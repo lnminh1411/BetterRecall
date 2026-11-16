@@ -377,6 +377,7 @@ public sealed class CommandProcessorTests : IDisposable
         Assert.True(ok);
         Assert.True(d.GetProperty("unlocked").GetBoolean());
         _agent.UnlockResult = false;
+        _vault.SetHelloAvailableForTest(true);   // sweep 3 T5: a failed prompt without Hello is not a cancel
         Assert.Equal("Unlock cancelled.", await Err(Ui, "unlock"));
         Assert.True((await Call(Ui, "lock")).Ok);
         Assert.False(_agent.Unlocked);

@@ -53,6 +53,14 @@ public static class WorkerLoop
 
             var reply = handler.Handle(frame.Value.Header, frame.Value.Payload);
             var header = JsonSerializer.SerializeToUtf8Bytes(reply.Header, ContractsJson.Default.WorkerResponse);
+            if (header.Length > BinaryFrame.MaxHeaderBytes || reply.Payload.Length > BinaryFrame.MaxPayloadBytes)
+            {
+                // C1: WriteAsync would throw before sending a byte and the worker used to exit without a reply. Answer the
+                // request with an error instead: the pipe stays in step and the agent drops just this frame.
+                Log.Warn($"reply too large for a frame (header {header.Length} B, payload {reply.Payload.Length} B): internal error sent");
+                header = JsonSerializer.SerializeToUtf8Bytes(new WorkerResponse(reply.Header.Id, false, WorkerErrors.Internal), ContractsJson.Default.WorkerResponse);
+                reply = reply with { Payload = [] };
+            }
             try
             {
                 await BinaryFrame.WriteAsync(pipe, header, reply.Payload, ct).ConfigureAwait(false);

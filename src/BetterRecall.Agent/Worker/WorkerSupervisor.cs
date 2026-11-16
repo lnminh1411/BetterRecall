@@ -21,7 +21,15 @@ internal interface IWorkerLauncher
 
 internal sealed class ProcessWorkerLauncher(string workerExe, Func<bool> ecoQos) : IWorkerLauncher
 {
-    private Process? _process;
+    // Every started worker until it exits, by pid: a late kill of an old worker must still reach it after a new start.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<int, Process> _processes = new();
+    // Lives as long as the agent: when the agent exits or crashes, Windows closes it and kills every worker in it.
+    private static readonly Lazy<KillOnCloseJob?> Job = new(() =>
+    {
+        var j = KillOnCloseJob.TryCreate();
+        if (j is null) Log.Warn("worker job object unavailable: a worker could outlive the agent");
+        return j;
+    });
 
     public int Start(string pipeName, string home)
     {
@@ -36,8 +44,12 @@ internal sealed class ProcessWorkerLauncher(string workerExe, Func<bool> ecoQos)
         psi.ArgumentList.Add(pipeName);
         psi.ArgumentList.Add("--home");
         psi.ArgumentList.Add(home);
+        foreach (var (id, old) in _processes)
+            try { if (old.HasExited && _processes.TryRemove(id, out _)) old.Dispose(); } catch { }
         var p = Process.Start(psi) ?? throw new WorkerException("Worker failed to start.");
-        _process = p;
+        _processes[p.Id] = p;
+        try { if (Job.Value is { } job && !job.Assign(p.Handle)) Log.Warn("worker not in the job object: it could outlive the agent"); }
+        catch (Exception ex) { Log.Debug($"worker job: {ex.Message}"); }
         if (ecoQos()) Governance.ApplyEcoQos(p.Handle, idlePriority: true);   // read per start: governance.ecoQos applies at the next start
         return p.Id;
     }
@@ -46,14 +58,14 @@ internal sealed class ProcessWorkerLauncher(string workerExe, Func<bool> ecoQos)
     {
         try
         {
-            if (_process is { } p && p.Id == pid && !p.HasExited) p.Kill();
+            if (_processes.TryGetValue(pid, out var p) && !p.HasExited) p.Kill();
         }
         catch { }
     }
 
     public bool HasExited(int pid)
     {
-        try { return _process is not { } p || p.Id != pid || p.HasExited; }
+        try { return !_processes.TryGetValue(pid, out var p) || p.HasExited; }
         catch { return true; }
     }
 }
@@ -192,7 +204,8 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
                 }
             }
             var conn = new WorkerConnection(server);
-            conn.Closed += (err, pending) => OnClosed(conn, err, pending);
+            int connPid = pid;
+            conn.Closed += (err, pending) => OnClosed(conn, connPid, err, pending);
             // Hello waits for model load and, after a model change, the device benchmark (minutes on an NPU compile);
             // the cap only stops a hung worker from holding the start lock forever.
             using var helloTimeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -219,7 +232,7 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
         return Win32.GetNamedPipeClientProcessId(server.SafePipeHandle.DangerousGetHandle(), &pid) ? pid : 0;
     }
 
-    private void OnClosed(WorkerConnection conn, Exception? err, int pendingAtClose)
+    private void OnClosed(WorkerConnection conn, int pid, Exception? err, int pendingAtClose)
     {
         // A close with requests in flight or a broken frame is a crash; a clean close while idle is the idle exit.
         bool crashed = err is not null || pendingAtClose > 0;
@@ -229,6 +242,14 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
         else if (crashed && !_disposed && !conn.ShuttingDown) NoteFailure();
         else Interlocked.Exchange(ref _failures, 0);
         if (ReferenceEquals(_conn, conn)) _conn = null;
+        // A2: a broken pipe or frame used to leave the old worker running (models loaded) next to the new one. Kill this
+        // connection's own process (never _pid, which a new start may already own) and free the pipe. Recycle, abort and
+        // shutdown do both themselves.
+        if (crashed && !conn.Recycled && !conn.ShuttingDown)
+        {
+            if (pid != 0) { try { _launcher.Kill(pid); } catch (Exception ex) { Log.Debug($"worker kill: {ex.Message}"); } }
+            _ = Task.Run(async () => { try { await conn.DisposeAsync().ConfigureAwait(false); } catch { } });
+        }
     }
 
     public void MarkHealthy() => Interlocked.Exchange(ref _failures, 0);

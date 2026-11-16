@@ -112,6 +112,9 @@ public sealed class KeyVault : IKeyVault, IDisposable
     /// <summary>The Windows Hello availability check has finished (HelloAvailable is meaningful).</summary>
     public bool HelloChecked => _helloChecked;
 
+    /// <summary>Tests built with probeHello false: Hello present (a failed prompt is a cancel, not a missing Hello).</summary>
+    internal void SetHelloAvailableForTest(bool available) { _helloAvailable = available; _helloChecked = true; }
+
     /// <summary>TPM key name for a data folder: "BetterRecall.DataKeyWrap." + 16 hex of SHA-256 over the full path
     /// (upper case, no trailing separator). Key files store the name they were wrapped with, so older files keep
     /// opening the legacy name.</summary>
@@ -308,7 +311,10 @@ public sealed class KeyVault : IKeyVault, IDisposable
             _key?.Dispose();
             _key = null;
             _fileMode = null;
+            // B1: a store open waiting for the old key's passphrase wakes up and waits on the new key instead of for ever.
+            var old = _loaded;
             _loaded = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            old.TrySetResult();
             Log.Info("data key destroyed");
         }
     }
