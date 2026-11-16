@@ -314,6 +314,7 @@ public sealed class KeyStateTests : IDisposable
         Assert.True(_vault.TryLoadSilent());   // dpapi key file
         var before = File.ReadAllBytes(KeyFile);
         Set("{\"security\":{\"keyProtection\":\"passphrase\"}}");
+        _vault.SetHelloAvailableForTest(true);   // sweep 3 T5: a failed prompt without Hello is not a cancel
         _agent.Unlocked = false;
         _agent.UnlockResult = false;   // Hello cancelled
         Assert.Equal("Unlock cancelled.", (await Call(Ui, "unlock intruder pass")).Error);

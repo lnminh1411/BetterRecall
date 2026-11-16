@@ -110,7 +110,9 @@ public static class Envelope
 /// <summary>Worker pipe frame: u32 LE headerLen, JSON header, u32 LE payloadLen, payload.</summary>
 public static class BinaryFrame
 {
-    public const int MaxHeaderBytes = 65_536;
+    /// <summary>OCR and transcript replies travel in the header: a dense 4K or CJK screen is several hundred KB of JSON
+    /// (C1: 64 KiB killed the worker on one code screen). Both ends read this constant.</summary>
+    public const int MaxHeaderBytes = 4 * 1024 * 1024;
     public const int MaxPayloadBytes = 67_108_864;
 
     public static async Task WriteAsync(Stream stream, ReadOnlyMemory<byte> header, ReadOnlyMemory<byte> payload, CancellationToken ct)

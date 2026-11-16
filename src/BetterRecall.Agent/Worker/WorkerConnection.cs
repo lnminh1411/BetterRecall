@@ -77,24 +77,27 @@ internal sealed class WorkerConnection : IAsyncDisposable
 
     private async Task<WorkerReply> SendCoreAsync(long id, TaskCompletionSource<WorkerReply> tcs, WorkerRequest req, ReadOnlyMemory<byte> payload, CancellationToken ct)
     {
-        bool writing = false;
         try
         {
             var header = JsonSerializer.SerializeToUtf8Bytes(req, ContractsJson.Default.WorkerRequest);
-            await _writeLock.WaitAsync(ct).ConfigureAwait(false);
-            try
+            // Too big for a frame: BinaryFrame.WriteAsync would throw before writing a byte, so the pipe is fine.
+            if (header.Length > BinaryFrame.MaxHeaderBytes || payload.Length > BinaryFrame.MaxPayloadBytes)
+                throw new WorkerException("Request too large.");
+            await _writeLock.WaitAsync(ct).ConfigureAwait(false);   // a cancel here leaves nothing half sent
+            // A2: once started, the frame is written whole, without the caller's token. On the 0-byte worker pipe a write
+            // waits while the serial worker is busy (a cold transcribe takes minutes): cancelling it there closed the
+            // pipe, failed the request in flight and counted a crash. A caller that gives up only abandons the reply.
+            var write = WriteFrameAsync(header, payload);
+            try { await write.WaitAsync(ct).ConfigureAwait(false); }
+            catch (OperationCanceledException)
             {
-                writing = true;
-                await BinaryFrame.WriteAsync(_stream, header, payload, ct).ConfigureAwait(false);
+                _ = write.ContinueWith(static t => _ = t.Exception, CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+                throw;
             }
-            finally { _writeLock.Release(); }
         }
-        catch (Exception ex)
+        catch (Exception)
         {
             _pending.TryRemove(id, out _);
-            // A frame cancelled part-way leaves the pipe out of step: every later reply would be garbage. Close it; the
-            // supervisor starts a fresh worker.
-            if (ex is IOException or ObjectDisposedException || (ex is OperationCanceledException && writing)) Fail(ex);
             throw;
         }
         using var reg = ct.Register(() =>
@@ -108,6 +111,16 @@ internal sealed class WorkerConnection : IAsyncDisposable
         var reply = await tcs.Task.ConfigureAwait(false);
         Touch();
         return reply;
+    }
+
+    /// <summary>Writes one frame under the write lock the caller took, and releases it. A failed write (broken pipe, or a
+    /// frame left part-way) leaves the pipe out of step: every later reply would be garbage, so the connection closes and
+    /// the supervisor starts a fresh worker.</summary>
+    private async Task WriteFrameAsync(byte[] header, ReadOnlyMemory<byte> payload)
+    {
+        try { await BinaryFrame.WriteAsync(_stream, header, payload, CancellationToken.None).ConfigureAwait(false); }
+        catch (Exception ex) { Fail(ex); throw; }
+        finally { try { _writeLock.Release(); } catch (ObjectDisposedException) { } }
     }
 
     private void Touch() => Interlocked.Exchange(ref _lastActivityTicks, Environment.TickCount64);

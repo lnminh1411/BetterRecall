@@ -96,7 +96,7 @@ Store columns added in 0.2 (idempotent steps in `EncryptedStore.Migrate`, `meta.
 
 Private pipe `\\.\pipe\BetterRecall.worker.<32 hex>`, new random name per launch. The agent creates it with the DACL of section 6, starts the worker with `--pipe <name> --home <data dir>`, and accepts only the process id it started. The worker exits when the pipe closes. The worker reads `settings.json` itself for `inference.*` and `index.dim`.
 
-Frame, both directions: `u32 LE headerLen`, header (UTF-8 JSON), `u32 LE payloadLen`, payload. Header at most 65,536 bytes, payload at most 67,108,864 bytes (`BinaryFrame` in Contracts). Header types are `WorkerRequest` and `WorkerResponse` in Contracts, serialised with `ContractsJson`. The worker runs requests one at a time in arrival order (one NPU queue). Each response carries the request `id`.
+Frame, both directions: `u32 LE headerLen`, header (UTF-8 JSON), `u32 LE payloadLen`, payload. Header at most 4,194,304 bytes (OCR and transcript replies travel in it), payload at most 67,108,864 bytes (`BinaryFrame` in Contracts); a reply too large for a frame is answered with `Internal error.`. Header types are `WorkerRequest` and `WorkerResponse` in Contracts, serialised with `ContractsJson`. The worker runs requests one at a time in arrival order (one NPU queue). Each response carries the request `id`.
 
 | op | Request fields | Request payload | Response fields | Response payload |
 |---|---|---|---|---|
@@ -142,7 +142,7 @@ UI-only verbs:
 
 | Verb | `data` | Notes |
 |---|---|---|
-| `unlock` or `unlock <passphrase>` | `{"unlocked":true,"until":"<ISO>"}` | Agent shows Windows Hello. In passphrase mode the passphrase is the argument. With `security.unlockMethod` password the argument is the unlock password (no Hello prompt); while the data key still waits for its passphrase, the argument is that passphrase and also opens the gate. Errors `Unlock cancelled.`, `Wrong password.`, `No unlock password is set.`, `Too many attempts. Try again in <n> s.` |
+| `unlock` or `unlock <passphrase>` | `{"unlocked":true,"until":"<ISO>"}` | Agent shows Windows Hello. In passphrase mode the passphrase is the argument. With `security.unlockMethod` password the argument is the unlock password (no Hello prompt); while the data key still waits for its passphrase, the argument is that passphrase and also opens the gate. With the password method and `keys\unlock.bin` missing or damaged, Windows Hello opens the gate instead (audit `unlock hello (no password file)`). With hello on a PC without Windows Hello, the passphrase of a passphrase-wrapped key or the unlock password stands in for Hello (audit `unlock password (no Hello)`). Errors `Unlock cancelled.`, `Wrong password.`, `No unlock password is set.`, `Windows Hello is not available: unlock with the password (config security.unlockMethod).`, `Too many attempts. Try again in <n> s.` |
 | `lock` | `null` | |
 | `consent` | `null` | Sets `capture.consented`. Nothing is captured before it |
 | `settings get` | `Settings` | |
@@ -202,7 +202,7 @@ Keys: a random 256-bit data key encrypts `store.db`, the keyframe files (SQLite3
 
 Windows Hello is the read gate the agent enforces: data verbs work only for `security.unlockTimeoutMin` after `unlock`, and the gate closes on session lock. This stops disk theft and other accounts. It does not stop malware running as the same user. The settings page says so.
 
-`security.unlockMethod` password replaces Hello at the gate, for PCs without Hello or users who prefer it. The password is a gate check only; it does not encrypt anything. `keys\unlock.bin` holds `BRU1`, the Argon2id parameters (64 MiB, 3 passes, 4 lanes, reusing the `KeyVault` Argon2id code), a 16-byte salt, the 32-byte hash, the failed-try count and the lock-out end, written atomically. Verify is constant-time. Five wrong tries are free, then each wrong try locks the gate for 30 s, doubling to at most 900 s; the count survives agent restarts and resets on success. The password is never logged, stored or audited (audit `unlock password`, count 1 or 0). The unlock panel shows a password box with a "less secure than Windows Hello" note. Set, change and remove from Settings > Security.
+`security.unlockMethod` password replaces Hello at the gate, for PCs without Hello or users who prefer it. The password is a gate check only; it does not encrypt anything. `keys\unlock.bin` holds `BRU1`, the Argon2id parameters (64 MiB, 3 passes, 4 lanes, reusing the `KeyVault` Argon2id code), a 16-byte salt, the 32-byte hash, the failed-try count and the lock-out end, written atomically. Verify is constant-time. Five wrong tries are free, then each wrong try locks the gate for 30 s, doubling to at most 900 s; the count survives agent restarts and resets on success. A stored lock-out end more than 900 s ahead (the clock stepped back) is cut to 900 s from now. The password is never logged, stored or audited (audit `unlock password`, count 1 or 0). The unlock panel shows a password box with a "less secure than Windows Hello" note. Set, change and remove from Settings > Security.
 
 | Setting | Default | Effect |
 |---|---|---|
@@ -212,7 +212,7 @@ Windows Hello is the read gate the agent enforces: data verbs work only for `sec
 | `security.lockOnSessionLock` | true | |
 | `security.memoryIsolation` | true | Agent and worker: process DACL denying `PROCESS_VM_READ`, `PROCESS_VM_WRITE`, `PROCESS_CREATE_THREAD`, `PROCESS_DUP_HANDLE` to all but SYSTEM; mitigation policies (agent: dynamic code prohibited, it is Native AOT; worker: child processes blocked; both: image loads limited to the install dir and System32, strict handle checks); replay ring and key buffers in native memory, `VirtualLock`ed after `SetProcessWorkingSetSizeEx`; key buffers wrapped with `CryptProtectMemory` when idle; `WerAddExcludedApplication` for all BetterRecall exes. UI: the same process DACL and WER exclusion |
 | `security.keyProtection` | `auto` | Table above |
-| `security.unlockMethod` | `hello` | `hello` or `password`. `password` is refused until a password is set (`No unlock password is set.`) |
+| `security.unlockMethod` | `hello` | `hello` or `password`. `password` is refused until a password is set (`No unlock password is set.`). While locked, `settings set` may change this key alone when no unlock path exists (hello without Windows Hello, or password with no usable `keys\unlock.bin` and no Hello) |
 
 Guardrails (agent), checked on every foreground change and again at each keyframe:
 

@@ -22,7 +22,13 @@ public partial class App : Application
         _args = args;
         _current = this;
         InitializeComponent();
-        UnhandledException += (_, e) => e.Handled = true;   // never crash with captured content on screen; nothing is logged
+        // Never crash with captured content on screen. D1: log the type and stack (never the message, which can quote
+        // content), so a page that silently stops building leaves a trace.
+        UnhandledException += (_, e) =>
+        {
+            e.Handled = true;
+            UiErrorLog.Append(BetterRecall.Contracts.DataPaths.LogsDir(BetterRecall.Contracts.DataPaths.Home()), e.Exception);
+        };
     }
 
     public static new App Current => _current!;

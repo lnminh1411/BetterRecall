@@ -122,7 +122,7 @@ internal static partial class Redactor
         var taken = new List<(int, int)>();
         if (o.Cards)
             foreach (Match m in CardCandidate().Matches(t))
-                if (CardSpan(m.Value) is int len) { var sp = (m.Index, m.Index + len); taken.Add(sp); yield return sp; }
+                if (CardSpan(m.Value) is var (off, len)) { var sp = (m.Index + off, m.Index + off + len); taken.Add(sp); yield return sp; }
         if (o.Ids)
         {
             foreach (Match m in IbanCandidate().Matches(t))
@@ -249,12 +249,42 @@ internal static partial class Redactor
 
     // ---------------- checksums ----------------
 
-    /// <summary>Candidate length when it is a card number (13-19 digits, starting with 2-6, Luhn), else null. No
-    /// shorter prefixes are tried: one random number in ten passes Luhn, so trimming would flag most long numbers.</summary>
-    internal static int? CardSpan(string candidate)
+    /// <summary>Start and length of the card number (13-19 digits, starting with 2-6, Luhn) in a candidate, else null.
+    /// The whole candidate first; else the longest run of whole digit groups, which starts and ends on a separator: the
+    /// candidate also takes in an expiry, CVV or order number written next to the card ("4111 1111 1111 1111 12/26",
+    /// "Order 12 4111 1111 1111 1111", A3). Never a cut inside a group: one random number in ten passes Luhn, so
+    /// trimming digits anywhere would flag most long numbers.</summary>
+    internal static (int Start, int Length)? CardSpan(string candidate)
     {
-        var digits = candidate.Where(char.IsAsciiDigit).ToArray();
-        return digits.Length is >= 13 and <= 19 && digits[0] is >= '2' and <= '6' && Luhn(digits) ? candidate.Length : null;
+        if (IsCard(candidate)) return (0, candidate.Length);
+        var groups = new List<(int S, int E)>();
+        for (int i = 0; i < candidate.Length;)
+        {
+            if (!char.IsAsciiDigit(candidate[i])) { i++; continue; }
+            int s = i;
+            while (i < candidate.Length && char.IsAsciiDigit(candidate[i])) i++;
+            groups.Add((s, i));
+        }
+        (int, int)? best = null;
+        int bestDigits = 0;
+        for (int a = 0; a < groups.Count; a++)
+        {
+            int n = 0;
+            for (int b = a; b < groups.Count; b++)
+            {
+                n += groups[b].E - groups[b].S;
+                if (n > 19) break;
+                if (n < 13 || n <= bestDigits || a == 0 && b == groups.Count - 1) continue;
+                if (IsCard(candidate[groups[a].S..groups[b].E])) { best = (groups[a].S, groups[b].E - groups[a].S); bestDigits = n; }
+            }
+        }
+        return best;
+    }
+
+    private static bool IsCard(string s)
+    {
+        var digits = s.Where(char.IsAsciiDigit).ToArray();
+        return digits.Length is >= 13 and <= 19 && digits[0] is >= '2' and <= '6' && Luhn(digits);
     }
 
     private static readonly HashSet<string> IbanCountries =

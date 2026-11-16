@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) BetterRecall contributors
+using BetterRecall.Worker.Protocol;
+
 namespace BetterRecall.Worker.Models.Ocr;
 
 /// <summary>Axis-aligned text box in image pixels with the detector's score.</summary>
@@ -41,7 +43,9 @@ public static class OcrMath
     /// <summary>DB post-processing with axis-aligned boxes: probability above thresh, 4-connected components, box score
     /// = mean probability inside the component's bounding box (PaddleOCR "fast" score), kept at boxThresh or more,
     /// expanded on every side by area * unclip / perimeter, scaled from the map (pw x ph) to the image (imgW x imgH).
-    /// Boxes thinner than 3 map pixels are dropped. Sorted top to bottom, then left to right.</summary>
+    /// Boxes thinner than 3 map pixels are dropped. Sorted top to bottom, then left to right. More than maxBoxes boxes
+    /// throws <see cref="OcrOverflowException"/>: the scan would stop part-way and leave the rest of the frame unread and
+    /// unredacted (C17), so the agent gets a failed read and drops the keyframe.</summary>
     public static List<TextBox> Boxes(ReadOnlySpan<float> prob, int pw, int ph, int imgW, int imgH, float thresh, float boxThresh, float unclip, int maxBoxes = 3000)
     {
         if (prob.Length < pw * ph) throw new ArgumentException("probability map too short", nameof(prob));
@@ -80,8 +84,8 @@ public static class OcrMath
             double r = Math.Min(imgW, (x1 + 1 + d) * sx), b = Math.Min(imgH, (y1 + 1 + d) * sy);
             int il = (int)Math.Floor(l), it = (int)Math.Floor(t), ir = (int)Math.Ceiling(r), ib = (int)Math.Ceiling(b);
             if (ir - il < 3 || ib - it < 3) continue;
+            if (boxes.Count >= maxBoxes) throw new OcrOverflowException($"ocr found more than {maxBoxes} text boxes");
             boxes.Add(new TextBox(il, it, ir - il, ib - it, score));
-            if (boxes.Count >= maxBoxes) break;
         }
         boxes.Sort((a, b) => a.Y != b.Y ? a.Y.CompareTo(b.Y) : a.X.CompareTo(b.X));
         return boxes;

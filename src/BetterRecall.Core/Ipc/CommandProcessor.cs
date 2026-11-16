@@ -119,6 +119,8 @@ public sealed partial class CommandProcessor
     internal const string ErrNoPassword = "No unlock password is set.";
     internal const string ErrPasswordRule = "Password must be 6 to 256 characters.";
     internal const string ErrPasswordInUse = "Password in use (config security.unlockMethod).";
+    /// <summary>T5: security.unlockMethod hello on a PC without Windows Hello, with an unlock password set.</summary>
+    internal const string ErrHelloMissing = "Windows Hello is not available: unlock with the password (config security.unlockMethod).";
     internal const string ErrTooManyPrefix = "Too many attempts. Try again in ";
     internal const string ErrAiOff = "Cloud describe is off (config ai.enabled).";
     internal const string ErrNoApiKey = "API key not set.";
@@ -952,6 +954,13 @@ public sealed partial class CommandProcessor
 
     private bool UsesPassword => S.Security.UnlockMethod == "password";
 
+    /// <summary>The Windows Hello check finished and found none on this PC.</summary>
+    private bool HelloMissing => !_d.Keys.HelloAvailable && _d.Keys is not Crypto.KeyVault { HelloChecked: false };
+
+    /// <summary>The configured unlock method cannot open the gate: hello without Windows Hello on this PC (T5), or password
+    /// with keys\unlock.bin missing or damaged and no Hello to fall back on (B15).</summary>
+    private bool NoUnlockPath => S.Security.RequireUnlock && HelloMissing && (!UsesPassword || _d.Password?.IsSet != true);
+
     /// <summary>
     /// unlock [secret]. Data key still passphrase-wrapped: the secret is the passphrase; an empty one runs Windows Hello
     /// only, which is enough for purge all (a forgotten passphrase can start over) but opens no data. Otherwise with
@@ -963,7 +972,7 @@ public sealed partial class CommandProcessor
     private async Task<Reply> UnlockAsync(ClientSession s, string rest, CancellationToken ct)
     {
         var keys = _d.Keys;
-        bool rewrap = false;
+        bool rewrap = false, helloFallback = false, passphraseOk = false;
         // Passphrase guesses are rate-limited like the unlock password (each one is a 64 MiB Argon2id run).
         bool passphraseTry = rest.Length > 0 && (KeyNeedsPassphrase || !UsesPassword && keys.KeyLoaded && keys.Protection == Crypto.KeyVault.ModePassphrase);
         if (passphraseTry && keys.PassphraseRetryAfterSeconds is > 0 and var passWait) return Err(ErrTooMany(passWait));
@@ -973,6 +982,7 @@ public sealed partial class CommandProcessor
             {
                 if (!keys.UnlockWithPassphrase(rest)) return Err(ErrWrongPassphrase);
                 if (UsesPassword) return OpenVerified(s, "unlock passphrase");
+                passphraseOk = true;
             }
         }
         else if (UsesPassword)
@@ -981,28 +991,61 @@ public sealed partial class CommandProcessor
             var check = pw == null ? Crypto.PasswordCheck.NotSet : pw.Verify(rest);
             switch (check)
             {
-                case Crypto.PasswordCheck.NotSet: return Err(ErrNoPassword);
+                case Crypto.PasswordCheck.NotSet:
+                    // B15: keys\unlock.bin missing or damaged. Windows Hello opens the gate instead (below); without Hello
+                    // the answer stays "no password", and password set is allowed while locked.
+                    Log.Warn("unlock password file missing or damaged: trying Windows Hello instead");
+                    helloFallback = true;
+                    break;
                 case Crypto.PasswordCheck.Throttled: return Err(ErrTooMany(Math.Max(1, pw!.RetryAfterSeconds)));
                 case Crypto.PasswordCheck.Wrong:
                     Audit(s, "unlock password", 0, "");
                     int wait = pw!.RetryAfterSeconds;
                     return Err(wait > 0 ? ErrTooMany(wait) : ErrWrongPassword);
             }
-            return OpenVerified(s, "unlock password");
+            if (!helloFallback) return OpenVerified(s, "unlock password");
         }
         else if (rest.Length > 0 && keys.KeyLoaded)
         {
             // Already passphrase-wrapped: check the passphrase before Hello. security.keyProtection = passphrase while the
             // key file is still tpm/dpapi (keys.Protection reports the file's mode): the passphrase re-wraps the key, but
             // only after Hello passed, so a cancelled Hello leaves the key file as it was.
-            if (keys.Protection == Crypto.KeyVault.ModePassphrase) { if (!keys.UnlockWithPassphrase(rest)) return Err(ErrWrongPassphrase); }
+            if (keys.Protection == Crypto.KeyVault.ModePassphrase) { if (!keys.UnlockWithPassphrase(rest)) return Err(ErrWrongPassphrase); passphraseOk = true; }
             else rewrap = S.Security.KeyProtection == Crypto.KeyVault.ModePassphrase;
         }
-        if (!await _d.Agent.UnlockAsync(ct).ConfigureAwait(false)) return Err(ErrUnlockCancelled);
+        if (!await _d.Agent.UnlockAsync(ct).ConfigureAwait(false))
+        {
+            if (helloFallback) return Err(ErrNoPassword);
+            // T5: hello configured on a PC without Windows Hello. The prompt cannot work, so the passphrase just checked or
+            // the unlock password stands in for it; otherwise say what is missing instead of "cancelled".
+            if (S.Security.RequireUnlock && HelloMissing) return HelloMissingUnlock(s, rest, passphraseOk, rewrap);
+            return Err(ErrUnlockCancelled);
+        }
         if (rewrap && !keys.UnlockWithPassphrase(rest)) return Err(ErrWrongPassphrase);
+        if (helloFallback) Audit(s, "unlock hello (no password file)", 1, "");
         _lastUnlock = Now();
         var until = _d.Agent.GetStatus().UnlockedUntil;
         return Ok(JsonSerializer.Serialize(new UnlockReply(true, until), CoreJson.Default.UnlockReply));
+    }
+
+    /// <summary>T5: unlock with security.unlockMethod hello after the Hello prompt failed on a PC without Windows Hello.</summary>
+    private Reply HelloMissingUnlock(ClientSession s, string rest, bool passphraseOk, bool rewrap)
+    {
+        if (passphraseOk) return OpenVerified(s, "unlock passphrase");
+        var pw = _d.Password;
+        if (pw?.IsSet != true) return Err(ErrNoPassword);
+        // A re-wrap needs a proof of the user before it runs, and an empty secret is no password.
+        if (rest.Length == 0 || rewrap) return Err(ErrHelloMissing);
+        switch (pw.Verify(rest))
+        {
+            case Crypto.PasswordCheck.NotSet: return Err(ErrNoPassword);
+            case Crypto.PasswordCheck.Throttled: return Err(ErrTooMany(Math.Max(1, pw.RetryAfterSeconds)));
+            case Crypto.PasswordCheck.Wrong:
+                Audit(s, "unlock password", 0, "");
+                int wait = pw.RetryAfterSeconds;
+                return Err(wait > 0 ? ErrTooMany(wait) : ErrWrongPassword);
+        }
+        return OpenVerified(s, "unlock password (no Hello)");
     }
 
     private Reply OpenVerified(ClientSession s, string what)
@@ -1200,7 +1243,8 @@ public sealed partial class CommandProcessor
                     // Guarded groups change what is protected, kept or redacted and what leaves the PC: not while the gate
                     // is closed (a passphrase-wrapped key would otherwise be re-wrapped to dpapi without the passphrase).
                     if (doc.RootElement.ValueKind == JsonValueKind.Object && LockError(PipeKind.Ui) is { } locked
-                        && GuardedSettingGroups.Any(g => doc.RootElement.TryGetProperty(g, out _)))
+                        && GuardedSettingGroups.Any(g => doc.RootElement.TryGetProperty(g, out _))
+                        && !(NoUnlockPath && OnlyUnlockMethod(doc.RootElement)))
                         return Err(locked);
                     // The password method needs a password first, or nobody could unlock.
                     if (doc.RootElement.ValueKind == JsonValueKind.Object && doc.RootElement.TryGetProperty("security", out var sec)
@@ -1218,6 +1262,18 @@ public sealed partial class CommandProcessor
                 return Ok(JsonSerializer.Serialize(S, CoreJson.Default.Settings));
         }
         return Err(UsageSettings);
+    }
+
+    /// <summary>{"security":{"unlockMethod":...}} and nothing else. Allowed while locked when no unlock path exists (T5):
+    /// otherwise only hand-editing settings.json gets the user back in. Password still needs a password set (checked
+    /// below), so this opens nothing by itself.</summary>
+    private static bool OnlyUnlockMethod(JsonElement root)
+    {
+        int groups = 0, keys = 0;
+        foreach (var g in root.EnumerateObject()) groups++;
+        if (groups != 1 || !root.TryGetProperty("security", out var sec) || sec.ValueKind != JsonValueKind.Object) return false;
+        foreach (var k in sec.EnumerateObject()) keys++;
+        return keys == 1 && sec.TryGetProperty("unlockMethod", out var m) && m.ValueKind == JsonValueKind.String;
     }
 
     private async Task<Reply> ReplayAsync(ClientSession s, string rest, CancellationToken ct)

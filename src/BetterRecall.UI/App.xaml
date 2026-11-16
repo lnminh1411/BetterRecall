@@ -93,7 +93,7 @@
                 <Setter Property="CornerRadius" Value="4" />
                 <Setter Property="Padding" Value="8,2,8,3" />
             </Style>
-            <Style x:Key="OutlinedListViewStyle" TargetType="ListView" BasedOn="{StaticResource DefaultListViewStyle}">
+            <Style x:Key="OutlinedListViewStyle" TargetType="ListView">
                 <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}" />
                 <Setter Property="BorderThickness" Value="1" />
                 <Setter Property="CornerRadius" Value="4" />

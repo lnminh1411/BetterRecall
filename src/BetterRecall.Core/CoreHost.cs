@@ -87,16 +87,29 @@ public sealed class CoreHostImpl : ICoreHost
 
     public async Task OpenStoreAsync(CancellationToken ct)
     {
-        await _storeGate.WaitAsync(ct).ConfigureAwait(false);
-        try
+        while (true)
         {
             if (_store != null) return;
+            // B1: the passphrase wait holds no gate, so purge all (the way out of a forgotten passphrase) can run meanwhile.
+            // DestroyKey completes the old wait; the loop then waits on the new key.
             var loaded = _vault.WhenLoaded;
             if (!await Task.Run(_vault.TryLoadSilent, ct).ConfigureAwait(false))
             {
                 Log.Info("data key needs the passphrase; waiting for unlock");
                 await loaded.WaitAsync(ct).ConfigureAwait(false);
             }
+            if (await OpenLoadedAsync(ct).ConfigureAwait(false)) return;
+        }
+    }
+
+    /// <summary>Opens the store under the gate. False when the key went away first (purge all destroyed it).</summary>
+    private async Task<bool> OpenLoadedAsync(CancellationToken ct)
+    {
+        await _storeGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (_store != null) return true;
+            if (!_vault.KeyLoaded) return false;
             try { _store = Wire(await Task.Run(() => new EncryptedStore(_options.Home, () => _vault.Derive("betterrecall-sqlite")), ct).ConfigureAwait(false)); }
             catch (Microsoft.Data.Sqlite.SqliteException ex) when (ex.SqliteErrorCode == 26)   // SQLITE_NOTADB
             {
@@ -105,6 +118,7 @@ public sealed class CoreHostImpl : ICoreHost
                 throw new KeyLostException("The data key does not open this store.", ex);
             }
             Log.Info("store opened");
+            return true;
         }
         finally { _storeGate.Release(); }
     }

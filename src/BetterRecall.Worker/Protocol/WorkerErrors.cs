@@ -34,3 +34,7 @@ public sealed class ModelNotInstalledException(string model) : WorkerException(W
 }
 
 public sealed class DeviceFailedException(string detail, Exception? inner = null) : WorkerException(WorkerErrors.DeviceFailed(detail), inner);
+
+/// <summary>The input, not the device, cannot be read whole (OCR box cap): "Device failed: ..." on the wire, so the agent
+/// drops the keyframe, but not a <see cref="DeviceFailedException"/>, so the device is not marked failed and replanned.</summary>
+public sealed class OcrOverflowException(string detail) : WorkerException(WorkerErrors.DeviceFailed(detail));

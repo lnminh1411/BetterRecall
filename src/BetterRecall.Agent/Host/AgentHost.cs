@@ -522,11 +522,12 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
                 finally { Monitor.Exit(_audioGate); }
             }
             _loopback.CheckHealth(Environment.TickCount64);   // A13: restarts a loopback stream whose thread ended
-            if ((_pause.Has("keylost") || _pause.Has("storeerror")) && Store != null)
+            if ((_pause.Has("keylost") || _pause.Has("storeerror") || _pause.Has("keylocked")) && Store != null)
             {
-                // Purge all made a new key and store.
+                // Purge all made a new key and store (B1: also while the first open still waited for a passphrase).
                 _pause.Clear("keylost");
                 _pause.Clear("storeerror");
+                _pause.Clear("keylocked");
                 Log.Info("store open after purge all");
                 Maintenance();
                 _scheduler?.Signal();

@@ -20,6 +20,8 @@ public sealed class UnlockPassword
     public const int MinLength = 6;
     public const int MaxLength = 256;
     public const int FreeTries = 5;
+    /// <summary>Longest wait: also the cap on a stored wait, so a clock stepped back cannot extend the lockout (B15).</summary>
+    public const int MaxWaitSeconds = 900;
     private static readonly byte[] Magic = "BRU1"u8.ToArray();
     private const int FileLength = 4 + 12 + 16 + 32 + 4 + 8;
 
@@ -48,7 +50,7 @@ public sealed class UnlockPassword
             {
                 var r = Read();
                 if (r == null) return 0;
-                var wait = DateTimeOffset.FromUnixTimeMilliseconds(r.Value.LockedUntilMs) - _now();
+                var wait = DateTimeOffset.FromUnixTimeMilliseconds(Capped(r.Value).LockedUntilMs) - _now();
                 return wait > TimeSpan.Zero ? (int)Math.Ceiling(wait.TotalSeconds) : 0;
             }
         }
@@ -63,7 +65,7 @@ public sealed class UnlockPassword
         {
             var r = Read();
             if (r == null) return PasswordCheck.NotSet;
-            var rec = r.Value;
+            var rec = Capped(r.Value);
             if (_now().ToUnixTimeMilliseconds() < rec.LockedUntilMs) return PasswordCheck.Throttled;
             bool ok = !string.IsNullOrEmpty(password) && password.Length <= MaxLength && Matches(rec, password);
             if (ok)
@@ -76,7 +78,7 @@ public sealed class UnlockPassword
             if (failures >= FreeTries)
             {
                 int extra = Math.Min(failures - FreeTries, 5); // 30 s, 1, 2, 4, 8 min, then 15 min
-                double seconds = Math.Min(30 * Math.Pow(2, extra), 900);
+                double seconds = Math.Min(30 * Math.Pow(2, extra), MaxWaitSeconds);
                 until = (_now() + TimeSpan.FromSeconds(seconds)).ToUnixTimeMilliseconds();
             }
             Write(rec with { Failures = failures, LockedUntilMs = until });
@@ -109,6 +111,17 @@ public sealed class UnlockPassword
     // ---- file ----
 
     private readonly record struct Record(int MemKiB, int Passes, int Lanes, byte[] Salt, byte[] Hash, int Failures, long LockedUntilMs);
+
+    /// <summary>The record with its wait cut to at most MaxWaitSeconds from now, written back when cut: the stored time is
+    /// wall clock, so after the clock steps back it lies further ahead than any wait ever set. Call under _gate.</summary>
+    private Record Capped(Record r)
+    {
+        long cap = (_now() + TimeSpan.FromSeconds(MaxWaitSeconds)).ToUnixTimeMilliseconds();
+        if (r.LockedUntilMs <= cap) return r;
+        r = r with { LockedUntilMs = cap };
+        try { Write(r); } catch (IOException ex) { Log.Warn("unlock password file write failed", ex); }
+        return r;
+    }
 
     private static bool Matches(Record r, string password)
     {
