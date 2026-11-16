@@ -358,7 +358,7 @@ public sealed partial class SettingsPage : Page
             else block.Visibility = Visibility.Collapsed;
         }
         var keys = Editor.Loaded ? SettingsDiff.Keys(Editor.Diff()).ToList() : [];
-        PendingText.Text = keys.Count == 0 ? "" : Loc.Format("Settings_Pending", keys.Count);
+        PendingText.Text = keys.Count == 0 ? "" : Loc.Format(SettingsDiff.PendingKey(keys.Count), keys.Count);
         PendingText.Visibility = SaveBar.IsOpen ? Visibility.Collapsed : Visibility.Visible;
         SaveButton.IsEnabled = keys.Count > 0;
         DiscardButton.IsEnabled = keys.Count > 0;
@@ -427,6 +427,7 @@ public sealed partial class SettingsPage : Page
         SettingType.Hotkey => Loc.Get("Settings_HotkeyError"),
         SettingType.Path => Loc.Get("Settings_PathError"),
         SettingType.StringList when d.Key == "ipc.allowClients" => Loc.Get("Settings_PathError"),
+        SettingType.Text when d.Key == "ipc.pipeName" => Loc.Get("Settings_PipeNameError"),
         _ => Loc.Get("Settings_InvalidError"),
     };
 

@@ -5,7 +5,8 @@ using BetterRecall.Core;
 using BetterRecall.Core.Ipc;
 
 // betterrecall ipc <words...>: sends one line to the public pipe and prints the response line (research 7.4).
-// Exit 0 on ok:true, 1 on ok:false or no response, 2 when the agent is unreachable or untrusted.
+// Exit 0 on ok:true, 1 on ok:false or no response, 2 when the agent is unreachable or untrusted, 3 when the agent
+// runs but scripts (ipc.enabled) are off.
 // betterrecall ipc purge <scope> [--yes]: preview and confirm on one connection (tokens are per connection); without
 // --yes it asks at the console.
 
@@ -28,7 +29,12 @@ using var cts = new CancellationTokenSource();
 Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
 
 var (result, client) = await PipeClient.ConnectAsync(pipe, agentExe, 1000, cts.Token);
-if (result == PipeConnectResult.NotRunning) { Console.WriteLine("err BetterRecall not running"); return 2; }
+if (result == PipeConnectResult.NotRunning)
+{
+    var (msg, exit) = AgentPresence.NotAnswering(home, settings.Ipc.Enabled);   // the agent may run with scripts (IPC) off
+    Console.WriteLine(msg);
+    return exit;
+}
 if (result != PipeConnectResult.Ok || client == null) { Console.WriteLine("err BetterRecall not trusted"); return 2; }
 
 await using (client)

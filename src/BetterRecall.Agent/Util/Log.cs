@@ -44,10 +44,13 @@ internal static class Log
     public static void Error(string msg, Exception ex) => Write(Level.Error, $"{msg}: {ex.GetType().Name} 0x{ex.HResult:X8} {ex.Message}");
     public static void Warn(string msg, Exception ex) => Write(Level.Warn, $"{msg}: {ex.GetType().Name} 0x{ex.HResult:X8} {ex.Message}");
 
+    /// <summary>Local time with its UTC offset, the format of the core and worker logs too (sweep 3 D19).</summary>
+    internal static string Stamp(DateTimeOffset t) => t.ToString("yyyy-MM-ddTHH:mm:ss.fffzzz", System.Globalization.CultureInfo.InvariantCulture);
+
     private static void Write(Level level, string msg)
     {
         if (level < MinLevel) return;
-        var line = $"{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff} {level.ToString().ToUpperInvariant(),-5} [{Environment.CurrentManagedThreadId}] {msg}";
+        var line = $"{Stamp(DateTimeOffset.Now)} {level.ToString().ToUpperInvariant(),-5} [{Environment.CurrentManagedThreadId}] {msg}";
         if (AlsoConsole) Console.Error.WriteLine(line);
         if (_dir is null) return;
         Queue.TryAdd(line);

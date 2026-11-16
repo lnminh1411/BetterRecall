@@ -22,7 +22,9 @@ public static partial class ProcessHardening
             Step(r, "strict-handle-checks", () => SetPolicy(ProcessStrictHandleCheckPolicy, 0x1 | 0x2));
             // Image loads: no remote (UNC) images, no low-integrity images. PreferSystem32Images stays off on purpose:
             // System32 has its own onnxruntime.dll and DirectML.dll, which would shadow the bundled newer ones.
-            Step(r, "image-load-no-remote-no-low-il", () => SetPolicy(ProcessImageLoadPolicy, 0x1 | 0x2));
+            // The worker inherits the agent's image-load policy (the agent's includes PreferSystem32Images), and an
+            // inherited policy cannot be set again (error 5 on every start, sweep 3 D19): holding both flags counts as applied.
+            Step(r, "image-load-no-remote-no-low-il", () => HasPolicy(ProcessImageLoadPolicy, 0x1 | 0x2) || SetPolicy(ProcessImageLoadPolicy, 0x1 | 0x2));
             Step(r, "process-dacl", ApplyProcessDacl);
             Step(r, "wer-excluded", () =>
             {
@@ -50,6 +52,13 @@ public static partial class ProcessHardening
     {
         uint v = flags;
         return SetProcessMitigationPolicy(policy, &v, sizeof(uint));
+    }
+
+    /// <summary>True when every bit of flags is already set for the policy (inherited from the parent, for one).</summary>
+    internal static unsafe bool HasPolicy(int policy, uint flags)
+    {
+        uint v = 0;
+        return GetProcessMitigationPolicy(GetCurrentProcess(), policy, &v, sizeof(uint)) && (v & flags) == flags;
     }
 
     private static unsafe bool EnableEcoQos()
@@ -102,6 +111,10 @@ public static partial class ProcessHardening
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static unsafe partial bool SetProcessMitigationPolicy(int policy, void* buffer, nuint length);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static unsafe partial bool GetProcessMitigationPolicy(nint process, int policy, void* buffer, nuint length);
 
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

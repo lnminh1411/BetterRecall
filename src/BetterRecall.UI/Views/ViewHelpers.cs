@@ -222,4 +222,14 @@ internal static class WindowHelpers
 
     public static InfoBarSeverity Severity(AgentErrorKind kind) =>
         kind is AgentErrorKind.NotRunning or AgentErrorKind.NotTrusted ? InfoBarSeverity.Error : InfoBarSeverity.Warning;
+
+    /// <summary>"Start BetterRecall" for the offline bars, or null when no installed agent sits next to the UI (D10).
+    /// The status subscription picks the agent up within its 5 s retry.</summary>
+    public static Button? StartAgentButton()
+    {
+        if (AgentStart.AgentPath(AppContext.BaseDirectory) is null) return null;
+        var b = new Button { Content = Loc.Get("Err_NotRunning_Start") };
+        b.Click += (_, _) => { b.IsEnabled = !AgentStart.TryStart(AppContext.BaseDirectory); };
+        return b;
+    }
 }

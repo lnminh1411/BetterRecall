@@ -218,7 +218,7 @@ public sealed partial class LauncherWindow : Window
         _ask = AskToggle.IsChecked == true;
         AskView.Visibility = _ask ? Visibility.Visible : Visibility.Collapsed;
         ResultsGrid.Visibility = _ask ? Visibility.Collapsed : Visibility.Visible;
-        FilterRow.Visibility = _ask ? Visibility.Collapsed : Visibility.Visible;
+        FilterRow.Visibility = _ask || Services.Current.Locked ? Visibility.Collapsed : Visibility.Visible;
         UpdateEmpty();
         if (_ask)
         {
@@ -272,6 +272,12 @@ public sealed partial class LauncherWindow : Window
         bool locked = Services.Current.Locked;
         var was = Unlock.Visibility == Visibility.Visible;
         Unlock.Visibility = locked ? Visibility.Visible : Visibility.Collapsed;
+        // Nothing behind the unlock panel may take Tab focus or show in UI Automation; Close stays (D7).
+        SearchBox.IsEnabled = !locked;
+        AskToggle.IsEnabled = !locked;
+        FilterRow.Visibility = locked || _ask ? Visibility.Collapsed : Visibility.Visible;
+        BodyGrid.Visibility = locked ? Visibility.Collapsed : Visibility.Visible;
+        FooterBar.Visibility = locked ? Visibility.Collapsed : Visibility.Visible;
         if (locked && !was)
         {
             DropData();
@@ -290,6 +296,9 @@ public sealed partial class LauncherWindow : Window
             OfflineBar.Title = Loc.Error(kind, null);
             OfflineBar.Message = Loc.Get(kind == AgentErrorKind.NotTrusted ? "Err_NotTrusted_Detail" : "Err_NotRunning_Detail");
         }
+        if (kind == AgentErrorKind.NotRunning) OfflineBar.ActionButton ??= WindowHelpers.StartAgentButton();
+        else OfflineBar.ActionButton = null;
+        ResultsGrid.Opacity = OfflineBar.IsOpen ? 0.5 : 1;   // results from before the agent went away (D10)
     }
 
     private void UpdateStatus()

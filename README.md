@@ -28,6 +28,7 @@ Estimates for 0.2.3-dev-part1, from the code's defaults and the dev PC's measure
 | Part | Requirement | Why |
 |---|---|---|
 | OS | Windows 11 (build 22000 or later), x64 | The exes target build 20348 or later, which no Windows 10 release reached; system audio uses process loopback, which needs it. Windows on Arm is untested (x64 build only) |
+| Runtime | Microsoft Visual C++ 2015-2022 Redistributable (x64) | The worker's OpenVINO runtime needs it. Without it the worker cannot start, so embeddings, OCR and transcripts do not run. A stock Windows Sandbox lacks it |
 | CPU | 4 cores, x64 | With no NPU or usable GPU, embeddings, screen text (OCR) and speech run on the CPU: it works, but indexing lags behind and costs more power (OCR alone is about 1 s of CPU per screen) |
 | RAM | 8 GB | Below 8 GB the benchmark cuts the replay to 60 s and, with long retention, the vectors to 512 dimensions. The replay ring stays in RAM (about 90 MB per monitor at the default 120 s and 6 Mbit/s) |
 | GPU | DirectX 11 GPU with a WDDM driver | Screen capture uses Desktop Duplication. Replay also needs a hardware video encoder (H.264, HEVC or AV1); with none the benchmark turns replay off |

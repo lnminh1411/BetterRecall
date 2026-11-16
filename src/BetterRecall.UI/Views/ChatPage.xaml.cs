@@ -21,6 +21,15 @@ public sealed partial class ChatPage : Page, IDataPage
         Detail.ViewModel = _detail;
         NewChatText.Text = Loc.Get("Chat_New");
         DeleteAllText.Text = Loc.Get("Chat_DeleteAll");
+        // Their content is a StackPanel, which gives no automation name (D6).
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(NewChatButton, NewChatText.Text);
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(DeleteAllButton, DeleteAllText.Text);
+        // List items are named by title and date instead of the ChatSummary record dump.
+        SavedList.ContainerContentChanging += (_, args) =>
+        {
+            if (args.Item is ChatSummary c)
+                Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(args.ItemContainer, ChatViewModel.SummaryName(c));
+        };
         var close = Loc.Get("Chat_CloseDetail");
         ToolTipService.SetToolTip(CloseDetailButton, close);
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(CloseDetailButton, close);
@@ -90,10 +99,11 @@ public sealed partial class ChatPage : Page, IDataPage
         if (_selecting) return;
         if (SavedList.SelectedItem is ChatSummary summary)
         {
+            var ticket = ChatControl.ViewModel.BeginOpen();
             var r = await Services.Current.Api.ChatGetAsync(summary.Id);
             if (r.Ok && r.Value is not null)
             {
-                ChatControl.ViewModel.Load(r.Value);
+                ChatControl.ViewModel.LoadIfCurrent(ticket, r.Value);   // New chat or another chat opened meanwhile wins
             }
         }
     }

@@ -51,6 +51,11 @@ internal sealed class PauseController(Func<DateTimeOffset> now)
 
     public event Action? Changed;
 
+    /// <summary>A timed reason ran out (user or ipc pause "for N min"). Raised once per expiry, outside the lock, by
+    /// whichever call noticed it, so the agent can log the resume (sweep 3 T6).</summary>
+    public event Action<string>? Expired;
+    private readonly List<string> _expired = [];
+
     /// <summary>Adds or updates a reason. Changed fires only when something changed: setting a reason that is already
     /// set with the same end time re-applied every setting (and rebuilt the replay) on each storeerror retry (D29).</summary>
     public void Set(string reason, DateTimeOffset? until = null)
@@ -72,11 +77,14 @@ internal sealed class PauseController(Func<DateTimeOffset> now)
 
     public bool Has(string reason)
     {
+        bool has;
         lock (_gate)
         {
             Expire();
-            return _reasons.ContainsKey(reason);
+            has = _reasons.ContainsKey(reason);
         }
+        RaiseExpired();
+        return has;
     }
 
     /// <summary>Paused for keyframes (any reason).</summary>
@@ -86,6 +94,7 @@ internal sealed class PauseController(Func<DateTimeOffset> now)
     /// battery and storage (the ring lives in RAM; only keyframes fill the disk).</summary>
     public bool ContinuousPaused(bool duringFullscreen)
     {
+        bool paused = false;
         lock (_gate)
         {
             Expire();
@@ -93,10 +102,12 @@ internal sealed class PauseController(Func<DateTimeOffset> now)
             {
                 if (r == "fullscreen" && duringFullscreen) continue;
                 if (r is "battery" or "storage") continue;
-                return true;
+                paused = true;
+                break;
             }
-            return false;
         }
+        RaiseExpired();
+        return paused;
     }
 
     public (string? Reason, DateTimeOffset? Until) Current()
@@ -114,6 +125,7 @@ internal sealed class PauseController(Func<DateTimeOffset> now)
                 result = (first.Key, first.Value);
             }
         }
+        RaiseExpired();
         if (expired) Changed?.Invoke();
         return result;
     }
@@ -123,6 +135,19 @@ internal sealed class PauseController(Func<DateTimeOffset> now)
         var t = now();
         var gone = _reasons.Where(kv => kv.Value is { } u && t >= u).Select(kv => kv.Key).ToList();
         foreach (var g in gone) _reasons.Remove(g);
+        _expired.AddRange(gone);
         return gone.Count > 0;
+    }
+
+    private void RaiseExpired()
+    {
+        string[] list;
+        lock (_gate)
+        {
+            if (_expired.Count == 0) return;
+            list = [.. _expired];
+            _expired.Clear();
+        }
+        foreach (var r in list) Expired?.Invoke(r);
     }
 }

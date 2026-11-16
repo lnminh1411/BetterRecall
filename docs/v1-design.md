@@ -136,7 +136,7 @@ Line protocol for all three (`research.md` 7.5): UTF-8, one request per `\n`, `\
 
 Names per data folder: the default folder (`%LOCALAPPDATA%\BetterRecall`) uses the names above; any other `BETTERRECALL_HOME` appends `.<16 hex>` (SHA-256 of the full upper-case path), as the agent mutex and quit event do (`PipeNames.Scoped`). The same suffix scopes the show-launcher event and the UI's AppInstance key. Agent, UI, CLI, MCP and launcher all resolve the folder the same way (`DataPaths.Home()`), so a dev or test agent never serves the real UI and never reaches the real agent. The agent writes its pid to `<home>\agent.pid`; the launcher uses it to find the agent of its folder. A hidden UI exits when the agent it talks to exits.
 
-Security descriptor, trust checks, public verbs, `search` JSON form, result shape, errors, subscribe and audit follow `research.md` 7.2 to 7.9 exactly, except that the pipe names carry the SID suffix as above, and `thumb` takes an optional width: `thumb <id> [width]`, width 64 to 1280, default 320.
+Security descriptor, trust checks, public verbs, `search` JSON form, result shape, errors, subscribe and audit follow `research.md` 7.2 to 7.9 exactly, except that the pipe names carry the SID suffix as above, and `thumb` takes an optional width: `thumb <id> [width]`, width 64 to 1280, default 320. `thumb` on the UI pipe is not audited (one row per card flooded the log; the UI's `timeline` and `search` rows cover those reads). When the public pipe does not answer but the agent of the data folder holds its mutex and `ipc.enabled` is off, the CLI prints `err Scripts (IPC) are off. Turn on Settings > IPC and MCP > Allow scripts (IPC).` and exits 3 instead of `err BetterRecall not running` (exit 2).
 
 UI-only verbs:
 

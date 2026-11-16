@@ -95,9 +95,10 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         if (s.Governance.EcoQos) Governance.ApplyEcoQos(Win32.GetCurrentProcess(), idlePriority: false);
 
         _window = new MessageWindow();
-        // Another version's launcher asks us to step aside (see PipeNames.AgentQuitEvent).
+        // Another version's launcher asks us to step aside (see PipeNames.AgentQuitEvent). Anyone may set it, so the log
+        // names the event, not the launcher.
         _quitEvent = new EventWaitHandle(false, EventResetMode.AutoReset, PipeNames.AgentQuitEventFor(_opt.Home));
-        _quitWait = ThreadPool.RegisterWaitForSingleObject(_quitEvent, (_, _) => { Log.Info("quit requested by launcher"); RequestQuit(); }, null, Timeout.Infinite, executeOnlyOnce: true);
+        _quitWait = ThreadPool.RegisterWaitForSingleObject(_quitEvent, (_, _) => { Log.Info("quit event set"); RequestQuit(); }, null, Timeout.Infinite, executeOnlyOnce: true);
         _window.Hotkey += OnHotkey;
         _window.Command += OnTrayCommand;
         _window.BalloonClicked += () => UiLauncher.Start(_opt.InstallDir, "--replays");
@@ -126,6 +127,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         _pause.Set("keylocked");
         _openStore = Task.Run(OpenStoreAsync);
         _pause.Changed += () => _capture?.ApplySettings();
+        _pause.Expired += r => { if (r is "user" or "ipc") Log.Info($"resumed ({r} pause ended)"); };
 
         _guard.Start();
         _scheduler.Start();

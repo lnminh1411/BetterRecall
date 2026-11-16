@@ -594,11 +594,26 @@ public static class StatusText
             : new LocalizedText("Status_Unlocked"));
         if (s.Audio.System || s.Audio.Mic)
             parts.Add(new LocalizedText(s.Audio.System && s.Audio.Mic ? "Status_AudioBoth" : s.Audio.System ? "Status_AudioSystem" : "Status_AudioMic"));
-        parts.Add(new LocalizedText("Status_Device", s.Device));
+        parts.Add(new LocalizedText("Status_Device", Device(s.Device)));
         if (locked) return parts;   // how much was captured, and how fast, is shown only while unlocked
         if (s.Queue.Pending > 0) parts.Add(new LocalizedText("Status_Queue", s.Queue.Pending));
         parts.Add(new LocalizedText("Status_Store", s.Store.Rows, FormatBytes(s.Store.Bytes)));
         return parts;
+    }
+
+    /// <summary>The agent reports "none" while the worker is not up (starting, restarting): show "Not loaded" (D17).</summary>
+    public static object Device(string? device) =>
+        string.IsNullOrEmpty(device) || device.Equals("none", StringComparison.OrdinalIgnoreCase) ? new LocalizedText("Status_DeviceNotLoaded") : device;
+
+    /// <summary>Status bar detail parts that fit a window this wide: the store size goes first, then the waiting count,
+    /// then audio, so the device stays readable at 640 px (D16).</summary>
+    public static IReadOnlyList<LocalizedText> Fit(IReadOnlyList<LocalizedText> detail, double windowWidth)
+    {
+        var drop = new List<string>();
+        if (windowWidth < 1000) drop.Add("Status_Store");
+        if (windowWidth < 800) drop.Add("Status_Queue");
+        if (windowWidth < 700) drop.AddRange(["Status_AudioBoth", "Status_AudioSystem", "Status_AudioMic"]);
+        return drop.Count == 0 ? detail : [.. detail.Where(p => !drop.Contains(p.Key))];
     }
 
     public static string FormatBytes(long bytes)

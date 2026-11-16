@@ -51,11 +51,14 @@ public static class Log
     public static void Warn(string msg, Exception? ex = null) => Write(LogLevel.Warn, msg, ex);
     public static void Error(string msg, Exception? ex = null) => Write(LogLevel.Error, msg, ex);
 
+    /// <summary>Local time with its UTC offset, the format of the agent and worker logs too (sweep 3 D19).</summary>
+    internal static string Stamp(DateTimeOffset t) => t.ToString("yyyy-MM-ddTHH:mm:ss.fffzzz", System.Globalization.CultureInfo.InvariantCulture);
+
     private static void Write(LogLevel level, string msg, Exception? ex)
     {
         if (level < _level) return;
         var sb = new StringBuilder(128);
-        sb.Append(DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ")).Append(' ')
+        sb.Append(Stamp(DateTimeOffset.Now)).Append(' ')
           .Append(level switch { LogLevel.Debug => "DBG", LogLevel.Info => "INF", LogLevel.Warn => "WRN", _ => "ERR" })
           .Append(' ').Append(Environment.CurrentManagedThreadId).Append(' ').Append(msg);
         if (ex != null)
@@ -70,12 +73,12 @@ public static class Log
             try
             {
                 if (_dir == null) return;
-                var path = Path.Combine(_dir, $"{_prefix}-{DateTime.UtcNow:yyyyMMdd}.log");
+                var path = Path.Combine(_dir, $"{_prefix}-{DateTime.Now:yyyyMMdd}.log");   // local date, as the agent and worker logs
                 if (_writer == null || _currentPath != path || _writer.BaseStream.Length > MaxFileBytes)
                 {
                     CloseWriter();
                     if (File.Exists(path) && new FileInfo(path).Length > MaxFileBytes)
-                        path = Path.Combine(_dir, $"{_prefix}-{DateTime.UtcNow:yyyyMMdd-HHmmss}.log");
+                        path = Path.Combine(_dir, $"{_prefix}-{DateTime.Now:yyyyMMdd-HHmmss}.log");
                     _writer = new StreamWriter(new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete), new UTF8Encoding(false)) { AutoFlush = true };
                     _currentPath = path;
                     Prune();

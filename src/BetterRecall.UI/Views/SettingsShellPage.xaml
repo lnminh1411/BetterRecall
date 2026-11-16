@@ -3,8 +3,9 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
     <!-- Settings open as their own page with a group list, like Windows Terminal and PowerToys settings. -->
-    <!-- The group list folds to icons (names in tooltips) when the page is narrow, so the setting rows keep their room. -->
-    <NavigationView x:Name="Groups" PaneDisplayMode="Auto" OpenPaneLength="240" IsBackButtonVisible="Collapsed"
+    <!-- Narrow page (main nav already folded to icons): the groups move to a top strip with names instead of a second
+         icon rail (sweep 3 D15); code-behind switches PaneDisplayMode. -->
+    <NavigationView x:Name="Groups" PaneDisplayMode="Left" OpenPaneLength="240" IsBackButtonVisible="Collapsed"
                     IsSettingsVisible="False" IsPaneToggleButtonVisible="False" IsTitleBarAutoPaddingEnabled="False"
                     ItemInvoked="Groups_ItemInvoked" CompactModeThresholdWidth="0" ExpandedModeThresholdWidth="860">
         <NavigationView.PaneHeader>

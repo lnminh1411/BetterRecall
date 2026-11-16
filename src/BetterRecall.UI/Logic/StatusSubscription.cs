@@ -15,7 +15,9 @@ public sealed class StatusSubscription(string pipeName, IServerTrust trust) : IA
     public event Action<AgentErrorKind>? Disconnected;
 
     public TimeSpan MinBackoff { get; init; } = TimeSpan.FromSeconds(1);
-    public TimeSpan MaxBackoff { get; init; } = TimeSpan.FromSeconds(30);
+    /// <summary>5 s: after an agent restart the UI is back within about 6 s (each try also waits up to 1 s to connect);
+    /// at 30 s it took 20 to 45 s (sweep 3 D10). A try on a missing pipe costs next to nothing.</summary>
+    public TimeSpan MaxBackoff { get; init; } = TimeSpan.FromSeconds(5);
 
     public void Start()
     {

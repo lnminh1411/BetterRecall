@@ -99,6 +99,7 @@ public sealed partial class ChatView : UserControl
         ChatScroll.Visibility = off ? Visibility.Collapsed : Visibility.Visible;
         InputBox.IsEnabled = !off;
         SendButton.IsEnabled = !off && ViewModel.CanSend && !string.IsNullOrWhiteSpace(InputBox.Text);
+        UpdateBindings();   // the usage line follows ai.enabled
     }
 
     private void UpdateBindings()
@@ -136,7 +137,8 @@ public sealed partial class ChatView : UserControl
         StopButton.Visibility = ViewModel.Busy ? Visibility.Visible : Visibility.Collapsed;
         SendButton.IsEnabled = Services.Current.AiEnabled && ViewModel.CanSend && !string.IsNullOrWhiteSpace(InputBox.Text);
 
-        UsageBlock.Text = FormatUsage(ViewModel.Usage);
+        // The request budget means nothing while cloud chat is off (D18).
+        UsageBlock.Text = Services.Current.AiEnabled ? FormatUsage(ViewModel.Usage) : "";
         UsageBlock.Visibility = string.IsNullOrEmpty(UsageBlock.Text) ? Visibility.Collapsed : Visibility.Visible;
     }
 
