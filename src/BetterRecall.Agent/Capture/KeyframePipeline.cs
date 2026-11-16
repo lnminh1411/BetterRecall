@@ -86,10 +86,14 @@ internal sealed class OcrHealth(Func<long>? nowMs = null)
 internal sealed class KeyframePipeline : IAsyncDisposable
 {
     public static readonly TimeSpan OcrTimeout = TimeSpan.FromSeconds(30);
+    /// <summary>Longest wait for one OCR read: a slow CPU on a dense page took 35 s, over OcrTimeout every time.</summary>
+    public const int MaxOcrTimeoutFactor = 4;
 
+    // Wait, not DropWrite: with DropWrite TryWrite returns true and drops the grab itself, so Post never freed it. While
+    // OCR blocked this thread every grab past the 6 queued leaked its native pixels, unzeroed (S3 leak: 195 -> 725 MB).
     private readonly Channel<KeyframeGrab> _channel = Channel.CreateBounded<KeyframeGrab>(new BoundedChannelOptions(6)
     {
-        FullMode = BoundedChannelFullMode.DropWrite,
+        FullMode = BoundedChannelFullMode.Wait,
         SingleReader = true,
     });
     private readonly Func<IStore?> _store;
@@ -104,6 +108,11 @@ internal sealed class KeyframePipeline : IAsyncDisposable
     private string _encoderName = "";
     private Task<bool>? _wait;
     private long _lastMissingLog = -1;
+    private readonly TimeSpan _ocrTimeout;
+    private TimeSpan _ocrWait;   // current OCR timeout: NextOcrWait (keyframe thread only)
+
+    /// <summary>Current wait for one OCR read (status, tests).</summary>
+    public TimeSpan OcrWait => _ocrWait;
 
     /// <summary>OCR failure streak and name/address detector state, for the log and the status (A21, C9).</summary>
     public OcrHealth OcrHealth { get; } = new();
@@ -154,8 +163,9 @@ internal sealed class KeyframePipeline : IAsyncDisposable
     }
 
     public KeyframePipeline(Func<IStore?> store, Func<Settings> settings, Action<CaptureMeta> stored,
-        IKeyframeReader? reader = null, RedactionMasks? masks = null)
+        IKeyframeReader? reader = null, RedactionMasks? masks = null, TimeSpan? ocrTimeout = null)
     {
+        _ocrTimeout = _ocrWait = ocrTimeout ?? OcrTimeout;
         _store = store;
         _settings = settings;
         _stored = stored;
@@ -373,8 +383,10 @@ internal sealed class KeyframePipeline : IAsyncDisposable
         try
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            timeout.CancelAfter(OcrTimeout);
+            timeout.CancelAfter(_ocrWait);
+            var sw = Stopwatch.StartNew();
             var r = _reader!.ReadAsync(copy, g.Width, g.Height, g.Stride, entities, timeout.Token).GetAwaiter().GetResult();
+            _ocrWait = NextOcrWait(_ocrTimeout, _ocrWait, sw.Elapsed, timedOut: false);
             return (r, false, "");
         }
         catch (WorkerException ex) when (ex.Message.StartsWith("Model not installed", StringComparison.Ordinal))
@@ -382,8 +394,24 @@ internal sealed class KeyframePipeline : IAsyncDisposable
             return (null, true, ex.Message);
         }
         catch (WorkerException ex) { return (null, false, ex.Message); }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested) { return (null, false, "timeout"); }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            var was = _ocrWait;
+            _ocrWait = NextOcrWait(_ocrTimeout, was, was, timedOut: true);
+            if (_ocrWait > was) Log.Info($"ocr took over {was.TotalSeconds:0} s: next keyframes wait up to {_ocrWait.TotalSeconds:0} s");
+            return (null, false, $"timeout after {was.TotalSeconds:0} s");
+        }
         finally { Array.Clear(copy); }
+    }
+
+    /// <summary>OCR timeout for the next read. A timeout doubles it (up to MaxOcrTimeoutFactor x baseline): on a slow
+    /// CPU a dense page took 35 s against 30 s, so every keyframe was dropped and re-read forever, the worker never idle.
+    /// A read that finished sets it to twice its time, never under the baseline. Pure.</summary>
+    internal static TimeSpan NextOcrWait(TimeSpan baseline, TimeSpan current, TimeSpan took, bool timedOut)
+    {
+        var max = baseline * MaxOcrTimeoutFactor;
+        var next = timedOut ? current * 2 : took * 2;
+        return next < baseline ? baseline : next > max ? max : next;
     }
 
     private static byte[] CopyPixels(KeyframeGrab g)
