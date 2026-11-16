@@ -61,10 +61,13 @@ internal sealed unsafe class BrowserBadgeDetector : IDisposable
         if (_cache.TryGetValue(hwnd, out var c) && now - c.At < c.Result switch { BadgeResult.Private => 600_000, BadgeResult.CheckFailed => 5_000, _ => 30_000 })
             return c.Result;
         var sw = Stopwatch.StartNew();
+        _shortCache = false;
         var r = Probe(hwnd);
         LastCheckMs = sw.Elapsed.TotalMilliseconds;
         if (_cache.Count > 256) _cache.Clear();
-        _cache[hwnd] = (r, now);
+        // A window without a toolbar is probed again within 5 s whatever the answer, as CheckFailed is: it may still be
+        // initialising (A8). Stamped 25 s back so NoBadge's 30 s lifetime ends after 5 s.
+        _cache[hwnd] = (r, _shortCache && r == BadgeResult.NoBadge ? now - 25_000 : now);
         return r;
     }
 
@@ -77,13 +80,12 @@ internal sealed unsafe class BrowserBadgeDetector : IDisposable
             if (fromHandle(_uia, hwnd, &root) < 0 || root == 0) return BadgeResult.CheckFailed;
             // The root element's name ends in "(Incognito)" / "(InPrivate)" in Chrome and Edge, also in fullscreen or
             // kiosk mode where no toolbar exists (A8).
-            if (RootNameIsPrivate(ElementName(root))) return BadgeResult.Private;
+            var rootName = ElementName(root);
+            if (RootNameIsPrivate(rootName)) return BadgeResult.Private;
             var findFirst = (delegate* unmanaged[Stdcall]<nint, int, nint, nint*, int>)Ole.Slot(root, 5);
             // Search the toolbar first so the walk does not descend into page content.
             if (findFirst(root, TreeScope_Descendants, _toolbarCondition, &toolbar) < 0) return BadgeResult.CheckFailed;
-            // No toolbar (fullscreen, kiosk, window still initialising): the badge cannot be seen, so fail closed with the
-            // short CheckFailed cache instead of caching NoBadge for 30 s (A8).
-            if (toolbar == 0) return BadgeResult.CheckFailed;
+            if (toolbar == 0) { _shortCache = true; return NoToolbarResult(rootName); }
             var findInScope = (delegate* unmanaged[Stdcall]<nint, int, nint, nint*, int>)Ole.Slot(toolbar, 5);
             if (findInScope(toolbar, TreeScope_Descendants, _badgeCondition, &hit) < 0) return BadgeResult.CheckFailed;
             return hit != 0 ? BadgeResult.Private : BadgeResult.NoBadge;
@@ -100,6 +102,19 @@ internal sealed unsafe class BrowserBadgeDetector : IDisposable
             Ole.Release(root);
         }
     }
+
+    private bool _shortCache;
+
+    /// <summary>
+    /// A window with no toolbar (F11 fullscreen, kiosk, installed web apps, undocked DevTools, picture-in-picture, or one
+    /// still initialising): the badge cannot be seen there, but the root name carries the private tag in Chrome and Edge,
+    /// and RootNameIsPrivate already checked it. A readable name without the tag is NoBadge; only an unreadable or empty
+    /// name fails closed (A8). Pure.
+    /// </summary>
+    internal static BadgeResult NoToolbarResult(string? rootName) =>
+        RootNameIsPrivate(rootName) ? BadgeResult.Private
+        : string.IsNullOrWhiteSpace(rootName) ? BadgeResult.CheckFailed
+        : BadgeResult.NoBadge;
 
     /// <summary>The element's current name, or "" when it cannot be read.</summary>
     private static string ElementName(nint element)

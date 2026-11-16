@@ -164,6 +164,32 @@ public sealed class Sweep3JCoreTests : IAsyncDisposable
         Assert.Equal("", a.QuerySha256);   // the row stays, the hash of what was searched goes
     }
 
+    /// <summary>Review S4: a site purge blanks the audit hashes of searches for the purged terms, saved searches naming
+    /// them included, so searching the term again does not reveal the old row on the Audit page.</summary>
+    [Fact]
+    public async Task B9_site_purge_clears_the_audit_hashes_of_its_terms()
+    {
+        using var h = new TempHome("dpapi");
+        var st = SettingsStore.Load(h.Path);
+        using var vault = new KeyVault(h.Path, () => st.Current, probeHello: false);
+        Assert.True(vault.TryLoadSilent());
+        var p = Processor(st, vault, new FakeAgent(), _t.Store, h.Path);
+        async Task<(bool Ok, JsonElement Data, string? Error)> C(string l) => Envelope.Parse((await p.HandleAsync(_ui, l, CancellationToken.None)).Line);
+        var id = _t.Store.AddScreenCapture(Caps.Screen(DateTimeOffset.UtcNow.AddDays(-2), "chrome.exe", "video page") with { Site = "pornhub.com" });
+        _t.Store.SetEmbedding(id, Vec.Seeded(9), Vec.Info);
+        Assert.True((await C("search pornhub")).Ok);
+        Assert.True((await C("search pornhub videos")).Ok);
+        Assert.True((await C("history add pornhub videos")).Ok);
+        Assert.True((await C("search invoice")).Ok);   // unrelated: keeps its hash
+        var preview = await C("purge site pornhub.com");
+        Assert.True(preview.Ok, preview.Error);
+        Assert.True((await C("purge confirm " + preview.Data.GetProperty("confirm").GetString())).Ok);
+        var audit = _t.Store.ReadAudit(50).Where(a => a.Verb == "search").ToList();
+        Assert.Equal(3, audit.Count);
+        Assert.Equal(2, audit.Count(a => a.QuerySha256 == ""));
+        Assert.Contains(audit, a => a.QuerySha256 == p.QueryHash("invoice"));
+    }
+
     // ---- B11: a throwing maintenance still raises the retention notice
 
     [Fact]
@@ -255,6 +281,26 @@ public sealed class Sweep3JCoreTests : IAsyncDisposable
         Assert.False(v2.WouldSetPassphrase);
         Assert.True(KeyVault.ValidNewPassphrase("12345678"));
         Assert.False(KeyVault.ValidNewPassphrase("        "));
+    }
+
+    /// <summary>Review S1: an install already in the B7 state (keyProtection passphrase, unlockMethod password, key still
+    /// dpapi) with a 6-character unlock password still unlocks: the 8-character passphrase rule is not applied to it.</summary>
+    [Fact]
+    public async Task B14_rule_does_not_apply_to_a_short_unlock_password()
+    {
+        using var h = new TempHome("dpapi");
+        var st = SettingsStore.Load(h.Path);
+        using var vault = new KeyVault(h.Path, () => st.Current, probeHello: false);
+        Assert.True(vault.TryLoadSilent());
+        var agent = new FakeAgent();
+        var p = Processor(st, vault, agent, _t.Store, h.Path);
+        async Task<(bool Ok, JsonElement Data, string? Error)> C(string l) => Envelope.Parse((await p.HandleAsync(_ui, l, CancellationToken.None)).Line);
+        Assert.True((await C("password set {\"new\":\"abc123\"}")).Ok);
+        Assert.Null(st.TryUpdate(JsonDocument.Parse("{\"security\":{\"keyProtection\":\"passphrase\",\"unlockMethod\":\"password\"}}").RootElement));   // legacy state
+        Assert.True(vault.WouldSetPassphrase);
+        agent.Unlocked = false;
+        var r = await C("unlock abc123");
+        Assert.True(r.Ok, r.Error);
     }
 
     // ---- B16: the unlock password alone cannot move a passphrase-wrapped key off passphrase

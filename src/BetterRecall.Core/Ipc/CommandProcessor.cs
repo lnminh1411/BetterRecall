@@ -567,6 +567,24 @@ public sealed partial class CommandProcessor
         finally { CryptographicOperations.ZeroMemory(key); }
     }
 
+    /// <summary>Queries whose audit hash an app or site purge blanks (B9): the purge terms themselves (as typed and lower
+    /// case) and the saved searches that name them, read before the purge deletes those. Searching the term again would
+    /// otherwise match the old hash on the Audit page. Searches neither saved nor equal to a term cannot be found.</summary>
+    private static List<string> AuditQueriesFor(IStore store, PurgeScope scope)
+    {
+        var needles = Store.EncryptedStore.HistoryNeedles(scope);
+        var queries = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var n in needles) { queries.Add(n); queries.Add(n.ToLowerInvariant()); }
+        if (needles.Count > 0)
+            try
+            {
+                foreach (var h in store.History(1000))
+                    if (needles.Any(n => h.Q.Contains(n, StringComparison.OrdinalIgnoreCase))) queries.Add(h.Q);
+            }
+            catch (Exception ex) { Log.Warn("purge: history read failed", ex); }
+        return [.. queries];
+    }
+
     private int MaxResponseBytes(PipeKind k) => k == PipeKind.Ui ? UiMaxResponseBytes : S.Ipc.MaxResponseBytes;
 
     // ------------------------------------------------------------ search
@@ -952,7 +970,10 @@ public sealed partial class CommandProcessor
                 var st = _d.Store();
                 if (st == null) return Err(NotOpenError);
                 var scope2 = ticket.Span is { } span ? PurgeScope.Last(span) : ticket.Scope;
+                var auditQueries = scope2.Kind is "app" or "site" ? AuditQueriesFor(st, scope2) : null;
                 int n = st.Purge(scope2);
+                if (auditQueries is { Count: > 0 } && st is Store.EncryptedStore es)
+                    es.ClearAuditQueryHashes(auditQueries.SelectMany(q => new[] { QueryHash(q), Sha256(q) }).Where(h => h.Length > 0).Distinct().ToList());
                 // Unsaved chats, approval cards and running turns that quote a deleted capture go too.
                 bool window = scope2.Kind is "last" or "range";
                 _chat?.ForgetCaptures(id => st.Get(id) == null, window ? scope2.From : null, window ? scope2.To : null);
@@ -1022,7 +1043,9 @@ public sealed partial class CommandProcessor
         bool passphraseTry = rest.Length > 0 && (KeyNeedsPassphrase || !UsesPassword && keys.KeyLoaded && keys.Protection == Crypto.KeyVault.ModePassphrase);
         if (passphraseTry && keys.PassphraseRetryAfterSeconds is > 0 and var passWait) return Err(ErrTooMany(passWait));
         // A passphrase that would create the key or re-wrap it must meet the rule (B14); say so instead of "Wrong passphrase.".
-        if (rest.Length > 0 && keys is Crypto.KeyVault { WouldSetPassphrase: true } && !Crypto.KeyVault.ValidNewPassphrase(rest)) return Err(ErrPassphraseRule);
+        // Only where the text is a passphrase: with the password method and a loaded key it is the unlock password (6+).
+        if (rest.Length > 0 && (KeyNeedsPassphrase || !UsesPassword) && keys is Crypto.KeyVault { WouldSetPassphrase: true }
+            && !Crypto.KeyVault.ValidNewPassphrase(rest)) return Err(ErrPassphraseRule);
         if (KeyNeedsPassphrase)
         {
             if (rest.Length > 0)

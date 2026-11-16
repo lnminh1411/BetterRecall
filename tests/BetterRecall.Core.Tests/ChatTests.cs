@@ -967,25 +967,28 @@ public sealed class ChatServiceTests : IDisposable
         Assert.Equal("done", again[^1].Type);
     }
 
-    /// <summary>Sweep 3 B2: a capture the user removed on the card is asked about again on the next question of the
-    /// chat, listed alone, instead of being sent without a card.</summary>
+    /// <summary>Sweep 3 B2: a capture the user removed on the card stays out of later questions of the chat: it is
+    /// neither sent nor asked about again. Forgetting the approval (lock) forgets that too.</summary>
     [Fact]
-    public async Task Removed_capture_asks_again_on_the_next_question()
+    public async Task Removed_capture_stays_out_of_later_questions_without_a_card()
     {
         var chatId = await ApprovedChat();   // audio removed on the card
-        int before = _h.Bodies.Count;
-        _p.Turns.Enqueue(ScriptProvider.Search());
-        var ev = await Send(chatId, "And the phone number?");
-        var ap = ev[^1];
-        Assert.Equal("approval", ap.Type);
-        Assert.Equal(_audio, Assert.Single(ap.Items!).Id);
-        Assert.Equal(before + 1, _h.Bodies.Count);
+        for (int i = 0; i < 2; i++)
+        {
+            _p.Turns.Enqueue(ScriptProvider.Search());
+            _p.Turns.Enqueue(ScriptProvider.Answer("Without it."));
+            var ev = await Send(chatId, "And the phone number?");
+            Assert.DoesNotContain(ev, e => e.Type == "approval");
+            Assert.Equal("done", ev[^1].Type);
+        }
         Assert.DoesNotContain("hunter2", string.Concat(_h.Bodies));
+        Assert.Contains("Acme invoice", _h.Bodies[^1]);   // the kept capture is still shared
 
-        _p.Turns.Enqueue(ScriptProvider.Answer("Without it."));
-        var done = await Approve(ap.Token!, _audio);   // removed again: still not sent
-        Assert.Equal("done", done[^1].Type);
-        Assert.DoesNotContain("hunter2", string.Concat(_h.Bodies));
+        _chat.ForgetApprovals();
+        _p.Turns.Enqueue(ScriptProvider.Search());
+        var again = (await Send(chatId, "Again?"))[^1];
+        Assert.Equal("approval", again.Type);
+        Assert.Contains(again.Items!, x => x.Id == _audio);   // a fresh card offers it again
     }
 
     /// <summary>Sweep 3 B3: the first search of a later turn (the saved transcript already holds capture text that can

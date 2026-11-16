@@ -791,7 +791,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         _thumbs.ClearCache();
         _systemAudio?.Clear();
         _micAudio?.Clear();
-        _gate.Close();
+        _gate.LockByUser();   // locks also with security.requireUnlock off, so the UI closes decrypted dialogs (C2, D4)
         int purged = 0;
         int minutes = Math.Max(0, S.Privacy.PanicPurgeMinutes);
         if (Store is { } store)

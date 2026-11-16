@@ -823,6 +823,23 @@ public sealed partial class EncryptedStore : IStore
         return n;
     }
 
+    /// <summary>Blanks the hash of audit search rows whose hash is one of these (an app or site purge, B9). The rows stay.</summary>
+    public int ClearAuditQueryHashes(IReadOnlyCollection<string> hashes)
+    {
+        if (hashes.Count == 0) return 0;
+        int n = 0;
+        lock (_wl)
+        {
+            ThrowIfDisposed();
+            foreach (var h in hashes)
+            {
+                using var cmd = Cmd(_w, "UPDATE audit SET sha = '' WHERE verb = 'search' AND sha = $sha", ("$sha", h));
+                n += cmd.ExecuteNonQuery();
+            }
+        }
+        return n;
+    }
+
     /// <summary>Fences a time-window purge: "last" refuses anything stamped before its end, a range ending within
     /// FenceSlack of now (or later) refuses its window up to now. Caller holds _wl.</summary>
     private void FenceLocked(PurgeScope scope)

@@ -96,8 +96,9 @@ public sealed class ChatService(ChatDeps d)
 
     private readonly Lock _gate = new();
     // Per chat: share level approved, the endpoint it was approved for (a new endpoint asks again) and the capture ids
-    // the user kept on an approval card.
-    private readonly Dictionary<string, (int Rank, string Endpoint, HashSet<string> Reviewed)> _approved = new(StringComparer.Ordinal);
+    // the user kept on an approval card, and the ones the user removed on a card: those stay out of every later round of
+    // the chat without asking again (kept in the same entry, so every path that forgets an approval forgets them too).
+    private readonly Dictionary<string, (int Rank, string Endpoint, HashSet<string> Reviewed, HashSet<string> Denied)> _approved = new(StringComparer.Ordinal);
 
     private bool ApprovedLocked(string chatId, int rank, string endpoint) =>
         _approved.TryGetValue(chatId, out var a) && a.Rank >= rank && a.Endpoint == endpoint;
@@ -266,9 +267,11 @@ public sealed class ChatService(ChatDeps d)
             {
                 bool same = _approved.TryGetValue(p.Turn.ChatId, out var a) && a.Endpoint == p.Turn.Endpoint;
                 var reviewed = same ? a.Reviewed : new HashSet<string>(StringComparer.Ordinal);
+                var denied = same ? a.Denied : new HashSet<string>(StringComparer.Ordinal);
                 foreach (var h in p.Plans.SelectMany(pl => pl?.Hits ?? []))
                     if (!remove.Contains(h.Hit.Id)) reviewed.Add(h.Hit.Id);
-                _approved[p.Turn.ChatId] = (Math.Max(p.Rank, same ? a.Rank : -1), p.Turn.Endpoint, reviewed);
+                    else { denied.Add(h.Hit.Id); reviewed.Remove(h.Hit.Id); }
+                _approved[p.Turn.ChatId] = (Math.Max(p.Rank, same ? a.Rank : -1), p.Turn.Endpoint, reviewed, denied);
             }
             return p.Plans.Select(pl => pl == null ? null : pl with { Hits = pl.Hits.Where(h => !remove.Contains(h.Hit.Id)).ToList() }).ToList();
         });
@@ -408,6 +411,11 @@ public sealed class ChatService(ChatDeps d)
             if (purgedMeanwhile)
                 for (int i = 0; i < plans.Count; i++)
                     if (plans[i] is { } pl) plans[i] = pl with { Hits = pl.Hits.Where(h => store.Get(h.Hit.Id) != null).ToList() };
+            // Captures the user removed on a card in this chat stay out, without a card each time (B2).
+            lock (_gate)
+                if (_approved.TryGetValue(turn.ChatId, out var ap) && ap.Endpoint == turn.Endpoint && ap.Denied.Count > 0)
+                    for (int i = 0; i < plans.Count; i++)
+                        if (plans[i] is { } pl) plans[i] = pl with { Hits = pl.Hits.Where(h => !ap.Denied.Contains(h.Hit.Id)).ToList() };
             bool sharesData = plans.Any(p => p is { Hits.Count: > 0 });
             bool approved;
             HashSet<string> unseen;
@@ -534,8 +542,8 @@ public sealed class ChatService(ChatDeps d)
     /// <summary>
     /// Captures this round would share that the user has not reviewed: hits that were neither kept on an approval card
     /// in this chat nor shared earlier in this turn. Every round counts, the first search of a later turn too: the chat's
-    /// transcript already holds capture text that can steer it (B3), and a capture the user removed on a card is not in
-    /// Reviewed, so it is asked about again instead of being sent on the next question (B2).
+    /// transcript already holds capture text that can steer it (B3). Captures the user removed on a card were dropped from
+    /// the plans before this (Denied), so they are neither sent nor asked about again (B2).
     /// </summary>
     private HashSet<string> UnseenLocked(Turn turn, IReadOnlyList<SharePlan?> plans)
     {

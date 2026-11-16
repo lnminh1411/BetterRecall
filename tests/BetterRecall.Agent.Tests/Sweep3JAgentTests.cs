@@ -108,6 +108,18 @@ public class Sweep3JAgentTests
     public void A8_root_name_private_tag(string? name, bool expected) =>
         Assert.Equal(expected, BrowserBadgeDetector.RootNameIsPrivate(name));
 
+    /// <summary>Review S3: windows without a toolbar (installed web apps, DevTools, picture-in-picture, F11) are not
+    /// hidden when their root name is readable and carries no private tag; an unreadable name still fails closed.</summary>
+    [Theory]
+    [InlineData("Mail - Outlook", "NoBadge")]
+    [InlineData("DevTools - example.com/", "NoBadge")]
+    [InlineData("Picture in picture", "NoBadge")]
+    [InlineData("YouTube - Google Chrome (Incognito)", "Private")]
+    [InlineData("", "CheckFailed")]
+    [InlineData(null, "CheckFailed")]
+    public void A8_no_toolbar_result(string? rootName, string expected) =>
+        Assert.Equal(Enum.Parse<BadgeResult>(expected), BrowserBadgeDetector.NoToolbarResult(rootName));
+
     [Fact]
     public void A8_edge_badge_name_is_matched()
     {
@@ -214,6 +226,16 @@ public class Sweep3JAgentTests
         t.Start();
         Assert.True(t.Join(20000));
         Assert.Null(failed);
+    }
+
+    /// <summary>Review S2: the first failure warns (long.MinValue never reaches the subtraction), then once per 10 min.</summary>
+    [Fact]
+    public void A15_password_warning_is_rate_limited_and_fires_first()
+    {
+        Assert.True(GuardrailService.WarnDue(long.MinValue, 5));
+        Assert.True(GuardrailService.WarnDue(long.MinValue, long.MinValue + 1));
+        Assert.False(GuardrailService.WarnDue(1_000, 1_000 + 599_999));
+        Assert.True(GuardrailService.WarnDue(1_000, 1_000 + 600_000));
     }
 
     // ---- A16 + CA-S2: raw PCM is zeroed, not just emptied

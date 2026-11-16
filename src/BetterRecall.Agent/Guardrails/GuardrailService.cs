@@ -182,10 +182,14 @@ internal sealed class GuardrailService : IDisposable
     {
         Interlocked.Increment(ref PasswordProbeFailures);
         long now = Environment.TickCount64;
-        if (now - _passwordWarnAt < 600_000) return;
+        if (!WarnDue(_passwordWarnAt, now)) return;
         _passwordWarnAt = now;
         Log.Warn($"password field search failed for {fg.ProcessName} (UI Automation); its password fields are not masked ({Interlocked.Read(ref PasswordProbeFailures)} failures so far)");
     }
+
+    /// <summary>The first warning, then one per 10 minutes. long.MinValue (never warned) must not reach the subtraction:
+    /// it overflowed, so the warning never fired. Pure.</summary>
+    internal static bool WarnDue(long lastWarnAt, long now) => lastWarnAt == long.MinValue || now - lastWarnAt >= 600_000;
 
     public void Dispose()
     {
