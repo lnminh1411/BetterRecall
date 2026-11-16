@@ -77,6 +77,12 @@ internal sealed class Services
         MediaClient.ResponseClassified += k => ui.TryEnqueue(() => OnClassified(k));
         Subscription.StatusReceived += s => ui.TryEnqueue(() => { SetConnection(AgentErrorKind.None); ApplyStatus(s); });
         Subscription.Disconnected += k => ui.TryEnqueue(() => SetConnection(k));
+        Subscription.Connected += () => ui.TryEnqueue(() =>
+        {
+            // The first connection follows InitAsync's fetch; every later one may face a restarted agent whose settings
+            // changed (reset to defaults, file edited): window exclusion, isolation and consent follow them (D2).
+            if (++_subscriptionConnects > 1) _ = ReloadSettingsAsync();
+        });
         _agentWatch.Exited += () => ui.TryEnqueue(() => AgentExited?.Invoke());
     }
 
@@ -117,6 +123,23 @@ internal sealed class Services
         Settings.Load(r.Value!);
         ApplySecurity();
         SettingsLoaded?.Invoke();
+    }
+
+    private int _subscriptionConnects;
+
+    /// <summary>The agent asks for consent (its settings say capture.consented is false) after a reconnect.</summary>
+    public event Action? ConsentNeeded;
+
+    /// <summary>Re-reads settings after a reconnect, keeping pending edits, and re-applies window exclusion, memory
+    /// isolation and theme (D2).</summary>
+    public async Task ReloadSettingsAsync()
+    {
+        var r = await Api.SettingsGetAsync();
+        if (!r.Ok) return;
+        Settings.Refresh(r.Value!);
+        ApplySecurity();
+        SettingsLoaded?.Invoke();
+        if (!Consented) ConsentNeeded?.Invoke();
     }
 
     public async Task RefreshStatusAsync()
@@ -198,10 +221,14 @@ internal sealed class Services
         if (wasDown && kind == AgentErrorKind.None) Reconnected?.Invoke();
     }
 
+    /// <summary>Open dialogs that show decrypted content: hidden on lock and when their window hides (C2).</summary>
+    public OpenDialogs<Microsoft.UI.Xaml.Controls.ContentDialog> SensitiveDialogs { get; } = new();
+
     private void SetLocked(bool locked)
     {
         if (Locked == locked) return;
         Locked = locked;
+        if (locked) SensitiveDialogs.HideAll(d => d.Hide());
         LockedChanged?.Invoke();
         if (!locked) Unlocked?.Invoke();
     }

@@ -189,6 +189,7 @@ public sealed class CommandProcessorTests : IDisposable
         Assert.True((await Call(Pub, "status")).Ok);   // not a data verb
         Assert.True((await Call(Pub, "subscribe")).Ok); // status stream is not gated
         Set("{\"security\":{\"requireUnlock\":false}}");
+        _agent.Unlocked = true;   // the agent reports unlocked with requireUnlock off, unless Lock was pressed (sweep 3 D4)
         Assert.True((await Call(Pub, "search acme")).Ok);
         // Store not open at all (key lost, storage error): its own error whatever the settings say, not a lock.
         _storeOpen = false;

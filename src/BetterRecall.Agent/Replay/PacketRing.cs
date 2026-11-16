@@ -122,7 +122,11 @@ internal sealed unsafe class PacketRing : IDisposable
         long size = newCommitted - _committed;
         var p = Win32.VirtualAlloc(_base + _committed, (nuint)size, Win32.MEM_COMMIT, Win32.PAGE_READWRITE);
         if (p == null) throw new OutOfMemoryException("PacketRing commit failed.");
-        if (_lock && !Win32.VirtualLock(_base + _committed, (nuint)size)) _lockFailed = true;
+        if (_lock && !Win32.VirtualLock(_base + _committed, (nuint)size))
+        {
+            if (!_lockFailed) Util.Log.Warn($"replay ring VirtualLock failed ({System.Runtime.InteropServices.Marshal.GetLastPInvokeError()}): replay video can be paged to disk");
+            _lockFailed = true;
+        }
         _committed = newCommitted;
     }
 
@@ -213,8 +217,15 @@ internal sealed unsafe class RingSnapshot : IDisposable
         _packets = new List<RingPacket>(count);
         _locked = lockMemory && size > 0;
         Base = size > 0 ? (byte*)NativeMemory.Alloc((nuint)size) : null;
-        if (_locked) Win32.VirtualLock(Base, (nuint)size);
+        if (_locked && !Win32.VirtualLock(Base, (nuint)size))
+        {
+            LockFailed = true;
+            Util.Log.Warn($"replay snapshot VirtualLock failed ({System.Runtime.InteropServices.Marshal.GetLastPInvokeError()}): the clip being saved can be paged to disk");
+        }
     }
+
+    /// <summary>The copy could not be pinned in RAM (A11).</summary>
+    public bool LockFailed { get; }
 
     public IReadOnlyList<RingPacket> Packets => _packets;
     public long Size => _size;

@@ -595,13 +595,13 @@ public sealed class ChatServiceTests : IDisposable
 
     private static string Answer(List<ChatEvent> ev) => string.Concat(ev.Where(e => e.Type == "text").Select(e => e.Text));
 
-    /// <summary>A chat that asked, was allowed (audio removed) and answered.</summary>
-    private async Task<string> ApprovedChat()
+    /// <summary>A chat that asked, was allowed (audio removed unless keepAll) and answered.</summary>
+    private async Task<string> ApprovedChat(bool keepAll = false)
     {
         _p.Turns.Enqueue(ScriptProvider.Search());
         var ev = await Send(null, "Which invoice did I see?");
         _p.Turns.Enqueue(ScriptProvider.Answer());
-        var done = await Approve(ev[^1].Token!, _audio);
+        var done = await Approve(ev[^1].Token!, keepAll ? [] : [_audio]);
         Assert.Equal("done", done[^1].Type);
         return ev[0].ChatId!;
     }
@@ -657,7 +657,7 @@ public sealed class ChatServiceTests : IDisposable
     [Fact]
     public async Task Same_chat_does_not_ask_again_a_new_chat_does()
     {
-        var chatId = await ApprovedChat();
+        var chatId = await ApprovedChat(keepAll: true);   // every hit reviewed: the next question shares without a card
         _p.Turns.Enqueue(ScriptProvider.Search());
         _p.Turns.Enqueue(ScriptProvider.Answer("Same one [S1]."));
         var ev = await Send(chatId, "And when was that?");
@@ -863,7 +863,7 @@ public sealed class ChatServiceTests : IDisposable
         Assert.Contains(ev, e => e is { Type: "warning", Code: "truncated" });
         Assert.Equal("done", ev[^1].Type);
 
-        var chatId = await ApprovedChat();
+        var chatId = await ApprovedChat(keepAll: true);
         for (int i = 0; i < ChatService.MaxRounds; i++) _p.Turns.Enqueue(ScriptProvider.Search());
         ev = await Send(chatId, "Keep searching");
         Assert.Contains(ev, e => e is { Type: "warning", Code: "rounds" });
@@ -873,7 +873,7 @@ public sealed class ChatServiceTests : IDisposable
     [Fact]
     public async Task Too_many_calls_in_one_round_are_not_run()
     {
-        var chatId = await ApprovedChat();
+        var chatId = await ApprovedChat(keepAll: true);
         _p.Turns.Enqueue(ScriptProvider.Search(calls: ChatService.MaxCallsPerRound + 1));
         _p.Turns.Enqueue(ScriptProvider.Answer());
         var ev = await Send(chatId, "Search a lot");
@@ -965,6 +965,43 @@ public sealed class ChatServiceTests : IDisposable
         _p.Turns.Enqueue(ScriptProvider.Answer("Same [S2]."));
         var again = await Send(chatId, "Once more?");
         Assert.Equal("done", again[^1].Type);
+    }
+
+    /// <summary>Sweep 3 B2: a capture the user removed on the card is asked about again on the next question of the
+    /// chat, listed alone, instead of being sent without a card.</summary>
+    [Fact]
+    public async Task Removed_capture_asks_again_on_the_next_question()
+    {
+        var chatId = await ApprovedChat();   // audio removed on the card
+        int before = _h.Bodies.Count;
+        _p.Turns.Enqueue(ScriptProvider.Search());
+        var ev = await Send(chatId, "And the phone number?");
+        var ap = ev[^1];
+        Assert.Equal("approval", ap.Type);
+        Assert.Equal(_audio, Assert.Single(ap.Items!).Id);
+        Assert.Equal(before + 1, _h.Bodies.Count);
+        Assert.DoesNotContain("hunter2", string.Concat(_h.Bodies));
+
+        _p.Turns.Enqueue(ScriptProvider.Answer("Without it."));
+        var done = await Approve(ap.Token!, _audio);   // removed again: still not sent
+        Assert.Equal("done", done[^1].Type);
+        Assert.DoesNotContain("hunter2", string.Concat(_h.Bodies));
+    }
+
+    /// <summary>Sweep 3 B3: the first search of a later turn (the saved transcript already holds capture text that can
+    /// steer it) asks before sharing a capture nobody reviewed.</summary>
+    [Fact]
+    public async Task First_search_of_a_later_turn_asks_before_sharing_unreviewed_captures()
+    {
+        var chatId = await ApprovedChat(keepAll: true);
+        var bank = _t.Store.AddScreenCapture(Caps.Screen(_now.AddMinutes(-3), "bank.exe", "Bank statement balance"));
+        _t.Store.SetEmbedding(bank, Vec.Seeded(99), Vec.Info);
+        _emb.Map["statement"] = Vec.Seeded(99);
+        _p.Turns.Enqueue(SearchIn("statement", "bank.exe"));   // round 1 of the new turn
+        var ap = (await Send(chatId, "Anything else?"))[^1];
+        Assert.Equal("approval", ap.Type);
+        Assert.Equal(bank, Assert.Single(ap.Items!).Id);
+        Assert.DoesNotContain("Bank statement", string.Concat(_h.Bodies));
     }
 
     [Fact]

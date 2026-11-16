@@ -1,6 +1,47 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) BetterRecall contributors
+using System.Runtime.InteropServices;
+
 namespace BetterRecall.Agent.Audio;
+
+/// <summary>Raw PCM lists are zeroed, not just emptied: List&lt;float&gt;.Clear and RemoveRange only move the count, so
+/// the samples stayed in the backing array until the GC reused it (CA-S2).</summary>
+internal static class Pcm
+{
+    /// <summary>Zeroes the whole backing array, then empties the list.</summary>
+    public static void Wipe(List<float> l)
+    {
+        CollectionsMarshal.SetCount(l, l.Capacity);
+        CollectionsMarshal.AsSpan(l).Clear();
+        l.Clear();
+    }
+
+    /// <summary>RemoveRange(0, n) that zeroes the vacated tail.</summary>
+    public static void RemoveHead(List<float> l, int n)
+    {
+        if (n <= 0) return;
+        int old = l.Count;
+        l.RemoveRange(0, n);
+        int now = l.Count;
+        CollectionsMarshal.SetCount(l, old);
+        CollectionsMarshal.AsSpan(l)[now..].Clear();
+        CollectionsMarshal.SetCount(l, now);
+    }
+
+    /// <summary>AddRange that grows into a new list itself and wipes the old backing array.</summary>
+    public static List<float> Append(List<float> l, ReadOnlySpan<float> data)
+    {
+        if (l.Count + data.Length > l.Capacity)
+        {
+            var n = new List<float>(Math.Max(l.Capacity * 2, l.Count + data.Length));
+            n.AddRange(CollectionsMarshal.AsSpan(l));
+            Wipe(l);
+            l = n;
+        }
+        l.AddRange(data);
+        return l;
+    }
+}
 
 /// <summary>Converts interleaved PCM to 16 kHz mono float32.</summary>
 internal sealed class Resampler
@@ -22,7 +63,7 @@ internal sealed class Resampler
         _bits = fmt.BitsPerSample;
     }
 
-    public void Reset() { _pos = 0; _mono.Clear(); }
+    public void Reset() { _pos = 0; Pcm.Wipe(_mono); }
 
     /// <summary>Appends resampled output for this chunk to output. Leftover input carries to the next call.</summary>
     public void Process(ReadOnlySpan<byte> data, int frames, bool silent, List<float> output)
@@ -46,7 +87,7 @@ internal sealed class Resampler
         if (_inRate == OutRate)
         {
             output.AddRange(_mono);
-            _mono.Clear();
+            Pcm.Wipe(_mono);
             return;
         }
         double step = (double)_inRate / OutRate;
@@ -72,7 +113,7 @@ internal sealed class Resampler
             _pos += step;
         }
         int consumed = Math.Min(_mono.Count, (int)Math.Floor(_pos));
-        _mono.RemoveRange(0, consumed);
+        Pcm.RemoveHead(_mono, consumed);
         _pos -= consumed;
     }
 }
@@ -93,7 +134,7 @@ internal sealed class SpeechSegmenter
     private const int MinSpeechFrames = 15;    // 300 ms of speech in a segment
 
     private readonly Func<int> _maxSegmentS;
-    private readonly List<float> _pending = new();
+    private List<float> _pending = new();
     private readonly Queue<float[]> _preRoll = new();
     private List<float>? _seg;
     private long _segStart;
@@ -120,10 +161,10 @@ internal sealed class SpeechSegmenter
         if (Math.Abs(qpc100ns - expected) > 5_000_000)
         {
             Flush(output);
-            _pending.Clear();
+            Pcm.Wipe(_pending);
             _streamStartQpc = qpc100ns - _streamPos * 10_000_000L / Rate;
         }
-        foreach (var s in samples) _pending.Add(s);
+        _pending = Pcm.Append(_pending, samples);
         int offset = 0;
         var frame = new float[FrameSamples];
         while (_pending.Count - offset >= FrameSamples)
@@ -133,7 +174,8 @@ internal sealed class SpeechSegmenter
             ProcessFrame(frame, output);
             _streamPos += FrameSamples;
         }
-        _pending.RemoveRange(0, offset);
+        Pcm.RemoveHead(_pending, offset);
+        Array.Clear(frame);
     }
 
     private long QpcAt(long streamSample) => _streamStartQpc + streamSample * 10_000_000L / Rate;
@@ -152,18 +194,18 @@ internal sealed class SpeechSegmenter
         if (_seg is null)
         {
             _preRoll.Enqueue((float[])frame.Clone());
-            if (_preRoll.Count > PreRollFrames) _preRoll.Dequeue();
+            if (_preRoll.Count > PreRollFrames) Array.Clear(_preRoll.Dequeue());
             if (!speech) return;
             _seg = new List<float>(Rate * 4);
             _segStart = _streamPos - (_preRoll.Count - 1) * FrameSamples;
-            foreach (var f in _preRoll) _seg.AddRange(f);
-            _preRoll.Clear();
+            foreach (var f in _preRoll) _seg = Pcm.Append(_seg, f);
+            ClearPreRoll();
             _speechFrames = 1;
             _silenceRun = 0;
             _lastQuietFrameEnd = -1;
             return;
         }
-        _seg.AddRange(frame);
+        _seg = Pcm.Append(_seg, frame);
         if (speech) { _speechFrames++; _silenceRun = 0; }
         else { _silenceRun++; _lastQuietFrameEnd = _seg.Count; }
 
@@ -189,13 +231,14 @@ internal sealed class SpeechSegmenter
         length = Math.Min(length, seg.Count);
         if (_speechFrames >= MinSpeechFrames)
         {
-            var samples = seg.GetRange(0, length).ToArray();
+            var samples = CollectionsMarshal.AsSpan(seg)[..length].ToArray();   // no GetRange temporary list (CA-S2)
             output.Add(new SpeechSegment(samples, QpcAt(_segStart), length * 1000 / Rate));
         }
         // Remainder after a mid-speech cut starts a new segment immediately.
         if (length < seg.Count)
         {
-            var rest = seg.GetRange(length, seg.Count - length);
+            var rest = new List<float>(seg.Capacity);
+            rest.AddRange(CollectionsMarshal.AsSpan(seg)[length..]);
             _segStart += length;
             _seg = rest;
             _speechFrames = 1;
@@ -205,10 +248,15 @@ internal sealed class SpeechSegmenter
         else
         {
             _seg = null;
-            _preRoll.Clear();
+            ClearPreRoll();
         }
         // Zero our copy.
-        seg.Clear();
+        Pcm.Wipe(seg);
+    }
+
+    private void ClearPreRoll()
+    {
+        while (_preRoll.Count > 0) Array.Clear(_preRoll.Dequeue());
     }
 
     /// <summary>Ends the current segment (stream stop, long gap).</summary>
@@ -220,9 +268,9 @@ internal sealed class SpeechSegmenter
     /// <summary>Panic: drop buffered audio.</summary>
     public void Clear()
     {
-        _seg?.Clear();
+        if (_seg is not null) Pcm.Wipe(_seg);
         _seg = null;
-        _pending.Clear();
-        _preRoll.Clear();
+        Pcm.Wipe(_pending);
+        ClearPreRoll();
     }
 }

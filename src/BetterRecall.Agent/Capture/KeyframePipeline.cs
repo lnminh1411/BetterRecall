@@ -176,10 +176,11 @@ internal sealed class KeyframePipeline : IAsyncDisposable
         }
     }
 
+    /// <summary>Panic: forget de-dup state. The replay redaction masks stay (A9): they are positions, not content, and
+    /// the screen still shows the text they cover; each monitor's next kept keyframe replaces them.</summary>
     public void ResetDedup()
     {
         lock (_dedup) foreach (var d in _dedup.Values) d.Reset();
-        _masks?.Clear();
     }
 
     private volatile bool _flush;

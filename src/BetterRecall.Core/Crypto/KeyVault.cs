@@ -213,6 +213,24 @@ public sealed class KeyVault : IKeyVault, IDisposable
         }
     }
 
+    public const int PassphraseMinLength = 8, PassphraseMaxLength = 1024;
+
+    /// <summary>Rule for a passphrase that creates the key or re-wraps it (B14): a typo or a 1-character passphrase made
+    /// the data unrecoverable or guessable offline. Existing passphrases are checked as they are.</summary>
+    public static bool ValidNewPassphrase(string? p) =>
+        p is { Length: >= PassphraseMinLength and <= PassphraseMaxLength } && !string.IsNullOrWhiteSpace(p);
+
+    /// <summary>The next UnlockWithPassphrase would set a new passphrase (create the key, or re-wrap a tpm/dpapi key).</summary>
+    public bool WouldSetPassphrase
+    {
+        get
+        {
+            lock (_gate)
+                return _key != null ? _fileMode != ModePassphrase && _settings().Security.KeyProtection == ModePassphrase
+                    : _fileMode == null && !DataExists();
+        }
+    }
+
     public bool UnlockWithPassphrase(string passphrase)
     {
         if (string.IsNullOrEmpty(passphrase)) return false;
@@ -233,6 +251,7 @@ public sealed class KeyVault : IKeyVault, IDisposable
                 if (s.Security.KeyProtection == ModePassphrase)
                 {
                     // First passphrase for a key wrapped by tpm or dpapi: switch the wrap.
+                    if (!ValidNewPassphrase(passphrase)) return false;
                     bool wasTpm = _fileMode == ModeTpm;
                     WriteWrapped(_key, ModePassphrase, passphrase);
                     _fileMode = ModePassphrase;
@@ -245,6 +264,7 @@ public sealed class KeyVault : IKeyVault, IDisposable
             if (_fileMode == null)
             {
                 if (DataExists()) return false;   // key file missing next to existing data: lost, never replaced here
+                if (!ValidNewPassphrase(passphrase)) return false;
                 var key = SecureKey.Random(s.Security.MemoryIsolation);
                 WriteWrapped(key, ModePassphrase, passphrase);
                 SetLoaded(key, ModePassphrase);

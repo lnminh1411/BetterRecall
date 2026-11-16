@@ -753,8 +753,11 @@ public sealed partial class EncryptedStore : IStore
                 break;
             case "app":
                 if (string.IsNullOrWhiteSpace(scope.App)) throw new ArgumentException("App needed.");
-                where = "app_lc = $app";
-                ps.Add(("$app", scope.App.Trim().ToLowerInvariant()));
+                // With or without ".exe": captures store the process name, users type "claude.exe" (D13).
+                where = "(app_lc = $app OR app_lc = $app2)";
+                var appLc = scope.App.Trim().ToLowerInvariant();
+                ps.Add(("$app", appLc));
+                ps.Add(("$app2", appLc.EndsWith(".exe", StringComparison.Ordinal) ? appLc[..^4] : appLc + ".exe"));
                 break;
             case "site":
                 if (string.IsNullOrWhiteSpace(scope.Site)) throw new ArgumentException("Site needed.");
@@ -803,6 +806,9 @@ public sealed partial class EncryptedStore : IStore
             if (scope.Kind is "last" or "range" && scope.From != null && scope.To != null)
             {
                 Exec(_w, "DELETE FROM search_history WHERE ts >= $from AND ts <= $to",
+                    ("$from", scope.From.Value.ToUnixTimeMilliseconds()), ("$to", scope.To.Value.ToUnixTimeMilliseconds()));
+                // The audit rows stay (who searched, when), but not the hash of what was searched in the window (B9).
+                Exec(_w, "UPDATE audit SET sha = '' WHERE verb = 'search' AND ts >= $from AND ts <= $to",
                     ("$from", scope.From.Value.ToUnixTimeMilliseconds()), ("$to", scope.To.Value.ToUnixTimeMilliseconds()));
                 DeleteChatsInWindowLocked(scope.From.Value, scope.To.Value);   // chats active in the window go too
             }
@@ -1348,10 +1354,24 @@ public sealed partial class EncryptedStore : IStore
     /// Hourly maintenance in short _wl slices (one retention chunk, one thinning day, one month file, ...), so capture
     /// inserts, keyframe reads (thumbnails, detail pane, chat images) and a panic purge wait for one slice, not for the
     /// whole run. Purge and keyframe reads enter with priority: maintenance does not start its next slice while one waits.
+    /// The retention notice is raised even when a step throws (a damaged month file, VACUUM out of memory or disk), so
+    /// the RAM copies of rows already deleted (thumbnails, chats, approvals, jobs) are dropped (B11).
     /// </summary>
     public void RunMaintenance(Settings settings)
     {
         ArgumentNullException.ThrowIfNull(settings);
+        try { RunMaintenanceSteps(settings); }
+        finally
+        {
+            PurgeNotice? notice = null;
+            try { notice = MaintenanceSlice(() => TakeNoticeLocked("retention")); }
+            catch (Exception ex) { Log.Warn("maintenance notice", ex); }
+            Raise(notice);
+        }
+    }
+
+    private void RunMaintenanceSteps(Settings settings)
+    {
         var sw = Stopwatch.StartNew();
         var now = DateTimeOffset.UtcNow;
         long cutoff = now.AddDays(-settings.Retention.Days).ToUnixTimeMilliseconds();
@@ -1430,7 +1450,6 @@ public sealed partial class EncryptedStore : IStore
             return true;
         });
         Log.Info($"maintenance: {expired} rows expired in {sw.ElapsedMilliseconds} ms");
-        Raise(MaintenanceSlice(() => TakeNoticeLocked("retention")));
     }
 
     /// <summary>Count of callers waiting for _wl with priority (purge, keyframe reads).</summary>

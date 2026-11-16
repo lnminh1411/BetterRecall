@@ -83,6 +83,27 @@ public sealed partial class CommandProcessor
     internal const string UsageSearch = "Usage: search <text> | search <json>";
     internal const string UsageGet = "Usage: get <id>";
     internal const string UsagePause = "Usage: pause [seconds]";
+    /// <summary>purge app: captures store the app as the file name without ".exe", so "claude.exe" or a full path matched
+    /// nothing (D13). Pure.</summary>
+    internal static string PurgeAppName(string name)
+    {
+        var n = name.Trim();
+        if (n.IndexOfAny(['\\', '/']) >= 0) n = n[(n.LastIndexOfAny(['\\', '/']) + 1)..];
+        if (n.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) n = n[..^4];
+        return n.Trim();
+    }
+
+    /// <summary>purge site: the host of a pasted URL ("https://www.google.com/path" is google.com after NormalizeSite),
+    /// else the argument as typed (D13). Pure.</summary>
+    internal static string PurgeSiteHost(string arg)
+    {
+        var a = arg.Trim();
+        if (a.Contains("://", StringComparison.Ordinal) ? Uri.TryCreate(a, UriKind.Absolute, out var u)
+            : a.IndexOfAny(['/', ':', '?', '#']) >= 0 && Uri.TryCreate("http://" + a, UriKind.Absolute, out u))
+            return u!.Host.Length > 0 ? u.Host : a;
+        return a;
+    }
+
     internal const string UsagePurge = "Usage: purge last <seconds> | purge range <from> <to> | purge app <name> | purge site <host> | purge id <id> | purge confirm <token>";
     internal const string UsagePurgeUi = "Usage: purge last <seconds> | purge range <from> <to> | purge app <name> | purge site <host> | purge id <id> | purge all | purge confirm <token>";
     internal const string UsageFacets = "Usage: facets [<from> <to>]";
@@ -119,6 +140,9 @@ public sealed partial class CommandProcessor
     internal const string ErrNoPassword = "No unlock password is set.";
     internal const string ErrPasswordRule = "Password must be 6 to 256 characters.";
     internal const string ErrPasswordInUse = "Password in use (config security.unlockMethod).";
+    internal const string ErrPassphraseRule = "A new passphrase must be 8 to 1024 characters.";
+    internal const string ErrPassphraseFirst = "Set the passphrase first: with security.unlockMethod hello, unlock with the new passphrase, then switch to password.";
+    internal const string ErrPassphraseNeeded = "Unlock with the data-key passphrase to change security.keyProtection.";
     internal const string ErrTooManyPrefix = "Too many attempts. Try again in ";
     internal const string ErrAiOff = "Cloud describe is off (config ai.enabled).";
     internal const string ErrNoApiKey = "API key not set.";
@@ -239,7 +263,7 @@ public sealed partial class CommandProcessor
             if (reply.Subscribe != Subscription.None)
             {
                 // The ack goes out only after the event handlers are attached, so no event between the two is lost.
-                await StreamAsync(stream, reply.Subscribe, reply.Line, ct).ConfigureAwait(false);
+                await StreamAsync(stream, reply.Subscribe, reply.Line, ct, conn.Kind).ConfigureAwait(false);
                 return;
             }
             if (!await WriteAsync(stream, reply.Line, ct).ConfigureAwait(false)) return;
@@ -290,7 +314,8 @@ public sealed partial class CommandProcessor
     }
 
     /// <summary>One-way stream after subscribe (research 7.7). Input is ignored; 64 queued messages disconnect the client.</summary>
-    internal async Task StreamAsync(Stream stream, Subscription sub, string ack, CancellationToken ct)
+    /// <param name="kind">Pipe of the subscriber: capture events follow that pipe's gate (B18).</param>
+    internal async Task StreamAsync(Stream stream, Subscription sub, string ack, CancellationToken ct, PipeKind kind = PipeKind.Ui)
     {
         var ch = Channel.CreateBounded<string>(new BoundedChannelOptions(64) { FullMode = BoundedChannelFullMode.Wait, SingleReader = true });
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -302,10 +327,10 @@ public sealed partial class CommandProcessor
             try { if (!cts.IsCancellationRequested) { Log.Info("subscriber too slow, disconnected"); cts.Cancel(); } }
             catch (ObjectDisposedException) { }
         }
-        Action<AgentStatus> onStatus = st => Push(Envelope.Ok(JsonSerializer.Serialize(st, CoreJson.Default.AgentStatus)));
+        Action<AgentStatus> onStatus = st => Push(Envelope.Ok(JsonSerializer.Serialize(StatusFor(kind, st), CoreJson.Default.AgentStatus)));
         Action<CaptureMeta> onCapture = m =>
         {
-            if (IsLocked(PipeKind.Public) && IsLocked(PipeKind.Ui)) return;
+            if (IsLocked(kind)) return;   // the subscriber's own pipe, not "both locked" (B18)
             Push(Envelope.Ok(JsonSerializer.Serialize(new CaptureEvent(m.Id, m.Ts, m.Kind, m.App), CoreJson.Default.CaptureEvent)));
         };
         if (sub == Subscription.Status) _d.Agent.StatusChanged += onStatus;
@@ -415,7 +440,7 @@ public sealed partial class CommandProcessor
             case "help":
                 return Ok(JsonSerializer.Serialize(new HelpData(HelpVerbs(s.Kind)), CoreJson.Default.HelpData));
             case "status":
-                return Ok(JsonSerializer.Serialize(_d.Agent.GetStatus(), CoreJson.Default.AgentStatus));
+                return Ok(JsonSerializer.Serialize(StatusFor(s.Kind, _d.Agent.GetStatus()), CoreJson.Default.AgentStatus));
             case "search":
                 return await SearchAsync(s, rest, ct).ConfigureAwait(false);
             case "get":
@@ -437,6 +462,7 @@ public sealed partial class CommandProcessor
                 return await UnlockAsync(s, RawRest(line), ct).ConfigureAwait(false);
             case "lock":
                 _d.Agent.Lock();
+                _unlockedWithPassphrase = false;
                 return Ok("null");
             case "consent":
                 _d.Agent.Consent();
@@ -498,12 +524,20 @@ public sealed partial class CommandProcessor
     /// <summary>Read gate: store not open, or security.requireUnlock with the gate closed (ipc.requireUnlocked for IPC and MCP).</summary>
     internal bool IsLocked(PipeKind kind) => LockError(kind) != null;
 
+    private static readonly StoreStats NoStoreStats = new(0, 0, 0, null, null, 0, 0);
+
+    /// <summary>Status as a pipe may see it: the public and MCP pipes get no store rows, bytes or oldest/newest while
+    /// their gate is closed, since those change with every capture and reveal activity (D12).</summary>
+    internal AgentStatus StatusFor(PipeKind kind, AgentStatus st) =>
+        kind != PipeKind.Ui && LockError(kind) == ErrLocked ? st with { Store = NoStoreStats } : st;
+
     /// <summary>Null when data verbs may read. "Store is locked." while the gate is closed or the key waits for its
     /// passphrase; "Store is not open." when the gate is open but the store did not open (keylost, storeerror).</summary>
     internal string? LockError(PipeKind kind)
     {
         var s = S;
-        if (s.Security.RequireUnlock && (kind == PipeKind.Ui || s.Ipc.RequireUnlocked) && !_d.Agent.IsUnlocked) return ErrLocked;
+        // The agent's gate also reports closed with security.requireUnlock off after the user pressed Lock (D4).
+        if ((kind == PipeKind.Ui || s.Ipc.RequireUnlocked) && !_d.Agent.IsUnlocked) return ErrLocked;
         return _d.Store() == null ? NotOpenError : null;
     }
 
@@ -519,6 +553,19 @@ public sealed partial class CommandProcessor
     }
 
     internal static string Sha256(string text) => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(text)));
+
+    /// <summary>Audit hash of a search query: HMAC-SHA256 keyed by an HKDF subkey of the data key, so a dictionary of
+    /// common words or sites does not recover the query from the audit log after a purge (B9). Plain SHA-256 only when
+    /// no data key is loaded (then no store is open and nothing is audited; tests with a separate store).</summary>
+    internal string QueryHash(string q)
+    {
+        if (_d.Keys is not Crypto.KeyVault { KeyLoaded: true } kv) return Sha256(q);
+        byte[] key;
+        try { key = kv.Derive("betterrecall-audit-query"); }
+        catch (InvalidOperationException) { return ""; }   // key dropped meanwhile: no hash rather than a plain one
+        try { return Convert.ToHexStringLower(HMACSHA256.HashData(key, Encoding.UTF8.GetBytes(q))); }
+        finally { CryptographicOperations.ZeroMemory(key); }
+    }
 
     private int MaxResponseBytes(PipeKind k) => k == PipeKind.Ui ? UiMaxResponseBytes : S.Ipc.MaxResponseBytes;
 
@@ -664,7 +711,7 @@ public sealed partial class CommandProcessor
         if (weakBelow > 0)
             resp = resp with { Results = resp.Results.Select(h => h with { Weak = !h.TextMatch && (h.Cosine ?? 0) < weakBelow }).ToList() };
         resp = resp with { TookMs = sw.ElapsedMilliseconds };
-        Audit(s, "search", resp.Count, Sha256(req.Q));
+        Audit(s, "search", resp.Count, QueryHash(req.Q));
         return Ok(JsonSerializer.Serialize(resp, CoreJson.Default.SearchResponse));
     }
 
@@ -752,6 +799,7 @@ public sealed partial class CommandProcessor
             Audit(s, "export", result.Count, "");
             return Ok(JsonSerializer.Serialize(result, CoreJson.Default.ExportResult));
         }
+        catch (Store.ExportPurgedException ex) { Log.Info("export aborted: a purge ran during it"); return Err(ex.Message); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             Log.Warn("export failed", ex);
@@ -918,6 +966,8 @@ public sealed partial class CommandProcessor
                 return Ok(JsonSerializer.Serialize(new PurgeConfirmReply(NewToken(s, null, 0), null), CoreJson.Default.PurgeConfirmReply));
             }
             case "last":
+                if (args.Length == 2 && args[1].Length > 0 && args[1].All(char.IsAsciiDigit) && !long.TryParse(args[1], NumberStyles.None, CultureInfo.InvariantCulture, out _))
+                    return Err("Invalid seconds.");   // digits that overflow are a range error, not a usage error (D13)
                 if (args.Length != 2 || !long.TryParse(args[1], NumberStyles.None, CultureInfo.InvariantCulture, out var secs)) return Err(usage);
                 if (secs < 1 || secs > 3650L * 86400) return Err("Invalid seconds.");
                 scope = PurgeScope.Last(TimeSpan.FromSeconds(secs));
@@ -929,11 +979,15 @@ public sealed partial class CommandProcessor
                 break;
             case "app":
                 if (args.Length < 2) return Err(usage);
-                scope = PurgeScope.ForApp(string.Join(' ', args.Skip(1)));
+                var appName = PurgeAppName(string.Join(' ', args.Skip(1)));
+                if (appName.Length == 0) return Err(usage);
+                scope = PurgeScope.ForApp(appName);
                 break;
             case "site":
-                if (args.Length != 2 || Store.EncryptedStore.NormalizeSite(args[1]).Length == 0) return Err(usage);
-                scope = PurgeScope.ForSite(args[1]);
+                if (args.Length != 2) return Err(usage);
+                var host = PurgeSiteHost(args[1]);
+                if (Store.EncryptedStore.NormalizeSite(host).Length == 0) return Err(usage);
+                scope = PurgeScope.ForSite(host);
                 break;
             case "id":
                 if (args.Length != 2 || args[1].Length > 64) return Err(usage);
@@ -963,16 +1017,19 @@ public sealed partial class CommandProcessor
     private async Task<Reply> UnlockAsync(ClientSession s, string rest, CancellationToken ct)
     {
         var keys = _d.Keys;
-        bool rewrap = false;
+        bool rewrap = false, passphraseChecked = false;
         // Passphrase guesses are rate-limited like the unlock password (each one is a 64 MiB Argon2id run).
         bool passphraseTry = rest.Length > 0 && (KeyNeedsPassphrase || !UsesPassword && keys.KeyLoaded && keys.Protection == Crypto.KeyVault.ModePassphrase);
         if (passphraseTry && keys.PassphraseRetryAfterSeconds is > 0 and var passWait) return Err(ErrTooMany(passWait));
+        // A passphrase that would create the key or re-wrap it must meet the rule (B14); say so instead of "Wrong passphrase.".
+        if (rest.Length > 0 && keys is Crypto.KeyVault { WouldSetPassphrase: true } && !Crypto.KeyVault.ValidNewPassphrase(rest)) return Err(ErrPassphraseRule);
         if (KeyNeedsPassphrase)
         {
             if (rest.Length > 0)
             {
                 if (!keys.UnlockWithPassphrase(rest)) return Err(ErrWrongPassphrase);
-                if (UsesPassword) return OpenVerified(s, "unlock passphrase");
+                passphraseChecked = true;
+                if (UsesPassword) { _unlockedWithPassphrase = true; return OpenVerified(s, "unlock passphrase"); }
             }
         }
         else if (UsesPassword)
@@ -988,6 +1045,7 @@ public sealed partial class CommandProcessor
                     int wait = pw!.RetryAfterSeconds;
                     return Err(wait > 0 ? ErrTooMany(wait) : ErrWrongPassword);
             }
+            _unlockedWithPassphrase = false;
             return OpenVerified(s, "unlock password");
         }
         else if (rest.Length > 0 && keys.KeyLoaded)
@@ -995,14 +1053,52 @@ public sealed partial class CommandProcessor
             // Already passphrase-wrapped: check the passphrase before Hello. security.keyProtection = passphrase while the
             // key file is still tpm/dpapi (keys.Protection reports the file's mode): the passphrase re-wraps the key, but
             // only after Hello passed, so a cancelled Hello leaves the key file as it was.
-            if (keys.Protection == Crypto.KeyVault.ModePassphrase) { if (!keys.UnlockWithPassphrase(rest)) return Err(ErrWrongPassphrase); }
+            if (keys.Protection == Crypto.KeyVault.ModePassphrase) { if (!keys.UnlockWithPassphrase(rest)) return Err(ErrWrongPassphrase); passphraseChecked = true; }
             else rewrap = S.Security.KeyProtection == Crypto.KeyVault.ModePassphrase;
         }
         if (!await _d.Agent.UnlockAsync(ct).ConfigureAwait(false)) return Err(ErrUnlockCancelled);
         if (rewrap && !keys.UnlockWithPassphrase(rest)) return Err(ErrWrongPassphrase);
+        _unlockedWithPassphrase = passphraseChecked || rewrap;
         _lastUnlock = Now();
         var until = _d.Agent.GetStatus().UnlockedUntil;
         return Ok(JsonSerializer.Serialize(new UnlockReply(true, until), CoreJson.Default.UnlockReply));
+    }
+
+    /// <summary>The gate was last opened with the data-key passphrase checked (B16).</summary>
+    private bool _unlockedWithPassphrase;
+
+    /// <summary>Last value of security.name in a settings set (TryUpdate applies them in order), else null.</summary>
+    private static string? SecurityValue(JsonElement root, string name)
+    {
+        string? v = null;
+        if (root.ValueKind != JsonValueKind.Object) return null;
+        foreach (var g in root.EnumerateObject())
+            if (g.Name == "security" && g.Value.ValueKind == JsonValueKind.Object)
+                foreach (var k in g.Value.EnumerateObject())
+                    if (k.Name == name && k.Value.ValueKind == JsonValueKind.String) v = k.Value.GetString();
+        return v;
+    }
+
+    /// <summary>
+    /// security.keyProtection changes the settings set refuses:
+    /// - passphrase with unlockMethod password while the key file is not passphrase-wrapped: unlock then checks only the
+    ///   password, so the re-wrap never runs and the key stays dpapi/tpm while settings say passphrase (B7);
+    /// - off passphrase while the key file is passphrase-wrapped, unless the gate was opened with that passphrase: the
+    ///   unlock password alone would re-wrap the key to dpapi (B16).
+    /// </summary>
+    private string? KeyProtectionError(JsonElement root)
+    {
+        var protection = SecurityValue(root, "keyProtection");
+        var method = SecurityValue(root, "unlockMethod");
+        if (protection is null && method is null) return null;
+        string fileMode = _d.Keys.Protection;
+        string nextProtection = protection ?? S.Security.KeyProtection, nextMethod = method ?? S.Security.UnlockMethod;
+        if (nextProtection == Crypto.KeyVault.ModePassphrase && nextMethod == "password" && fileMode != Crypto.KeyVault.ModePassphrase)
+            return ErrPassphraseFirst;
+        if (protection is not null && protection != Crypto.KeyVault.ModePassphrase && fileMode == Crypto.KeyVault.ModePassphrase
+            && _d.Keys.KeyLoaded && !_unlockedWithPassphrase)
+            return ErrPassphraseNeeded;
+        return null;
     }
 
     private Reply OpenVerified(ClientSession s, string what)
@@ -1163,6 +1259,8 @@ public sealed partial class CommandProcessor
                 var verb = "describe " + ai.Provider;
                 var sha = Convert.ToHexStringLower(SHA256.HashData(ticket.Image.Bytes));
                 var store = _d.Store()!;
+                // The capture was purged after the preview (panic, purge, lock and unlock in between): its image is gone (B8).
+                if (store.Get(ticket.CaptureId) == null) return Err(ErrNotFound);
                 if (Ai.AiBudget.Check(Ai.AiBudget.Usage(store, ai, now)) is { } over) return Err(over.Message);
                 try
                 {
@@ -1181,8 +1279,27 @@ public sealed partial class CommandProcessor
     }
 
     /// <summary>Groups that change what is protected, kept or redacted, or what leaves the PC (retention.days and
-    /// storage.maxGb delete history; privacy and ocr off stop redaction; mcp opens a pipe).</summary>
-    internal static readonly string[] GuardedSettingGroups = ["security", "ai", "ipc", "mcp", "privacy", "ocr", "retention", "storage"];
+    /// storage.maxGb delete history; privacy and ocr off stop redaction; mcp opens a pipe; replay.encryptExports and
+    /// exportDir write plaintext clips anywhere; audio.mic records the room; index.dim truncates every vector;
+    /// keyframes and inference.modelDir change what is stored and which models read it, B6).</summary>
+    internal static readonly string[] GuardedSettingGroups = ["security", "ai", "ipc", "mcp", "privacy", "ocr", "retention", "storage", "replay", "index", "audio", "keyframes"];
+
+    /// <summary>Single keys guarded outside the guarded groups (group, key).</summary>
+    internal static readonly (string Group, string Key)[] GuardedSettingKeys = [("inference", "modelDir")];
+
+    /// <summary>Every property is looked at (a repeated group name cannot hide a guarded key).</summary>
+    internal static bool TouchesGuardedSettings(JsonElement root)
+    {
+        if (root.ValueKind != JsonValueKind.Object) return false;
+        foreach (var g in root.EnumerateObject())
+        {
+            if (GuardedSettingGroups.Contains(g.Name)) return true;
+            if (g.Value.ValueKind != JsonValueKind.Object) continue;
+            foreach (var k in g.Value.EnumerateObject())
+                if (GuardedSettingKeys.Contains((g.Name, k.Name))) return true;
+        }
+        return false;
+    }
 
     private Reply Settings(string rest)
     {
@@ -1199,13 +1316,13 @@ public sealed partial class CommandProcessor
                 {
                     // Guarded groups change what is protected, kept or redacted and what leaves the PC: not while the gate
                     // is closed (a passphrase-wrapped key would otherwise be re-wrapped to dpapi without the passphrase).
-                    if (doc.RootElement.ValueKind == JsonValueKind.Object && LockError(PipeKind.Ui) is { } locked
-                        && GuardedSettingGroups.Any(g => doc.RootElement.TryGetProperty(g, out _)))
+                    if (LockError(PipeKind.Ui) is { } locked && TouchesGuardedSettings(doc.RootElement))
                         return Err(locked);
                     // The password method needs a password first, or nobody could unlock.
                     if (doc.RootElement.ValueKind == JsonValueKind.Object && doc.RootElement.TryGetProperty("security", out var sec)
                         && JsonString(sec, "unlockMethod") == "password" && _d.Password?.IsSet != true)
                         return Err(ErrNoPassword);
+                    if (KeyProtectionError(doc.RootElement) is { } keyErr) return Err(keyErr);
                     var error = _d.Settings.TryUpdate(doc.RootElement);
                     if (error != null) return Err(error);
                 }

@@ -26,6 +26,9 @@ internal sealed class GuardrailService : IDisposable
     public double LastScanMs { get; private set; }
     public double LastBadgeMs { get; private set; }
     public double LastPasswordMs { get; private set; }
+    /// <summary>Password-field searches that failed (UI Automation error): those frames carry no password boxes (A15).</summary>
+    public long PasswordProbeFailures;
+    private long _passwordWarnAt = long.MinValue;
 
     public GuardrailService(Func<Settings> settings, Func<bool> sessionLocked, Func<IReadOnlyList<(int, RECT)>> monitors, string installDir)
     {
@@ -50,6 +53,24 @@ internal sealed class GuardrailService : IDisposable
     /// window's "allow" would store a denied window that was alt-tabbed to meanwhile. Two cheap calls, no scan.</summary>
     public GuardSnapshot CurrentForKeyframe(long maxAgeMs = 2000)
         => FreshForGrab(Current(maxAgeMs), Interlocked.Read(ref _fgEpoch), WindowInspector.ForegroundRoot());
+
+    /// <summary>For replay masks (A1): the bounds of the current foreground window when <paramref name="s"/> was scanned
+    /// before it came up (the case keyframes refuse as ForegroundChanged), else null. The new window may be denied or a
+    /// private browser window the scan has not probed yet. A Closed snapshot already masks everything. Two cheap calls.</summary>
+    public RECT? UnscannedForeground(GuardSnapshot s)
+    {
+        if (ReferenceEquals(s, GuardSnapshot.Closed)) return null;
+        nint fg = WindowInspector.ForegroundRoot();
+        return UnscannedForeground(s, Interlocked.Read(ref _fgEpoch), fg, fg != 0 && WindowInspector.TryGetBounds(fg, out var r) ? r : null);
+    }
+
+    /// <summary>Pure part of <see cref="UnscannedForeground(GuardSnapshot)"/>. No foreground window now: nothing new to
+    /// mask. A stale snapshot whose foreground bounds cannot be read masks everything, as no fresh snapshot does.</summary>
+    internal static RECT? UnscannedForeground(GuardSnapshot s, long fgEpochNow, nint foregroundNow, RECT? foregroundBounds)
+    {
+        if (foregroundNow == 0 || ReferenceEquals(s, GuardSnapshot.Closed) || !ReferenceEquals(FreshForGrab(s, fgEpochNow, foregroundNow), ForegroundMoved)) return null;
+        return foregroundBounds ?? Capture.CaptureService.MaskEverything;
+    }
 
     internal static readonly GuardSnapshot ForegroundMoved = GuardSnapshot.Closed with { Decision = GuardDecision.Deny(GuardReason.ForegroundChanged) };
 
@@ -133,6 +154,7 @@ internal sealed class GuardrailService : IDisposable
                         }
                         secrets = passwords?.Find(fg.Hwnd);
                         LastPasswordMs = passwords?.LastMs ?? 0;
+                        if (passwords is not null && secrets is null) NotePasswordProbeFailed(fg);
                     }
                     Volatile.Write(ref _snapshot, new GuardSnapshot(Environment.TickCount64, fg, decision, badgeResult, scan.AnyAffinity, masks, scan.PerMonitor, site, secrets, epoch));
                     if (fg?.Hwnd != lastFg)
@@ -152,6 +174,17 @@ internal sealed class GuardrailService : IDisposable
             passwords?.Dispose();
             Ole.CoUninitialize();
         }
+    }
+
+    /// <summary>A failed password-field search fails open (skipping keyframes would lose every keyframe of apps whose
+    /// UI Automation tree always fails), so it is counted for diagnostics and warned about at most every 10 minutes (A15).</summary>
+    private void NotePasswordProbeFailed(WindowInfo fg)
+    {
+        Interlocked.Increment(ref PasswordProbeFailures);
+        long now = Environment.TickCount64;
+        if (now - _passwordWarnAt < 600_000) return;
+        _passwordWarnAt = now;
+        Log.Warn($"password field search failed for {fg.ProcessName} (UI Automation); its password fields are not masked ({Interlocked.Read(ref PasswordProbeFailures)} failures so far)");
     }
 
     public void Dispose()

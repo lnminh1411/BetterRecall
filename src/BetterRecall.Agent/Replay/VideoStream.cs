@@ -128,11 +128,15 @@ internal sealed class VideoStream : IDisposable
         }
     }
 
+    /// <summary>Panic or purge: zero the ring and end the current session, so a packet the old encoder still had in
+    /// flight (maybe the 1 s keyframe) is dropped instead of starting the next save (A10). The rebuild that follows opens
+    /// a new session.</summary>
     public void Clear()
     {
         lock (_gate)
         {
             Ring.Clear();
+            _currentSession++;
         }
     }
 

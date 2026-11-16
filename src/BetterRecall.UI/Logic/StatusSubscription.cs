@@ -13,6 +13,8 @@ public sealed class StatusSubscription(string pipeName, IServerTrust trust) : IA
 
     public event Action<AgentStatus>? StatusReceived;
     public event Action<AgentErrorKind>? Disconnected;
+    /// <summary>The subscription was acknowledged: the first connection and every reconnect (agent restart, D2).</summary>
+    public event Action? Connected;
 
     public TimeSpan MinBackoff { get; init; } = TimeSpan.FromSeconds(1);
     public TimeSpan MaxBackoff { get; init; } = TimeSpan.FromSeconds(30);
@@ -43,6 +45,7 @@ public sealed class StatusSubscription(string pipeName, IServerTrust trust) : IA
                         if (ack is not null && AgentClient.Parse(ack).Ok)
                         {
                             backoff = MinBackoff;
+                            Connected?.Invoke();
                             while (await conn.ReadLineAsync(ct).ConfigureAwait(false) is { } line)
                             {
                                 var r = AgentClient.Parse(line);

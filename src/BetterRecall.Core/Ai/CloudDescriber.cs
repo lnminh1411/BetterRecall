@@ -63,7 +63,7 @@ public sealed class CloudDescriber(HttpMessageHandler? handler = null)
         Log.Info($"cloud describe: {provider} {model}, {image.Bytes.Length / 1024} KiB sent, HTTP {(int)resp.StatusCode}, {sw.ElapsedMilliseconds} ms");
         if (!resp.IsSuccessStatusCode)
         {
-            var err = ErrorText(resp.StatusCode, body);
+            var err = ErrorText(resp.StatusCode, body, apiKey);
             if (!string.IsNullOrEmpty(apiKey)) err = err.Replace(apiKey, "***", StringComparison.Ordinal); // some providers echo the key
             throw new DescribeException(err);
         }
@@ -182,7 +182,9 @@ public sealed class CloudDescriber(HttpMessageHandler? handler = null)
     }
 
     /// <summary>"Provider error (HTTP 401): message" with the provider's own message cut to 200 characters.</summary>
-    internal static string ErrorText(HttpStatusCode status, string body)
+    /// <param name="apiKey">Scrubbed from the message before it is cut to 200 characters: a key cut in half by the cut no
+    /// longer matches the later Replace, and its prefix reached the UI (B17).</param>
+    internal static string ErrorText(HttpStatusCode status, string body, string? apiKey = null)
     {
         string? message = null;
         try
@@ -197,6 +199,7 @@ public sealed class CloudDescriber(HttpMessageHandler? handler = null)
             }
         }
         catch (JsonException) { }
+        if (!string.IsNullOrEmpty(message) && !string.IsNullOrEmpty(apiKey)) message = message.Replace(apiKey, "***", StringComparison.Ordinal);
         message = string.IsNullOrWhiteSpace(message) ? "" : ": " + new string(message.Where(ch => !char.IsControl(ch)).Take(200).ToArray());
         return $"Provider error (HTTP {(int)status}){message}";
     }

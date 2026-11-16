@@ -162,7 +162,7 @@ public sealed class ChatService(ChatDeps d)
         lock (_gate) _approved.Clear();
     }
 
-    internal const string MoreCapturesNote = "The assistant searched again after reading captures, and found ones you have not reviewed in this chat. Only these new captures are listed; check them before they are sent.";
+    internal const string MoreCapturesNote = "The assistant's search found captures you have not reviewed in this chat. Only these new captures are listed; check them before they are sent.";
 
     /// <summary>
     /// After a purge: drops unsaved chats and pending approvals that cite a deleted capture (gone(id) is true), and stops
@@ -532,14 +532,15 @@ public sealed class ChatService(ChatDeps d)
     }
 
     /// <summary>
-    /// Captures this round would share that the model may have been steered to: once the turn has shared captures (the
-    /// model read their text), hits that were neither kept on an approval card in this chat nor shared earlier in this
-    /// turn. The first search of a turn follows the user's own question and shares under the chat's approval.
+    /// Captures this round would share that the user has not reviewed: hits that were neither kept on an approval card
+    /// in this chat nor shared earlier in this turn. Every round counts, the first search of a later turn too: the chat's
+    /// transcript already holds capture text that can steer it (B3), and a capture the user removed on a card is not in
+    /// Reviewed, so it is asked about again instead of being sent on the next question (B2).
     /// </summary>
     private HashSet<string> UnseenLocked(Turn turn, IReadOnlyList<SharePlan?> plans)
     {
         var unseen = new HashSet<string>(StringComparer.Ordinal);
-        if (turn.Sources.Count == 0 || !_approved.TryGetValue(turn.ChatId, out var a)) return unseen;
+        if (!_approved.TryGetValue(turn.ChatId, out var a)) return unseen;
         foreach (var h in plans.SelectMany(p => p?.Hits ?? []))
             if (!a.Reviewed.Contains(h.Hit.Id) && turn.Sources.All(s => s.Id != h.Hit.Id)) unseen.Add(h.Hit.Id);
         return unseen;

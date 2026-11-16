@@ -139,6 +139,14 @@ internal sealed class ReplayEngine : IDisposable
         return ReplayMux.Save(output, streams, audio, seconds);
     }
 
+    /// <summary>Bytes of one video ring for this bitrate and window.</summary>
+    internal static long RingCapacity(int kbps, int seconds) => (long)kbps * 1000 / 8 * (seconds + 2) * 21 / 20;
+
+    /// <summary>Locked memory of the replay: every video ring, the same again for the snapshot a save copies them into,
+    /// and the audio ring (A11). Pure.</summary>
+    internal static long LockedBytes(int kbps, int seconds, int streams) =>
+        RingCapacity(kbps, seconds) * Math.Max(1, streams) * 2 + 8L * 1024 * 1024;
+
     /// <summary>Zeroes every ring now; the engine thread then rebuilds (fresh encoders, black canvas).</summary>
     public void Panic()
     {
@@ -400,9 +408,14 @@ internal sealed class ReplayEngine : IDisposable
         var newPipelines = new List<ReplayPipeline>();
         string? failureError = null;
 
+        // The start-time reserve (AgentHost) covers the settings of that moment and three monitors; a later
+        // replay.seconds or bitrate raise, more monitors with perMonitor, and the snapshot each save copies would fail
+        // VirtualLock and leave replay video pageable (A11). Raise the working-set minimum for what this layout locks.
+        if (cfg.LockMemory) Security.MemoryIsolation.ReserveWorkingSet(LockedBytes(cfg.Kbps, cfg.Seconds, groups.Count));
+
         foreach (var (key, group, fps) in groups)
         {
-            long capacity = (long)cfg.Kbps * 1000 / 8 * (cfg.Seconds + 2) * 21 / 20;
+            long capacity = RingCapacity(cfg.Kbps, cfg.Seconds);
             if (!_streams.TryGetValue(key, out var stream) || stream.Ring.Capacity != capacity)
             {
                 stream?.Dispose();

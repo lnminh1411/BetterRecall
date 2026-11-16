@@ -174,7 +174,10 @@ public sealed partial class ReplaysPage : Page, IDataPage
         player.SetMediaPlayer(mp);
         var dialog = WindowHelpers.Dialog(XamlRoot, Loc.Format("Replays_PlayerTitle", when, StatusText.FormatDuration(offsetMs)), player, Loc.Get("Replays_OpenExternal"), Loc.Get("Replays_PlayerClose"));
         dialog.Resources["ContentDialogMaxWidth"] = 1200.0;
-        var choice = await dialog.ShowAsync();
+        var choice = ContentDialogResult.None;
+        // Lock, panic or hiding the window closes the player (C2); the clip stops and the player is disposed below.
+        if (!Services.Current.Locked)
+            using (Services.Current.SensitiveDialogs.Track(dialog, XamlRoot)) choice = await dialog.ShowAsync();
         mp.Pause();
         player.SetMediaPlayer(null);
         mp.Dispose();
