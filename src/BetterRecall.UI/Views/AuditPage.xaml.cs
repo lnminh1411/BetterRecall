@@ -46,4 +46,30 @@ public sealed partial class AuditPage : Page, IDataPage
     }
 
     private void Refresh_Click(object sender, RoutedEventArgs e) => Reload();
+
+    private bool _narrow;
+
+    /// <summary>Narrow page: Results and PID columns go, so the Client column does not clip (D14).</summary>
+    private void Root_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        bool narrow = BetterRecall.UI.Logic.AuditLayout.Narrow(e.NewSize.Width);
+        if (narrow == _narrow) return;
+        _narrow = narrow;
+        ApplyColumns(HeaderRow);
+        for (int i = 0; i < List.Items.Count; i++)
+            if (List.ContainerFromIndex(i) is ListViewItem { ContentTemplateRoot: Grid g }) ApplyColumns(g);
+    }
+
+    private void List_ContainerContentChanging(ListViewBase sender, ContainerContentChangingEventArgs args)
+    {
+        if (args.ItemContainer.ContentTemplateRoot is Grid g) ApplyColumns(g);
+    }
+
+    private void ApplyColumns(Grid g)
+    {
+        var widths = BetterRecall.UI.Logic.AuditLayout.FixedWidths(_narrow);
+        for (int i = 0; i < widths.Length && i < g.ColumnDefinitions.Count; i++) g.ColumnDefinitions[i].Width = new GridLength(widths[i]);
+        foreach (var child in g.Children)
+            if (child is FrameworkElement f && Grid.GetColumn(f) is 3 or 4) f.Visibility = _narrow ? Visibility.Collapsed : Visibility.Visible;
+    }
 }

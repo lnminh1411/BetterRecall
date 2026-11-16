@@ -89,11 +89,11 @@
   <data name="Consent_What1.Text" xml:space="preserve"><value>• A screen image (keyframe) about every 2 seconds while the screen changes, with the window title and app name.</value></data>
   <data name="Consent_What2.Text" xml:space="preserve"><value>• The last 2 minutes of screen video and desktop audio, in memory only. It reaches disk only when you save a replay.</value></data>
   <data name="Consent_What3.Text" xml:space="preserve"><value>• Audio transcripts, only if you turn on system audio or the microphone in Settings.</value></data>
-  <data name="Consent_What4.Text" xml:space="preserve"><value>• No text recognition (OCR). Screen images are searched by an AI model that runs on this PC.</value></data>
+  <data name="Consent_What4.Text" xml:space="preserve"><value>• The text on each kept screen image, read on this PC (OCR) and stored encrypted for search. Screen images are also searched by an AI model that runs on this PC.</value></data>
   <data name="Consent_WhatTitle.Text" xml:space="preserve"><value>What is captured</value></data>
   <data name="Consent_Where1.Text" xml:space="preserve"><value>• Only on this PC, in your user profile (%LOCALAPPDATA%\BetterRecall), encrypted with a key protected by the TPM, a passphrase or Windows.</value></data>
   <data name="Consent_Where2.Text" xml:space="preserve"><value>• Kept for 30 days by default. You can delete a time range, an app, or everything at any time.</value></data>
-  <data name="Consent_Where3.Text" xml:space="preserve"><value>• BetterRecall makes no network connections.</value></data>
+  <data name="Consent_Where3.Text" xml:space="preserve"><value>• BetterRecall makes no network connections while Cloud describe is off, which is the default. Turned on in Settings, it sends only what you approve to the AI provider you choose.</value></data>
   <data name="Consent_WhereTitle.Text" xml:space="preserve"><value>Where it is stored</value></data>
   <data name="Danger_AllBody.Text" xml:space="preserve"><value>Destroys the encryption key and deletes every capture, keyframe, transcript and saved replay. Nothing can be recovered.</value></data>
   <data name="Danger_AllDone" xml:space="preserve"><value>Everything was deleted ({0:N0} captures).</value></data>
@@ -140,6 +140,7 @@
   <data name="Err_NotFound" xml:space="preserve"><value>That item no longer exists.</value></data>
   <data name="Err_NotRunning" xml:space="preserve"><value>BetterRecall is not running</value></data>
   <data name="Err_NotRunning_Detail" xml:space="preserve"><value>Start BetterRecall, then try again.</value></data>
+  <data name="Err_NotRunning_Start" xml:space="preserve"><value>Start BetterRecall</value></data>
   <data name="Err_NotTrusted" xml:space="preserve"><value>BetterRecall is not trusted</value></data>
   <data name="Err_NotTrusted_Detail" xml:space="preserve"><value>The program answering on the BetterRecall pipe is not the installed BetterRecall agent, so nothing was sent to it.</value></data>
   <data name="Err_Protocol" xml:space="preserve"><value>The agent sent a response this version cannot read.</value></data>
@@ -493,7 +494,7 @@
   <data name="S_security_lockOnSessionLock" xml:space="preserve"><value>Lock when the PC is locked</value></data>
   <data name="S_security_memoryIsolation" xml:space="preserve"><value>Memory isolation</value></data>
   <data name="S_security_memoryIsolation_D" xml:space="preserve"><value>Blocks other programs from reading BetterRecall's memory and keeps it out of crash dumps.</value></data>
-  <data name="S_security_requireUnlock" xml:space="preserve"><value>Require Windows Hello to view history</value></data>
+  <data name="S_security_requireUnlock" xml:space="preserve"><value>Require unlock to view history</value></data>
   <data name="S_security_unlockTimeoutMin" xml:space="preserve"><value>Stay unlocked for (minutes)</value></data>
   <data name="Search_Count" xml:space="preserve"><value>{0} results in {1} ms</value></data>
   <data name="Search_Hint" xml:space="preserve"><value>Type to search. Arrow keys move, Esc hides.</value></data>
@@ -511,6 +512,8 @@
   <data name="Settings_InvalidError" xml:space="preserve"><value>This value is not allowed.</value></data>
   <data name="Settings_PathError" xml:space="preserve"><value>Enter a full path, such as D:\Folder.</value></data>
   <data name="Settings_Pending" xml:space="preserve"><value>{0} unsaved changes</value></data>
+  <data name="Settings_PendingOne" xml:space="preserve"><value>1 unsaved change</value></data>
+  <data name="Settings_PipeNameError" xml:space="preserve"><value>Use 1 to 64 letters, digits, dots, dashes or underscores. Names that start with BetterRecall.ui, BetterRecall.mcp or BetterRecall.worker are taken.</value></data>
   <data name="Settings_Range" xml:space="preserve"><value>{0} to {1}</value></data>
   <data name="Settings_RangeError" xml:space="preserve"><value>Enter a value from {0} to {1}.</value></data>
   <data name="Settings_Save.Content" xml:space="preserve"><value>Save</value></data>
@@ -522,6 +525,7 @@
   <data name="Status_AudioSystem" xml:space="preserve"><value>System audio</value></data>
   <data name="Status_Capturing" xml:space="preserve"><value>Capturing</value></data>
   <data name="Status_Device" xml:space="preserve"><value>Device: {0}</value></data>
+  <data name="Status_DeviceNotLoaded" xml:space="preserve"><value>Not loaded</value></data>
   <data name="Status_Idle" xml:space="preserve"><value>Not capturing</value></data>
   <data name="Status_Locked" xml:space="preserve"><value>Locked</value></data>
   <data name="Status_Paused" xml:space="preserve"><value>Paused: {0}</value></data>
@@ -555,7 +559,7 @@
   <data name="W_ipc_enabled" xml:space="preserve"><value>Turning this on lets any program running as you ask BetterRecall about everything you have seen. Malware running as you could then ask questions instead of only stealing an encrypted file. Keep it off unless you need it, and check the audit log.</value></data>
   <data name="W_mcp_enabled" xml:space="preserve"><value>Turning this on lets the connected AI assistant search your history. If the assistant uses a cloud model, it sends the results it reads to its provider. BetterRecall itself still makes no network connections.</value></data>
   <data name="W_replay_encryptExports" xml:space="preserve"><value>When off, saved replays are written as plain MP4 files that anyone with access to the folder can watch.</value></data>
-  <data name="W_security_requireUnlock" xml:space="preserve"><value>When off, anyone using your signed-in session can search your history without Windows Hello.</value></data>
+  <data name="W_security_requireUnlock" xml:space="preserve"><value>When off, anyone using your signed-in session can search your history without unlocking it.</value></data>
   <data name="Launcher_AppFilter.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve"><value>App filter</value></data>
   <data name="Launcher_SiteFilter.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve"><value>Website filter</value></data>
   <data name="Launcher_AppAll" xml:space="preserve"><value>All apps</value></data>

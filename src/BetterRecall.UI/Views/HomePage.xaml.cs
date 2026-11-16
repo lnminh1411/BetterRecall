@@ -224,7 +224,7 @@ public sealed partial class HomePage : Page
             Stat("Home_Since", st.Store.Oldest is { } o ? o.ToLocalTime().ToString("d", CultureInfo.CurrentCulture) : "-");
             Stat("Home_Waiting", st.Queue.Pending.ToString("N0", CultureInfo.CurrentCulture));
         }
-        Stat("Home_Device", st.Device);
+        Stat("Home_Device", StatusText.Device(st.Device) is LocalizedText t ? Loc.Text(t) : st.Device);   // not "none" (D17)
         Stat("Home_Retention", Loc.Format(st.RetentionDays == 1 ? "Home_Day" : "Home_Days", st.RetentionDays));
     }
 

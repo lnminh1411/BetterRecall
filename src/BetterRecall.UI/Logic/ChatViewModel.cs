@@ -237,8 +237,27 @@ public sealed class ChatViewModel : ObservableObject
         _turnOpen = false;
     }
 
+    private long _openTicket;
+
+    /// <summary>Starts opening a saved chat. A later BeginOpen or a Reset (New chat, delete) makes the ticket stale,
+    /// so a fetch that returns late cannot replace what the user opened since (sweep 3 C7).</summary>
+    public long BeginOpen() => ++_openTicket;
+
+    /// <summary>Loads d only when no other open or Reset came after the ticket was taken.</summary>
+    public bool LoadIfCurrent(long ticket, ChatDetail d)
+    {
+        if (ticket != _openTicket) return false;
+        Load(d);
+        return true;
+    }
+
+    /// <summary>Accessible name of a saved chat in the list: title and last update, not the record's ToString (D6).</summary>
+    public static string SummaryName(ChatSummary s) =>
+        s.Title + ", " + s.Updated.ToLocalTime().ToString("g", CultureInfo.CurrentCulture);
+
     public void Reset()
     {
+        _openTicket++;
         Generation++;
         ChatId = null;
         Title = "";

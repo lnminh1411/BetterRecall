@@ -709,7 +709,9 @@ public sealed partial class CommandProcessor
         }
         if (LockError(s.Kind) is { } locked) return Err(locked);
         var t = await _d.Thumbnailer.GetThumbAsync(args[0], width, ct).ConfigureAwait(false);
-        Audit(s, "thumb", t == null ? 0 : 1, "");
+        // The UI fetches one thumbnail per card; its timeline and search rows already stand for those reads, and a row
+        // per thumbnail pushed script and MCP entries out of view (sweep 3 D9). Public pipe thumbs stay audited.
+        if (s.Kind != PipeKind.Ui) Audit(s, "thumb", t == null ? 0 : 1, "");
         if (t == null) return Err(ErrNotFound);
         return Ok(JsonSerializer.Serialize(t, CoreJson.Default.ThumbData));
     }

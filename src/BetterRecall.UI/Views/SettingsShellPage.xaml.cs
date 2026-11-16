@@ -31,6 +31,11 @@ public sealed partial class SettingsShellPage : Page
                 Tag = g,
                 Icon = new FontIcon { Glyph = Glyphs.GetValueOrDefault(g, "\uE713") },
             });
+        SizeChanged += (_, e) =>
+        {
+            var mode = SettingsShellLayout.GroupsOnTop(e.NewSize.Width) ? NavigationViewPaneDisplayMode.Top : NavigationViewPaneDisplayMode.Left;
+            if (Groups.PaneDisplayMode != mode) Groups.PaneDisplayMode = mode;
+        };
     }
 
     protected override void OnNavigatedTo(NavigationEventArgs e) => Show(e.Parameter as string);

@@ -41,7 +41,8 @@ public sealed class RequestHandler(IWorkerEngine engine, Func<WorkerSettings> se
         }
         catch (WorkerException e)
         {
-            Log.Info($"op={req.Op} id={req.Id} failed: {e.Message}{(e is BadRequestException b && b.Why is not null ? " (" + b.Why + ")" : "")}");
+            if (ShouldLogFailure(req.Op, e.Message))
+                Log.Info($"op={req.Op} id={req.Id} failed: {e.Message}{(e is BadRequestException b && b.Why is not null ? " (" + b.Why + ")" : "")}");
             return new WorkerReply(new WorkerResponse(req.Id, false, e.Message), []);
         }
         catch (Exception e)
@@ -50,6 +51,13 @@ public sealed class RequestHandler(IWorkerEngine engine, Func<WorkerSettings> se
             return new WorkerReply(new WorkerResponse(req.Id, false, WorkerErrors.Internal), []);
         }
     }
+
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _missingLogged = new();
+
+    /// <summary>A missing model fails every request of its op (one per keyframe for ocr): logged once per op and model
+    /// per worker start, not once per request (sweep 3 D19). Other failures are always logged.</summary>
+    internal bool ShouldLogFailure(string op, string message) =>
+        !message.StartsWith("Model not installed", StringComparison.Ordinal) || _missingLogged.TryAdd(op + "|" + message, 0);
 
     private WorkerReply Dispatch(WorkerRequest r, byte[] payload, Stopwatch sw)
     {

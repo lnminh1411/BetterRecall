@@ -7,6 +7,9 @@
 - Third-party notices: every NuGet package a published project resolved (obj/project.assets.json) contributes its
   licence and notice files to LICENSES/third-party/<id>-<version>/, and LICENSES/third-party/README.txt lists each
   package with the licence its .nuspec declares. Native pieces in the repo (src/**/Native/*LICENSE*) are copied too.
+  So do the runtime packs a self-contained or AOT publish downloads (project.frameworks.*.downloadDependencies) when
+  the build ships them: the .NET runtime (NETCore.App, NativeAOT, ILCompiler) and the Windows SDK projection
+  (Windows.SDK.NET.Ref). AspNetCore and WindowsDesktop packs are downloaded but not framework-referenced, so not shipped.
 
 Self-test: python Scripts/release_layout.py --self-test
 """
@@ -78,7 +81,27 @@ def packages(assets_files: list[Path]) -> dict[tuple[str, str], tuple[Path, list
             if pkg_dir is None:
                 continue
             found[(pid, ver)] = (pkg_dir, [f for f in lib.get("files", []) if _is_notice(f)])
+        for fw in data.get("project", {}).get("frameworks", {}).values():
+            refs = list(fw.get("frameworkReferences", {}))
+            for dep in fw.get("downloadDependencies", []):
+                pid = dep.get("name", "")
+                ver = dep.get("version", "").strip("[]() ").split(",")[0].strip()
+                if not pid or not ver or (pid, ver) in found or not _shipped_pack(pid, refs):
+                    continue
+                pkg_dir = next((f / pid.lower() / ver.lower() for f in folders if (f / pid.lower() / ver.lower()).is_dir()), None)
+                if pkg_dir is None:
+                    continue
+                found[(pid, ver)] = (pkg_dir, sorted(p.name for p in pkg_dir.iterdir() if p.is_file() and _is_notice(p.name)))
     return found
+
+
+def _shipped_pack(pack: str, framework_refs: list[str]) -> bool:
+    """A downloaded pack whose files end up in the build: the runtime pack of a referenced framework (NETCore.App ->
+    Microsoft.NETCore.App.Runtime.win-x64 and .NativeAOT), a referenced targeting/projection pack
+    (Microsoft.Windows.SDK.NET.Ref.Windows -> Microsoft.Windows.SDK.NET.Ref), or the AOT compiler's runtime."""
+    if "ILCompiler" in pack:
+        return True
+    return any(pack.startswith(ref + ".Runtime.") or ref.startswith(pack) for ref in framework_refs)
 
 
 def write_notices(layout: Path, assets_files: list[Path], native_notices: list[Path]) -> int:
@@ -177,6 +200,23 @@ def _self_test() -> None:
         assert write_notices(layout, [assets], []) == 1
         readme = (layout / THIRD_PARTY / "README.txt").read_text(encoding="utf-8")
         assert "Demo.Pkg 1.0.0: MIT; (c) Demo" in readme, readme
+        # runtime packs from downloadDependencies (C16): shipped ones listed with their notices, unreferenced ones not
+        for pack in ("microsoft.netcore.app.runtime.win-x64", "microsoft.windows.sdk.net.ref", "microsoft.aspnetcore.app.runtime.win-x64"):
+            d = t / "pkgs" / pack / "10.0.1"
+            d.mkdir(parents=True)
+            (d / "LICENSE.TXT").write_text(pack, encoding="utf-8")
+            (d / "THIRD-PARTY-NOTICES.TXT").write_text("notices", encoding="utf-8")
+        data = json.loads(assets.read_text(encoding="utf-8"))
+        data["project"] = {"frameworks": {"net10.0-windows": {
+            "frameworkReferences": {"Microsoft.NETCore.App": {}, "Microsoft.Windows.SDK.NET.Ref.Windows": {}},
+            "downloadDependencies": [{"name": n, "version": "[10.0.1, 10.0.1]"} for n in (
+                "Microsoft.NETCore.App.Runtime.win-x64", "Microsoft.Windows.SDK.NET.Ref", "Microsoft.AspNetCore.App.Runtime.win-x64")]}}}
+        assets.write_text(json.dumps(data), encoding="utf-8")
+        assert write_notices(layout, [assets], []) == 3
+        readme = (layout / THIRD_PARTY / "README.txt").read_text(encoding="utf-8")
+        assert "Microsoft.NETCore.App.Runtime.win-x64 10.0.1" in readme and "Microsoft.Windows.SDK.NET.Ref 10.0.1" in readme, readme
+        assert "AspNetCore" not in readme, readme
+        assert (layout / THIRD_PARTY / "Microsoft.NETCore.App.Runtime.win-x64-10.0.1" / "THIRD-PARTY-NOTICES.TXT").is_file()
         assert (layout / THIRD_PARTY / "Demo.Pkg-1.0.0" / "LICENSE.txt").read_text(encoding="utf-8") == "MIT demo"
         removed = {r.as_posix() for r in prune(layout)}
         assert removed == {"worker/createdump.exe", "worker/onnxruntime.lib", DEV_MARKER, "x.pdb"}, removed

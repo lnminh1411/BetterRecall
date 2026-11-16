@@ -71,6 +71,7 @@ public sealed partial class MainWindow : Window
         };
         s.Reconnected += () => { if (!s.Locked) (ContentFrame.Content as IDataPage)?.Reload(); };
         Unlock.UnlockedOk += UpdateLock;
+        StatusBar.SizeChanged += (_, _) => UpdateStatus();   // fewer status parts on narrow windows (D16)
         UpdateStatus();
         UpdateOffline();
     }
@@ -224,6 +225,8 @@ public sealed partial class MainWindow : Window
             OfflineBar.Title = Loc.Error(kind, null);
             OfflineBar.Message = Loc.Get(kind == AgentErrorKind.NotTrusted ? "Err_NotTrusted_Detail" : "Err_NotRunning_Detail");
         }
+        if (kind == AgentErrorKind.NotRunning) OfflineBar.ActionButton ??= WindowHelpers.StartAgentButton();
+        else OfflineBar.ActionButton = null;
     }
 
     private void UpdateStatus()
@@ -233,15 +236,19 @@ public sealed partial class MainWindow : Window
         bool locked = Services.Current.Locked;   // counts stay hidden while locked (sweep 2 D37)
         var state = st is null ? "" : string.Join("  ·  ", PauseControl.StateParts(st, now, locked).Select(Loc.Text));
         if (StateLine.Text != state) StateLine.Text = state;   // the live region speaks only when this changes
-        var detail = st is null ? "" : string.Join("  ·  ", PauseControl.DetailParts(st, now, locked).Select(Loc.Text));
-        StatusLine.Text = detail.Length == 0 ? "" : "  ·  " + detail;
+        var detail = st is null ? "" : string.Join("  ·  ", StatusText.Fit(PauseControl.DetailParts(st, now, locked), StatusBar.ActualWidth > 0 ? StatusBar.ActualWidth : 1200).Select(Loc.Text));
+        StatusLine.Text = detail.Length == 0 ? "" : "·  " + detail;   // the column spacing stands in for the two spaces before the dot (D17)
         bool connected = Services.Current.Connection is not (AgentErrorKind.NotRunning or AgentErrorKind.NotTrusted);
         PauseButton.Content = Loc.Get(PauseControl.LabelKey(st));
         PauseButton.IsEnabled = PauseControl.Enabled(st, connected);
         LockButton.Content = Loc.Get(Services.Current.Locked ? "Main_Unlock" : "Main_Lock");
         LockButton.IsEnabled = connected;
-        UpdateStorageBar(st);
-        UpdateStoreBar(st);
+        // Offline: the last status is stale, so its banners go until the agent is back (D10).
+        UpdateStorageBar(connected ? st : null);
+        UpdateStoreBar(connected ? st : null);
+        if (!connected) ActionBar.IsOpen = false;
+        bool dataPage = _pageType is not null && typeof(IDataPage).IsAssignableFrom(_pageType);
+        ContentFrame.Opacity = connected || !dataPage ? 1 : 0.5;   // what a data page shows may be out of date
     }
 
     private string? _storeBarReason;

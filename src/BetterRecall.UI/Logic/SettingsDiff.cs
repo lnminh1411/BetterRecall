@@ -28,6 +28,9 @@ public static class SettingsDiff
         return result;
     }
 
+    /// <summary>Resource key of the save bar count: "1 unsaved change", "{0} unsaved changes" (D18).</summary>
+    public static string PendingKey(int count) => count == 1 ? "Settings_PendingOne" : "Settings_Pending";
+
     /// <summary>Dotted keys present in a diff, for the "unsaved changes" list and tests.</summary>
     public static IEnumerable<string> Keys(JsonObject diff, string prefix = "")
     {

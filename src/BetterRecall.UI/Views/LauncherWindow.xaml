@@ -106,11 +106,12 @@
             </ComboBox>
             <ComboBox x:Name="AppBox" x:Uid="Launcher_AppFilter" Grid.Column="2" MinWidth="150" MaxWidth="240" SelectionChanged="Facet_Changed" />
             <ComboBox x:Name="SiteBox" x:Uid="Launcher_SiteFilter" Grid.Column="3" MinWidth="150" MaxWidth="240" SelectionChanged="Facet_Changed" />
-            <TextBlock x:Name="MessageText" Grid.Column="4" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
+            <!-- Wraps to a second line instead of cutting "60 results in 12 ms" at narrow widths (D16). -->
+            <TextBlock x:Name="MessageText" Grid.Column="4" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" TextWrapping="WrapWholeWords" MaxLines="2"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" AutomationProperties.LiveSetting="Polite" />
         </Grid>
 
-        <Grid Grid.Row="2" SizeChanged="Body_SizeChanged">
+        <Grid x:Name="BodyGrid" Grid.Row="2" SizeChanged="Body_SizeChanged">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition x:Name="DetailColumn" Width="380" />
@@ -177,7 +178,7 @@
             </Border>
         </Grid>
 
-        <Grid Grid.Row="3" Padding="16,6" ColumnSpacing="8" Background="{ThemeResource LayerFillColorDefaultBrush}"
+        <Grid x:Name="FooterBar" Grid.Row="3" Padding="16,6" ColumnSpacing="8" Background="{ThemeResource LayerFillColorDefaultBrush}"
               BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="0,1,0,0">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />
