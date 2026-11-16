@@ -190,7 +190,7 @@ internal sealed unsafe class OutputCapture : IDisposable
     private bool TryCreateDuplication()
     {
         long now = Environment.TickCount64;
-        if (now - _lastRetry < 1000) return false;
+        if (!RetryDue(now, _lastRetry, _barren.NextAt)) return false;
         _lastRetry = now;
         try
         {
@@ -230,7 +230,10 @@ internal sealed unsafe class OutputCapture : IDisposable
                 _keyframeGate.Invalidate();
                 _sampleGate.Invalidate();
                 State = _rotationBlocked ? "rotation unsupported" : "running";
-                Log.Info($"duplication up on output {Info.Index} ({_srcW}x{_srcH}{(rotation != 0 ? $", rotated {rotation}" : "")}, vendor 0x{Info.VendorId:X4})");
+                _upAt = Environment.TickCount64;
+                _framesAtUp = FrameCount;
+                Log.Info($"duplication up on output {Info.Index} ({_srcW}x{_srcH}{(rotation != 0 ? $", rotated {rotation}" : "")}, vendor 0x{Info.VendorId:X4}{(_lostWhy is { } w ? $", again after {w} #{_resets}" : "")})");
+                _lostWhy = null;
                 if (_rotationBlocked)
                     Log.Warn($"output {Info.Index} is rotated {rotation} degrees and the GPU's video processor cannot rotate: it is recorded black and gets no keyframes");
                 return true;
@@ -333,18 +336,37 @@ internal sealed unsafe class OutputCapture : IDisposable
         try { _dup.Dispose(); } catch { }
         _dup = null;
         State = why;
-        // T3: say why the duplication comes up again; repeats at most once a minute, with the count.
+        // T3: say why the duplication comes up again; repeats at most once a minute, with the count, and once when
+        // the backoff starts. The next "duplication up" line names the loss too.
         if (why == "stop") return;
         _resets++;
+        _lostWhy = why;
         long now = Environment.TickCount64;
-        if (_resets == 1 || now - _resetLoggedAt >= 60_000)
+        long lived = now - _upAt, frames = FrameCount - _framesAtUp;
+        // A duplication lost before its first frame is dead on arrival (in Windows Sandbox's vGPU display every new one
+        // got ACCESS_LOST on its first AcquireNextFrame): back off instead of re-creating it every second (T3).
+        long delay = 0;
+        if (Barren(frames, lived)) delay = _barren.Failed(now);
+        else _barren.Succeeded();
+        if (_resets == 1 || now - _resetLoggedAt >= 60_000 || _barren.Failures == 2)
         {
             _resetLoggedAt = now;
-            Log.Info($"duplication on output {Info.Index} lost: {why} ({_resets} so far)");
+            Log.Info($"duplication on output {Info.Index} lost: {why} after {lived} ms, {frames} frames ({_resets} so far"
+                + (_barren.Failures > 1 ? $", {_barren.Failures} before a frame in a row, next try in {delay / 1000} s)" : ")"));
         }
     }
 
-    private long _resets, _resetLoggedAt;
+    /// <summary>A duplication lost before it delivered a frame and within BarrenMs of coming up. Pure.</summary>
+    internal static bool Barren(long framesSinceUp, long livedMs) => framesSinceUp == 0 && livedMs < BarrenMs;
+    internal const long BarrenMs = 5000, BarrenMaxMs = 15_000;
+
+    /// <summary>A new duplication may be tried: 1 s after the last try and past the barren backoff. Pure.</summary>
+    internal static bool RetryDue(long now, long lastTry, long barrenNextAt) => now - lastTry >= 1000 && now >= barrenNextAt;
+
+    private long _resets, _resetLoggedAt, _upAt, _framesAtUp;
+    private string? _lostWhy;
+    // Barren losses in a row: 1 s, 2 s, 4 s, 8 s, then every 15 s. Reset by a duplication that delivered a frame.
+    private readonly RetryBackoff _barren = new(1000, BarrenMaxMs);
 
     private void Acquire(uint timeoutMs)
     {
