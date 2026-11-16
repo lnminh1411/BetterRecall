@@ -34,6 +34,12 @@ internal sealed class WorkerConnection : IAsyncDisposable
     private int _consecutiveTimeouts;
     private int _longOps;
     private int _closed;
+    // Liveness (A5, CA-S1): when each request still waiting for its reply began, and the requests a caller gave up on
+    // that the serial worker still serves, until their own late reply comes (K review N1: a cancel during the write
+    // counts too, since the write goes on, A2). Keepalive frames (id 0) do not clear them.
+    private readonly ConcurrentDictionary<long, (string Op, long Ticks)> _started = new();
+    private readonly Lock _abandonGate = new();
+    private readonly Dictionary<long, (string Op, long Ticks)> _abandoned = new();
 
     /// <summary>Error (null on clean end of stream) and the number of requests still pending at close.</summary>
     public event Action<Exception?, int>? Closed;
@@ -53,6 +59,25 @@ internal sealed class WorkerConnection : IAsyncDisposable
     public int ConsecutiveTimeouts => Volatile.Read(ref _consecutiveTimeouts);
     /// <summary>A request that may legitimately run for minutes (bench) is in flight: replies to the others wait for it.</summary>
     public bool LongOpPending => Volatile.Read(ref _longOps) > 0;
+    /// <summary>The oldest request the worker owes a reply (waiting, or abandoned but still served) and how long
+    /// the worker has owed it: since it began or since the worker's last frame, whichever is later. Null when nothing is
+    /// owed. Untimed callers (scheduler, transcriber) count too: the old rule needed callers that time out.</summary>
+    public (string Op, long Ms)? Oldest
+    {
+        get
+        {
+            (string Op, long Ticks)? oldest;
+            oldest = null;
+            lock (_abandonGate)
+                foreach (var v in _abandoned.Values)
+                    if (oldest is null || v.Ticks < oldest.Value.Ticks) oldest = v;
+            foreach (var kv in _started)
+                if (oldest is null || kv.Value.Ticks < oldest.Value.Ticks) oldest = kv.Value;
+            if (oldest is not { } o) return null;
+            return (o.Op, Math.Min(Environment.TickCount64 - o.Ticks, NoReplyMs));
+        }
+    }
+
     /// <summary>Set by the supervisor when it kills this worker for not answering; the failure is already counted.</summary>
     public bool Recycled { get; set; }
 
@@ -68,11 +93,16 @@ internal sealed class WorkerConnection : IAsyncDisposable
         var req = request with { Id = id };
         var tcs = new TaskCompletionSource<WorkerReply>(TaskCreationOptions.RunContinuationsAsynchronously);
         _pending[id] = tcs;
+        _started[id] = (request.Op, Environment.TickCount64);
         Touch();
         bool longOp = IsLongOp(request.Op);
         if (longOp) Interlocked.Increment(ref _longOps);
         try { return await SendCoreAsync(id, tcs, req, payload, ct).ConfigureAwait(false); }
-        finally { if (longOp) Interlocked.Decrement(ref _longOps); }
+        finally
+        {
+            _started.TryRemove(id, out _);
+            if (longOp) Interlocked.Decrement(ref _longOps);
+        }
     }
 
     private async Task<WorkerReply> SendCoreAsync(long id, TaskCompletionSource<WorkerReply> tcs, WorkerRequest req, ReadOnlyMemory<byte> payload, CancellationToken ct)
@@ -91,6 +121,8 @@ internal sealed class WorkerConnection : IAsyncDisposable
             try { await write.WaitAsync(ct).ConfigureAwait(false); }
             catch (OperationCanceledException)
             {
+                // Owed from now: its reply cannot come before the write ends. A failed write closes the connection.
+                if (_started.TryGetValue(id, out var st)) lock (_abandonGate) _abandoned[id] = st;
                 _ = write.ContinueWith(static t => _ = t.Exception, CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
                 throw;
             }
@@ -102,11 +134,15 @@ internal sealed class WorkerConnection : IAsyncDisposable
         }
         using var reg = ct.Register(() =>
         {
-            if (_pending.TryRemove(id, out var t))
+            TaskCompletionSource<WorkerReply>? t;
+            // Under the gate with the reader's removal: a reply racing this cancel cannot leave a stale entry behind.
+            lock (_abandonGate)
             {
-                Interlocked.Increment(ref _consecutiveTimeouts);
-                t.TrySetCanceled(ct);
+                if (!_pending.TryRemove(id, out t)) return;
+                if (_started.TryGetValue(id, out var st)) _abandoned[id] = st;
             }
+            Interlocked.Increment(ref _consecutiveTimeouts);
+            t.TrySetCanceled(ct);
         });
         var reply = await tcs.Task.ConfigureAwait(false);
         Touch();
@@ -142,7 +178,15 @@ internal sealed class WorkerConnection : IAsyncDisposable
                 Touch();
                 Interlocked.Exchange(ref _lastReplyTicks, Environment.TickCount64);
                 Interlocked.Exchange(ref _consecutiveTimeouts, 0);   // any frame, late replies to cancelled requests too: it is alive
-                if (_pending.TryRemove(header.Id, out var tcs)) tcs.TrySetResult(new WorkerReply(header, payload));
+                // A keepalive (id 0) only says the worker is still on its request: an abandoned one stays owed until its
+                // own reply, so if the keepalives stop (they end after 15 min) the silence counts from the last one.
+                TaskCompletionSource<WorkerReply>? tcs;
+                lock (_abandonGate)
+                {
+                    _abandoned.Remove(header.Id);
+                    _pending.TryRemove(header.Id, out tcs);
+                }
+                tcs?.TrySetResult(new WorkerReply(header, payload));
             }
         }
         catch (OperationCanceledException) { }

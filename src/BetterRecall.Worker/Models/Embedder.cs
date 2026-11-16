@@ -59,6 +59,19 @@ public sealed class Embedder : IDisposable
         return s;
     }
 
+    /// <summary>Keys of the sessions compiled so far.</summary>
+    internal HashSet<string> SessionKeys() => new(_sessions.Keys, StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Disposes every session not in keep: what a budget sweep compiled beyond the configured graphs (C13).</summary>
+    internal void DropSessionsExcept(HashSet<string> keep)
+    {
+        foreach (var k in _sessions.Keys.Where(k => !keep.Contains(k)).ToList())
+        {
+            _sessions[k].Dispose();
+            _sessions.Remove(k);
+        }
+    }
+
     private static Dictionary<string, long[]>? EmbedShapes(string? embedsName, string? maskName, int seq, int dim)
     {
         if (embedsName is null) return null;

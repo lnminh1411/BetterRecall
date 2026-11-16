@@ -252,6 +252,14 @@ internal sealed unsafe class OutputCapture : IDisposable
         var dev = _dev!;
         lock (dev.Gate)
         {
+            // A new duplication of the same output (after access lost: a desktop switch, UAC, a mode blip on a virtual
+            // GPU) keeps the frame textures, which live on the same device: a new FeedGeneration made the replay rebuild
+            // its encoders each time, so frequent resets became a rebuild loop with black first frames (T3).
+            if (SameFrames(_latest is not null, (_texW, _texH, _srcW, _srcH, _rotation), (texW, texH, deskW, deskH, rotation)))
+            {
+                _feedDirty = new RECT(0, 0, _srcW, _srcH);
+                return;
+            }
             DisposeFrameResources();
             _texW = texW; _texH = texH; _srcW = deskW; _srcH = deskH; _rotation = rotation;
             _rotationBlocked = false;
@@ -284,6 +292,10 @@ internal sealed unsafe class OutputCapture : IDisposable
             _feedDirty = new RECT(0, 0, _srcW, _srcH);
         }
     }
+
+    /// <summary>The frame textures made for the old sizes and rotation serve the new duplication. Pure.</summary>
+    internal static bool SameFrames(bool haveFrames, (int TexW, int TexH, int SrcW, int SrcH, int Rotation) old,
+        (int TexW, int TexH, int SrcW, int SrcH, int Rotation) now) => haveFrames && old == now;
 
     /// <summary>Releases everything created on the current device. Caller holds its gate (or the device is gone).</summary>
     private void DisposeFrameResources()
@@ -321,7 +333,18 @@ internal sealed unsafe class OutputCapture : IDisposable
         try { _dup.Dispose(); } catch { }
         _dup = null;
         State = why;
+        // T3: say why the duplication comes up again; repeats at most once a minute, with the count.
+        if (why == "stop") return;
+        _resets++;
+        long now = Environment.TickCount64;
+        if (_resets == 1 || now - _resetLoggedAt >= 60_000)
+        {
+            _resetLoggedAt = now;
+            Log.Info($"duplication on output {Info.Index} lost: {why} ({_resets} so far)");
+        }
     }
+
+    private long _resets, _resetLoggedAt;
 
     private void Acquire(uint timeoutMs)
     {

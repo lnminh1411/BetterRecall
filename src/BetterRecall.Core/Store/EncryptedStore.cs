@@ -1025,10 +1025,11 @@ public sealed partial class EncryptedStore : IStore
         for (int i = 0; i < textRanked.Count; i++) fused[textRanked[i]] = fused.GetValueOrDefault(textRanked[i]) + 1.0 / (RrfK + i + 1);
         for (int i = 0; i < vecRanked.Count; i++) fused[vecRanked[i]] = fused.GetValueOrDefault(vecRanked[i]) + 1.0 / (RrfK + i + 1);
         double norm = lists == 0 ? 1 : lists * (1.0 / (RrfK + 1));
-        if (lists == 1 && useVec)
+        if (useVec && (lists == 1 || textRanked.Count == 0))
         {
-            // Vector-only: rank-based RRF would report 1.0 for the best hit even when nothing matches.
-            // Report the cosine itself, so a weak match shows a low score.
+            // Vector-only (by mode, or because no text matched): rank-based RRF would report a fixed score for the best
+            // hit (1.0, or 0.5 in hybrid mode) even when nothing matches (D11). Report the cosine itself, so a weak
+            // match shows a low score.
             fused.Clear();
             foreach (var (rid, cos) in vecScored) fused[rid] = Math.Max(0, cos);
             norm = 1;
@@ -1447,7 +1448,8 @@ public sealed partial class EncryptedStore : IStore
             }
         if (thinned > 0) Log.Info($"maintenance: {thinned} rows thinned");
         foreach (var m in MaintenanceSlice(KfMonths))
-            MaintenanceSlice(() => { ReleaseFreePagesLocked(m, vacuumLegacy: true); return true; });
+            // A legacy rebuild pauses for priority callers (S3) and goes on in the next slice.
+            while (MaintenanceSlice(() => ReleaseFreePagesLocked(m, vacuumLegacy: true))) { }
 
         MaintenanceSlice(() =>
         {
@@ -1459,8 +1461,15 @@ public sealed partial class EncryptedStore : IStore
                 long pageSize = (long)(Scalar(_w, "PRAGMA page_size") ?? 4096L);
                 if (pages > 0 && free * 4 > pages && free * pageSize > 16L * 1024 * 1024)
                 {
-                    Exec(_w, "VACUUM");
-                    Log.Info("store.db vacuumed");
+                    // VACUUM builds its copy in RAM (SQLITE_TEMP_STORE=2; a file temp_store is not encrypted): about the
+                    // live size. Above the budget the free pages stay for new rows to reuse (B4).
+                    long live = (pages - free) * pageSize;
+                    if (live <= VacuumRamBudgetBytes)
+                    {
+                        Exec(_w, "VACUUM");
+                        Log.Info("store.db vacuumed");
+                    }
+                    else Log.Info($"store.db not vacuumed: {live / (1024 * 1024)} MiB live is over the RAM budget");
                 }
             }
             try { Exec(_w, "PRAGMA optimize"); } catch { }
@@ -1468,6 +1477,9 @@ public sealed partial class EncryptedStore : IStore
         });
         Log.Info($"maintenance: {expired} rows expired in {sw.ElapsedMilliseconds} ms");
     }
+
+    /// <summary>Largest live store.db that the maintenance VACUUMs (128 MiB; tests lower it).</summary>
+    internal long VacuumRamBudgetBytes { get; set; } = 128L * 1024 * 1024;
 
     /// <summary>Count of callers waiting for _wl with priority (purge, keyframe reads).</summary>
     private int _priorityWaiters;
@@ -1610,6 +1622,7 @@ public sealed partial class EncryptedStore : IStore
         if (_disposed) return;
         _disposed = true;
         try { Exec(_w, "PRAGMA wal_checkpoint(TRUNCATE)"); } catch { }
+        AbortRebuildLocked(null);   // a paused month rebuild: its temporary file must not outlive the store (purge all)
         foreach (var c in _kf.Values) { try { Exec(c, "PRAGMA wal_checkpoint(TRUNCATE)"); } catch { } c.Dispose(); }
         _kf.Clear();
         lock (_vl) _rv.Dispose();

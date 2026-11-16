@@ -27,6 +27,12 @@ internal sealed class StorageGuard(Func<IStore?> store, Func<Settings> settings,
     public static bool LowDisk(StorageSettings s, long? disk, StorageUse use, long margin) =>
         s.MinFreeGb > 0 && disk is long d && d + use.FreeBytes < s.MinFreeGb * Gb + margin;
 
+    /// <summary>Deleting captures can bring the disk back above storage.minFreeGb plus margin: the store's live bytes
+    /// cover the shortfall. Space taken by other apps (an update download, a build) used to empty the whole store, 100 000
+    /// rows per check, and the disk was still low (A13); then capture only pauses.</summary>
+    public static bool StoreCoversShortfall(StorageSettings s, long? disk, StorageUse use, long margin) =>
+        disk is long d && use.LiveBytes >= s.MinFreeGb * Gb + margin - (d + use.FreeBytes);
+
     public static bool OverSize(StorageSettings s, StorageUse use, long margin) =>
         use.LiveBytes > s.MaxGb * Gb - margin;
 
@@ -41,7 +47,8 @@ internal sealed class StorageGuard(Func<IStore?> store, Func<Settings> settings,
         int deleted = 0;
         if (s.Overwrite && (LowDisk(s, disk, use, 0) || OverSize(s, use, 0)))
         {
-            for (int i = 0; i < MaxBatchesPerCheck && (LowDisk(s, disk, use, margin) || OverSize(s, use, margin)); i++)
+            bool forDisk = StoreCoversShortfall(s, disk, use, margin);
+            for (int i = 0; i < MaxBatchesPerCheck && ((forDisk && LowDisk(s, disk, use, margin)) || OverSize(s, use, margin)); i++)
             {
                 int n = st.DeleteForSpace(Batch);
                 if (n == 0) break;

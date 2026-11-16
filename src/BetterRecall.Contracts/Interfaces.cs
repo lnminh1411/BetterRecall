@@ -199,6 +199,10 @@ public interface IAgentControl
 public interface IQueryEmbedder
 {
     Task<float[]> EmbedQueryAsync(string text, CancellationToken ct);
+
+    /// <summary>The model is loaded and a query embeds in milliseconds. False while the worker is not running: the
+    /// first query would wait for its start (10-15 s), so search waits only briefly and answers text-only (D5).</summary>
+    bool Warm => true;
 }
 
 /// <summary>Everything Core gives the agent. Core implements it as BetterRecall.Core.CoreHost.Create(CoreHostOptions).</summary>

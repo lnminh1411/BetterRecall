@@ -123,6 +123,11 @@ public static class DevicePolicy
         return list;
     }
 
+    /// <summary>Whisper: auto and npu give the NPU (when present) then the CPU, never the GPU, which the user did not
+    /// choose and where the long compile competes with replay encoding (C11); gpu and cpu as <see cref="Allowed"/>.</summary>
+    public static IReadOnlyList<DeviceInfo> WhisperAllowed(string setting, IReadOnlyList<DeviceInfo> available)
+        => Allowed(setting is "gpu" or "cpu" ? setting : "npu", available);
+
     /// <summary>Devices the bench op measures: the allowed ones and, when the PC has more than one GPU
     /// (<see cref="GpuSelection.All"/>), every other GPU as a measure-only row that is never chosen.</summary>
     public static IReadOnlyList<DeviceInfo> BenchDevices(IReadOnlyList<DeviceInfo> allowed, IReadOnlyList<DeviceInfo> gpus)

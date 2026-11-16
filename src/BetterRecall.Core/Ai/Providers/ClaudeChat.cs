@@ -50,6 +50,21 @@ public sealed class ClaudeChat : IChatProvider
         var sbText = new StringBuilder();
         var blocks = new SortedDictionary<int, JsonObject>();
         var jsonBuffers = new Dictionary<int, StringBuilder>();
+        // A block's text and thinking grow in builders and are written into the block once: "cur + delta" per event
+        // copied the whole string each time, quadratic in the answer length (4 MiB took 8 s) (B10).
+        var fieldBuffers = new Dictionary<(int Index, string Field), StringBuilder>();
+        void Append(int idx, JsonObject block, string field, string part)
+        {
+            if (!fieldBuffers.TryGetValue((idx, field), out var b))
+                fieldBuffers[(idx, field)] = b = new StringBuilder(block[field]?.GetValue<string>() ?? "");
+            b.Append(part);
+        }
+        void Flush(int idx)
+        {
+            if (!blocks.TryGetValue(idx, out var block)) return;
+            foreach (var f in (string[])["text", "thinking"])
+                if (fieldBuffers.Remove((idx, f), out var b)) block[f] = b.ToString();
+        }
         string? stopReasonRaw = null;
         long inputTokens = 0;
         long outputTokens = 0;
@@ -104,6 +119,8 @@ public sealed class ClaudeChat : IChatProvider
                     if (root["index"]?.GetValue<int>() is { } startIdx && root["content_block"] is JsonObject cb)
                     {
                         blocks[startIdx] = (JsonObject)cb.DeepClone();
+                        fieldBuffers.Remove((startIdx, "text"));
+                        fieldBuffers.Remove((startIdx, "thinking"));
                     }
                     break;
 
@@ -114,11 +131,7 @@ public sealed class ClaudeChat : IChatProvider
                         if (deltaType == "text_delta")
                         {
                             var text = delta["text"]?.GetValue<string>() ?? "";
-                            if (blocks.TryGetValue(deltaIdx, out var block))
-                            {
-                                var cur = block["text"]?.GetValue<string>() ?? "";
-                                block["text"] = cur + text;
-                            }
+                            if (blocks.TryGetValue(deltaIdx, out var block)) Append(deltaIdx, block, "text", text);
                             onText(text);
                             sbText.Append(text);
                         }
@@ -135,11 +148,7 @@ public sealed class ClaudeChat : IChatProvider
                         else if (deltaType == "thinking_delta")
                         {
                             var thinking = delta["thinking"]?.GetValue<string>() ?? "";
-                            if (blocks.TryGetValue(deltaIdx, out var block))
-                            {
-                                var cur = block["thinking"]?.GetValue<string>() ?? "";
-                                block["thinking"] = cur + thinking;
-                            }
+                            if (blocks.TryGetValue(deltaIdx, out var block)) Append(deltaIdx, block, "thinking", thinking);
                         }
                         else if (deltaType == "signature_delta")
                         {
@@ -153,6 +162,7 @@ public sealed class ClaudeChat : IChatProvider
                     break;
 
                 case "content_block_stop":
+                    if (root["index"]?.GetValue<int>() is { } flushIdx) Flush(flushIdx);
                     if (root["index"]?.GetValue<int>() is { } stopIdx && blocks.TryGetValue(stopIdx, out var stopBlock))
                     {
                         if (stopBlock["type"]?.GetValue<string>() == "tool_use")
@@ -192,6 +202,7 @@ public sealed class ClaudeChat : IChatProvider
             }
         }
 
+        foreach (var idx in blocks.Keys.ToList()) Flush(idx);   // blocks the stream never stopped
         var calls = new List<ToolCall>();
         foreach (var block in blocks.Values)
         {

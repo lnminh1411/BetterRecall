@@ -594,6 +594,10 @@
   <data name="Save_Png" xml:space="preserve"><value>PNG image</value></data>
   <data name="Save_Text" xml:space="preserve"><value>Text</value></data>
   <data name="Search_CountOnly" xml:space="preserve"><value>{0} results</value></data>
+  <data name="Search_CountTextOnly" xml:space="preserve"><value>{0} results in {1} ms, text matches only: visual search is starting, try again in a few seconds</value></data>
+  <data name="Search_NoResultsTextOnly" xml:space="preserve"><value>No text matches. Visual search is starting; try again in a few seconds.</value></data>
+  <data name="Search_CountVisualUnavailable" xml:space="preserve"><value>{0} results in {1} ms, text matches only: visual search is unavailable</value></data>
+  <data name="Search_NoResultsVisualUnavailable" xml:space="preserve"><value>No text matches. Visual search is unavailable right now.</value></data>
   <data name="History_Title.Text" xml:space="preserve"><value>Recent searches</value></data>
   <data name="History_Clear.Content" xml:space="preserve"><value>Clear history</value></data>
   <data name="History_List.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve"><value>Recent searches</value></data>

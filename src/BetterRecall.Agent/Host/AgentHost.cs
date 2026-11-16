@@ -22,6 +22,7 @@ internal sealed record AgentOptions(string InstallDir, string Home, bool Autosta
 internal sealed class QueryEmbedder(WorkerClient worker) : IQueryEmbedder
 {
     public Task<float[]> EmbedQueryAsync(string text, CancellationToken ct) => worker.EmbedTextAsync(text, "query", ct);
+    public bool Warm => worker.Supervisor.IsRunning;
 }
 
 /// <summary>
@@ -77,6 +78,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         _opt = opt;
         _settingsSnapshot = core.Settings.Current;
         var workerExe = InstallLayout.Full(opt.InstallDir, InstallLayout.WorkerExe);
+        VcRuntime.WorkerDir = Path.GetDirectoryName(workerExe);   // the VC++ check looks where the worker loads from
         _supervisor = new WorkerSupervisor(new ProcessWorkerLauncher(workerExe, () => S.Governance.EcoQos), opt.Home, () => S.Inference.IdleExitS);
         _worker = new WorkerClient(_supervisor);
         _thumbs = new Thumbnailer(() => _core.Store, () => S);
@@ -165,6 +167,8 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
             Log.Info($"store open in {sw.ElapsedMilliseconds} ms ({_core.Keys.Protection})");
             _pause.Clear("keylocked");
             _pause.Clear("storeerror");
+            // The first search should not pay for the worker start (10-15 s) (D5).
+            _ = _worker.PrewarmAsync(CancellationToken.None).ContinueWith(t => { _ = t.Exception; }, TaskScheduler.Default);
             Maintenance();
             _scheduler?.Signal();
             RaiseStatus(force: true);
@@ -553,6 +557,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         if (reason is null)
         {
             if (!_captureStarted) return "Starting";
+            if (!VcRuntime.Present) return "Capturing (search off: install the Microsoft Visual C++ 2015-2022 Redistributable, x64)";
             if (S.Ocr.Enabled && _pipeline?.OcrHealth.Failing == true)
                 return Privacy.RedactionOptions.From(S.Privacy).AnyText
                     ? "Capturing (keyframes dropped: text recognition failing)"
@@ -568,6 +573,8 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         }
         return reason switch
         {
+            "consent" when (_core.Settings as BetterRecall.Core.SettingsStore)?.LoadError is not null
+                => "Waiting for consent (settings.json unreadable, defaults in use until you save)",
             "consent" => "Waiting for consent",
             "keylocked" => "Locked: enter passphrase",
             "keylost" => "Data key missing: purge all in Danger zone to start over",
@@ -627,12 +634,16 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
     }
 
     /// <summary>ocr-failing: text recognition keeps failing (keyframes dropped, or stored without text) (A21).
-    /// ner-unavailable: names or addresses are on but their detector model is missing or broken (C9).</summary>
+    /// ner-unavailable: names or addresses are on but their detector model is missing or broken (C9).
+    /// settings-unreadable: settings.json did not parse; defaults are in use and the file is kept until a save (D3).
+    /// vc-runtime-missing: the worker cannot start without the Visual C++ 2015-2022 runtime (T2).</summary>
     private string[]? Warnings()
     {
+        var list = new List<string>(3);
+        if ((_core.Settings as BetterRecall.Core.SettingsStore)?.LoadError is not null) list.Add("settings-unreadable");
+        if (!VcRuntime.Present) list.Add("vc-runtime-missing");
         var h = _pipeline?.OcrHealth;
-        if (h is null || !S.Ocr.Enabled) return null;
-        var list = new List<string>(2);
+        if (h is null || !S.Ocr.Enabled) return list.Count > 0 ? [.. list] : null;
         if (h.Failing) list.Add("ocr-failing");
         if (h.EntitiesMissing) list.Add("ner-unavailable");
         return list.Count > 0 ? [.. list] : null;

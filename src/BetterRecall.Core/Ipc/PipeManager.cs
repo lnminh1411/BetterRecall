@@ -100,6 +100,9 @@ public sealed class PipeManager : IAsyncDisposable
         try
         {
             if (_stopped) return;
+            // Changed is raised outside the settings lock, so two racing updates can deliver their snapshots out of
+            // order; the passed one may be stale and reopen a pipe the newest settings closed. Apply the newest (B13).
+            s = _settings.Current;
             if (_ui == null) _ui = TryCreate(PipeKind.Ui, s);
 
             // The client checks run at connect only. Before any await (this runs inside the settings change when the

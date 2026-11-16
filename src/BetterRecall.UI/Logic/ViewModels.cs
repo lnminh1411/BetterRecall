@@ -254,7 +254,10 @@ public sealed class SearchViewModel : ObservableObject
         foreach (var g in ResultGroups.Build(r.Value!.Results.Select(h => CaptureItem.From(h, q.Text)))) Groups.Add(g);
         Flatten();
         SelectedIndex = Results.Count > 0 ? 0 : -1;
-        Message = Results.Count == 0 ? new LocalizedText("Search_NoResults") : new LocalizedText("Search_Count", TotalCount, r.Value.TookMs);
+        // "vector": the worker is starting, try again; "vector-unavailable": visual search failed (K review S2).
+        string suffix = r.Value.Degraded switch { "vector" => "TextOnly", "vector-unavailable" => "VisualUnavailable", _ => "" };
+        Message = Results.Count == 0 ? new LocalizedText("Search_NoResults" + suffix)
+            : new LocalizedText("Search_Count" + suffix, TotalCount, r.Value.TookMs);
     }
 
     public void ClearResults()

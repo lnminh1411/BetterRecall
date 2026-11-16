@@ -122,18 +122,43 @@ public sealed class BpeTokenizer
                 foreach (var b in Encoding.UTF8.GetBytes(ch)) syms.Add(new Sym { Id = _byteIds[b], Start = i, End = i + len });
             i += len;
         }
-        while (syms.Count > 1)
-        {
-            int bestAt = -1, bestRank = int.MaxValue, bestId = 0;
-            for (int k = 0; k + 1 < syms.Count; k++)
-                if (_merges.TryGetValue(((long)syms[k].Id << 32) | (uint)syms[k + 1].Id, out var mg) && mg.Rank < bestRank)
-                {
-                    bestRank = mg.Rank; bestAt = k; bestId = mg.Id;
-                }
-            if (bestAt < 0) break;
-            syms[bestAt] = new Sym { Id = bestId, Start = syms[bestAt].Start, End = syms[bestAt + 1].End };
-            syms.RemoveAt(bestAt + 1);
-        }
+        Merge(syms);
         foreach (var s in syms) tokens.Add(new BpeToken(s.Id, s.Start, s.End));
+    }
+
+    /// <summary>Applies merges lowest rank first, leftmost on ties, until none applies: the same result as rescanning
+    /// the list per merge, which cost O(n^2) on a long word without spaces (8 000 chars took 6.5 s) (C9). Symbols form
+    /// a linked list; candidate pairs wait in a priority queue keyed (rank, position) and are skipped once either side
+    /// has changed.</summary>
+    private void Merge(List<Sym> syms)
+    {
+        int n = syms.Count;
+        if (n < 2) return;
+        var arr = syms.ToArray();
+        var next = new int[n];
+        var prev = new int[n];
+        var ver = new int[n];
+        for (int i = 0; i < n; i++) { next[i] = i + 1 < n ? i + 1 : -1; prev[i] = i - 1; }
+        var queue = new PriorityQueue<(int L, int R, int VerL, int VerR, int Id), long>();
+        void Push(int l)
+        {
+            int r = l < 0 ? -1 : next[l];
+            if (r < 0 || !_merges.TryGetValue(((long)arr[l].Id << 32) | (uint)arr[r].Id, out var mg)) return;
+            queue.Enqueue((l, r, ver[l], ver[r], mg.Id), ((long)mg.Rank << 32) | (uint)l);
+        }
+        for (int i = 0; i + 1 < n; i++) Push(i);
+        while (queue.TryDequeue(out var e, out _))
+        {
+            if (ver[e.L] != e.VerL || ver[e.R] != e.VerR || next[e.L] != e.R) continue;   // a side merged since
+            arr[e.L] = new Sym { Id = e.Id, Start = arr[e.L].Start, End = arr[e.R].End };
+            ver[e.L]++;
+            ver[e.R] = -1;   // gone
+            next[e.L] = next[e.R];
+            if (next[e.R] >= 0) prev[next[e.R]] = e.L;
+            Push(prev[e.L]);
+            Push(e.L);
+        }
+        syms.Clear();
+        for (int i = 0; i >= 0; i = next[i]) syms.Add(arr[i]);   // the first symbol is never merged away
     }
 }

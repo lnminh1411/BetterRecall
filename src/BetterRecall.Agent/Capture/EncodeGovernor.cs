@@ -28,6 +28,10 @@ internal sealed class EncodeGovernor<T> where T : IDisposable
     private readonly Queue<(long T, double Ms)> _samples = new();
     private readonly Queue<(T Item, long Since)> _waiting = new();
     private readonly double[] _estimate;
+    private readonly double[] _initial;
+    private readonly long[] _lastRun;
+    /// <summary>A level unused this long gets half its estimate's excess over the initial value back (A12).</summary>
+    public const long RelaxAfterMs = 60_000;
     private double _used10, _used60;
 
     public double Limit10Ms { get; }
@@ -52,6 +56,9 @@ internal sealed class EncodeGovernor<T> where T : IDisposable
         _encode = encode;
         _drop = drop;
         _estimate = (double[])initialEstimateMs.Clone();
+        _initial = (double[])initialEstimateMs.Clone();
+        long t0 = clockMs();
+        _lastRun = [t0, t0, t0, t0];
         int procs = Math.Max(1, logicalProcessors);
         Limit10Ms = PeakPercent / 100 * procs * 10_000;
         Limit60Ms = AvgPercent / 100 * procs * 60_000;
@@ -120,11 +127,26 @@ internal sealed class EncodeGovernor<T> where T : IDisposable
     /// spending the window on Normal and then stalling; a level that does not fit falls through to the cheaper ones.</summary>
     public EncodeLevel? Choose()
     {
+        Relax(_clockMs());
         double load = Load;
         var start = load < 0.5 ? EncodeLevel.Normal : load < 0.75 ? EncodeLevel.Fast : EncodeLevel.Reduced;
         for (var l = start; l <= EncodeLevel.Reduced; l++)
             if (Fits(l)) return l;
         return null;
+    }
+
+    /// <summary>A level's estimate is updated only when it runs, and a level whose estimate alone is over the target
+    /// never runs: one slow encode (first after start, a stall under memory pressure) used to disable it for good (A12).
+    /// An unused level therefore drifts back toward its initial estimate, halving the excess each RelaxAfterMs, and is
+    /// measured again once it fits. The windows still charge what the encode really cost.</summary>
+    private void Relax(long now)
+    {
+        for (int i = 0; i < _estimate.Length; i++)
+        {
+            if (now - _lastRun[i] < RelaxAfterMs) continue;
+            _lastRun[i] = now;
+            if (_estimate[i] > _initial[i]) _estimate[i] = (_estimate[i] + _initial[i]) / 2;
+        }
     }
 
     private bool Fits(EncodeLevel l) =>
@@ -174,6 +196,7 @@ internal sealed class EncodeGovernor<T> where T : IDisposable
         _used60 += ms;
         ref double e = ref _estimate[(int)level];
         e = e * 0.7 + ms * 0.3;              // follows the content; one slow frame moves it only a little
+        _lastRun[(int)level] = now;
         if (level != EncodeLevel.Normal) Downgraded++;
         Encoded++;
         Level = level;

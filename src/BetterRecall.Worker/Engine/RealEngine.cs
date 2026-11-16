@@ -153,7 +153,9 @@ public sealed class RealEngine : IWorkerEngine
             if (missing.Contains(ModelCatalog.Ocr)) return null;
             return "onnx " + NsfwDevicePlan.Label(EnsureOcr().Device);
         }
-        catch (WorkerException e) { Log.Warn($"hello: ocr not loaded: {e.Message}"); return null; }
+        // Any failure, not only WorkerException: a COMException from Windows.Media.Ocr or a warm-up IndexOutOfRange
+        // used to fail the whole hello, so the worker never came up (C14).
+        catch (Exception e) when (e is not OutOfMemoryException) { Log.Warn($"hello: ocr not loaded: {e.GetType().Name}: {e.Message}"); return null; }
     }
 
     /// <summary>With privacy.nsfwFilter on, loads the NSFW gate now (the detector too when privacy.nsfwDetector is on
@@ -163,7 +165,7 @@ public sealed class RealEngine : IWorkerEngine
     {
         if (!_s.NsfwFilter || missing.Contains(ModelCatalog.Nsfw)) return null;
         try { return EnsureNsfw(_s.NsfwDetector && !missing.Contains(ModelCatalog.NsfwDetector)).DeviceLabel; }
-        catch (WorkerException e) { Log.Warn($"hello: nsfw gate not loaded: {e.Message}"); return null; }
+        catch (Exception e) when (e is not OutOfMemoryException) { Log.Warn($"hello: nsfw gate not loaded: {e.GetType().Name}: {e.Message}"); return null; }
     }
 
     internal List<string> Missing()
@@ -379,6 +381,9 @@ public sealed class RealEngine : IWorkerEngine
     {
         var image = BenchImage();
         int runs = o.Device.Kind == DeviceKind.Cpu ? 1 : 3;
+        // Each budget compiles its own vision tower and fusion lengths into e, the embedder kept for use: they stayed
+        // on the device until the worker exited (C13). Drop what the sweep added.
+        var configured = e.SessionKeys();
         foreach (int b in e.Budgets)
         {
             if (b == e.ImageTokens)
@@ -398,6 +403,7 @@ public sealed class RealEngine : IWorkerEngine
                 Log.Warn($"bench {o.Model} {o.Device.Id} tokens={b} failed: {ex.Message}");
             }
         }
+        e.DropSessionsExcept(configured);
     }
 
     private static int CountFiles(string dir)
@@ -552,6 +558,11 @@ public sealed class RealEngine : IWorkerEngine
                 last = e.Message;
                 Log.Warn($"ocr on {NsfwDevicePlan.Label(c.Device)} ({c.Device.Ep} {c.Device.Id}) failed: {e.Message}");
             }
+            catch
+            {
+                ocr?.Dispose();   // a half-loaded engine holds device sessions (C14)
+                throw;
+            }
         }
         throw new DeviceFailedException(last is null ? "ocr has no device" : $"ocr failed on every device ({last})");
     }
@@ -634,7 +645,7 @@ public sealed class RealEngine : IWorkerEngine
         if (!ModelCatalog.WhisperPresent(_s.ModelDir)) throw new ModelNotInstalledException(ModelCatalog.Whisper);
         if (!WhisperGenAi.RuntimePresent()) throw new DeviceFailedException("OpenVINO GenAI runtime not found");
         var ovDevices = (Main as OpenVinoBackend)?.Devices ?? [new DeviceInfo(DeviceKind.Cpu, "CPU", "CPU", "OpenVINO")];
-        var order = DevicePolicy.Allowed(_s.Device, ovDevices);
+        var order = DevicePolicy.WhisperAllowed(_s.Device, ovDevices);
         var dir = ModelCatalog.Dir(_s.ModelDir, ModelCatalog.Whisper);
         var cache = DeviceCache.CompiledDir(DataPaths.CompiledCache(_home), ModelCatalog.Whisper,
             new DeviceCacheKey("OpenVINO GenAI", Main.Version, Main.NpuDriverVersion, FolderHash(dir), "", 0).CompiledId);

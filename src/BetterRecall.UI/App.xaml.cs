@@ -52,6 +52,14 @@ public partial class App : Application
         {
             // Someone else holds the name with a DACL we cannot use; the second-exe path still works.
         }
+        // C5: the launcher replacing this version asks this folder's UI to exit, even with a window open. Its wait
+        // thread keeps the signal alive for the life of the UI.
+        try
+        {
+            _ = new LauncherSignal(BetterRecall.Contracts.PipeNames.UiQuitEventFor(BetterRecall.Contracts.DataPaths.Home()) + (_args.Mock ? ".mock" : ""),
+                () => services.Ui.TryEnqueue(DispatcherQueuePriority.High, () => { _signal?.Dispose(); _signal = null; Exit(); }));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or WaitHandleCannotBeOpenedException) { }
         Handle(_args, firstLaunch: true);
         services.AgentExited += OnAgentExited;
         services.ConsentNeeded += () => ShowMain("consent");   // a restarted agent reset capture.consented (D2)
