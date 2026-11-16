@@ -130,8 +130,12 @@ public sealed partial class DetailPane : UserControl
             });
             var dialog = WindowHelpers.Dialog(XamlRoot, Loc.Get("Describe_Title"), new ScrollViewer { Content = body }, Loc.Get("Describe_Send"));
             dialog.DefaultButton = ContentDialogButton.Close;
-            var choice = await dialog.ShowAsync();
+            if (s.Locked) { img.Source = null; return; }   // locked while the preview loaded
+            ContentDialogResult choice;
+            // Lock, panic or hiding the window closes it (C2): ShowAsync then returns None and the image goes below.
+            using (s.SensitiveDialogs.Track(dialog, XamlRoot)) choice = await dialog.ShowAsync();
             img.Source = null;
+            if (s.Locked) return;
             if (choice != ContentDialogResult.Primary) return;
             await using var client = s.CreateRunClient();
             var r = await new AgentApi(client).DescribeSendAsync(preview.Token);

@@ -178,10 +178,10 @@ public class KeyVaultTests
         Assert.True(v.TryLoadSilent());
         var a = v.Derive("x");
         s.Security.KeyProtection = "passphrase";
-        Assert.True(v.UnlockWithPassphrase("pw"));
+        Assert.True(v.UnlockWithPassphrase("pw-long-enough"));
         Assert.Equal("passphrase", v.Protection);
         using var v2 = new KeyVault(h.Path, () => s, probeHello: false);
-        Assert.True(v2.UnlockWithPassphrase("pw"));
+        Assert.True(v2.UnlockWithPassphrase("pw-long-enough"));
         Assert.Equal(a, v2.Derive("x"));
     }
 

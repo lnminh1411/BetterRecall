@@ -95,6 +95,9 @@ public sealed class PiiNer : IDisposable
             throw new DeviceFailedException("ner output missing");
         int labels = checked((int)t.Shape[2]);
         if (labels != _spec.Labels.Length) throw new DeviceFailedException($"ner output has {labels} labels, manifest {_spec.Labels.Length}");
+        // The whole output, as OCR checks it: one NaN in a row made its softmax NaN, so the token silently got no tag and
+        // entitiesMissing stayed false (C6).
+        if (!Ocr.PaddleOcr.AllFinite(t.Floats.AsSpan(0, Math.Min(t.Floats.Length, n * labels)))) throw new DeviceFailedException("ner output not finite");
         var tags = new (int Tag, float P)[to - from];
         for (int i = 0; i < tags.Length; i++)
             tags[i] = Pick(t.Floats.AsSpan((i + 1) * labels, labels), _tags);
@@ -106,7 +109,11 @@ public sealed class PiiNer : IDisposable
     internal static (int Tag, float P) Pick(ReadOnlySpan<float> logits, (string Entity, string Base, bool Begin)?[] map)
     {
         float mx = float.NegativeInfinity;
-        foreach (var v in logits) if (v > mx) mx = v;
+        foreach (var v in logits)
+        {
+            if (!float.IsFinite(v)) throw new DeviceFailedException("ner output not finite");   // any logit, not only the max (C6)
+            if (v > mx) mx = v;
+        }
         if (!float.IsFinite(mx)) throw new DeviceFailedException("ner output not finite");
         double sum = 0;
         foreach (var v in logits) sum += Math.Exp(v - mx);

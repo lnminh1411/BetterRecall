@@ -300,6 +300,39 @@ internal static unsafe partial class Win32
     [return: MarshalAs(UnmanagedType.Bool)]
     public static partial bool WTSUnRegisterSessionNotification(nint hwnd);
 
+    public const int WTSSessionInfoEx = 25, WTS_CURRENT_SESSION = -1;
+    public const int WTS_SESSIONSTATE_LOCK = 0, WTS_SESSIONSTATE_UNLOCK = 1, WTSActive = 0;
+
+    [LibraryImport("wtsapi32.dll", EntryPoint = "WTSQuerySessionInformationW", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool WTSQuerySessionInformationW(nint server, int sessionId, int infoClass, nint* buffer, uint* bytes);
+
+    [LibraryImport("wtsapi32.dll")]
+    public static partial void WTSFreeMemory(nint memory);
+
+    /// <summary>The current session is locked or disconnected right now (WTSSessionInfoEx); null when unknown. The agent
+    /// only sees later lock transitions through WM_WTSSESSION_CHANGE, so it asks once at start (A14).</summary>
+    public static bool? SessionLockedNow()
+    {
+        nint buf = 0;
+        uint bytes = 0;
+        if (!WTSQuerySessionInformationW(0 /* WTS_CURRENT_SERVER_HANDLE */, WTS_CURRENT_SESSION, WTSSessionInfoEx, &buf, &bytes) || buf == 0)
+            return null;
+        try
+        {
+            // WTSINFOEXW: DWORD Level, then the WTSINFOEX_LEVEL1_W union (8-aligned: it holds LARGE_INTEGERs):
+            // SessionId at 8, SessionState at 12, SessionFlags at 16.
+            if (bytes < 20 || *(int*)buf != 1) return null;
+            int state = *(int*)(buf + 12), flags = *(int*)(buf + 16);
+            return SessionLocked(state, flags);
+        }
+        finally { WTSFreeMemory(buf); }
+    }
+
+    /// <summary>Locked when the session flags say lock, or the session is not the active one (disconnected). Pure.</summary>
+    internal static bool? SessionLocked(int state, int flags) =>
+        state != WTSActive ? true : flags switch { WTS_SESSIONSTATE_LOCK => true, WTS_SESSIONSTATE_UNLOCK => false, _ => null };
+
     // ---- kernel32 ----
     [LibraryImport("kernel32.dll")]
     public static partial nint GetModuleHandleW(char* name);

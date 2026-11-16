@@ -135,6 +135,7 @@ public sealed partial class LauncherWindow : Window
     public void HideLauncher()
     {
         if (_vm.Query.Trim().Length > 0 && _vm.Results.Count > 0) _ = _vm.CommitHistoryAsync();
+        if (Content?.XamlRoot is { } root) Services.Current.SensitiveDialogs.HideAll(d => d.Hide(), root);   // C2
         AppWindow.Hide();
         _vm.CancelPending();
         DropData();
@@ -579,19 +580,21 @@ public sealed partial class LauncherWindow : Window
         _modal++;
         try
         {
-            var first = await Ask();
-            if (!first.Ok) { MessageText.Text = Loc.Error(first.Kind, first.Error); return; }
-            int rows = first.Value!.Rows ?? 0;
-            if (rows == 0) { MessageText.Text = Loc.Get("Err_NotFound"); return; }
             string name = scope == DeleteScope.Site ? item.Site : CaptureItem.AppName(item.App);
-            var dialog = WindowHelpers.Dialog(Root.XamlRoot,
-                Loc.Get(scope == DeleteScope.One ? "Delete_OneTitle" : "Delete_ManyTitle"),
-                new TextBlock { Text = scope == DeleteScope.One ? Loc.Get("Delete_OneBody") : Loc.Format("Delete_ManyBody", rows, name), TextWrapping = TextWrapping.Wrap },
-                Loc.Get("Delete_Confirm"), danger: true);
-            if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
-            var again = await Ask();
-            if (!again.Ok) { MessageText.Text = Loc.Error(again.Kind, again.Error); return; }
-            var done = await api.PurgeConfirmAsync(again.Value!.Confirm);
+            bool none = false;
+            // A fresh count higher than the one shown (capture kept running while the dialog was open) is confirmed
+            // again, as in the Danger zone (C15).
+            var result = await PurgeFlow.ConfirmFreshAsync(api, Ask, async rows =>
+            {
+                if (rows == 0) { none = true; return false; }
+                var dialog = WindowHelpers.Dialog(Root.XamlRoot,
+                    Loc.Get(scope == DeleteScope.One ? "Delete_OneTitle" : "Delete_ManyTitle"),
+                    new TextBlock { Text = scope == DeleteScope.One ? Loc.Get("Delete_OneBody") : Loc.Format("Delete_ManyBody", rows, name), TextWrapping = TextWrapping.Wrap },
+                    Loc.Get("Delete_Confirm"), danger: true);
+                return await dialog.ShowAsync() == ContentDialogResult.Primary;
+            });
+            if (none) { MessageText.Text = Loc.Get("Err_NotFound"); return; }
+            if (result is not { } done) return;   // cancelled
             if (!done.Ok) { MessageText.Text = Loc.Error(done.Kind, done.Error); return; }
             Func<CaptureItem, bool> match = scope switch
             {

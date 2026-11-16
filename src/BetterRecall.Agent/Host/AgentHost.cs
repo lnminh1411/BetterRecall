@@ -127,7 +127,14 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         _pause.Set("keylocked");
         _openStore = Task.Run(OpenStoreAsync);
         _pause.Changed += () => _capture?.ApplySettings();
-        _pause.Expired += r => { if (r is "user" or "ipc") Log.Info($"resumed ({r} pause ended)"); };
+        _pause.Expired += r => { if (r is "user" or "ipc") Log.Info($"resumed ({r} pause ended)"); };   // T6
+        // Started while the session is locked (launcher upgrade, restart, locked logon): only later transitions arrive
+        // as messages, so apply the current state now, as a lock event would (A14).
+        if (Win32.SessionLockedNow() == true)
+        {
+            Log.Info("session is locked at start");
+            OnSessionChanged(Win32.WTS_SESSION_LOCK);
+        }
 
         _guard.Start();
         _scheduler.Start();
@@ -662,7 +669,13 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
 
     public async Task<bool> UnlockAsync(CancellationToken ct)
     {
-        if (!S.Security.RequireUnlock) return true;
+        if (!S.Security.RequireUnlock)
+        {
+            // Nothing to verify; lifts a Lock the user pressed (D4).
+            _gate.ReleaseUserLock();
+            RaiseStatus(force: true);
+            return true;
+        }
         bool ok;
         try { ok = await _core.Keys.VerifyUserAsync(_window?.Handle ?? 0, "Unlock BetterRecall to view your history", ct).ConfigureAwait(false); }
         catch (Exception ex) { Log.Warn("Windows Hello", ex); ok = false; }
@@ -680,7 +693,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
 
     public void Lock()
     {
-        _gate.Close();
+        _gate.LockByUser();   // locks also with security.requireUnlock off (D4)
         _thumbs.ClearCache();
         _sampler.Clear();
         RaiseStatus(force: true);
@@ -780,7 +793,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         _thumbs.ClearCache();
         _systemAudio?.Clear();
         _micAudio?.Clear();
-        _gate.Close();
+        _gate.LockByUser();   // locks also with security.requireUnlock off, so the UI closes decrypted dialogs (C2, D4)
         int purged = 0;
         int minutes = Math.Max(0, S.Privacy.PanicPurgeMinutes);
         if (Store is { } store)

@@ -13,6 +13,9 @@ namespace BetterRecall.Core.Store;
 /// durationS). The copy is not encrypted: the UI warns before it asks for the path. Written to a .partial file
 /// first, then moved over the target.
 /// </summary>
+/// <summary>A user purge or panic reached the rows of a running export: the partial file is deleted (B12).</summary>
+public sealed class ExportPurgedException() : IOException("A purge ran during the export; nothing was written.");
+
 public static class CaptureExporter
 {
     private const int Page = 2000;
@@ -75,6 +78,19 @@ public static class CaptureExporter
         var partial = r.Path + ".partial";
         var entries = new List<ExportEntry>();
         int images = 0;
+        // A user purge (panic flush, purge last/range/app/site/id, purge all) that deletes a row already written, or whose
+        // window overlaps the export's, aborts it: the rows written before the purge would stay in the plaintext zip (B12).
+        var written = new HashSet<string>(StringComparer.Ordinal);
+        bool purged = false;
+        void OnPurged(PurgeNotice n)
+        {
+            if (!n.ByUser) return;
+            bool hit = n.Reason == "all" || n.From is { } f && n.To is { } t && f < r.To && r.From <= t;
+            if (!hit) lock (written) hit = n.Ids.Any(written.Contains);
+            if (hit) Volatile.Write(ref purged, true);
+        }
+        var notices = store as EncryptedStore;
+        if (notices is not null) notices.Purged += OnPurged;
         try
         {
             using (var fs = new FileStream(partial, FileMode.Create, FileAccess.Write, FileShare.None))
@@ -83,6 +99,8 @@ public static class CaptureExporter
                 foreach (var m in Rows(store, r).Reverse())
                 {
                     ct.ThrowIfCancellationRequested();
+                    if (Volatile.Read(ref purged)) throw new ExportPurgedException();
+                    lock (written) written.Add(m.Id);
                     var detail = store.Get(m.Id);
                     if (detail is null) continue; // deleted meanwhile
                     string? file = null;
@@ -110,6 +128,7 @@ public static class CaptureExporter
                 using (var js = json.Open())
                     JsonSerializer.Serialize(js, entries, CoreJson.Default.ListExportEntry);
             }
+            if (Volatile.Read(ref purged)) throw new ExportPurgedException();
             File.Move(partial, r.Path, overwrite: true);
         }
         catch
@@ -117,6 +136,7 @@ public static class CaptureExporter
             try { File.Delete(partial); } catch { }
             throw;
         }
+        finally { if (notices is not null) notices.Purged -= OnPurged; }
         long bytes = new FileInfo(r.Path).Length;
         Log.Info($"export: {entries.Count} captures, {images} images, {bytes / 1024} KiB");
         return new ExportResult(entries.Count, images, bytes);

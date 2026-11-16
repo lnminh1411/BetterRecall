@@ -61,7 +61,7 @@ public partial class PasswordFieldProbeTests
         {
             Ole.CoInitializeEx(0, Ole.COINIT_MULTITHREADED);
             using var p = new PasswordFieldProbe();
-            found = p.Find(top);
+            found = p.Find(top) ?? [];
             Ole.CoUninitialize();
         });
         probe.Start();

@@ -67,6 +67,49 @@ public sealed class BinaryVectorIndex : IVectorIndex
     private readonly Dictionary<long, (Segment Seg, int Slot)> _where = [];
     private readonly Dictionary<string, int> _apps = new(StringComparer.Ordinal);
     private readonly Dictionary<string, int> _sites = new(StringComparer.Ordinal);
+    // Live rows per app / site id: a name no live row uses is dropped, so a purged app or site does not stay in RAM in
+    // plain text (AB-S1). Ids come from a counter and are never reused, so dropping a name leaves other ids valid.
+    private readonly Dictionary<int, (string Name, int Refs)> _appRefs = [];
+    private readonly Dictionary<int, (string Name, int Refs)> _siteRefs = [];
+    private int _nextApp, _nextSite;
+
+    private static int AddRef(Dictionary<string, int> names, Dictionary<int, (string Name, int Refs)> refs, ref int next, string name)
+    {
+        if (!names.TryGetValue(name, out var id)) { names[name] = id = next++; refs[id] = (name, 0); }
+        var r = refs[id];
+        refs[id] = (r.Name, r.Refs + 1);
+        return id;
+    }
+
+    private static void Release(Dictionary<string, int> names, Dictionary<int, (string Name, int Refs)> refs, int id)
+    {
+        if (!refs.TryGetValue(id, out var r)) return;
+        if (r.Refs > 1) { refs[id] = (r.Name, r.Refs - 1); return; }
+        refs.Remove(id);
+        names.Remove(r.Name);
+    }
+
+    /// <summary>Tests: app and site names currently held.</summary>
+    internal (int Apps, int Sites) NameCounts()
+    {
+        _lock.EnterReadLock();
+        try { return (_apps.Count, _sites.Count); }
+        finally { _lock.ExitReadLock(); }
+    }
+
+    /// <summary>Tests: true when any bit word of the segment of this dim beyond its live rows, or of a dead row, is set.</summary>
+    internal bool HasStaleBits(int dim)
+    {
+        _lock.EnterReadLock();
+        try
+        {
+            if (!_segments.TryGetValue(dim, out var seg)) return false;
+            for (int i = 0; i < seg.Ts.Length; i++)
+                if ((i >= seg.Count || !seg.Alive[i]) && seg.Bits.AsSpan(i * seg.Words, seg.Words).ContainsAnyExcept(0UL)) return true;
+            return false;
+        }
+        finally { _lock.ExitReadLock(); }
+    }
 
     public int Count { get { _lock.EnterReadLock(); try { return _where.Count; } finally { _lock.ExitReadLock(); } } }
 
@@ -121,10 +164,8 @@ public sealed class BinaryVectorIndex : IVectorIndex
             seg.Ts[slot] = tsMs;
             seg.Rid[slot] = rid;
             seg.Kind[slot] = (byte)(1 << kind);
-            if (!_apps.TryGetValue(appLower, out var app)) _apps[appLower] = app = _apps.Count;
-            seg.App[slot] = app;
-            if (!_sites.TryGetValue(site, out var st)) _sites[site] = st = _sites.Count;
-            seg.Site[slot] = st;
+            seg.App[slot] = AddRef(_apps, _appRefs, ref _nextApp, appLower);
+            seg.Site[slot] = AddRef(_sites, _siteRefs, ref _nextSite, site);
             seg.Alive[slot] = true;
             _where[rid] = (seg, slot);
         }
@@ -142,6 +183,11 @@ public sealed class BinaryVectorIndex : IVectorIndex
     {
         if (!_where.Remove(rid, out var at)) return;
         at.Seg.Alive[at.Slot] = false;
+        // A purged row's sign signature does not stay in RAM until compaction (B19).
+        Array.Clear(at.Seg.Bits, at.Slot * at.Seg.Words, at.Seg.Words);
+        at.Seg.Ts[at.Slot] = 0;
+        Release(_apps, _appRefs, at.Seg.App[at.Slot]);
+        Release(_sites, _siteRefs, at.Seg.Site[at.Slot]);
         at.Seg.Dead++;
         if (at.Seg.Dead > 4096 && at.Seg.Dead * 4 > at.Seg.Count) Compact(at.Seg);
     }
@@ -166,6 +212,8 @@ public sealed class BinaryVectorIndex : IVectorIndex
             dst++;
         }
         Array.Clear(seg.Alive, dst, seg.Count - dst);
+        Array.Clear(seg.Bits, dst * w, (seg.Count - dst) * w);   // the moved rows' old copies past the new end (B19)
+        Array.Clear(seg.Ts, dst, seg.Count - dst);
         seg.Count = dst;
         seg.Dead = 0;
     }
@@ -173,7 +221,7 @@ public sealed class BinaryVectorIndex : IVectorIndex
     public void Clear()
     {
         _lock.EnterWriteLock();
-        try { _segments.Clear(); _where.Clear(); _apps.Clear(); _sites.Clear(); }
+        try { _segments.Clear(); _where.Clear(); _apps.Clear(); _sites.Clear(); _appRefs.Clear(); _siteRefs.Clear(); _nextApp = _nextSite = 0; }
         finally { _lock.ExitWriteLock(); }
     }
 

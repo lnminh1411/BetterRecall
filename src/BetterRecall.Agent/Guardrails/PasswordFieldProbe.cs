@@ -25,7 +25,7 @@ internal sealed unsafe class PasswordFieldProbe : IDisposable
     private nint _cond;
     private nint _lastHwnd;
     private long _lastAt = long.MinValue;
-    private RECT[] _last = [];
+    private RECT[]? _last = [];
 
     public double LastMs { get; private set; }
 
@@ -40,8 +40,8 @@ internal sealed unsafe class PasswordFieldProbe : IDisposable
     }
 
     /// <summary>Password field rectangles (desktop pixels, non-empty) of hwnd; the cached answer when the same window
-    /// was searched less than MinIntervalMs ago. Empty when the search fails.</summary>
-    public RECT[] Find(nint hwnd)
+    /// was searched less than MinIntervalMs ago. Null when the search failed (fields unknown, A15), empty when it found none.</summary>
+    public RECT[]? Find(nint hwnd)
     {
         long now = Environment.TickCount64;
         if (hwnd == _lastHwnd && now - _lastAt < MinIntervalMs) return _last;
@@ -52,18 +52,19 @@ internal sealed unsafe class PasswordFieldProbe : IDisposable
         return r;
     }
 
-    private RECT[] Probe(nint hwnd)
+    private RECT[]? Probe(nint hwnd)
     {
         nint root = 0, array = 0;
         try
         {
             var fromHandle = (delegate* unmanaged[Stdcall]<nint, nint, nint*, int>)Ole.Slot(_uia, 6);   // ElementFromHandle
-            if (fromHandle(_uia, hwnd, &root) < 0 || root == 0) return [];
+            if (fromHandle(_uia, hwnd, &root) < 0 || root == 0) return null;
             var findAll = (delegate* unmanaged[Stdcall]<nint, int, nint, nint*, int>)Ole.Slot(root, 6);   // FindAll
-            if (findAll(root, TreeScope_Descendants, _cond, &array) < 0 || array == 0) return [];
+            if (findAll(root, TreeScope_Descendants, _cond, &array) < 0 || array == 0) return null;
             int n;
             var length = (delegate* unmanaged[Stdcall]<nint, int*, int>)Ole.Slot(array, 3);
-            if (length(array, &n) < 0 || n <= 0) return [];
+            if (length(array, &n) < 0) return null;
+            if (n <= 0) return [];
             var list = new List<RECT>();
             var get = (delegate* unmanaged[Stdcall]<nint, int, nint*, int>)Ole.Slot(array, 4);
             for (int i = 0; i < Math.Min(n, MaxFields); i++)
@@ -83,7 +84,7 @@ internal sealed unsafe class PasswordFieldProbe : IDisposable
         catch (Exception ex)
         {
             Log.Debug($"uia password search failed: 0x{ex.HResult:X8}");
-            return [];
+            return null;
         }
         finally
         {

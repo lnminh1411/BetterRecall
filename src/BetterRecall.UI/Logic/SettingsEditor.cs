@@ -28,6 +28,19 @@ public sealed class SettingsEditor
         Changed?.Invoke();
     }
 
+    /// <summary>Fresh settings from the agent (after a reconnect, D2): Original follows them, so a later save sends only
+    /// the user's pending edits, which stay on top of the fresh values.</summary>
+    public void Refresh(JsonObject settings)
+    {
+        if (!Loaded) { Load(settings); return; }
+        var pending = Diff();
+        Original = (JsonObject)settings.DeepClone();
+        Working = (JsonObject)settings.DeepClone();
+        foreach (var k in SettingsDiff.Keys(pending))
+            SettingsSchema.Set(Working, k, SettingsSchema.Get(pending, k)?.DeepClone());
+        Changed?.Invoke();
+    }
+
     public JsonNode? Get(string key) => SettingsSchema.Get(Working, key);
 
     public void Set(string key, JsonNode? value)

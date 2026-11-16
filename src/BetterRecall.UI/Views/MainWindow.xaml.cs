@@ -87,6 +87,7 @@ public sealed partial class MainWindow : Window
 
     private void HideMain()
     {
+        if (Content?.XamlRoot is { } root) Services.Current.SensitiveDialogs.HideAll(d => d.Hide(), root);   // C2
         AppWindow.Hide();
         DropContent();   // drop page images from memory
         _page = "";

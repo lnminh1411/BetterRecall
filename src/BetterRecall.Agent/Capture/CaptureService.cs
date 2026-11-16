@@ -26,6 +26,7 @@ internal sealed class CaptureService : IAsyncDisposable
     private readonly ReplayEngine _engine;
     private readonly object _gate = new();
     private List<OutputCapture> _outputs = new();
+    private int _layoutGen;   // bumped on every output rebuild, under _gate (A7)
     private AudioReplayEncoder? _audio;
     private Timer? _timer;
     private long _lastKeyframeTick;
@@ -60,12 +61,17 @@ internal sealed class CaptureService : IAsyncDisposable
     public AudioReplayEncoder? Audio => _audio;
     internal GpuDeviceCache Devices => _devices;
 
-    /// <summary>Monitor bounds for the guardrail scan.</summary>
+    /// <summary>Monitor bounds for the guardrail scan, keyed by <see cref="GuardKey"/>.</summary>
     public IReadOnlyList<(int, RECT)> MonitorBounds()
     {
         lock (_gate)
-            return _outputs.Select(o => (o.Info.Index, new RECT(o.Info.Left, o.Info.Top, o.Info.Left + o.Info.Width, o.Info.Top + o.Info.Height))).ToList();
+            return _outputs.Select(o => (GuardKey(o), new RECT(o.Info.Left, o.Info.Top, o.Info.Left + o.Info.Width, o.Info.Top + o.Info.Height))).ToList();
     }
+
+    /// <summary>Guard snapshot key of an output: the DXGI index plus the layout generation. A hot-plug renumbers DXGI
+    /// indices, so a snapshot scanned before the rebuild must not apply its index 0 to the monitor that is index 0 now (A7);
+    /// with the generation in the key it knows none of the new outputs and they are skipped until the next scan. Under _gate.</summary>
+    private int GuardKey(OutputCapture o) => unchecked(_layoutGen * 64 + o.Info.Index);
 
     public void Start()
     {
@@ -89,7 +95,7 @@ internal sealed class CaptureService : IAsyncDisposable
             var (outputs, pin) = MonitorSelection.Resolve(s.Capture.Monitors ?? [], all, MonitorSelection.StableId, MonitorSelection.Load(MonitorSelectionFile));
             if (pin is not null) MonitorSelection.Save(MonitorSelectionFile, pin);
             var list = outputs.Select(o => new OutputCapture(o, _devices, _pipeline.Post)).ToList();
-            lock (_gate) _outputs = list;
+            lock (_gate) { _outputs = list; _layoutGen++; }
             ApplySettings();
             foreach (var o in list) o.Start();
             _engine.RequestRebuild("outputs");
@@ -103,16 +109,23 @@ internal sealed class CaptureService : IAsyncDisposable
     /// redaction boxes of each monitor's newest keyframe.</summary>
     internal static readonly RECT MaskEverything = new(-(1 << 20), -(1 << 20), 1 << 20, 1 << 20);   // clipped to each output
 
-    private RECT[] Masks() => MergeMasks(_guard.Current(), _settings().Privacy.RedactPasswords, _redactions?.All() ?? []);
+    private RECT[] Masks()
+    {
+        var snap = _guard.Current();
+        return MergeMasks(snap, _settings().Privacy.RedactPasswords, _redactions?.All() ?? [], _guard.UnscannedForeground(snap));
+    }
 
-    internal static RECT[] MergeMasks(GuardSnapshot snap, bool passwords, RECT[] redactions)
+    /// <param name="unscannedForeground">Bounds of a foreground window the snapshot has not scanned yet (A1): masked until
+    /// a scan that started after the foreground change lands, as keyframes are refused meanwhile. Not the whole canvas,
+    /// so an alt-tab does not black the replay.</param>
+    internal static RECT[] MergeMasks(GuardSnapshot snap, bool passwords, RECT[] redactions, RECT? unscannedForeground = null)
     {
         // No fresh guard snapshot (guard thread stalled, or before its first scan): nothing says which windows are denied,
         // so black the whole canvas rather than record unmasked. Keyframes fail closed on the same snapshot.
         if (ReferenceEquals(snap, GuardSnapshot.Closed)) return [MaskEverything];
         var secrets = passwords ? snap.SecretRects : [];
-        if (secrets.Length == 0 && redactions.Length == 0) return snap.MaskRects;
-        return [.. snap.MaskRects, .. secrets, .. redactions];
+        if (secrets.Length == 0 && redactions.Length == 0 && unscannedForeground is null) return snap.MaskRects;
+        return unscannedForeground is { } fg ? [.. snap.MaskRects, .. secrets, .. redactions, fg] : [.. snap.MaskRects, .. secrets, .. redactions];
     }
 
     /// <summary>Pushes replay settings and pause state into the engine and the audio ring.</summary>
@@ -240,7 +253,7 @@ internal sealed class CaptureService : IAsyncDisposable
             foreach (var o in _outputs)
             {
                 // A monitor the snapshot did not scan (new after a rebuild) is unknown: skip it until the next scan (A12).
-                if (!snap.PerMonitor.TryGetValue(o.Info.Index, out var mt) || mt.DeniedVisible) { SkippedByGuard++; continue; }
+                if (!snap.PerMonitor.TryGetValue(GuardKey(o), out var mt) || mt.DeniedVisible) { SkippedByGuard++; continue; }
                 var w = mt.Window ?? (snap.Foreground is { } fg && IsOnMonitor(fg, o.Info) ? fg : null);
                 string exe = w?.ExePath ?? "";
                 string app = exe.Length == 0 ? "" : Path.GetFileNameWithoutExtension(exe);
@@ -287,7 +300,7 @@ internal sealed class CaptureService : IAsyncDisposable
         _pipeline.Flush();
     }
 
-    /// <summary>Panic: zero every ring and forget de-dup state.</summary>
+    /// <summary>Panic: zero every ring and forget de-dup state. Replay redaction masks stay (A9).</summary>
     public void Panic()
     {
         _engine.Panic();

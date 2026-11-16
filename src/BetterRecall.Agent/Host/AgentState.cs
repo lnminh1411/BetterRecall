@@ -2,30 +2,56 @@
 // Copyright (c) BetterRecall contributors
 namespace BetterRecall.Agent.Host;
 
-/// <summary>Windows Hello read gate: open for security.unlockTimeoutMin after an unlock, closed on lock or session lock.</summary>
-internal sealed class ReadGate(Func<DateTimeOffset> now)
+/// <summary>Windows Hello read gate: open for security.unlockTimeoutMin after an unlock, closed on lock or session lock.
+/// The timeout runs on a monotonic clock (counts sleep, ignores wall-clock steps, A17); wall time is for display only.</summary>
+internal sealed class ReadGate(Func<DateTimeOffset> now, Func<long> monoMs)
 {
     private readonly object _gate = new();
     private DateTimeOffset? _until;
+    private long _untilMono;
+    private bool _userLocked;   // Lock pressed: closed even with security.requireUnlock off, until the next unlock (D4)
 
-    public ReadGate() : this(() => DateTimeOffset.UtcNow) { }
+    public ReadGate() : this(() => DateTimeOffset.UtcNow, () => Environment.TickCount64) { }
+
+    /// <summary>Tests: one fake clock drives both.</summary>
+    public ReadGate(Func<DateTimeOffset> now) : this(now, () => now().ToUnixTimeMilliseconds()) { }
 
     public bool IsOpen(bool requireUnlock)
     {
-        if (!requireUnlock) return true;
-        lock (_gate) return _until is { } u && now() < u;
+        lock (_gate)
+        {
+            if (_userLocked) return false;
+            if (!requireUnlock) return true;
+            return _until is not null && monoMs() < _untilMono;
+        }
     }
 
     public DateTimeOffset? Until
     {
-        get { lock (_gate) return _until is { } u && now() < u ? u : null; }
+        get { lock (_gate) return !_userLocked && _until is { } u && monoMs() < _untilMono ? u : null; }
+    }
+
+    /// <summary>The user pressed Lock (button, hotkey, tray, lock verb): closed until the next unlock, whatever
+    /// security.requireUnlock says (D4). Session lock and timeouts use Close.</summary>
+    public void LockByUser()
+    {
+        lock (_gate) { _until = null; _userLocked = true; }
+    }
+
+    /// <summary>Unlock with security.requireUnlock off: nothing to verify, only the user lock to lift.</summary>
+    public void ReleaseUserLock()
+    {
+        lock (_gate) _userLocked = false;
     }
 
     public DateTimeOffset Open(int timeoutMin)
     {
         lock (_gate)
         {
-            _until = now() + TimeSpan.FromMinutes(Math.Max(1, timeoutMin));
+            var span = TimeSpan.FromMinutes(Math.Max(1, timeoutMin));
+            _userLocked = false;
+            _untilMono = monoMs() + (long)span.TotalMilliseconds;
+            _until = now() + span;
             return _until.Value;
         }
     }
@@ -41,13 +67,19 @@ internal sealed class ReadGate(Func<DateTimeOffset> now)
 /// consent, keylocked and keylost (data key file present but its TPM/DPAPI key gone) block everything; lock pauses capture; user/ipc pause until a time or until resume;
 /// fullscreen only pauses keyframes and inference.
 /// </summary>
-internal sealed class PauseController(Func<DateTimeOffset> now)
+/// <remarks>An end time is turned into a monotonic deadline when it is set (counts sleep, ignores wall-clock steps:
+/// "pause 1 h" no longer ends early on an NTP step, A17); the wall time is kept for display only.</remarks>
+internal sealed class PauseController(Func<DateTimeOffset> now, Func<long> monoMs)
 {
     private static readonly string[] Priority = ["consent", "keylocked", "keylost", "storeerror", "lock", "storage", "user", "ipc", "fullscreen", "battery"];
     private readonly object _gate = new();
     private readonly Dictionary<string, DateTimeOffset?> _reasons = new();
+    private readonly Dictionary<string, long> _deadlines = new();   // monotonic ms, for reasons with an end time
 
-    public PauseController() : this(() => DateTimeOffset.UtcNow) { }
+    public PauseController() : this(() => DateTimeOffset.UtcNow, () => Environment.TickCount64) { }
+
+    /// <summary>Tests: one fake clock drives both.</summary>
+    public PauseController(Func<DateTimeOffset> now) : this(now, () => now().ToUnixTimeMilliseconds()) { }
 
     public event Action? Changed;
 
@@ -64,6 +96,8 @@ internal sealed class PauseController(Func<DateTimeOffset> now)
         {
             if (_reasons.TryGetValue(reason, out var old) && old == until) return;
             _reasons[reason] = until;
+            if (until is { } u) _deadlines[reason] = monoMs() + (long)Math.Max(0, (u - now()).TotalMilliseconds);
+            else _deadlines.Remove(reason);
         }
         Changed?.Invoke();
     }
@@ -71,7 +105,7 @@ internal sealed class PauseController(Func<DateTimeOffset> now)
     public void Clear(string reason)
     {
         bool removed;
-        lock (_gate) removed = _reasons.Remove(reason);
+        lock (_gate) { removed = _reasons.Remove(reason); _deadlines.Remove(reason); }
         if (removed) Changed?.Invoke();
     }
 
@@ -132,10 +166,11 @@ internal sealed class PauseController(Func<DateTimeOffset> now)
 
     private bool Expire()
     {
-        var t = now();
-        var gone = _reasons.Where(kv => kv.Value is { } u && t >= u).Select(kv => kv.Key).ToList();
-        foreach (var g in gone) _reasons.Remove(g);
-        _expired.AddRange(gone);
+        if (_deadlines.Count == 0) return false;
+        long t = monoMs();
+        var gone = _deadlines.Where(kv => t >= kv.Value).Select(kv => kv.Key).ToList();
+        foreach (var g in gone) { _reasons.Remove(g); _deadlines.Remove(g); }
+        _expired.AddRange(gone);   // raised outside the lock by RaiseExpired
         return gone.Count > 0;
     }
 

@@ -54,6 +54,7 @@ public partial class App : Application
         }
         Handle(_args, firstLaunch: true);
         services.AgentExited += OnAgentExited;
+        services.ConsentNeeded += () => ShowMain("consent");   // a restarted agent reset capture.consented (D2)
         _ = InitAsync(services);
     }
 

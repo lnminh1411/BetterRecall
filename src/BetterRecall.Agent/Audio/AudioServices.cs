@@ -204,7 +204,9 @@ internal sealed class TranscriptSource : IDisposable
     private readonly string _source;
     private readonly Func<Settings> _settings;
     private readonly Func<bool> _paused;
-    private readonly Channel<SpeechSegment> _queue = Channel.CreateBounded<SpeechSegment>(new BoundedChannelOptions(8) { FullMode = BoundedChannelFullMode.DropOldest });
+    // A segment DropOldest evicts (worker slow) is zeroed like a transcribed one (A16).
+    private readonly Channel<SpeechSegment> _queue = Channel.CreateBounded<SpeechSegment>(
+        new BoundedChannelOptions(8) { FullMode = BoundedChannelFullMode.DropOldest }, s => Array.Clear(s.Samples));
     private readonly SpeechSegmenter _segmenter;
     private readonly List<float> _buf = new();
     private readonly List<SpeechSegment> _out = new();
@@ -249,12 +251,12 @@ internal sealed class TranscriptSource : IDisposable
         {
             // Digital silence with no segment open: nothing to do (keeps an idle desktop cheap).
             if (quiet && !_segmenter.Active) { _resampler!.Reset(); return; }
-            _buf.Clear();
+            Pcm.Wipe(_buf);
             _resampler!.Process(data, frames, quiet, _buf);
             _out.Clear();
             _segmenter.Push(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_buf), qpc, _out);
             foreach (var s in _out) { Segments++; _queue.Writer.TryWrite(s); }
-            _buf.Clear();
+            Pcm.Wipe(_buf);
         }
     }
 
@@ -265,7 +267,8 @@ internal sealed class TranscriptSource : IDisposable
         lock (_gate)
         {
             _segmenter.Clear();
-            _buf.Clear();
+            Pcm.Wipe(_buf);
+            _resampler?.Reset();
             while (_queue.Reader.TryRead(out var s)) Array.Clear(s.Samples);
         }
     }

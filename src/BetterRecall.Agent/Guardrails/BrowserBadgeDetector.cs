@@ -23,7 +23,7 @@ internal sealed unsafe class BrowserBadgeDetector : IDisposable
     /// <summary>Accessible names of the private-mode badge. English plus common localisations.</summary>
     public static readonly string[] BadgeNames =
     [
-        "Incognito", "InPrivate", "Private", "Private browsing", "Private window",
+        "Incognito", "InPrivate", "InPrivate browsing", "Private", "Private browsing", "Private window",
         "Inkognito", "Incógnito", "Navigation privée", "Privat", "Privado", "隐身", "シークレット", "시크릿",
     ];
 
@@ -61,10 +61,13 @@ internal sealed unsafe class BrowserBadgeDetector : IDisposable
         if (_cache.TryGetValue(hwnd, out var c) && now - c.At < c.Result switch { BadgeResult.Private => 600_000, BadgeResult.CheckFailed => 5_000, _ => 30_000 })
             return c.Result;
         var sw = Stopwatch.StartNew();
+        _shortCache = false;
         var r = Probe(hwnd);
         LastCheckMs = sw.Elapsed.TotalMilliseconds;
         if (_cache.Count > 256) _cache.Clear();
-        _cache[hwnd] = (r, now);
+        // A window without a toolbar is probed again within 5 s whatever the answer, as CheckFailed is: it may still be
+        // initialising (A8). Stamped 25 s back so NoBadge's 30 s lifetime ends after 5 s.
+        _cache[hwnd] = (r, _shortCache && r == BadgeResult.NoBadge ? now - 25_000 : now);
         return r;
     }
 
@@ -75,12 +78,16 @@ internal sealed unsafe class BrowserBadgeDetector : IDisposable
         {
             var fromHandle = (delegate* unmanaged[Stdcall]<nint, nint, nint*, int>)Ole.Slot(_uia, 6);
             if (fromHandle(_uia, hwnd, &root) < 0 || root == 0) return BadgeResult.CheckFailed;
+            // The root element's name ends in "(Incognito)" / "(InPrivate)" in Chrome and Edge, also in fullscreen or
+            // kiosk mode where no toolbar exists (A8).
+            var rootName = ElementName(root);
+            if (RootNameIsPrivate(rootName)) return BadgeResult.Private;
             var findFirst = (delegate* unmanaged[Stdcall]<nint, int, nint, nint*, int>)Ole.Slot(root, 5);
             // Search the toolbar first so the walk does not descend into page content.
             if (findFirst(root, TreeScope_Descendants, _toolbarCondition, &toolbar) < 0) return BadgeResult.CheckFailed;
-            nint scope = toolbar != 0 ? toolbar : root;
-            var findInScope = (delegate* unmanaged[Stdcall]<nint, int, nint, nint*, int>)Ole.Slot(scope, 5);
-            if (findInScope(scope, TreeScope_Descendants, _badgeCondition, &hit) < 0) return BadgeResult.CheckFailed;
+            if (toolbar == 0) { _shortCache = true; return NoToolbarResult(rootName); }
+            var findInScope = (delegate* unmanaged[Stdcall]<nint, int, nint, nint*, int>)Ole.Slot(toolbar, 5);
+            if (findInScope(toolbar, TreeScope_Descendants, _badgeCondition, &hit) < 0) return BadgeResult.CheckFailed;
             return hit != 0 ? BadgeResult.Private : BadgeResult.NoBadge;
         }
         catch (Exception ex)
@@ -94,6 +101,47 @@ internal sealed unsafe class BrowserBadgeDetector : IDisposable
             Ole.Release(toolbar);
             Ole.Release(root);
         }
+    }
+
+    private bool _shortCache;
+
+    /// <summary>
+    /// A window with no toolbar (F11 fullscreen, kiosk, installed web apps, undocked DevTools, picture-in-picture, or one
+    /// still initialising): the badge cannot be seen there, but the root name carries the private tag in Chrome and Edge,
+    /// and RootNameIsPrivate already checked it. A readable name without the tag is NoBadge; only an unreadable or empty
+    /// name fails closed (A8). Pure.
+    /// </summary>
+    internal static BadgeResult NoToolbarResult(string? rootName) =>
+        RootNameIsPrivate(rootName) ? BadgeResult.Private
+        : string.IsNullOrWhiteSpace(rootName) ? BadgeResult.CheckFailed
+        : BadgeResult.NoBadge;
+
+    /// <summary>The element's current name, or "" when it cannot be read.</summary>
+    private static string ElementName(nint element)
+    {
+        VARIANT v = default;
+        try
+        {
+            var getValue = (delegate* unmanaged[Stdcall]<nint, int, VARIANT*, int>)Ole.Slot(element, 10);   // GetCurrentPropertyValue
+            if (getValue(element, UIA_NamePropertyId, &v) < 0 || v.vt != VARIANT.VT_BSTR || v.ptr == 0) return "";
+            return System.Runtime.InteropServices.Marshal.PtrToStringBSTR(v.ptr) ?? "";
+        }
+        finally { Ole.VariantClear(&v); }
+    }
+
+    /// <summary>True when a browser window's root name ends in a private-mode tag in parentheses or brackets, such as
+    /// "New Tab - Google Chrome (Incognito)" or "... - Microsoft Edge (InPrivate)". Tags: <see cref="BadgeNames"/>. Pure.</summary>
+    internal static bool RootNameIsPrivate(string? name)
+    {
+        if (string.IsNullOrEmpty(name)) return false;
+        var n = name.TrimEnd();
+        if (n.Length < 3 || (n[^1] != ')' && n[^1] != ']')) return false;
+        int open = n.LastIndexOf(n[^1] == ')' ? '(' : '[');
+        if (open < 0) return false;
+        var tag = n[(open + 1)..^1].Trim();
+        foreach (var b in BadgeNames)
+            if (string.Equals(tag, b, StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
     }
 
     /// <summary>Host in the address bar of a Chromium window, cached for 1.5 s per window. Empty when unknown.</summary>
