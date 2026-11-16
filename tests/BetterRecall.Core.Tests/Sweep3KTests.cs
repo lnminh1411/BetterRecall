@@ -69,6 +69,102 @@ public class StoreCompactionSweep3Tests
         for (int i = 9; i < 12; i++) Assert.Equal(images[i].Bytes, t.Store.GetKeyframe(images[i].Id)!.Bytes);
     }
 
+    /// <summary>A legacy month with many free pages: count images, all ready, then all but the last keep purged.</summary>
+    private static (string Month, List<(string Id, byte[] Bytes)> Images) LegacyMonth(TempStore t, int count, int keep)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var month = now.UtcDateTime.ToString("yyyy-MM");
+        var images = new List<(string Id, byte[] Bytes)>();
+        for (int i = 0; i < count; i++)
+        {
+            var img = new byte[60_000];
+            new Random(i).NextBytes(img);
+            var id = t.Store.AddScreenCapture(Caps.Screen(now.AddSeconds(-count + i), image: img));
+            t.Store.TakePendingEmbeddings(10);
+            t.Store.SetEmbedding(id, Vec.Seeded(i), Vec.Info);
+            images.Add((id, img));
+        }
+        var c = MonthConn(t.Store, month);
+        using (var cmd = c.CreateCommand()) { cmd.CommandText = "PRAGMA auto_vacuum=NONE; VACUUM;"; cmd.ExecuteNonQuery(); }
+        for (int i = 0; i < count - keep; i++) Assert.Equal(1, t.Store.Purge(PurgeScope.ForId(images[i].Id)));
+        t.Store.Checkpoint();
+        t.Store.LegacyRebuildMinFreeBytes = 256 * 1024;
+        return (month, images.Skip(count - keep).ToList());
+    }
+
+    /// <summary>K review S3: the rebuild stops between batches while a priority caller (here a purge) waits for the
+    /// writer lock, lets it in, then goes on. A keyframe the purge deleted after it was copied is gone from the new file.</summary>
+    [Fact]
+    public void Legacy_rebuild_pauses_for_a_purge_and_resumes()
+    {
+        using var t = new TempStore();
+        var (month, kept) = LegacyMonth(t, 40, 10);
+        var waiters = typeof(EncryptedStore).GetField("_priorityWaiters", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        t.Store.RebuildBatchRows = 2;
+        Task<int>? purge = null;
+        t.Store.AfterRebuildBatch = () =>
+        {
+            if (purge != null) return;
+            purge = Task.Run(() => t.Store.Purge(PurgeScope.ForId(kept[0].Id)));   // copied in the first batch
+            var sw = Stopwatch.StartNew();
+            while ((int)waiters.GetValue(t.Store)! == 0 && sw.ElapsedMilliseconds < 5000) Thread.Sleep(1);
+        };
+        var s = new Settings();
+        s.Retention.Days = 3650;
+        t.Store.RunMaintenance(s);
+
+        Assert.Equal(1, purge!.Result);
+        Assert.True(t.Store.RebuildPauses >= 1);
+        Assert.Null(t.Store.GetKeyframe(kept[0].Id));
+        for (int i = 1; i < kept.Count; i++) Assert.Equal(kept[i].Bytes, t.Store.GetKeyframe(kept[i].Id)!.Bytes);
+        Assert.Equal(2L, Scalar(MonthConn(t.Store, month), "PRAGMA auto_vacuum"));   // rebuilt
+        Assert.Equal(9L, Scalar(MonthConn(t.Store, month), "SELECT count(*) FROM kf"));
+        Assert.Empty(Directory.GetFiles(DataPaths.KeyframesDir(t.Home.Path), "*.tmp*"));
+    }
+
+    /// <summary>K review N3: a rebuild that throws something other than an IO or SQLite error (a non-blob value) drops
+    /// only itself: the old file stays, no temporary file is left and the rest of the maintenance runs.</summary>
+    [Fact]
+    public void Failed_legacy_rebuild_leaves_the_month_and_the_maintenance_running()
+    {
+        using var t = new TempStore();
+        var (month, kept) = LegacyMonth(t, 20, 5);
+        var c = MonthConn(t.Store, month);
+        using (var cmd = c.CreateCommand())
+        {
+            cmd.CommandText = "UPDATE kf SET data = 'not a blob' WHERE rid = (SELECT max(rid) FROM kf)";   // the last kept one
+            cmd.ExecuteNonQuery();
+        }
+        var s = new Settings();
+        s.Retention.Days = 3650;
+        t.Store.RunMaintenance(s);   // threw InvalidCastException before
+
+        foreach (var k in kept[..^1]) Assert.Equal(k.Bytes, t.Store.GetKeyframe(k.Id)!.Bytes);
+        Assert.Equal(0L, Scalar(MonthConn(t.Store, month), "PRAGMA auto_vacuum"));   // not rebuilt, still the old file
+        Assert.Empty(Directory.GetFiles(DataPaths.KeyframesDir(t.Home.Path), "*.tmp*"));
+    }
+
+    /// <summary>A store closed while a rebuild is paused deletes its temporary file (purge all removes every file).</summary>
+    [Fact]
+    public void Closing_the_store_drops_a_paused_rebuild()
+    {
+        using var t = new TempStore();
+        var (_, _) = LegacyMonth(t, 20, 5);
+        t.Store.RebuildBatchRows = 1;
+        var release = typeof(EncryptedStore).GetMethod("ReleaseFreePagesLocked", BindingFlags.NonPublic | BindingFlags.Instance, [typeof(string), typeof(bool)])!;
+        var waiters = typeof(EncryptedStore).GetField("_priorityWaiters", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        var wl = (Lock)typeof(EncryptedStore).GetField("_wl", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(t.Store)!;
+        var month = DateTimeOffset.UtcNow.UtcDateTime.ToString("yyyy-MM");
+        waiters.SetValue(t.Store, 1);   // a priority caller is waiting: pause after the first batch
+        bool paused;
+        lock (wl) paused = (bool)release.Invoke(t.Store, [month, true])!;
+        waiters.SetValue(t.Store, 0);
+        Assert.True(paused);
+        Assert.NotEmpty(Directory.GetFiles(DataPaths.KeyframesDir(t.Home.Path), "*.tmp*"));
+        t.Store.Dispose();
+        Assert.Empty(Directory.GetFiles(DataPaths.KeyframesDir(t.Home.Path), "*.tmp*"));
+    }
+
     /// <summary>B4: store.db VACUUM (in RAM) runs only while the live size is within the RAM budget.</summary>
     [Fact]
     public void Store_db_vacuum_respects_the_ram_budget()
@@ -265,12 +361,15 @@ public sealed class SearchSweep3Tests : IDisposable
         Assert.True(resp.Results[0].TextMatch);
     }
 
+    /// <summary>K review S2: a failed embedding (model not installed, VC++ runtime missing, restart backoff) is not
+    /// "starting, try again": it gets its own value, warm or cold.</summary>
     [Fact]
     public async Task Failed_embedding_is_flagged_and_a_good_one_is_not()
     {
-        _embed.IsWarm = true;
         _embed.Throw = true;
-        Assert.Equal("vector", (await Search("acme")).Degraded);
+        Assert.Equal("vector-unavailable", (await Search("acme")).Degraded);   // cold, but it failed: not a timeout
+        _embed.IsWarm = true;
+        Assert.Equal("vector-unavailable", (await Search("acme")).Degraded);
         var json = (await _p.HandleAsync(Ui, "search {\"q\":\"acme\",\"mode\":\"text\"}", CancellationToken.None)).Line;
         Assert.DoesNotContain("degraded", json);   // text mode never asked for a vector
     }

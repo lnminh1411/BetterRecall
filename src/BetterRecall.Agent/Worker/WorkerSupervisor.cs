@@ -99,10 +99,9 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
     /// <summary>Liveness: the worker has owed its oldest request a reply for this long with no frame at all (native
     /// deadlock, stuck GenAI call), so it is hung. It is killed and restarted with backoff. The old rule counted caller
     /// timeouts, which could never reach its limit against the serial worker and missed untimed callers (scheduler,
-    /// transcriber) (A5, CA-S1).</summary>
+    /// transcriber) (A5, CA-S1). A request that runs long on purpose (cold Whisper or NPU OCR compile, device re-bench)
+    /// is covered by the worker's keepalive frames (every 20 s, up to 15 min per request).</summary>
     public TimeSpan UnresponsiveAfter { get; init; } = TimeSpan.FromSeconds(90);
-    /// <summary>The same for transcribe: the first Whisper call compiles for minutes on an NPU.</summary>
-    public TimeSpan TranscribeUnresponsiveAfter { get; init; } = TimeSpan.FromMinutes(10);
     /// <summary>Workers recycled because they stopped answering.</summary>
     public int Recycled => _recycled;
     private int _recycled;
@@ -282,7 +281,7 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
             lock (_startGate) if (_start is not { IsCompleted: false }) Volatile.Write(ref _restartFor, null);
             return;
         }
-        if (c.Oldest is { } sv && IsUnresponsive(sv.Op, sv.Ms, (long)UnresponsiveAfter.TotalMilliseconds, (long)TranscribeUnresponsiveAfter.TotalMilliseconds))
+        if (c.Oldest is { } sv && IsUnresponsive(sv.Op, sv.Ms, (long)UnresponsiveAfter.TotalMilliseconds))
         {
             Log.Warn($"worker not answering ({sv.Op} for {sv.Ms / 1000} s, {c.Pending} waiting), restarting it");
             _ = RecycleAsync(c);
@@ -304,11 +303,11 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
     }
 
     /// <summary>Hung: the oldest request the worker owes has waited its allowance with no frame coming back. The serial
-    /// worker serves requests in order, so that is the one it is working on (or stuck before). Transcribe gets longer
-    /// (cold Whisper compile); bench and hello may legitimately run for many minutes (device benchmark, NPU compile)
-    /// and are never judged. Pure.</summary>
-    internal static bool IsUnresponsive(string servingOp, long servingMs, long silenceMs, long transcribeSilenceMs)
-        => servingOp is not ("bench" or "hello") && servingMs >= (servingOp == "transcribe" ? transcribeSilenceMs : silenceMs);
+    /// worker serves requests in order, so that is the one it is working on (or stuck before). Any frame, keepalives
+    /// included, restarts the silence. Bench and hello may legitimately run for many minutes (device benchmark, NPU
+    /// compile) and are never judged. Pure.</summary>
+    internal static bool IsUnresponsive(string servingOp, long servingMs, long silenceMs)
+        => servingOp is not ("bench" or "hello") && servingMs >= silenceMs;
 
     /// <summary>Kills a hung worker and counts a failure, so the next request starts a new one after the backoff.</summary>
     private async Task RecycleAsync(WorkerConnection c)

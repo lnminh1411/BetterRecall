@@ -714,15 +714,16 @@ public sealed partial class CommandProcessor
         if (store == null) return Err(NotOpenError);
 
         float[] qv = [];
-        bool embedFailed = false;
+        string? degraded = null;
         if (req.Mode != SearchMode.Text)
         {
+            bool cold = !_d.Embedder.Warm && req.Mode != SearchMode.Vector;
             try
             {
                 using var to = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 // A cold worker takes 10-15 s to start: wait only briefly and answer from text (flagged); the start goes
                 // on, so the next search ranks visually again (D5). Vector-only mode has no text answer to give.
-                to.CancelAfter(_d.Embedder.Warm || req.Mode == SearchMode.Vector ? TimeSpan.FromSeconds(15) : ColdEmbedWait);
+                to.CancelAfter(cold ? ColdEmbedWait : TimeSpan.FromSeconds(15));
                 qv = await _d.Embedder.EmbedQueryAsync(req.Q, to.Token).ConfigureAwait(false) ?? [];
             }
             catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
@@ -730,11 +731,13 @@ public sealed partial class CommandProcessor
                 if (req.Mode == SearchMode.Vector) throw;
                 Log.Warn("query embedding failed, text-only search", ex);
                 qv = [];
-                embedFailed = true;
+                // K review S2: only the cold wait running out means "starting, try again". A failure (model not
+                // installed, VC++ runtime missing, restart backoff, a busy worker past 15 s) says nothing of the sort.
+                degraded = cold && ex is OperationCanceledException ? "vector" : "vector-unavailable";
             }
         }
         var resp = store.Search(req, qv, max, MaxResponseBytes(s.Kind));
-        if (embedFailed) resp = resp with { Degraded = "vector" };
+        if (degraded != null) resp = resp with { Degraded = degraded };
         double weakBelow = S.Index.WeakMatchBelow;
         if (weakBelow > 0)
             resp = resp with { Results = resp.Results.Select(h => h with { Weak = !h.TextMatch && (h.Cosine ?? 0) < weakBelow }).ToList() };

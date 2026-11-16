@@ -12,11 +12,21 @@ public enum LoopExit { PipeClosed, Shutdown, Idle, ProtocolError, Cancelled }
 /// after <c>idleExit</c> with no request.</summary>
 public static class WorkerLoop
 {
+    /// <summary>Keepalive (K review S1): while one request runs longer than this, an id-0 frame goes out at this interval.
+    /// The agent counts any frame as alive, so an inline model compile or device re-bench is not taken for a hang.</summary>
+    public static readonly TimeSpan KeepaliveEvery = TimeSpan.FromSeconds(20);
+    /// <summary>Keepalives stop after this long on one request, so a handler stuck in native code still lets the agent's
+    /// no-frame rule recycle the worker.</summary>
+    public static readonly TimeSpan KeepaliveMax = TimeSpan.FromMinutes(15);
+
     /// <param name="hasPendingInput">Checked when the idle timer fires: a request the agent sent at that moment is served
     /// instead of exiting under it (the agent would see a crash and back off).</param>
     public static async Task<LoopExit> RunAsync(Stream pipe, RequestHandler handler, TimeSpan idleExit, CancellationToken ct,
-        Func<bool>? hasPendingInput = null)
+        Func<bool>? hasPendingInput = null, TimeSpan? keepaliveEvery = null, TimeSpan? keepaliveMax = null)
     {
+        // Keepalive and reply share the pipe: one frame at a time, never interleaved.
+        using var writeLock = new SemaphoreSlim(1, 1);
+        var keepalive = JsonSerializer.SerializeToUtf8Bytes(new WorkerResponse(0, true), ContractsJson.Default.WorkerResponse);
         while (true)
         {
             (byte[] Header, byte[] Payload)? frame;
@@ -51,7 +61,17 @@ public static class WorkerLoop
             }
             if (frame is null) return LoopExit.PipeClosed;
 
-            var reply = handler.Handle(frame.Value.Header, frame.Value.Payload);
+            WorkerReply reply;
+            using (var stopKeepalive = new CancellationTokenSource())
+            {
+                var beats = KeepaliveAsync(pipe, writeLock, keepalive, keepaliveEvery ?? KeepaliveEvery, keepaliveMax ?? KeepaliveMax, stopKeepalive.Token);
+                try { reply = handler.Handle(frame.Value.Header, frame.Value.Payload); }
+                finally
+                {
+                    stopKeepalive.Cancel();
+                    await beats.ConfigureAwait(false);
+                }
+            }
             var header = JsonSerializer.SerializeToUtf8Bytes(reply.Header, ContractsJson.Default.WorkerResponse);
             if (header.Length > BinaryFrame.MaxHeaderBytes || reply.Payload.Length > BinaryFrame.MaxPayloadBytes)
             {
@@ -63,12 +83,36 @@ public static class WorkerLoop
             }
             try
             {
-                await BinaryFrame.WriteAsync(pipe, header, reply.Payload, ct).ConfigureAwait(false);
+                await writeLock.WaitAsync(ct).ConfigureAwait(false);
+                try { await BinaryFrame.WriteAsync(pipe, header, reply.Payload, ct).ConfigureAwait(false); }
+                finally { writeLock.Release(); }
             }
             catch (IOException) { return LoopExit.PipeClosed; }
             catch (ObjectDisposedException) { return LoopExit.PipeClosed; }
             catch (OperationCanceledException) { return LoopExit.Cancelled; }
             if (reply.Shutdown) return LoopExit.Shutdown;
         }
+    }
+
+    /// <summary>Sends id-0 frames every <paramref name="every"/> until stopped or <paramref name="max"/> has passed. A frame
+    /// once begun is written whole (no token), so stopping cannot leave the pipe out of step; a broken pipe just ends it
+    /// and the reply write reports the error.</summary>
+    private static async Task KeepaliveAsync(Stream pipe, SemaphoreSlim writeLock, byte[] header, TimeSpan every, TimeSpan max, CancellationToken stop)
+    {
+        long until = Environment.TickCount64 + (long)max.TotalMilliseconds;
+        try
+        {
+            while (true)
+            {
+                await Task.Delay(every, stop).ConfigureAwait(false);
+                if (Environment.TickCount64 >= until) { Log.Warn($"request still running after {max.TotalMinutes:F0} min: keepalive stopped"); return; }
+                await writeLock.WaitAsync(stop).ConfigureAwait(false);
+                try { await BinaryFrame.WriteAsync(pipe, header, ReadOnlyMemory<byte>.Empty, CancellationToken.None).ConfigureAwait(false); }
+                finally { writeLock.Release(); }
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (IOException) { }
+        catch (ObjectDisposedException) { }
     }
 }

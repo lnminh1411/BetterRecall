@@ -192,28 +192,89 @@ public sealed partial class EncryptedStore
         foreach (var m in KfMonths()) ReleaseFreePagesLocked(m, vacuumLegacy);
     }
 
-    /// <summary>ReleaseFreePagesLocked for one month file. Caller holds _wl.</summary>
-    private void ReleaseFreePagesLocked(string m, bool vacuumLegacy)
+    /// <summary>ReleaseFreePagesLocked for one month file. True when a legacy rebuild paused for a priority caller: call
+    /// again in a later maintenance slice to resume it. Caller holds _wl.</summary>
+    private bool ReleaseFreePagesLocked(string m, bool vacuumLegacy)
     {
-        if (Kf(m, false) is not { } c) return;
+        if (_rebuild is { } r && r.Month == m)
+        {
+            if (!vacuumLegacy) return false;   // the space guard leaves a paused rebuild to the maintenance
+            if (Kf(m, false) is { } kc) return RebuildMonthLocked(m, kc);
+            AbortRebuildLocked("the month file is gone");
+            return false;
+        }
+        if (Kf(m, false) is not { } c) return false;
         try
         {
             long free = (long)(Scalar(c, "PRAGMA freelist_count") ?? 0L);
-            if (free == 0) return;
+            if (free == 0) return false;
             long mode = (long)(Scalar(c, "PRAGMA auto_vacuum") ?? 0L);
             if (mode == 2)
             {
                 Exec(c, "PRAGMA incremental_vacuum");
                 Exec(c, "PRAGMA wal_checkpoint(TRUNCATE)");
-                return;
+                return false;
             }
-            if (!vacuumLegacy) return;
+            if (!vacuumLegacy) return false;
             long pages = (long)(Scalar(c, "PRAGMA page_count") ?? 0L);
             long pageSize = (long)(Scalar(c, "PRAGMA page_size") ?? 4096L);
             if (pages > 0 && free * 4 > pages && free * pageSize > LegacyRebuildMinFreeBytes)
-                RebuildMonthLocked(m, c);
+                return RebuildMonthLocked(m, c);
         }
         catch (SqliteException ex) { Log.Warn("keyframe file compaction failed", ex); }
+        return false;
+    }
+
+    /// <summary>A legacy month rebuild paused between batches for a priority caller (S3): the copy so far stays open.</summary>
+    private sealed class MonthRebuild(string month, string tmp, SqliteConnection old, SqliteConnection dst)
+    {
+        public readonly string Month = month, Tmp = tmp;
+        public readonly SqliteConnection Old = old, Dst = dst;
+        public long Last = long.MinValue, Rows;
+    }
+    private MonthRebuild? _rebuild;
+
+    /// <summary>Keyframes copied per batch of a legacy rebuild (tests lower it).</summary>
+    internal int RebuildBatchRows { get; set; } = 32;
+    /// <summary>Test hook: runs under _wl after each rebuild batch.</summary>
+    internal Action? AfterRebuildBatch { get; set; }
+    /// <summary>Times a rebuild paused for a priority caller.</summary>
+    internal int RebuildPauses { get; private set; }
+
+    /// <summary>Drops a rebuild in progress: closes and deletes its temporary file. Caller holds _wl.</summary>
+    private void AbortRebuildLocked(string? why)
+    {
+        if (_rebuild is not { } r) return;
+        _rebuild = null;
+        if (why != null) Log.Info($"keyframe file rebuild dropped: {why}");
+        try { r.Dst.Dispose(); } catch { }
+        SqliteConnection.ClearAllPools();
+        DeleteDbFiles(r.Tmp);
+    }
+
+    /// <summary>Before a paused rebuild goes on: the old file must be the same connection, and keyframes deleted from it
+    /// meanwhile (a purge is a priority caller) are deleted from the copy too. False when the copy cannot be trusted.</summary>
+    private static bool CatchUpRebuildLocked(MonthRebuild r)
+    {
+        long copied = (long)(Scalar(r.Dst, "SELECT count(*) FROM kf") ?? 0L);
+        long still = (long)(Scalar(r.Old, "SELECT count(*) FROM kf WHERE rid <= $r", ("$r", r.Last)) ?? 0L);
+        if (still == copied) return true;
+        if (still > copied) return false;   // rows added below the copy point: start over
+        var keep = new HashSet<long>();
+        using (var cmd = Cmd(r.Old, "SELECT rid FROM kf WHERE rid <= $r", ("$r", r.Last)))
+        using (var rd = cmd.ExecuteReader())
+            while (rd.Read()) keep.Add(rd.GetInt64(0));
+        var gone = new List<long>();
+        using (var cmd = Cmd(r.Dst, "SELECT rid FROM kf"))
+        using (var rd = cmd.ExecuteReader())
+            while (rd.Read()) if (!keep.Contains(rd.GetInt64(0))) gone.Add(rd.GetInt64(0));
+        using (var tx = r.Dst.BeginTransaction())
+        {
+            foreach (var rid in gone) Exec(r.Dst, "DELETE FROM kf WHERE rid=$r", ("$r", rid));
+            tx.Commit();
+        }
+        r.Rows -= gone.Count;
+        return true;
     }
 
     /// <summary>Free bytes a legacy month file needs before it is rebuilt (64 MiB; tests lower it).</summary>
@@ -224,39 +285,55 @@ public sealed partial class EncryptedStore
     /// file created with auto_vacuum=INCREMENTAL, then moves that over the old one. VACUUM built its temporary copy in
     /// RAM, about the file's live size (GBs for an old month), because the SQLite3MC bundle has SQLITE_TEMP_STORE=2; a
     /// file temp_store is not encrypted, so it is no way out (B4). Until the move the old file is untouched, and a crash
-    /// leaves only the temporary file, which the next rebuild deletes. Caller holds _wl.
+    /// leaves only the temporary file, which the next rebuild deletes. Between batches it pauses when a priority caller
+    /// (panic purge, keyframe read) waits for _wl and returns true; the next call resumes it (K review S3). Caller holds
+    /// _wl.
     /// </summary>
-    private void RebuildMonthLocked(string m, SqliteConnection old)
+    private bool RebuildMonthLocked(string m, SqliteConnection old)
     {
         var path = KfPath(m);
-        var tmp = Path.Combine(_kfDir, m + ".rebuild.tmp");   // never matches the ????-??.db month pattern
-        DeleteDbFiles(tmp);
-        long rows = 0;
+        var r = _rebuild;
         try
         {
-            using (var dst = OpenEncrypted(tmp, incrementalVacuum: true))
+            if (r is not null && (r.Month != m || !ReferenceEquals(r.Old, old) || !CatchUpRebuildLocked(r)))
             {
-                Exec(dst, "CREATE TABLE IF NOT EXISTS kf(rid INTEGER PRIMARY KEY, mime TEXT NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL, data BLOB NOT NULL)");
-                long last = long.MinValue;
-                while (true)
+                AbortRebuildLocked("the month file changed while it was paused");
+                r = null;
+            }
+            if (r is null)
+            {
+                var fresh = Path.Combine(_kfDir, m + ".rebuild.tmp");   // never matches the ????-??.db month pattern
+                DeleteDbFiles(fresh);
+                r = _rebuild = new MonthRebuild(m, fresh, old, OpenEncrypted(fresh, incrementalVacuum: true));
+                Exec(r.Dst, "CREATE TABLE IF NOT EXISTS kf(rid INTEGER PRIMARY KEY, mime TEXT NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL, data BLOB NOT NULL)");
+            }
+            while (true)
+            {
+                int n = 0;
+                using (var tx = r.Dst.BeginTransaction())
                 {
-                    int n = 0;
-                    using var tx = dst.BeginTransaction();
-                    using (var cmd = Cmd(old, "SELECT rid, mime, width, height, data FROM kf WHERE rid > $r ORDER BY rid LIMIT 32", ("$r", last)))
+                    using (var cmd = Cmd(old, "SELECT rid, mime, width, height, data FROM kf WHERE rid > $r ORDER BY rid LIMIT $n", ("$r", r.Last), ("$n", RebuildBatchRows)))
                     using (var rd = cmd.ExecuteReader())
                         while (rd.Read())
                         {
-                            last = rd.GetInt64(0);
-                            Exec(dst, "INSERT INTO kf(rid, mime, width, height, data) VALUES($rid, $mime, $w, $h, $data)",
-                                ("$rid", last), ("$mime", rd.GetString(1)), ("$w", rd.GetInt64(2)), ("$h", rd.GetInt64(3)), ("$data", (byte[])rd.GetValue(4)));
+                            r.Last = rd.GetInt64(0);
+                            Exec(r.Dst, "INSERT INTO kf(rid, mime, width, height, data) VALUES($rid, $mime, $w, $h, $data)",
+                                ("$rid", r.Last), ("$mime", rd.GetString(1)), ("$w", rd.GetInt64(2)), ("$h", rd.GetInt64(3)), ("$data", (byte[])rd.GetValue(4)));
                             n++;
                         }
                     tx.Commit();
-                    if (n == 0) break;
-                    rows += n;
                 }
-                Exec(dst, "PRAGMA wal_checkpoint(TRUNCATE)");
+                if (n == 0) break;
+                r.Rows += n;
+                AfterRebuildBatch?.Invoke();
+                // At least one batch per slice, so a steady stream of priority callers cannot stall it.
+                if (Volatile.Read(ref _priorityWaiters) > 0) { RebuildPauses++; return true; }
             }
+            Exec(r.Dst, "PRAGMA wal_checkpoint(TRUNCATE)");
+            r.Dst.Dispose();
+            _rebuild = null;
+            var tmp = r.Tmp;
+            long rows = r.Rows;
             _kf.Remove(m);
             try { Exec(old, "PRAGMA wal_checkpoint(TRUNCATE)"); } catch { }
             old.Dispose();
@@ -267,11 +344,14 @@ public sealed partial class EncryptedStore
             File.Move(tmp, path, overwrite: true);
             Log.Info($"keyframe file rebuilt ({rows} keyframes)");
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or SqliteException)
+        // N3: any failure (a non-blob value, a bad cast) drops only this rebuild; the rest of the maintenance goes on.
+        catch (Exception ex) when (ex is not OutOfMemoryException)
         {
             Log.Warn("keyframe file rebuild failed", ex);
-            DeleteDbFiles(tmp);
+            if (_rebuild is not null) AbortRebuildLocked(null);
+            else if (r is not null) DeleteDbFiles(r.Tmp);
         }
+        return false;
     }
 
     private static void DeleteDbFiles(string path)

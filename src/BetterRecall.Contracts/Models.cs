@@ -127,8 +127,9 @@ public sealed record SearchHit(
     string? ReplayId = null,  // kind replay: open this replay at ReplayOffsetMs
     int? ReplayOffsetMs = null);
 
-/// <summary>Degraded: "vector" when the query could not be embedded in time (worker starting or down), so the results
-/// come from text matching only (D5). Null otherwise.</summary>
+/// <summary>Degraded: the results come from text matching only (D5). "vector" when the query embedding was not ready in
+/// time because the worker is starting (try again shortly); "vector-unavailable" when the embedding failed (model not
+/// installed, worker cannot start, restarting after failures). Null otherwise.</summary>
 public sealed record SearchResponse(int Count, bool Truncated, long TookMs, IReadOnlyList<SearchHit> Results, string? Degraded = null);
 
 /// <summary>Result of get: hit plus full stored text (screen: redacted OCR text when read, else the title; audio: transcript).</summary>

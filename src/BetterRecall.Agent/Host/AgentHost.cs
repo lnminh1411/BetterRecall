@@ -78,6 +78,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         _opt = opt;
         _settingsSnapshot = core.Settings.Current;
         var workerExe = InstallLayout.Full(opt.InstallDir, InstallLayout.WorkerExe);
+        VcRuntime.WorkerDir = Path.GetDirectoryName(workerExe);   // the VC++ check looks where the worker loads from
         _supervisor = new WorkerSupervisor(new ProcessWorkerLauncher(workerExe, () => S.Governance.EcoQos), opt.Home, () => S.Inference.IdleExitS);
         _worker = new WorkerClient(_supervisor);
         _thumbs = new Thumbnailer(() => _core.Store, () => S);

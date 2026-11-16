@@ -1448,7 +1448,8 @@ public sealed partial class EncryptedStore : IStore
             }
         if (thinned > 0) Log.Info($"maintenance: {thinned} rows thinned");
         foreach (var m in MaintenanceSlice(KfMonths))
-            MaintenanceSlice(() => { ReleaseFreePagesLocked(m, vacuumLegacy: true); return true; });
+            // A legacy rebuild pauses for priority callers (S3) and goes on in the next slice.
+            while (MaintenanceSlice(() => ReleaseFreePagesLocked(m, vacuumLegacy: true))) { }
 
         MaintenanceSlice(() =>
         {
@@ -1621,6 +1622,7 @@ public sealed partial class EncryptedStore : IStore
         if (_disposed) return;
         _disposed = true;
         try { Exec(_w, "PRAGMA wal_checkpoint(TRUNCATE)"); } catch { }
+        AbortRebuildLocked(null);   // a paused month rebuild: its temporary file must not outlive the store (purge all)
         foreach (var c in _kf.Values) { try { Exec(c, "PRAGMA wal_checkpoint(TRUNCATE)"); } catch { } c.Dispose(); }
         _kf.Clear();
         lock (_vl) _rv.Dispose();
