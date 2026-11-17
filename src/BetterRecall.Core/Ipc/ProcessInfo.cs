@@ -39,8 +39,36 @@ internal static class ProcessInfo
     public static DateTime? CreatedUtc(SafeProcessHandle h)
         => Win32.GetProcessTimes(h, out var created, out _, out _, out _) && created > 0 ? DateTime.FromFileTimeUtc(created) : null;
 
+    /// <summary>Start time of the System process (pid 4): the boot, stamped on the clock of that moment. Null when it
+    /// cannot be read.</summary>
+    private static readonly Lazy<DateTime?> SystemStarted = new(() =>
+    {
+        using var h = Win32.OpenProcess(Win32.PROCESS_QUERY_LIMITED_INFORMATION, false, 4);
+        return h.IsInvalid ? null : CreatedUtc(h);
+    });
+
+    /// <summary>Backward clock steps up to this size are left to the wall clock: they reject a new process for at most
+    /// this long, and the boot bound below is a few seconds generous (the System process starts after boot).</summary>
+    internal static readonly TimeSpan StepTolerance = TimeSpan.FromSeconds(10);
+
+    private static readonly StepClock Steps = new(step => Log.Info(
+        $"clock stepped back about {step.TotalSeconds:F0} s: pid-reuse checks accept process start times up to that far ahead until the clock catches up"));
+
     /// <summary>
-    /// Image path of pid, but only when that process started before notAfterUtc (the moment the pipe connected).
+    /// Latest start time a process that already ran at wallNowUtc can show (PID reuse checks). Start times are
+    /// wall-clock stamps that a later clock change leaves alone: once the clock steps back (NTP fixing a clock that ran
+    /// ahead at boot), a process started before the step shows a start "after now", and every peer was taken for a
+    /// reused pid until the clock caught up (T2). See StepClock.
+    /// </summary>
+    public static DateTime StartBound(DateTime wallNowUtc) => Steps.Bound(wallNowUtc, Environment.TickCount64, SystemStarted.Value);
+
+    /// <summary>The rule on a fresh StepClock (one detection), for tests.</summary>
+    internal static DateTime StartBound(DateTime wallNowUtc, long msSinceBoot, DateTime? systemStartedUtc)
+        => new StepClock().Bound(wallNowUtc, msSinceBoot, systemStartedUtc);
+
+
+    /// <summary>
+    /// Image path of pid, but only when that process started before notAfterUtc (the moment the pipe connected, see StartBound).
     /// A later start means the pid was freed and reused, so the image says nothing about the peer. One handle for both.
     /// </summary>
     public static string? ImagePathIfStartedBefore(int pid, DateTime notAfterUtc)
@@ -98,4 +126,39 @@ internal static class ProcessInfo
     public static int CurrentPid => Environment.ProcessId;
 
     public static string? CurrentImage => Environment.ProcessPath ?? Process.GetCurrentProcess().MainModule?.FileName;
+}
+
+/// <summary>
+/// T2, S6: detects a backward clock step and bounds start times for its catch-up period only. Boot start (System
+/// process, pid 4) plus the time since boot (TickCount64 counts sleep and does not step) runs ahead of the wall clock by
+/// the net size of all steps back since boot. When that gap grows by more than StepTolerance, a step back of that size
+/// just happened: every process started before it shows a start no later than wall + step, so that is the bound until
+/// the wall clock reaches it; afterwards the wall clock alone is the bound again. Small gaps (the System process starts
+/// a few seconds after boot, tick drift) never count.
+/// </summary>
+internal sealed class StepClock(Action<TimeSpan>? onStep = null)
+{
+    private readonly object _gate = new();
+    private TimeSpan _gap;       // boot clock minus wall clock as last accounted for
+    private DateTime? _until;    // end of the current catch-up period
+
+    public DateTime Bound(DateTime wallNowUtc, long msSinceBoot, DateTime? systemStartedUtc)
+    {
+        if (systemStartedUtc is not { } boot) return wallNowUtc;
+        var gap = boot.AddMilliseconds(msSinceBoot) - wallNowUtc;
+        TimeSpan? step = null;
+        DateTime bound;
+        lock (_gate)
+        {
+            if (gap > _gap + ProcessInfo.StepTolerance)
+            {
+                step = gap - _gap;
+                _until = wallNowUtc + step.Value;
+            }
+            _gap = gap;   // follow drift and steps forward: only a jump since the last look is a step back
+            bound = _until is { } u && wallNowUtc < u ? u : wallNowUtc;
+        }
+        if (step is { } s) onStep?.Invoke(s);
+        return bound;
+    }
 }

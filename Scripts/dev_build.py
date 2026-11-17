@@ -29,6 +29,7 @@ LAYOUT = {
     "Agent": "",
     "Cli": "",
     "Mcp": "",
+    "Stub": "",  # D6: copied by the launcher to <data>\app\bin (autostart and MCP stable paths)
     "Worker": "worker",
     "UI": "ui",
 }

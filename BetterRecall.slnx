@@ -13,6 +13,9 @@
     <Project Path="src/BetterRecall.Mcp/BetterRecall.Mcp.csproj">
       <Platform Project="x64" />
     </Project>
+    <Project Path="src/BetterRecall.Stub/BetterRecall.Stub.csproj">
+      <Platform Project="x64" />
+    </Project>
     <Project Path="src/BetterRecall.UI/BetterRecall.UI.csproj">
       <Platform Project="x64" />
     </Project>

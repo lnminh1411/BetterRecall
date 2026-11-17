@@ -20,6 +20,57 @@ public static class InstallLayout
 
     public static string Full(string installDir, string relative) => Path.GetFullPath(Path.Combine(installDir, relative));
 
+    // D6: stable paths. The launcher installs each version into <root>\<version>-<hash12> (root = <data>\app) and keeps
+    // <root>\bin pointing at the current one: bin\current names the install folder, bin\betterrecall.cmd runs its CLI,
+    // and two copies of the small payload-less stub (StubExe) start the current install: bin\BetterRecall.exe for
+    // autostart, bin\betterrecall-mcp.exe for MCP clients.
+    public const string BinDir = "bin";
+    public const string CurrentFile = "current";
+    public const string CliShim = "betterrecall.cmd";
+    public const string StubExe = "BetterRecall.Stub.exe";
+    public const string AutostartExe = "BetterRecall.exe";
+
+    /// <summary>Set by the bin\betterrecall-mcp.exe relay for the MCP server it starts: the relay restarts a server that
+    /// exits with McpRestartExitCode against the current install and sends it the requests left unanswered.</summary>
+    public const string McpRelayEnv = "BETTERRECALL_MCP_RELAY";
+    public const int McpRestartExitCode = 75;
+
+    /// <summary>A launcher install folder name: "&lt;version&gt;-&lt;hash12&gt;" (12 lower-case hex digits).</summary>
+    public static bool IsVersionFolder(string name)
+    {
+        int dash = name.LastIndexOf('-');
+        if (dash <= 0 || name.Length - dash - 1 != 12 || !char.IsAsciiDigit(name[0])) return false;
+        for (int i = dash + 1; i < name.Length; i++)
+            if (!char.IsAsciiHexDigitLower(name[i]) && !char.IsAsciiDigit(name[i])) return false;
+        return true;
+    }
+
+    /// <summary>The install folder bin\current under root names, or null (no file, or not a version folder name). The
+    /// result is always a direct child of root. The launcher writes the real path (SUBST drives and junctions resolved;
+    /// trust checks compare real image paths): it is kept as written only when its parent is root or realRoot (root
+    /// with links resolved, which the caller supplies) and it is not a UNC path; otherwise only its folder name counts.</summary>
+    public static string? CurrentInstall(string root, string? realRoot = null)
+    {
+        string text;
+        try { text = File.ReadAllText(Path.Combine(root, BinDir, CurrentFile)).Trim().TrimEnd('\\', '/'); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { return null; }
+        var name = Path.GetFileName(text);
+        if (name.Length == 0 || !IsVersionFolder(name)) return null;
+        if (Path.IsPathFullyQualified(text) && !text.StartsWith(@"\\", StringComparison.Ordinal) && !text.StartsWith("//", StringComparison.Ordinal))
+        {
+            try
+            {
+                var parent = Path.GetDirectoryName(Path.GetFullPath(text));
+                if (SameDir(parent, root) || (realRoot is not null && SameDir(parent, realRoot))) return Path.GetFullPath(text);
+            }
+            catch (Exception e) when (e is ArgumentException or NotSupportedException or PathTooLongException) { }
+        }
+        return Path.Combine(root, name);
+    }
+
+    private static bool SameDir(string? a, string b) => a is not null && string.Equals(
+        Path.GetFullPath(a).TrimEnd('\\'), Path.GetFullPath(b).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase);
+
     /// <summary>Marker file Scripts/dev_build.py writes into its output folder: this install dir is a dev build.</summary>
     public const string DevBuildMarker = ".devbuild";
 
@@ -28,7 +79,7 @@ public static class InstallLayout
 
     /// <summary>A dev build never opens the user's real data folder (it would run dev code on their store) unless started
     /// with --allow-default-home: it needs its own BETTERRECALL_HOME. A layout the single-file launcher extracted
-    /// (&lt;home&gt;pp\..., or started with BETTERRECALL_LAUNCHER) is installed, marker or not.</summary>
+    /// (&lt;home&gt;\app\..., or started with BETTERRECALL_LAUNCHER) is installed, marker or not.</summary>
     public static bool RefusesHome(string installDir, string home, bool allowDefaultHome)
     {
         if (allowDefaultHome || !DataPaths.IsDefaultHome(home) || !File.Exists(Path.Combine(installDir, DevBuildMarker))) return false;

@@ -21,6 +21,7 @@
     <ProjectReference Include="..\..\src\BetterRecall.Contracts\BetterRecall.Contracts.csproj" />
     <ProjectReference Include="..\..\src\BetterRecall.Core\BetterRecall.Core.csproj" />
     <ProjectReference Include="..\..\src\BetterRecall.Mcp\BetterRecall.Mcp.csproj" />
+    <ProjectReference Include="..\..\src\BetterRecall.Stub\BetterRecall.Stub.csproj" />
   </ItemGroup>
   <ItemGroup>
     <Using Include="Xunit" />

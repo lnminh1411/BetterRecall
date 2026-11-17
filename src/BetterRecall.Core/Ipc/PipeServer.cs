@@ -144,7 +144,7 @@ public sealed class PipeServer : IAsyncDisposable
             try
             {
                 await stream.WaitForConnectionAsync(ct).ConfigureAwait(false);
-                await ServeAsync(stream, DateTime.UtcNow, ct).ConfigureAwait(false);
+                await ServeAsync(stream, ProcessInfo.StartBound(DateTime.UtcNow), ct).ConfigureAwait(false);   // T2: survives a clock step back
             }
             catch (OperationCanceledException) { }
             catch (Exception ex) { Log.Warn($"pipe {_kind}: connection ended with error", ex); }
