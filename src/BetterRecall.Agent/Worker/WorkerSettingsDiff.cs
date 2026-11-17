@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) BetterRecall contributors
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using BetterRecall.Contracts;
 
 namespace BetterRecall.Agent.Worker;
@@ -16,6 +18,23 @@ internal static class WorkerSettingsDiff
         foreach (var (key, get) in Keys)
             if (!string.Equals(get(a), get(b), StringComparison.Ordinal)) return key;
         return null;
+    }
+
+    /// <summary>The worker keys of s as a partial settings.json object: the worker's --settings argument, so it runs on the
+    /// agent's accepted settings and never reads settings.json, whose hand edits the agent has not loaded (sweep 4 C5).</summary>
+    public static string Json(Settings s)
+    {
+        var full = JsonSerializer.SerializeToNode(s, ContractsJson.Default.Settings) as JsonObject ?? [];
+        var o = new JsonObject();
+        foreach (var (key, _) in Keys)
+        {
+            int dot = key.IndexOf('.');
+            string section = key[..dot], name = key[(dot + 1)..];
+            if (full[section] is not JsonObject src || !src.TryGetPropertyValue(name, out var value)) continue;
+            if (o[section] is not JsonObject dst) o[section] = dst = new JsonObject();
+            dst[name] = value?.DeepClone();
+        }
+        return o.ToJsonString();
     }
 
     private static readonly (string Key, Func<Settings, string?> Get)[] Keys =

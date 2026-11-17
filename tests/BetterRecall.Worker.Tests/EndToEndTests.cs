@@ -76,6 +76,42 @@ public class EndToEndTests(ITestOutputHelper output)
         Assert.DoesNotContain("hello world", text); // no content in logs
     }
 
+    /// <summary>Sweep 4 C5 + A-M3 seam, real worker exe in fake mode: the agent's worker keys come on the command line
+    /// and win over a settings.json the agent never loaded (here: not fake, dim 768), and every embed and bench reply
+    /// names the embedder that served it.</summary>
+    [Fact]
+    public void Worker_exe_runs_on_the_agents_settings_and_names_its_embedder()
+    {
+        using var scratch = TestEnv.Scoped("e2e-s4w");
+        var root = scratch.Path;
+        var install = Path.Combine(root, "install");
+        CopyTree(BuildDir("BetterRecall.Worker"), Path.Combine(install, "worker"));
+        CopyTree(BuildDir("FakeAgent"), install);
+        File.Move(Path.Combine(install, "FakeAgent.exe"), Path.Combine(install, InstallLayout.AgentExe));
+
+        var home = Path.Combine(root, "home");
+        TestEnv.Settings(home, s => { s.Inference.Fake = false; s.Index.Dim = 768; s.Security.MemoryIsolation = false; });   // a hand edit
+        const string agentKeys = """{"inference":{"fake":true},"index":{"dim":512},"security":{"memoryIsolation":false}}""";
+        var outFile = Path.Combine(root, "out.txt");
+        var psi = new ProcessStartInfo(Path.Combine(install, InstallLayout.AgentExe),
+            [InstallLayout.Full(install, InstallLayout.WorkerExe), home, outFile, "--space", "--settings", agentKeys]) { UseShellExecute = false };
+        using var agent = Process.Start(psi)!;
+        Assert.True(agent.WaitForExit(90_000), "fake agent timed out");
+        var lines = File.ReadAllLines(outFile);
+        foreach (var l in lines) output.WriteLine(l);
+        Assert.Equal(5, lines.Length);
+        Assert.Contains("\"ep\":\"fake\"", lines[0]);                       // fake from the agent, not the file
+        Assert.Contains("\"dim\":512", lines[0]);
+        Assert.Contains("\"model\":\"fake/embeddinggemma-2\"", lines[1]);  // bench
+        Assert.Contains("\"device\":\"CPU\"", lines[1]);
+        Assert.Contains("\"model\":\"fake/embeddinggemma-2\"", lines[2]);  // embed_text
+        Assert.Contains("\"revision\":\"fake-1\"", lines[2]);
+        Assert.EndsWith("payload=2048", lines[2]);                         // 512 floats
+        Assert.Equal("exit=0", lines[4]);
+        var log = File.ReadAllText(Directory.GetFiles(DataPaths.LogsDir(home), "worker-*.log").Single());
+        Assert.Contains("start settings=agent fake=True", log);
+    }
+
     /// <summary>Real mode in the real exe with memory isolation on: OpenVINO, ONNX Runtime and Skia must still load
     /// under the mitigation policies (child processes blocked, strict handles, DLL search limited to app dir + System32).</summary>
     [Fact]

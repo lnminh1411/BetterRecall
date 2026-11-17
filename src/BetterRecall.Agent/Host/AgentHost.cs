@@ -79,7 +79,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         _settingsSnapshot = core.Settings.Current;
         var workerExe = InstallLayout.Full(opt.InstallDir, InstallLayout.WorkerExe);
         VcRuntime.WorkerDir = Path.GetDirectoryName(workerExe);   // the VC++ check looks where the worker loads from
-        _supervisor = new WorkerSupervisor(new ProcessWorkerLauncher(workerExe, () => S.Governance.EcoQos), opt.Home, () => S.Inference.IdleExitS);
+        _supervisor = new WorkerSupervisor(new ProcessWorkerLauncher(workerExe, () => S.Governance.EcoQos, () => WorkerSettingsDiff.Json(S)), opt.Home, () => S.Inference.IdleExitS);
         _worker = new WorkerClient(_supervisor);
         _thumbs = new Thumbnailer(() => _core.Store, () => S);
     }
@@ -115,7 +115,8 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         _replays.DeletePartials();   // saves that failed or were cut off by a crash (A20)
         var encLuid = GpuDevices.Adapters().FirstOrDefault(a => a.VendorId == GpuDevices.VendorIntel)?.Luid;
         _probe = new SystemProbe(encLuid is null ? null : GpuDevices.PdhLuidToken(encLuid.Value));
-        _scheduler = new EmbeddingScheduler(() => Store, () => S, _worker, ProbeLoad, () => _pause.Has("consent") || _pause.Has("keylocked") || _pause.Has("keylost") || _pause.Has("storeerror"));
+        _scheduler = new EmbeddingScheduler(() => Store, () => S, _worker, ProbeLoad, () => _pause.Has("consent") || _pause.Has("keylocked") || _pause.Has("keylost") || _pause.Has("storeerror"),
+            indexDim: () => S.Index.Dim);
         _pipeline = new KeyframePipeline(() => Store, () => S, OnCaptureStored, new WorkerKeyframeReader(_worker), _redactions) { Sampler = _sampler };
         _guard = new GuardrailService(() => S, () => _sessionLocked, () => _capture?.MonitorBounds() ?? [], _opt.InstallDir);
         _guard.ForegroundChanged += _ => _capture?.OnForegroundChanged();
@@ -624,7 +625,8 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
             Locked: !IsUnlocked,
             UnlockedUntil: _gate.Until,
             Audio: new AudioState(_systemAudio is not null && _loopback.Running, _micAudio is { MicLost: false }),
-            Queue: new QueueState((_scheduler?.Queued ?? 0) + StoreStats().PendingEmbeddings),
+            // A-L3: the jobs table already holds the jobs the scheduler took into RAM until they finish.
+            Queue: new QueueState(StoreStats().PendingEmbeddings),
             Device: _supervisor.IsRunning ? _supervisor.Hello?.Device ?? "none" : "none",
             Store: StoreStats(),
             RetentionDays: s.Retention.Days,

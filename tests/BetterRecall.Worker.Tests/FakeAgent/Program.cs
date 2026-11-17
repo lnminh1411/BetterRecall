@@ -7,23 +7,28 @@ using System.Text;
 using System.Text.Json;
 using BetterRecall.Contracts;
 
-// FakeAgent <workerExe> <home> <out.json> [--real] [--wav <path>]
+// FakeAgent <workerExe> <home> <out.json> [--real] [--wav <path>] [--settings <json>] [--space]
 // Creates the private pipe, starts the worker, sends hello, embed_text (query + document), embed_image (bgra8),
 // transcribe, shutdown; writes every response header plus the worker exit code to out.json.
+// --settings is handed to the worker as the agent's worker keys (sweep 4 C5). --space sends hello, bench, embed_text
+// and shutdown only, to see which embedder each reply names (sweep 4 A-M3).
 var workerExe = args[0];
 var home = args[1];
 var outFile = args[2];
-bool real = false;
-string? wavPath = null;
+bool real = false, space = false;
+string? wavPath = null, workerSettings = null;
 for (int i = 3; i < args.Length; i++)
 {
     if (args[i] == "--real") real = true;
+    else if (args[i] == "--space") space = true;
     else if (args[i] == "--wav" && i + 1 < args.Length) wavPath = args[++i];
+    else if (args[i] == "--settings" && i + 1 < args.Length) workerSettings = args[++i];
 }
 
 var name = PipeNames.NewWorker();
 await using var server = new NamedPipeServerStream(name, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
 var psi = new ProcessStartInfo(workerExe, ["--pipe", name, "--home", home]) { UseShellExecute = false };
+if (workerSettings is not null) { psi.ArgumentList.Add("--settings"); psi.ArgumentList.Add(workerSettings); }
 using var worker = Process.Start(psi)!;
 var lines = new List<string>();
 try
@@ -42,7 +47,14 @@ try
         var suffix = real ? $" payload={f.Payload.Length} ms={sw.ElapsedMilliseconds}" : $" payload={f.Payload.Length}";
         lines.Add(JsonSerializer.Serialize(resp, ContractsJson.Default.WorkerResponse) + suffix);
     }
-    if (!real)
+    if (space)
+    {
+        await Send(new WorkerRequest(++id, "hello"), []);
+        await Send(new WorkerRequest(++id, "bench"), []);
+        await Send(new WorkerRequest(++id, "embed_text", Text: "hello world", Kind: "document"), []);
+        await Send(new WorkerRequest(++id, "shutdown"), []);
+    }
+    else if (!real)
     {
         await Send(new WorkerRequest(++id, "hello"), []);
         await Send(new WorkerRequest(++id, "embed_text", Text: "hello world", Kind: "query"), []);

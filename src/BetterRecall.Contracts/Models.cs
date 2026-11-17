@@ -365,4 +365,9 @@ public sealed record WorkerResponse(
     WorkerHello? Hello = null,
     TranscribeResult? Transcript = null,
     BenchResult? Bench = null,
-    OcrResult? Ocr = null);
+    OcrResult? Ocr = null,
+    // embed_image, embed_text, bench (sweep 4 A-M3): the embedder that served the request. A bench or a run-time
+    // replan can switch model or device inside one worker process, with no new hello.
+    string? Model = null,
+    string? Revision = null,
+    string? Device = null);

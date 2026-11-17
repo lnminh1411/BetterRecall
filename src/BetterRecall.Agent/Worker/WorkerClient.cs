@@ -11,12 +11,13 @@ internal sealed class WorkerClient(WorkerSupervisor supervisor)
 {
     public WorkerSupervisor Supervisor => supervisor;
 
-    private async Task<WorkerReply> CallAsync(WorkerRequest req, ReadOnlyMemory<byte> payload, CancellationToken ct)
+    private async Task<WorkerReply> CallAsync(WorkerRequest req, ReadOnlyMemory<byte> payload, CancellationToken ct, bool urgent = false)
     {
         var conn = await supervisor.EnsureAsync(ct).ConfigureAwait(false);
-        var reply = await conn.SendAsync(req, payload, ct).ConfigureAwait(false);
+        var reply = await conn.SendAsync(req, payload, ct, urgent).ConfigureAwait(false);
         if (!reply.Header.Ok) throw new WorkerReplyException(reply.Header.Error ?? "Internal error.");
         supervisor.MarkHealthy();
+        supervisor.NoteEmbedder(reply.Header);   // before the caller files the vector (A-M3)
         return reply;
     }
 
@@ -46,9 +47,10 @@ internal sealed class WorkerClient(WorkerSupervisor supervisor)
         return new ImageEmbedResult(BinaryFrame.BytesToFloats(reply.Payload), false, reply.Header.Ms ?? 0);
     }
 
+    /// <summary>kind "query" (a search) is interactive: it is written before queued background requests (A-L4).</summary>
     public async Task<float[]> EmbedTextAsync(string text, string kind, CancellationToken ct)
     {
-        var reply = await CallAsync(new WorkerRequest(0, "embed_text", Text: text, Kind: kind), ReadOnlyMemory<byte>.Empty, ct).ConfigureAwait(false);
+        var reply = await CallAsync(new WorkerRequest(0, "embed_text", Text: text, Kind: kind), ReadOnlyMemory<byte>.Empty, ct, urgent: kind == "query").ConfigureAwait(false);
         return BinaryFrame.BytesToFloats(reply.Payload);
     }
 
@@ -86,6 +88,7 @@ internal sealed class WorkerClient(WorkerSupervisor supervisor)
         }
         if (!reply.Header.Ok) throw new WorkerReplyException(reply.Header.Error ?? "Internal error.");
         supervisor.MarkHealthy();
+        supervisor.NoteEmbedder(reply.Header);   // the bench may have chosen another model or device (A-M3, CA-S2)
         return reply.Header.Bench ?? throw new WorkerException("Internal error.");
     }
 }

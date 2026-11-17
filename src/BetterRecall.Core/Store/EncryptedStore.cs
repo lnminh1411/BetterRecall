@@ -42,7 +42,8 @@ public sealed partial class EncryptedStore : IStore
     private readonly Lock _rl = new();
     private readonly Lock _vl = new();
     private readonly Dictionary<string, SqliteConnection> _kf = new(StringComparer.Ordinal);
-    private readonly HashSet<long> _inflight = [];
+    // Embedding job leases: rid -> TickCount64 when handed out (A-M1: a lease expires, see EmbeddingLeaseTimeout).
+    private readonly Dictionary<long, long> _inflight = [];
     private SqliteConnection _w = null!;
     private SqliteConnection _r = null!;
     private SqliteConnection _rv = null!; // vector rerank reader, so FTS and vector stages run in parallel
@@ -385,6 +386,7 @@ public sealed partial class EncryptedStore : IStore
                 if (info.Dim < old.Dim) TruncateVectors(info.Dim);
                 if (info.Dim != old.Dim) { WriteSpace(info); Log.Info($"embedding dim {old.Dim} -> {info.Dim}"); }
                 if (info.Dim < old.Dim) { lock (_rl) LoadIndex(); }
+                if (info.Dim > old.Dim) QueueShortVectors(info);
                 return;
             }
             WriteSpace(info);
@@ -409,6 +411,26 @@ public sealed partial class EncryptedStore : IStore
             Log.Info("embedding model changed, rows queued for re-embedding");
             lock (_rl) LoadIndex();
         }
+    }
+
+    /// <summary>Going back up in dim (C5): vectors truncated by an earlier lower dim cannot grow back, so rows that can
+    /// still be embedded (keyframe or transcript kept) get a job. They stay searchable at their old dim meanwhile.</summary>
+    private void QueueShortVectors(EmbeddingInfo info)
+    {
+        long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        int n;
+        using (var tx = BeginWrite())
+        {
+            Exec(_w, """
+                INSERT OR IGNORE INTO jobs(rid, created)
+                SELECT c.rid, $now FROM captures c JOIN vectors v ON v.rid = c.rid
+                WHERE c.state = 1 AND v.model_id = $m AND v.revision = $r AND v.dim < $d
+                  AND ((c.kind IN (0, 2) AND c.has_keyframe = 1) OR (c.kind = 1 AND c.text IS NOT NULL AND c.text <> ''))
+                """, ("$now", now), ("$m", info.ModelId), ("$r", info.Revision), ("$d", info.Dim));
+            n = (int)(long)(Scalar(_w, "SELECT changes()") ?? 0L);
+            tx.Commit();
+        }
+        Log.Info($"{n} rows with shorter vectors queued for re-embedding at {info.Dim}-d");
     }
 
     private void TruncateVectors(int dim)
@@ -556,12 +578,21 @@ public sealed partial class EncryptedStore : IStore
         }
     }
 
+    /// <summary>How long a job handed out by <see cref="TakePendingEmbeddings"/> is held back from the next take
+    /// (A-M1). The agent's scheduler takes jobs only once it holds none, so a lease older than this belongs to jobs it
+    /// dropped without a reply (panic clears its RAM queue): they are handed out again instead of staying hidden, and
+    /// out of status.queue.pending's drain, until the agent restarts.</summary>
+    public TimeSpan EmbeddingLeaseTimeout { get; set; } = TimeSpan.FromMinutes(2);
+
+    private bool Leased(long rid, long now) => _inflight.TryGetValue(rid, out var at) && now - at < (long)EmbeddingLeaseTimeout.TotalMilliseconds;
+
     public IReadOnlyList<PendingJob> TakePendingEmbeddings(int max)
     {
         if (max <= 0) return [];
         lock (_wl)
         {
             ThrowIfDisposed();
+            long leaseNow = Environment.TickCount64;
             var rows = new List<(long Rid, string Id, int Kind, string? Text, string? Month, bool HasKf)>();
             using (var cmd = Cmd(_w, """
                 SELECT j.rid, c.id, c.kind, c.text, c.kf_month, c.has_keyframe FROM jobs j JOIN captures c ON c.rid = j.rid
@@ -574,11 +605,11 @@ public sealed partial class EncryptedStore : IStore
             foreach (var r in rows)
             {
                 if (jobs.Count >= max) break;
-                if (_inflight.Contains(r.Rid)) continue;
+                if (Leased(r.Rid, leaseNow)) continue;
                 if (r.Kind == KindAudio)
                 {
                     jobs.Add(new PendingJob(r.Id, CaptureKind.Audio, null, null, r.Text ?? ""));
-                    _inflight.Add(r.Rid);
+                    _inflight[r.Rid] = leaseNow;
                     continue;
                 }
                 (byte[] Data, string Mime)? img = null;
@@ -595,7 +626,7 @@ public sealed partial class EncryptedStore : IStore
                     continue;
                 }
                 jobs.Add(new PendingJob(r.Id, KindOf(r.Kind), img.Value.Data, img.Value.Mime, null));
-                _inflight.Add(r.Rid);
+                _inflight[r.Rid] = leaseNow;
             }
             return jobs;
         }

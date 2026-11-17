@@ -175,7 +175,7 @@ public class Sweep2GTests
     }
 
     /// <summary>Main backend with one GPU whose graphs run on the ONNX Runtime CPU; Broken makes every GPU run (and load) fail.</summary>
-    private sealed class FlakyGpuBackend : IInferenceBackend
+    internal sealed class FlakyGpuBackend : IInferenceBackend   // also used by Sweep4WWorkerTests
     {
         private readonly OnnxBackend _cpu = new(cpuOnly: true);
         public volatile bool Broken;

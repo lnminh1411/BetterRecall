@@ -7,7 +7,9 @@ using BetterRecall.Worker.Protocol;
 
 namespace BetterRecall.Worker;
 
-/// <summary>BetterRecall.Worker.exe --pipe &lt;name&gt; --home &lt;data dir&gt;. Exit codes: 0 normal, 2 bad arguments,
+/// <summary>BetterRecall.Worker.exe --pipe &lt;name&gt; --home &lt;data dir&gt; [--settings &lt;json&gt;]. --settings carries the
+/// agent's worker keys (sweep 4 C5): the agent's accepted settings, not settings.json, which a hand edit can change
+/// behind the agent's back. Without it (manual runs, tests) the worker reads settings.json. Exit codes: 0 normal, 2 bad arguments,
 /// 3 pipe connect failed, 4 server is not the agent, 5 protocol error, 1 unexpected.</summary>
 public static class Program
 {
@@ -19,9 +21,9 @@ public static class Program
 
         // Logging first, so a settings.json parse warning is written; then again at the configured level.
         Log.Init(DataPaths.LogsDir(home), "info");
-        var settings = WorkerSettings.Load(home);
+        var settings = parsed.Settings is { } fromAgent ? WorkerSettings.FromJson(fromAgent, home) : WorkerSettings.Load(home);
         Log.Init(DataPaths.LogsDir(home), settings.LogLevel);
-        Log.Info($"start fake={settings.Fake} device={settings.Device} gpuAdapter={settings.GpuAdapter} dim={settings.Dim} tokens={settings.ImageTokens} nsfwDevice={settings.NsfwDevice}");
+        Log.Info($"start settings={(parsed.Settings is null ? "file" : "agent")} fake={settings.Fake} device={settings.Device} gpuAdapter={settings.GpuAdapter} dim={settings.Dim} tokens={settings.ImageTokens} nsfwDevice={settings.NsfwDevice}");
         ProcessHardening.Apply(settings.MemoryIsolation, settings.EcoQos);
 
         System.IO.Pipes.NamedPipeClientStream pipe;
@@ -54,17 +56,18 @@ public static class Program
     }
 }
 
-public sealed record WorkerArgs(string Pipe, string Home)
+public sealed record WorkerArgs(string Pipe, string Home, string? Settings = null)
 {
     public static WorkerArgs? Parse(string[] args)
     {
-        string? pipe = null, home = null;
+        string? pipe = null, home = null, settings = null;
         for (int i = 0; i + 1 < args.Length; i += 2)
         {
             switch (args[i])
             {
                 case "--pipe": pipe = args[i + 1]; break;
                 case "--home": home = args[i + 1]; break;
+                case "--settings": settings = args[i + 1]; break;
                 default: return null;
             }
         }
@@ -72,6 +75,6 @@ public sealed record WorkerArgs(string Pipe, string Home)
         var name = AgentPipe.NormalizeName(pipe);
         if (name is null || string.IsNullOrWhiteSpace(home)) return null;
         try { home = Path.GetFullPath(home); } catch { return null; }
-        return new WorkerArgs(name, home);
+        return new WorkerArgs(name, home, settings);
     }
 }

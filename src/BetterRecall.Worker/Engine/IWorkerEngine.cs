@@ -34,4 +34,11 @@ public interface IWorkerEngine : IDisposable
     /// <summary>Text lines of a screenshot (ocr.engine, ocr.languages, ocr.device). entities: also run the NER model
     /// and fill each line's person/address spans.</summary>
     OcrResult Ocr(ImageInput image, bool entities);
+
+    /// <summary>The embedder loaded now (model id, revision, device label), or null when none is loaded. Replies to
+    /// embed and bench requests carry it, since a bench or a run-time replan can switch model without a new hello
+    /// (sweep 4 A-M3).</summary>
+    EmbedderIdentity? Embedder => null;
 }
+
+public sealed record EmbedderIdentity(string Model, string Revision, string Device);

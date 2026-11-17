@@ -18,6 +18,7 @@ internal sealed class EmbeddingScheduler : IAsyncDisposable
     private readonly WorkerClient _worker;
     private readonly Func<GovernanceInputs> _probe;
     private readonly Func<bool> _paused;
+    private readonly Func<int>? _indexDim;
     private readonly Queue<PendingJob> _queue = new();
     private readonly object _qlock = new();
     private readonly SemaphoreSlim _wake = new(0, int.MaxValue);
@@ -30,6 +31,10 @@ internal sealed class EmbeddingScheduler : IAsyncDisposable
     private readonly object _spaceLock = new();
     // S2/S3: worker attempts per job id (transient device errors, and crashes with the job in flight).
     private readonly Dictionary<string, int> _attempts = new();
+    // A-L2: the job being served (out of _queue) and whether a purge or Clear dropped it meanwhile; under _qlock.
+    private string? _inFlight;
+    private bool _inFlightDropped;
+    private long _dimRestartTicks = long.MinValue / 2;
 
     /// <summary>Transient worker errors ("Device failed:", "Internal error.") tried per job before it is settled.</summary>
     public const int MaxTransientAttempts = 5;
@@ -40,20 +45,48 @@ internal sealed class EmbeddingScheduler : IAsyncDisposable
     public int Processed { get; private set; }
     public int Dropped { get; private set; }
 
-    public EmbeddingScheduler(Func<IStore?> store, Func<Settings> settings, WorkerClient worker, Func<GovernanceInputs> probe, Func<bool> paused)
+    /// <param name="indexDim">The agent's index.dim: a hello with another dim is refused (C5). Null skips the check
+    /// (tests whose fake worker has a dim of its own).</param>
+    public EmbeddingScheduler(Func<IStore?> store, Func<Settings> settings, WorkerClient worker, Func<GovernanceInputs> probe, Func<bool> paused,
+        Func<int>? indexDim = null)
     {
         _store = store;
         _settings = settings;
         _worker = worker;
         _probe = probe;
         _paused = paused;
+        _indexDim = indexDim;
         worker.Supervisor.HelloReceived += OnHello;
+        // A worker already up (started before this scheduler) said hello before anyone listened: vectors need a space.
+        if (worker.Supervisor.Hello is { } h) OnHello(h);
     }
 
     public int Queued { get { lock (_qlock) return _queue.Count; } }
 
     private void OnHello(WorkerHello h)
     {
+        // A-M4: a worker without an embedder (models missing, no usable device) still says hello, with revision "".
+        // It says nothing about the store's model: taking it rewrote the space, emptied the vector index and queued the
+        // whole history, then again when the models came back. Keep the space; the first embed reply that names a real
+        // embedder brings it (WorkerSupervisor.NoteEmbedder).
+        if (string.IsNullOrEmpty(h.Model) || string.IsNullOrEmpty(h.Revision))
+        {
+            Log.Warn($"worker has no embedder (device {h.Device}, missing [{string.Join(",", h.Missing ?? [])}]); embedding space kept");
+            return;
+        }
+        // C5: the dim must be the one the agent accepted (the worker gets it from the agent now). Another dim would
+        // truncate every stored vector for good: keep the space and ask for a worker on the agent's settings.
+        if (_indexDim?.Invoke() is int want && h.Dim != want)
+        {
+            Log.Warn($"worker embeds at dim {h.Dim}, not index.dim {want}; embedding space kept");
+            long now = Environment.TickCount64;
+            if (now - Interlocked.Read(ref _dimRestartTicks) > 600_000)
+            {
+                Interlocked.Exchange(ref _dimRestartTicks, now);
+                _worker.Supervisor.RequestRestart("index.dim");
+            }
+            return;
+        }
         lock (_spaceLock)
         {
             var info = new EmbeddingInfo(h.Model, h.Revision, h.Dim);
@@ -119,6 +152,7 @@ internal sealed class EmbeddingScheduler : IAsyncDisposable
         {
             foreach (var j in _queue) if (j.Image is not null) Array.Clear(j.Image);
             _queue.Clear();
+            if (_inFlight is not null) _inFlightDropped = true;   // not put back after its reply (A-L2)
         }
         lock (_attempts) _attempts.Clear();
     }
@@ -138,6 +172,8 @@ internal sealed class EmbeddingScheduler : IAsyncDisposable
             }
             _queue.Clear();
             foreach (var j in keep) _queue.Enqueue(j);
+            // A-L2: the job being served is not in _queue: mark it, so a retryable reply does not put its image back.
+            if (_inFlight is { } f && ids.Contains(f)) _inFlightDropped = true;
             return before - keep.Count;
         }
     }
@@ -188,10 +224,16 @@ internal sealed class EmbeddingScheduler : IAsyncDisposable
         for (int i = 0; i < decision.BatchSize; i++)
         {
             PendingJob? job;
-            lock (_qlock) if (!_queue.TryDequeue(out job)) break;
+            lock (_qlock)
+            {
+                if (!_queue.TryDequeue(out job)) break;
+                _inFlight = job.Id;
+                _inFlightDropped = false;
+            }
             bool requeued = false;
             try
             {
+                if (DroppedInFlight(job)) continue;   // purged between the dequeue and here
                 await ProcessAsync(store, job, s, ct).ConfigureAwait(false);
                 Settled(job.Id);
             }
@@ -250,6 +292,7 @@ internal sealed class EmbeddingScheduler : IAsyncDisposable
             }
             finally
             {
+                lock (_qlock) if (_inFlight == job.Id) _inFlight = null;
                 // A re-queued job keeps its image; anything else is done with it.
                 if (!requeued && job.Image is not null) Array.Clear(job.Image);
             }
@@ -257,9 +300,19 @@ internal sealed class EmbeddingScheduler : IAsyncDisposable
         return decision.NextCheck;
     }
 
-    /// <summary>Puts the job back at the head of the queue.</summary>
+    /// <summary>The job in flight was purged or cleared meanwhile (A-L2): settle it here; the caller zeroes its image.</summary>
+    private bool DroppedInFlight(PendingJob job)
+    {
+        lock (_qlock) if (_inFlight != job.Id || !_inFlightDropped) return false;
+        Settled(job.Id);
+        Log.Debug($"embedding {job.Id}: purged while in flight, dropped");
+        return true;
+    }
+
+    /// <summary>Puts the job back at the head of the queue, unless it was purged while in flight (then false).</summary>
     private bool Requeue(PendingJob job)
     {
+        if (DroppedInFlight(job)) return false;
         lock (_qlock)
         {
             var rest = _queue.ToArray();
@@ -294,7 +347,7 @@ internal sealed class EmbeddingScheduler : IAsyncDisposable
                 return;
             }
             EnsureSpace(store);
-            store.SetEmbedding(job.Id, r.Vector!, CurrentSpace(r.Vector!.Length));
+            store.SetEmbedding(job.Id, r.Vector!, SpaceFor(r.Vector!.Length));
             Processed++;
         }
         else
@@ -302,15 +355,19 @@ internal sealed class EmbeddingScheduler : IAsyncDisposable
             if (string.IsNullOrEmpty(job.Text)) { store.FailEmbedding(job.Id, "no text"); return; }
             var v = await _worker.EmbedTextAsync(job.Text, "document", ct).ConfigureAwait(false);
             EnsureSpace(store);
-            store.SetEmbedding(job.Id, v, CurrentSpace(v.Length));
+            store.SetEmbedding(job.Id, v, SpaceFor(v.Length));
             Processed++;
         }
     }
 
-    private EmbeddingInfo CurrentSpace(int dim)
+    /// <summary>The space a vector of this length is filed under: the last hello the agent accepted. With none accepted
+    /// (A-M4) or another dim (a worker whose hello was refused, C5) the vector is not stored and the job waits for a
+    /// worker the agent can file under; it used to be labelled with whatever the hello said.</summary>
+    private EmbeddingInfo SpaceFor(int dim)
     {
-        var h = _worker.Supervisor.Hello;
-        return _space ?? new EmbeddingInfo(h?.Model ?? "unknown", h?.Revision ?? "", dim);
+        var space = _space ?? throw new WorkerException("No embedding space accepted yet.");
+        if (space.Dim != dim) throw new WorkerException($"Vector dim {dim} is not the index dim {space.Dim}.");
+        return space;
     }
 
     public async ValueTask DisposeAsync()

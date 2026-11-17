@@ -9,7 +9,8 @@ namespace BetterRecall.Worker.Hosting;
 /// <summary>The worker's view of settings.json: inference.* (gpuAdapter included), index.dim, audio.language, governance.ecoQos,
 /// security.memoryIsolation, log.level, and the NSFW gate's privacy.nsfwFilter / nsfwDetector / nsfwDevice /
 /// nsfwGpuAdapter, and ocr.enabled / engine / languages / device. Out-of-range values fall back to defaults (Core validates the file). Read once at start: a change
-/// takes effect when the agent next starts the worker (after the idle exit, inference.idleExitS).</summary>
+/// takes effect when the agent next starts the worker (after the idle exit, inference.idleExitS). The agent passes its own
+/// copy on the command line (<see cref="FromJson"/>); settings.json is read only when it does not (sweep 4 C5).</summary>
 public sealed record WorkerSettings(
     bool Fake,
     string Device,          // auto | npu | gpu | cpu
@@ -59,6 +60,20 @@ public sealed record WorkerSettings(
         catch (Exception e) when (e is JsonException or IOException or UnauthorizedAccessException or NotSupportedException or InvalidOperationException)
         {
             Log.Warn($"settings.json unreadable ({e.GetType().Name}); using defaults");
+            s = new Settings();
+        }
+        return From(s, home);
+    }
+
+    /// <summary>The agent's worker keys from --settings (a partial settings.json object). Unreadable text keeps the
+    /// defaults, as an unreadable file does; settings.json is not consulted.</summary>
+    public static WorkerSettings FromJson(string json, string home)
+    {
+        Settings s;
+        try { s = Parse(json); }
+        catch (Exception e) when (e is JsonException or InvalidOperationException)
+        {
+            Log.Warn($"--settings unreadable ({e.GetType().Name}); using defaults");
             s = new Settings();
         }
         return From(s, home);

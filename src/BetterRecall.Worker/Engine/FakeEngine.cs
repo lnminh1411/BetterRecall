@@ -69,6 +69,8 @@ public sealed class FakeEngine : IWorkerEngine
 
     public BenchResult Bench() => new("CPU", [new BenchDevice("CPU", "fake", true, 0, 0, 1.0, null)]);
 
+    public EmbedderIdentity? Embedder => new(ModelId, Revision, "CPU");
+
     /// <summary>One line "fake ocr WxH" at the top left, 10 px per character; entities: none.</summary>
     public OcrResult Ocr(ImageInput image, bool entities)
     {

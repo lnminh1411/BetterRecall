@@ -19,7 +19,9 @@ internal interface IWorkerLauncher
     bool HasExited(int pid);
 }
 
-internal sealed class ProcessWorkerLauncher(string workerExe, Func<bool> ecoQos) : IWorkerLauncher
+/// <param name="settingsJson">The agent's worker keys (<see cref="WorkerSettingsDiff.Json"/>), passed as --settings so the
+/// worker runs on what the agent accepted, never on a settings.json the agent has not loaded (sweep 4 C5).</param>
+internal sealed class ProcessWorkerLauncher(string workerExe, Func<bool> ecoQos, Func<string>? settingsJson = null) : IWorkerLauncher
 {
     // Every started worker until it exits, by pid: a late kill of an old worker must still reach it after a new start.
     private readonly System.Collections.Concurrent.ConcurrentDictionary<int, Process> _processes = new();
@@ -45,6 +47,11 @@ internal sealed class ProcessWorkerLauncher(string workerExe, Func<bool> ecoQos)
         psi.ArgumentList.Add(pipeName);
         psi.ArgumentList.Add("--home");
         psi.ArgumentList.Add(home);
+        if (settingsJson?.Invoke() is { } json)
+        {
+            psi.ArgumentList.Add("--settings");
+            psi.ArgumentList.Add(json);
+        }
         foreach (var (id, old) in _processes)
             try { if (old.HasExited && _processes.TryRemove(id, out _)) old.Dispose(); } catch { }
         var p = Process.Start(psi) ?? throw new WorkerException("Worker failed to start.");
@@ -102,6 +109,9 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
     /// transcriber) (A5, CA-S1). A request that runs long on purpose (cold Whisper or NPU OCR compile, device re-bench)
     /// is covered by the worker's keepalive frames (every 20 s, up to 15 min per request).</summary>
     public TimeSpan UnresponsiveAfter { get; init; } = TimeSpan.FromSeconds(90);
+    /// <summary>Clock (ms) the liveness check runs on. Default <see cref="BetterRecall.Agent.Worker.LivenessClock.NowMs"/>, which skips time
+    /// the PC slept: TickCount64 counted a sleep as worker silence and recycled a healthy worker on resume (C8).</summary>
+    public Func<long>? LivenessClock { get; init; }
     /// <summary>Workers recycled because they stopped answering.</summary>
     public int Recycled => _recycled;
     private int _recycled;
@@ -205,7 +215,7 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
                     throw new WorkerException("Worker pipe client is not the started process.");
                 }
             }
-            var conn = new WorkerConnection(server);
+            var conn = new WorkerConnection(server, LivenessClock);
             int connPid = pid;
             conn.Closed += (err, pending) => OnClosed(conn, connPid, err, pending);
             // Hello waits for model load and, after a model change, the device benchmark (minutes on an NPU compile);
@@ -215,7 +225,7 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
             var hello = await conn.SendAsync(new WorkerRequest(0, "hello"), ReadOnlyMemory<byte>.Empty, helloTimeout.Token).ConfigureAwait(false);
             if (!hello.Header.Ok || hello.Header.Hello is null)
                 throw new WorkerException(hello.Header.Error ?? "Worker hello failed.");
-            Hello = hello.Header.Hello;
+            lock (_helloGate) Hello = hello.Header.Hello;
             Log.Info($"worker up pid={pid} device={Hello.Device} ep={Hello.Ep} dim={Hello.Dim} nsfw={Hello.NsfwDevice ?? "not loaded"} in {sw.ElapsedMilliseconds} ms");
             try { HelloReceived?.Invoke(Hello); } catch (Exception ex) { Log.Warn("hello handler", ex); }
             return conn;
@@ -245,16 +255,39 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
         else Interlocked.Exchange(ref _failures, 0);
         if (ReferenceEquals(_conn, conn)) _conn = null;
         // A2: a broken pipe or frame used to leave the old worker running (models loaded) next to the new one. Kill this
-        // connection's own process (never _pid, which a new start may already own) and free the pipe. Recycle, abort and
-        // shutdown do both themselves.
-        if (crashed && !conn.Recycled && !conn.ShuttingDown)
+        // connection's own process (never _pid, which a new start may already own). Recycle, abort and shutdown kill
+        // themselves.
+        if (crashed && !conn.Recycled && !conn.ShuttingDown && pid != 0)
         {
-            if (pid != 0) { try { _launcher.Kill(pid); } catch (Exception ex) { Log.Debug($"worker kill: {ex.Message}"); } }
-            _ = Task.Run(async () => { try { await conn.DisposeAsync().ConfigureAwait(false); } catch { } });
+            try { _launcher.Kill(pid); } catch (Exception ex) { Log.Debug($"worker kill: {ex.Message}"); }
         }
+        // C10: free the pipe handle, CTS and write gate on every close, the idle exit included (it used to wait for the
+        // finalizer). Disposing twice is harmless.
+        _ = Task.Run(async () => { try { await conn.DisposeAsync().ConfigureAwait(false); } catch { } });
     }
 
     public void MarkHealthy() => Interlocked.Exchange(ref _failures, 0);
+
+    private readonly Lock _helloGate = new();
+
+    /// <summary>A reply named the embedder that served it (A-M3, CA-S2). A bench or a run-time replan in the running
+    /// worker can switch model or device with no new hello: Hello follows (status.device), and a new model or revision
+    /// is raised as a hello so the scheduler files vectors under it and checks it like one.</summary>
+    internal void NoteEmbedder(WorkerResponse r)
+    {
+        if (r.Model is null || r.Revision is null) return;
+        WorkerHello next;
+        lock (_helloGate)
+        {
+            if (Hello is not { } h) return;
+            string device = r.Device ?? h.Device;
+            if (h.Model == r.Model && h.Revision == r.Revision && h.Device == device) return;
+            next = h with { Model = r.Model, Revision = r.Revision, Device = device, Dim = r.Dim ?? h.Dim };
+            Hello = next;
+            Log.Info($"worker embedder now {next.Model} rev {next.Revision} on {next.Device} (was {h.Model} rev {h.Revision} on {h.Device})");
+        }
+        try { HelloReceived?.Invoke(next); } catch (Exception ex) { Log.Warn("hello handler", ex); }
+    }
 
     /// <summary>A setting the worker reads only at start changed (S4): shut the running worker down gracefully as soon as
     /// no request is in flight; the next request starts one with the new settings. No worker running: nothing to do.</summary>
@@ -342,6 +375,7 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
             {
                 if (!ReferenceEquals(_conn, c) || c.Recycled) return;
                 pid = _pid;
+                c.Aborted = true;    // no request in flight is to blame (A-L1)
                 c.Recycled = true;   // OnClosed then neither counts a failure nor resets the count
                 _conn = null;
             }
