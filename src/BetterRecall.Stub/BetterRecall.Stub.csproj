@@ -19,6 +19,10 @@
     <InternalsVisibleTo Include="BetterRecall.Core.Tests" />
   </ItemGroup>
   <ItemGroup>
+    <!-- bin\ is user-writable: static imports load from System32 only, never from next to the exe (no DLL planting). -->
+    <LinkerArg Include="/DEPENDENTLOADFLAG:0x800" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="..\BetterRecall.Contracts\BetterRecall.Contracts.csproj" />
   </ItemGroup>
 </Project>

@@ -41,23 +41,18 @@ public sealed class ServerTrustVerifier : IServerTrust
         _imageOf = startedOf is null ? image : (pid, at) => startedOf(pid) is { } s && s <= at ? image(pid, at) : null;
         _sessionOf = sessionOf ?? Win32Trust.SessionOf;
         _ownSession = ownSession ?? Win32Trust.SessionOf(Environment.ProcessId) ?? -1;
-        _startBound = startBound ?? (() => StartBound(DateTime.UtcNow, Environment.TickCount64, Win32Trust.SystemStartedUtc.Value));
+        _startBound = startBound ?? (() => Steps.Bound(DateTime.UtcNow, Environment.TickCount64, Win32Trust.SystemStartedUtc.Value));
     }
 
     /// <summary>Backward clock steps up to this size are left to the wall clock (same rule as Core ProcessInfo).</summary>
     public static readonly TimeSpan StepTolerance = TimeSpan.FromSeconds(10);
 
-    /// <summary>Latest start time a process that already ran at wallNowUtc can show. Start times are wall-clock stamps a
-    /// later clock change leaves alone, so after a step back the running agent "started in the future" and was refused
-    /// until the clock caught up (T2). Boot start (the System process) plus the time since boot (TickCount64, does not
-    /// step) is "now" on the clock that stamped it; it wins when ahead of the wall clock by more than StepTolerance.
-    /// Same rule as Core ProcessInfo.StartBound.</summary>
+    private static readonly StepClock Steps = new();
+
+    /// <summary>Latest start time a process that already ran at wallNowUtc can show, on a fresh StepClock (one
+    /// detection). Same rule as Core ProcessInfo.StartBound; see StepClock.</summary>
     public static DateTime StartBound(DateTime wallNowUtc, long msSinceBoot, DateTime? systemStartedUtc)
-    {
-        if (systemStartedUtc is not { } boot) return wallNowUtc;
-        var monotonic = boot.AddMilliseconds(msSinceBoot);
-        return monotonic - wallNowUtc > StepTolerance ? monotonic : wallNowUtc;
-    }
+        => new StepClock().Bound(wallNowUtc, msSinceBoot, systemStartedUtc);
 
     /// <summary>The agent path for the installed layout: install dir is the parent of the UI exe's folder.</summary>
     public static string InstalledAgentPath(string uiBaseDirectory)
@@ -155,4 +150,38 @@ internal static partial class Win32Trust
         try { return GetProcessTimes(h, out var created, out _, out _, out _) && created > 0 ? DateTime.FromFileTimeUtc(created) : null; }
         finally { CloseHandle(h); }
     });
+}
+
+/// <summary>
+/// T2, S6 (same rule as Core StepClock): start times are wall-clock stamps a later clock change leaves alone, so after a
+/// step back the running agent "started in the future" and was refused until the clock caught up. Boot start (System
+/// process) plus the time since boot (TickCount64, does not step) runs ahead of the wall clock by the net size of the
+/// steps back since boot. When that gap grows by more than StepTolerance, a step back of that size just happened: the
+/// bound is wall + step until the wall clock reaches it, then the wall clock alone again.
+/// </summary>
+public sealed class StepClock(Action<TimeSpan>? onStep = null)
+{
+    private readonly object _gate = new();
+    private TimeSpan _gap;       // boot clock minus wall clock as last accounted for
+    private DateTime? _until;    // end of the current catch-up period
+
+    public DateTime Bound(DateTime wallNowUtc, long msSinceBoot, DateTime? systemStartedUtc)
+    {
+        if (systemStartedUtc is not { } boot) return wallNowUtc;
+        var gap = boot.AddMilliseconds(msSinceBoot) - wallNowUtc;
+        TimeSpan? step = null;
+        DateTime bound;
+        lock (_gate)
+        {
+            if (gap > _gap + ServerTrustVerifier.StepTolerance)
+            {
+                step = gap - _gap;
+                _until = wallNowUtc + step.Value;
+            }
+            _gap = gap;   // follow drift and steps forward: only a jump since the last look is a step back
+            bound = _until is { } u && wallNowUtc < u ? u : wallNowUtc;
+        }
+        if (step is { } s) onStep?.Invoke(s);
+        return bound;
+    }
 }

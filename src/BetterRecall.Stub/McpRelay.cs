@@ -44,6 +44,7 @@ public sealed class McpRelay
     private string? _install;
     private bool _swapping;
     private volatile bool _clientEnded;
+    private readonly TaskCompletionSource _clientGone = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     private sealed record Pending(string Key, string RawId, byte[] Line);
 
@@ -85,13 +86,18 @@ public sealed class McpRelay
                 if (await Task.WhenAny(exited, Task.Delay(_poll)).ConfigureAwait(false) == exited) { code = await exited.ConfigureAwait(false); break; }
                 MaybeSwap(child);
             }
-            // Every answer the old server wrote is delivered (and leaves _pending) before anything is sent again.
-            await Task.WhenAny(pump, Task.Delay(TimeSpan.FromSeconds(5))).ConfigureAwait(false);
+            // Every answer the old server wrote is delivered (and leaves _pending) before anything is sent again: no
+            // timeout, a resend before that would run a call twice and answer its id twice (S1). The pump ends at the
+            // old server's end of output; only a client that stops reading holds it, and one that has gone does not.
+            await Task.WhenAny(pump, _clientGone.Task).ConfigureAwait(false);
+            if (_clientEnded) await Task.WhenAny(pump, Task.Delay(TimeSpan.FromSeconds(5))).ConfigureAwait(false);   // last answers on the way out
             bool swapped;
             string? old;
             lock (_gate) { swapped = _swapping; old = _install; }
             if (_clientEnded || (code != InstallLayout.McpRestartExitCode && !swapped))
             {
+                // S4: a server that stopped (a crash, a resent call it could not take) leaves no call unanswered.
+                await FailPendingAsync("BetterRecall's MCP server stopped: restart your MCP client.").ConfigureAwait(false);
                 child.Dispose();
                 return code;
             }
@@ -173,6 +179,7 @@ public sealed class McpRelay
             }
         }
         _clientEnded = true;
+        _clientGone.TrySetResult();
         lock (_gate)
         {
             try { _child?.Input.Dispose(); } catch (IOException) { }
@@ -250,8 +257,9 @@ public sealed class McpRelay
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("id", out var id)) return null;
-            bool hasMethod = root.TryGetProperty("method", out _);
-            if (hasMethod != request) return null;
+            // N4: a request's method is a string; McpServer answers nothing else, so nothing else is tracked.
+            bool hasMethod = root.TryGetProperty("method", out var method);
+            if (request ? method.ValueKind != JsonValueKind.String : hasMethod) return null;
             return id.ValueKind switch
             {
                 JsonValueKind.String => ("s:" + id.GetString(), id.GetRawText()),
@@ -263,9 +271,12 @@ public sealed class McpRelay
     }
 }
 
-/// <summary>Splits a byte stream into lines, each with its '\n'; the last one may lack it. Null at end of stream.</summary>
+/// <summary>Splits a byte stream into lines, each with its '\n'; the last one may lack it. Null at end of stream. A line
+/// longer than MaxLine comes out in MaxLine pieces (passed on as they are, never parsed whole).</summary>
 internal sealed class LineSplitter(Stream stream)
 {
+    public const int MaxLine = 16 * 1024 * 1024;   // PipeClient.MaxResponseBytes
+
     private readonly byte[] _buf = new byte[16 * 1024];
     private readonly MemoryStream _line = new();
     private int _start, _end;
@@ -283,6 +294,7 @@ internal sealed class LineSplitter(Stream stream)
             }
             _line.Write(_buf, _start, _end - _start);
             _start = _end = 0;
+            if (_line.Length >= MaxLine) return Take();
             int n;
             try { n = await stream.ReadAsync(_buf).ConfigureAwait(false); }
             catch (Exception e) when (e is IOException or ObjectDisposedException) { n = 0; }

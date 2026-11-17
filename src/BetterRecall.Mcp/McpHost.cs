@@ -73,7 +73,7 @@ public static class McpHost
             catch (Exception ex)
             {
                 Console.Error.WriteLine("betterrecall-mcp: " + ex.GetType().Name);
-                reply = null;
+                reply = InternalError(line);   // S5: a request is always answered (the relay would hold it forever)
             }
             // Under the relay the call stays unanswered: the relay sends it to the server of the current install.
             if (pipe.Stale && pipe.Relayed) return InstallLayout.McpRestartExitCode;
@@ -85,5 +85,32 @@ public static class McpHost
             }
         }
         return 0;
+    }
+
+    /// <summary>JSON-RPC "Internal error" for the request in line (string or number id), or null for anything else.</summary>
+    public static string? InternalError(string line)
+    {
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(line);
+            var root = doc.RootElement;
+            if (root.ValueKind != System.Text.Json.JsonValueKind.Object || !root.TryGetProperty("id", out var id)
+                || id.ValueKind is not (System.Text.Json.JsonValueKind.String or System.Text.Json.JsonValueKind.Number)) return null;
+            var buf = new System.Buffers.ArrayBufferWriter<byte>();
+            using (var w = new System.Text.Json.Utf8JsonWriter(buf))
+            {
+                w.WriteStartObject();
+                w.WriteString("jsonrpc", "2.0");
+                w.WritePropertyName("id");
+                id.WriteTo(w);
+                w.WriteStartObject("error");
+                w.WriteNumber("code", -32603);
+                w.WriteString("message", "Internal error");
+                w.WriteEndObject();
+                w.WriteEndObject();
+            }
+            return System.Text.Encoding.UTF8.GetString(buf.WrittenSpan);
+        }
+        catch (System.Text.Json.JsonException) { return null; }
     }
 }

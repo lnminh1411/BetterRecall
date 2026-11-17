@@ -45,27 +45,31 @@ public static class InstallLayout
         return true;
     }
 
-    /// <summary>The install folder bin\current under root names, or null (no file, or not a version folder name).
-    /// The launcher writes the real path (SUBST drives and junctions resolved; trust checks compare real image paths);
-    /// it is used as written when the folder it names sits next to a bin\current with the same text, else the folder
-    /// name is taken under root, so the result never leaves a launcher root.</summary>
-    public static string? CurrentInstall(string root)
+    /// <summary>The install folder bin\current under root names, or null (no file, or not a version folder name). The
+    /// result is always a direct child of root. The launcher writes the real path (SUBST drives and junctions resolved;
+    /// trust checks compare real image paths): it is kept as written only when its parent is root or realRoot (root
+    /// with links resolved, which the caller supplies) and it is not a UNC path; otherwise only its folder name counts.</summary>
+    public static string? CurrentInstall(string root, string? realRoot = null)
     {
-        var text = ReadCurrent(root);
-        if (text is null) return null;
-        var name = Path.GetFileName(text.TrimEnd('\\', '/'));
+        string text;
+        try { text = File.ReadAllText(Path.Combine(root, BinDir, CurrentFile)).Trim().TrimEnd('\\', '/'); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { return null; }
+        var name = Path.GetFileName(text);
         if (name.Length == 0 || !IsVersionFolder(name)) return null;
-        if (Path.IsPathFullyQualified(text) && Path.GetDirectoryName(text.TrimEnd('\\', '/')) is { } parent
-            && string.Equals(ReadCurrent(parent), text, StringComparison.OrdinalIgnoreCase))
-            return text.TrimEnd('\\', '/');
+        if (Path.IsPathFullyQualified(text) && !text.StartsWith(@"\\", StringComparison.Ordinal) && !text.StartsWith("//", StringComparison.Ordinal))
+        {
+            try
+            {
+                var parent = Path.GetDirectoryName(Path.GetFullPath(text));
+                if (SameDir(parent, root) || (realRoot is not null && SameDir(parent, realRoot))) return Path.GetFullPath(text);
+            }
+            catch (Exception e) when (e is ArgumentException or NotSupportedException or PathTooLongException) { }
+        }
         return Path.Combine(root, name);
     }
 
-    private static string? ReadCurrent(string root)
-    {
-        try { return File.ReadAllText(Path.Combine(root, BinDir, CurrentFile)).Trim(); }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { return null; }
-    }
+    private static bool SameDir(string? a, string b) => a is not null && string.Equals(
+        Path.GetFullPath(a).TrimEnd('\\'), Path.GetFullPath(b).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Marker file Scripts/dev_build.py writes into its output folder: this install dir is a dev build.</summary>
     public const string DevBuildMarker = ".devbuild";
@@ -75,7 +79,7 @@ public static class InstallLayout
 
     /// <summary>A dev build never opens the user's real data folder (it would run dev code on their store) unless started
     /// with --allow-default-home: it needs its own BETTERRECALL_HOME. A layout the single-file launcher extracted
-    /// (&lt;home&gt;pp\..., or started with BETTERRECALL_LAUNCHER) is installed, marker or not.</summary>
+    /// (&lt;home&gt;\app\..., or started with BETTERRECALL_LAUNCHER) is installed, marker or not.</summary>
     public static bool RefusesHome(string installDir, string home, bool allowDefaultHome)
     {
         if (allowDefaultHome || !DataPaths.IsDefaultHome(home) || !File.Exists(Path.Combine(installDir, DevBuildMarker))) return false;

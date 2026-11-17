@@ -22,6 +22,24 @@ public class Sweep4LUiTests
     }
 
     [Fact]
+    public void S6_Boot_bound_ends_when_the_clock_catches_up()
+    {
+        var steps = new List<TimeSpan>();
+        var clock = new StepClock(steps.Add);
+        var boot = new DateTime(2026, 11, 16, 9, 0, 0, DateTimeKind.Utc);
+        long ms = 3_600_000;
+        var wall = boot.AddMilliseconds(ms);
+        Assert.Equal(wall, clock.Bound(wall, ms, boot));
+        var before = wall;
+        wall -= TimeSpan.FromHours(2);
+        Assert.Equal(before, clock.Bound(wall, ms, boot));
+        ms += 7_201_000;
+        wall += TimeSpan.FromMilliseconds(7_201_000);
+        Assert.Equal(wall, clock.Bound(wall, ms, boot));   // caught up, boot clock still 2 h ahead
+        Assert.Single(steps);
+    }
+
+    [Fact]
     public async Task T2_Agent_started_before_a_2h_step_back_is_still_trusted_and_pid_reuse_is_still_refused()
     {
         await using var server = new FakeLineServer(_ => Envelope.Ok("null"));

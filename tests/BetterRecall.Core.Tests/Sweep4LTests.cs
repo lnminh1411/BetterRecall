@@ -8,6 +8,7 @@ using BetterRecall.Core.Crypto;
 using BetterRecall.Core.Ipc;
 using BetterRecall.Mcp;
 using BetterRecall.Stub;
+using StepClock = BetterRecall.Core.Ipc.StepClock;
 
 namespace BetterRecall.Core.Tests;
 
@@ -305,6 +306,10 @@ public sealed class Sweep4LTests : IAsyncLifetime
         var relay = new McpRelay(client.RelayIn, client.RelayOut, () => InstallLayout.CurrentInstall(_root), _ => new FakeChild(3));
         var run = relay.RunAsync();
         await client.SendAsync(StatusCall);
+        // S4: the call the server took with it is answered, not left hanging.
+        var answer = await client.ReadAsync();
+        Assert.Equal(2, answer.GetProperty("id").GetInt32());
+        Assert.Contains("stopped", answer.GetProperty("error").GetProperty("message").GetString());
         Assert.Equal(3, await run.WaitAsync(TimeSpan.FromSeconds(10)));
         Assert.Equal(0, relay.Restarts);
     }
@@ -321,7 +326,243 @@ public sealed class Sweep4LTests : IAsyncLifetime
         Assert.Equal(("n:1", "1"), McpRelay.MessageId([0xEF, 0xBB, 0xBF, .. B("{\"id\":1,\"method\":\"x\"}")], request: true));
     }
 
+    // ---------------------------------------------------------------- review follow-up (S1, S2, S4-S6, M1, S3, N4)
+
+    [Fact]
+    public async Task S1_Slow_client_gets_each_answer_once_and_the_new_server_only_the_unanswered_call()
+    {
+        Layout(OldFolder);
+        await using var client = new RelayClient();
+        var big = new string('x', 1 << 20);
+        var secondSaw = new List<int>();
+        ScriptChild? first = null;
+        var relay = new McpRelay(client.RelayIn, client.RelayOut, () => InstallLayout.CurrentInstall(_root), install =>
+        {
+            if (first is null)
+                // The old server answers 1 (big) and 2, then finds itself stale on 3; its output fits its pipe buffer.
+                return first = new ScriptChild(id => id switch
+                {
+                    1 => ($"{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"pad\":\"{big}\"}}}}", null),
+                    2 => ("{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{}}", null),
+                    _ => (null, InstallLayout.McpRestartExitCode),
+                }, outBuffer: 8 << 20);
+            return new ScriptChild(id =>
+            {
+                lock (secondSaw) secondSaw.Add(id);
+                return ($"{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{{}}}}", null);
+            });
+        }, poll: TimeSpan.FromMinutes(5));
+        var run = relay.RunAsync();
+        for (int id = 1; id <= 3; id++)
+            await client.SendAsync($"{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"ping\"}}");
+        SetCurrent(NewFolder);
+        // The client reads nothing for longer than the old 5 s pump timeout while the old server is already gone.
+        Assert.Equal(InstallLayout.McpRestartExitCode, await first!.Exited.WaitAsync(TimeSpan.FromSeconds(10)));
+        await Task.Delay(TimeSpan.FromSeconds(6));
+        var ids = new List<int>();
+        while (!ids.Contains(3)) ids.Add((await client.ReadAsync()).GetProperty("id").GetInt32());
+        Assert.Equal([1, 2, 3], ids);
+        lock (secondSaw) Assert.Equal([3], secondSaw);
+        client.EndInput();
+        Assert.Equal(0, await run.WaitAsync(TimeSpan.FromSeconds(10)));
+    }
+
+    [Fact]
+    public void S2_CurrentInstall_never_leaves_the_root()
+    {
+        Layout(NewFolder);
+        var expected = Path.Combine(_root, NewFolder);
+        Assert.Equal(expected, InstallLayout.CurrentInstall(_root));
+        // Another root with a self-consistent bin\current of its own: only the folder name counts.
+        var other = Path.Combine(_root, "other-root");
+        Directory.CreateDirectory(Path.Combine(other, NewFolder));
+        Directory.CreateDirectory(Path.Combine(other, InstallLayout.BinDir));
+        File.WriteAllText(Path.Combine(other, InstallLayout.BinDir, InstallLayout.CurrentFile), Path.Combine(other, NewFolder));
+        File.WriteAllText(Path.Combine(_root, InstallLayout.BinDir, InstallLayout.CurrentFile), Path.Combine(other, NewFolder));
+        Assert.Equal(expected, InstallLayout.CurrentInstall(_root));
+        // UNC, relative and dot-dot text: the folder name under root, never the path as written.
+        foreach (var text in new[] { @"\\host\share\" + NewFolder, NewFolder, Path.Combine(_root, "x", "..", "..", NewFolder) })
+        {
+            File.WriteAllText(Path.Combine(_root, InstallLayout.BinDir, InstallLayout.CurrentFile), text);
+            Assert.Equal(expected, InstallLayout.CurrentInstall(_root));
+        }
+        // The real root (links resolved) the launcher wrote is accepted as written.
+        var real = Path.Combine(TestEnv.Root, "real-" + Guid.NewGuid().ToString("N")[..6]);
+        File.WriteAllText(Path.Combine(_root, InstallLayout.BinDir, InstallLayout.CurrentFile), Path.Combine(real, NewFolder));
+        Assert.Equal(Path.Combine(real, NewFolder), InstallLayout.CurrentInstall(_root, real));
+        Assert.Equal(expected, InstallLayout.CurrentInstall(_root));
+        // Not a version folder name: nothing.
+        File.WriteAllText(Path.Combine(_root, InstallLayout.BinDir, InstallLayout.CurrentFile), Path.Combine(_root, "tools"));
+        Assert.Null(InstallLayout.CurrentInstall(_root));
+    }
+
+    [Fact]
+    public async Task S5_A_throwing_call_is_answered_with_an_internal_error()
+    {
+        var pipe = new McpPipe("BRtest.none." + _tag, Self, Path.GetDirectoryName(Self)!, relayed: true);
+        var server = new McpServer((_, _) => throw new ObjectDisposedException("pipe"));
+        var output = new StringWriter { NewLine = "\n" };
+        Assert.Equal(0, await McpHost.RunAsync(new StringReader(StatusCall + "\n"), output, server, pipe));
+        var r = JsonDocument.Parse(output.ToString()).RootElement;
+        Assert.Equal(2, r.GetProperty("id").GetInt32());
+        Assert.Equal(-32603, r.GetProperty("error").GetProperty("code").GetInt32());
+        Assert.Null(McpHost.InternalError("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}"));
+    }
+
+    [Fact]
+    public void S6_Boot_bound_lasts_only_for_the_catch_up_period_and_is_logged_once_per_step()
+    {
+        var steps = new List<TimeSpan>();
+        var clock = new StepClock(steps.Add);
+        var boot = new DateTime(2026, 11, 16, 9, 0, 0, DateTimeKind.Utc);
+        long ms = 3_600_000;
+        DateTime wall = boot.AddMilliseconds(ms).AddSeconds(-3);   // System process starts ~3 s after boot
+        DateTime Bound() => clock.Bound(wall, ms, boot);
+        void Pass(TimeSpan t) { ms += (long)t.TotalMilliseconds; wall += t; }
+
+        Assert.Equal(wall, Bound());
+        Pass(TimeSpan.FromDays(3)); wall += TimeSpan.FromSeconds(8);   // tick drift below the tolerance: nothing
+        Assert.Equal(wall, Bound());
+        Assert.Empty(steps);
+
+        var before = wall;
+        wall -= TimeSpan.FromHours(2);   // NTP steps the clock back 2 h
+        Assert.Equal(before, Bound());   // processes stamped before the step pass
+        Assert.Single(steps);
+        Assert.InRange(steps[0], TimeSpan.FromHours(2) - TimeSpan.FromSeconds(1), TimeSpan.FromHours(2) + TimeSpan.FromSeconds(1));
+        Pass(TimeSpan.FromHours(1));
+        Assert.Equal(before, Bound());   // the bound stays put, it does not run ahead with the boot clock
+        Pass(TimeSpan.FromHours(1) + TimeSpan.FromSeconds(1));
+        Assert.Equal(wall, Bound());     // caught up: the wall clock alone, although the boot clock is still 2 h ahead
+        Pass(TimeSpan.FromDays(1));
+        Assert.Equal(wall, Bound());
+        Assert.Single(steps);
+
+        wall += TimeSpan.FromHours(1);   // a step forward, then back again: the second step back is seen
+        Assert.Equal(wall, Bound());
+        before = wall;
+        wall -= TimeSpan.FromHours(1);
+        Assert.Equal(before, Bound());
+        Assert.Equal(2, steps.Count);
+    }
+
+    [Fact]
+    public async Task M1_Running_stub_is_renamed_aside_and_replaced_then_swept()
+    {
+        var bin = Path.Combine(_root, InstallLayout.BinDir);
+        Directory.CreateDirectory(bin);
+        var exe = Path.Combine(bin, InstallLayout.McpExe);
+        File.Copy(Path.Combine(Environment.SystemDirectory, "cmd.exe"), exe);   // a running image stands in for a live MCP session
+        using var p = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(exe, "/q /k")
+        { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true })!;   // waits on its input, starts nothing
+        try
+        {
+            await Task.Delay(300);
+            Assert.True(Record.Exception(() => File.WriteAllBytes(exe, [1])) is IOException or UnauthorizedAccessException);   // what the old copy hit
+            var fresh = new byte[] { 1, 2, 3 };
+            Assert.True(Maintenance.ReplaceFile(exe, fresh));
+            Assert.Equal(fresh, File.ReadAllBytes(exe));
+            var aside = Assert.Single(Directory.GetFiles(bin, "*.old-*"));
+            Assert.Equal(0, Maintenance.SweepAside(bin));   // still running: stays
+            Assert.True(File.Exists(aside));
+        }
+        finally
+        {
+            p.Kill();
+            p.WaitForExit(5000);
+        }
+        Assert.Equal(1, Maintenance.SweepAside(bin));
+        Assert.Empty(Directory.GetFiles(bin, "*.old-*"));
+    }
+
+    [Fact]
+    public void M1_Logon_refreshes_the_MCP_stub_from_the_current_install()
+    {
+        Layout(NewFolder);
+        File.WriteAllBytes(Path.Combine(_root, NewFolder, InstallLayout.StubExe), [7, 7, 7]);
+        File.WriteAllBytes(Path.Combine(_root, InstallLayout.BinDir, InstallLayout.McpExe), [1]);
+        Assert.True(Maintenance.RefreshMcpStub(_root, Path.Combine(_root, NewFolder)));
+        Assert.Equal([7, 7, 7], File.ReadAllBytes(Path.Combine(_root, InstallLayout.BinDir, InstallLayout.McpExe)));
+    }
+
+    [Fact]
+    public async Task S3_Logon_sweep_removes_old_versions_only()
+    {
+        Layout(NewFolder);
+        foreach (var f in new[] { OldFolder, NewFolder }) File.WriteAllText(Path.Combine(_root, f, ".payload"), "x");
+        var newer = "0.3.0-aaaaaaaaaaaa";
+        var busy = "0.2.2-bbbbbbbbbbbb";
+        var unmarked = "0.2.1-cccccccccccc";
+        foreach (var f in new[] { newer, busy })
+        {
+            Directory.CreateDirectory(Path.Combine(_root, f));
+            File.WriteAllText(Path.Combine(_root, f, ".payload"), "x");
+        }
+        Directory.CreateDirectory(Path.Combine(_root, unmarked));
+        Directory.CreateDirectory(Path.Combine(_root, ".old-0123"));
+        var exe = Path.Combine(_root, busy, InstallLayout.AgentExe);   // a running agent, started from elsewhere (cwd not in the folder)
+        File.Copy(Path.Combine(Environment.SystemDirectory, "cmd.exe"), exe);
+        using var p = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(exe, "/q /k")
+        { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true })!;   // waits on its input, starts nothing
+        try
+        {
+            await Task.Delay(300);
+            var removed = Maintenance.SweepOldVersions(_root, Path.Combine(_root, NewFolder));
+            Assert.Equal([".old-0123", OldFolder], removed.Order(StringComparer.Ordinal));
+            foreach (var kept in new[] { NewFolder, newer, busy, unmarked, InstallLayout.BinDir })
+                Assert.True(Directory.Exists(Path.Combine(_root, kept)), kept);
+            Assert.True(File.Exists(exe));   // a running install is never touched
+        }
+        finally
+        {
+            p.Kill();
+            p.WaitForExit(5000);
+        }
+        Assert.Contains(busy, Maintenance.SweepOldVersions(_root, Path.Combine(_root, NewFolder)));
+    }
+
+    [Fact]
+    public void N4_MessageId_needs_a_string_method()
+    {
+        Assert.Null(McpRelay.MessageId(Encoding.UTF8.GetBytes("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":5}\n"), request: true));
+        Assert.Null(McpRelay.MessageId(Encoding.UTF8.GetBytes("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":5}\n"), request: false));
+    }
+
     // ---------------------------------------------------------------- helpers
+
+    /// <summary>A server scripted per request id: (reply line, exit code after it). Ends with 0 at end of input.</summary>
+    private sealed class ScriptChild : IMcpChild
+    {
+        private readonly NamedPipeServerStream _in, _out;
+
+        public ScriptChild(Func<int, (string? Reply, int? Exit)> script, int outBuffer = 0)
+        {
+            (_in, var childIn) = PipePair(PipeDirection.Out);
+            (_out, var childOut) = PipePair(PipeDirection.In, outBuffer);
+            Exited = Task.Run(async () =>
+            {
+                using var reader = new StreamReader(childIn);
+                await using var writer = new StreamWriter(childOut, new UTF8Encoding(false)) { AutoFlush = true, NewLine = "\n" };
+                while (await reader.ReadLineAsync() is { } line)
+                {
+                    var (reply, exit) = script(JsonDocument.Parse(line).RootElement.GetProperty("id").GetInt32());
+                    if (reply is not null) await writer.WriteLineAsync(reply);
+                    if (exit is { } code) return code;
+                }
+                return 0;
+            });
+        }
+
+        public Stream Input => _in;
+        public Stream Output => _out;
+        public Task<int> Exited { get; }
+
+        public void Dispose()
+        {
+            _in.Dispose();
+            _out.Dispose();
+        }
+    }
 
     /// <summary>The MCP client's side of the relay's stdio, over two in-process named pipes.</summary>
     private sealed class RelayClient : IAsyncDisposable
@@ -366,10 +607,10 @@ public sealed class Sweep4LTests : IAsyncLifetime
     }
 
     /// <summary>server end in direction dir, connected client end the other way.</summary>
-    internal static (NamedPipeServerStream Server, NamedPipeClientStream Client) PipePair(PipeDirection dir)
+    internal static (NamedPipeServerStream Server, NamedPipeClientStream Client) PipePair(PipeDirection dir, int buffer = 0)
     {
         var name = "BRtest.relay." + Guid.NewGuid().ToString("N");
-        var server = new NamedPipeServerStream(name, dir, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+        var server = new NamedPipeServerStream(name, dir, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous, buffer, buffer);
         var client = new NamedPipeClientStream(".", name, dir == PipeDirection.Out ? PipeDirection.In : PipeDirection.Out, PipeOptions.Asynchronous);
         var wait = server.WaitForConnectionAsync();
         client.Connect(5000);

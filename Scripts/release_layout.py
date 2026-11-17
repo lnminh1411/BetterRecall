@@ -34,7 +34,7 @@ THIRD_PARTY = Path("LICENSES") / "third-party"
 VC_RUNTIME_DLLS = ("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "msvcp140_1.dll", "msvcp140_codecvt_ids.dll")
 VC_RUNTIME_DIRS = (".", "worker")
 # src/BetterRecall.<name> projects published into a release layout (dev_build.py LAYOUT; package_single.py lists them for
-# the notices). Stub (D6): the launcher copies BetterRecall.Stub.exe to <data>ppin as the autostart and MCP stable paths.
+# the notices). Stub (D6): the launcher copies BetterRecall.Stub.exe to <data>\app\bin as the autostart and MCP stable paths.
 SHIPPED_PROJECTS = ("Agent", "Cli", "Mcp", "Stub", "Worker", "UI")
 
 
