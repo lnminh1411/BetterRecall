@@ -51,6 +51,22 @@ internal sealed class CaptureService : IAsyncDisposable
         _loopback = loopback;
         _lockMemory = lockMemory;
         _engine = new ReplayEngine(_devices, () => Outputs, Masks);
+        if (pipeline is not null) pipeline.OcrDropped = RetryKeyframe;   // null in some tests
+    }
+
+    /// <summary>TH1: a grab of this monitor (DXGI index) was dropped because its OCR failed: grab it again at the
+    /// next keyframe or sample tick, also when the screen stays still.</summary>
+    private void RetryKeyframe(int monitor)
+    {
+        lock (_gate)
+            foreach (var o in _outputs)
+                if (o.Info.Index == monitor) o.RetryKeyframe();
+    }
+
+    /// <summary>Grab every output again at its next tick, also a still one (S3: a text detector was turned on).</summary>
+    public void RetryAll()
+    {
+        lock (_gate) foreach (var o in _outputs) o.RetryKeyframe();
     }
 
     /// <summary>Where the capture.monitors index list is pinned to stable monitor ids (null: not saved, tests).</summary>
@@ -96,6 +112,7 @@ internal sealed class CaptureService : IAsyncDisposable
             if (pin is not null) MonitorSelection.Save(MonitorSelectionFile, pin);
             var list = outputs.Select(o => new OutputCapture(o, _devices, _pipeline.Post)).ToList();
             lock (_gate) { _outputs = list; _layoutGen++; }
+            _pipeline.TrackMonitors(list.Select(o => o.Info.Index));   // C2: new outputs start with unchecked text masks
             ApplySettings();
             foreach (var o in list) o.Start();
             _engine.RequestRebuild("outputs");
@@ -112,7 +129,45 @@ internal sealed class CaptureService : IAsyncDisposable
     private RECT[] Masks()
     {
         var snap = _guard.Current();
-        return MergeMasks(snap, _settings().Privacy.RedactPasswords, _redactions?.All() ?? [], _guard.UnscannedForeground(snap));
+        var s = _settings();
+        var masks = MergeMasks(snap, s.Privacy.RedactPasswords, _redactions?.All() ?? [], _guard.UnscannedForeground(snap));
+        // C2 (D2): text masks unchecked (OCR failing, or none since start): black the foreground window when it is on an
+        // unchecked monitor, or everything when no foreground window is known. One volatile read per frame while OCR works.
+        if (_pipeline is not { MasksUnchecked: true } || !TextMasksNeeded(s)) return masks;
+        nint fg = WindowInspector.ForegroundRoot();
+        if (fg == 0 || !WindowInspector.TryGetBounds(fg, out var b)) return [.. masks, MaskEverything];
+        return ForegroundOnUncheckedMonitor(b) ? [.. masks, b] : masks;
+    }
+
+    /// <summary>The window rectangle overlaps an output whose text masks are unchecked (S1); with no outputs known (tests,
+    /// before the first rebuild) any unchecked monitor counts.</summary>
+    private bool ForegroundOnUncheckedMonitor(RECT w)
+    {
+        lock (_gate)
+        {
+            if (_outputs.Count == 0) return true;
+            foreach (var o in _outputs)
+            {
+                var i = o.Info;
+                if (w.Left < i.Left + i.Width && i.Left < w.Right && w.Top < i.Top + i.Height && i.Top < w.Bottom && _pipeline.MonitorUnchecked(i.Index))
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>OCR and a text detector are on, so the replay relies on OCR text masks.</summary>
+    private static bool TextMasksNeeded(Settings s) => s.Ocr.Enabled && Privacy.RedactionOptions.From(s.Privacy).AnyText;
+
+    /// <summary>The status warning waits this long, so the first read after start or a worker restart does not flash it (S11).</summary>
+    public const long WarnAfterMs = 5000;
+
+    /// <summary>C2 (D2): the replay is recording while its text masks have been unchecked for WarnAfterMs or more
+    /// (status warning replay-text-unchecked); the foreground window is masked meanwhile.</summary>
+    public bool ReplayTextUnchecked()
+    {
+        var s = _settings();
+        return s.Replay.Enabled && !_engine.Paused && _pipeline is { MasksUnchecked: true, UncheckedForMs: >= WarnAfterMs } && TextMasksNeeded(s);
     }
 
     /// <param name="unscannedForeground">Bounds of a foreground window the snapshot has not scanned yet (A1): masked until
@@ -168,7 +223,7 @@ internal sealed class CaptureService : IAsyncDisposable
                 {
                     _audio?.Dispose();
                     _audio = null;
-                    try { _audio = new AudioReplayEncoder(_loopback, clampedSeconds, _lockMemory); _audioRetry.Succeeded(); }
+                    try { _audio = new AudioReplayEncoder(_loopback, clampedSeconds, _lockMemory, ReplayAudioMuted); _audioRetry.Succeeded(); }
                     catch (Exception ex) { Log.Warn($"replay audio unavailable (retry in {_audioRetry.Failed(now) / 1000} s)", ex); }
                 }
             }
@@ -181,6 +236,10 @@ internal sealed class CaptureService : IAsyncDisposable
             if (_audio is not null) _audio.Paused = replayPaused;
         }
     }
+
+    /// <summary>A-H2 (D1): replay audio is silence while a denied, private or protected window is in front, or while a
+    /// foreground change is not scanned yet. Per audio packet; no Win32 call.</summary>
+    internal bool ReplayAudioMuted() => _guard.AudioNow().Gate != AudioGate.Allowed;
 
     public void SetLockMemory(bool on) => _lockMemory = on;
 
@@ -206,10 +265,14 @@ internal sealed class CaptureService : IAsyncDisposable
             // Replay samples (replay.searchable) follow the replay buffer, but not through a governance pause: fullscreen,
             // battery and storage pause keyframes and inference while the replay may keep running, and a sample costs an
             // OCR pass and an encode (A9). A saved clip then starts from the last sample taken before the pause.
-            bool sampleDue = SampleDue(s.Replay, replayPaused, SamplesPaused?.Invoke() ?? false, _engine.Pipelines.Count, now - _lastSampleTick);
-            if (_keyframesPaused())
+            bool keyframesPaused = _keyframesPaused();
+            NotePauseSamples(keyframesPaused);
+            // While keyframes pause, sample grabs also keep the replay text masks fresh with replay.searchable off (C2).
+            bool sampleDue = SampleDue(s.Replay, replayPaused, SamplesPaused?.Invoke() ?? false, _engine.Pipelines.Count, now - _lastSampleTick,
+                maskRefresh: keyframesPaused && TextMasksNeeded(s));
+            if (keyframesPaused)
             {
-                if (sampleDue) { _lastSampleTick = now; RequestKeyframes(force: false, keyframe: false, sample: true); }
+                if (sampleDue) { _lastSampleTick = now; _pauseSampleGrabs++; RequestKeyframes(force: false, keyframe: false, sample: true); }
                 return;
             }
             bool due = now - _lastKeyframeTick >= Math.Clamp(s.Capture.IntervalMs, 500, 60000);
@@ -245,7 +308,13 @@ internal sealed class CaptureService : IAsyncDisposable
         // Only a snapshot scanned after the current foreground window came up: the tick fires every 250 ms, a scan can
         // take a second, and the user may have switched to a denied window in between (A4).
         var snap = _guard.CurrentForKeyframe();
-        if (!snap.Decision.Allow) { SkippedByGuard++; LastGuardReason = snap.Decision.Reason; return; }
+        if (!snap.Decision.Allow)
+        {
+            SkippedByGuard++;
+            LastGuardReason = snap.Decision.Reason;
+            if ((keyframe || sample) && RefreshMasksWhileDenied(snap.Decision.Reason)) RequestMaskRefresh(snap, s);
+            return;
+        }
         LastGuardReason = GuardReason.None;
         var ts = DateTimeOffset.UtcNow;
         lock (_gate)
@@ -270,15 +339,61 @@ internal sealed class CaptureService : IAsyncDisposable
         }
     }
 
+    /// <summary>A denied or private window is in front (keyframes skip every monitor): the replay keeps recording, so the
+    /// other monitors' text masks must not freeze (review S2). Not for a locked session, no foreground, or a scan that
+    /// has not caught up with the foreground. Pure.</summary>
+    internal static bool RefreshMasksWhileDenied(GuardReason r) =>
+        r is GuardReason.DenyProcess or GuardReason.DenyPath or GuardReason.DenyTitle or GuardReason.PrivateBadge or GuardReason.BadgeCheckFailed;
+
+    /// <summary>Mask-only grabs (read for the replay text masks, nothing stored or sampled, no app or title) of the
+    /// monitors where no denied window is visible.</summary>
+    private void RequestMaskRefresh(GuardSnapshot snap, Settings s)
+    {
+        if (!s.Replay.Enabled || !TextMasksNeeded(s)) return;
+        var ts = DateTimeOffset.UtcNow;
+        lock (_gate)
+        {
+            foreach (var o in _outputs)
+            {
+                if (!snap.PerMonitor.TryGetValue(GuardKey(o), out var mt) || mt.DeniedVisible) continue;
+                var bounds = new RECT(o.Info.Left, o.Info.Top, o.Info.Left + o.Info.Width, o.Info.Top + o.Info.Height);
+                o.PendingKeyframe = new KeyframeRequest(ts, "", "", "", "", false, Math.Clamp(s.Capture.MaxWidth, 640, 3840),
+                    Math.Min(Math.Clamp(s.Capture.DirtyMinPercent, 0, 100), CapturePolicy.TriggerMinScore), "",
+                    Keyframe: false, ReplaySample: true, Bounds: bounds, MaskOnly: true);
+            }
+        }
+    }
+
+    // S10: sample grabs (and their OCR) while keyframes pause (fullscreen, battery, storage), logged when the pause ends.
+    private bool _wasPaused;
+    private long _pauseSampleGrabs, _pauseOcrAtStart, _pauseStartMs;
+    private void NotePauseSamples(bool paused)
+    {
+        if (paused == _wasPaused) return;
+        _wasPaused = paused;
+        if (paused)
+        {
+            _pauseSampleGrabs = 0;
+            _pauseOcrAtStart = Interlocked.Read(ref _pipeline.SampleOcrReads);
+            _pauseStartMs = Environment.TickCount64;
+            return;
+        }
+        long reads = Interlocked.Read(ref _pipeline.SampleOcrReads) - _pauseOcrAtStart;
+        if (_pauseSampleGrabs > 0 || reads > 0)
+            Log.Info($"keyframe pause ended after {(Environment.TickCount64 - _pauseStartMs) / 1000} s: {_pauseSampleGrabs} sample requests, {reads} sample OCR reads (replay masks)");
+    }
+
     private static bool IsOnMonitor(WindowInfo w, OutputInfo o) =>
         WindowInspector.TryGetBounds(w.Hwnd, out var r) && r.Left < o.Left + o.Width && o.Left < r.Right && r.Top < o.Top + o.Height && o.Top < r.Bottom;
 
-    /// <summary>True while a pause (fullscreen, battery, storage) stops keyframes and inference but not the replay ring.</summary>
+    /// <summary>True while samples must not run although the replay records. Samples (and their OCR) go on through the
+    /// fullscreen, battery and storage pauses: they keep the replay text masks fresh (C2).</summary>
     public Func<bool>? SamplesPaused { get; init; }
 
-    /// <summary>A replay sample grab is due. Pure.</summary>
-    internal static bool SampleDue(ReplaySettings r, bool replayPaused, bool samplesPaused, int pipelines, long sinceLastMs) =>
-        r.Enabled && r.Searchable && !replayPaused && !samplesPaused && pipelines > 0
+    /// <summary>A replay sample grab is due. maskRefresh: due also with replay.searchable off (the grab only refreshes the
+    /// replay text masks). Pure.</summary>
+    internal static bool SampleDue(ReplaySettings r, bool replayPaused, bool samplesPaused, int pipelines, long sinceLastMs, bool maskRefresh = false) =>
+        r.Enabled && (r.Searchable || maskRefresh) && !replayPaused && !samplesPaused && pipelines > 0
         && sinceLastMs >= Math.Clamp(r.SampleSeconds, 2, 60) * 1000L;
 
     public long SkippedByGuard;

@@ -149,6 +149,40 @@ internal static partial class Redactor
         }
     }
 
+    /// <summary>Spans to leave out of an audio transcript (A-M7), merged: the string detectors, the value after a password
+    /// label (to the end of its sentence), an id after an id label, a date after a birth label. No layout and no NER, so
+    /// names and addresses are not found in speech. Pure.</summary>
+    internal static List<(int S, int E)> TranscriptSpans(string t, RedactionOptions o)
+    {
+        var spans = StringSpans(t, o).ToList();
+        if (string.IsNullOrEmpty(t)) return spans;
+        if (o.Passwords)
+            foreach (var m in PasswordLabel().EnumerateMatches(t))
+            {
+                int s = SkipSeparators(t, m.Index + m.Length);
+                int e = SentenceEnd(t, s);
+                if (e > s) spans.Add((s, e));
+            }
+        if (o.Ids)
+            foreach (var m in IdLabel().EnumerateMatches(t))
+            {
+                var v = IdValue().Match(t, SkipSeparators(t, m.Index + m.Length));
+                if (v.Success && v.Index - (m.Index + m.Length) <= 40 && Digits(v.Value) >= 5) spans.Add((v.Index, v.Index + v.Length));
+            }
+        if (o.BirthDates && BirthLabel().Match(t) is { Success: true } bm)
+            spans.AddRange(Dates(t, bm.Index + bm.Length));
+        return Merge(spans, t.Length);
+    }
+
+    /// <summary>End of the sentence that starts at or before i: the next '.', '!' or '?' followed by a space or the end
+    /// of the text (included), else the end of the text.</summary>
+    private static int SentenceEnd(string t, int i)
+    {
+        for (int k = i; k < t.Length; k++)
+            if (t[k] is '.' or '!' or '?' && (k + 1 == t.Length || char.IsWhiteSpace(t[k + 1]))) return k + 1;
+        return t.Length;
+    }
+
     // ---------------- layout ----------------
 
     /// <summary>Lines sorted into rows (vertical centres within half a line height) top to bottom, each row left to

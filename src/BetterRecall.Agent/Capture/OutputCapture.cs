@@ -16,9 +16,9 @@ namespace BetterRecall.Agent.Capture;
 /// DirtyMinPercent is the cheap pre-grab gate on the dirty area since the last grab; the pipeline compares the grab
 /// with the last stored keyframe (capture.dirtyMinPercent). Trigger: asked by an event, not the timer.
 /// Secrets: password fields (UI Automation) in desktop pixels; Bounds: the output's desktop rectangle (maps desktop to
-/// keyframe pixels).</summary>
+/// keyframe pixels). MaskOnly: read for the replay text masks only (nothing stored or sampled; C2).</summary>
 internal sealed record KeyframeRequest(DateTimeOffset Ts, string App, string ExePath, string Title, string Context, bool Force, int MaxWidth, double DirtyMinPercent, string Site = "",
-    bool Keyframe = true, bool ReplaySample = false, bool Trigger = false, RECT[]? Secrets = null, RECT Bounds = default);
+    bool Keyframe = true, bool ReplaySample = false, bool Trigger = false, RECT[]? Secrets = null, RECT Bounds = default, bool MaskOnly = false);
 
 /// <summary>A grabbed, downscaled BGRA keyframe in native memory, owned by the receiver (Dispose zeroes it).</summary>
 internal sealed unsafe class KeyframeGrab : IDisposable
@@ -90,6 +90,12 @@ internal sealed unsafe class OutputCapture : IDisposable
 
     public OutputInfo Info { get; }
     public volatile KeyframeRequest? PendingKeyframe;
+    private volatile bool _retryKeyframe;
+
+    /// <summary>TH1: the last grab was dropped (its OCR failed). The next request (keyframe, or replay sample while
+    /// keyframes pause) grabs again even when no new desktop frame arrived; the pipeline's de-dup still decides whether
+    /// it is stored. Any thread.</summary>
+    public void RetryKeyframe() => _retryKeyframe = true;
     public volatile int ReplayPollFps;
     public volatile Action<KeyframeGrab>? GrabOverride;
     public GpuDevice? Device => _dev;
@@ -489,6 +495,7 @@ internal sealed unsafe class OutputCapture : IDisposable
     {
         if (_latest is null || _dev is null || _rotationBlocked) return;
         if (_pendingGrab is not null) FinishGrab();
+        if (_retryKeyframe) { _retryKeyframe = false; _keyframeGate.Invalidate(); _sampleGate.Invalidate(); }
         bool changed = (req.Keyframe && _keyframeGate.Changed(req.DirtyMinPercent))
                        || (req.ReplaySample && _sampleGate.Changed(req.DirtyMinPercent));
         if (!req.Force && !changed) { SkippedNoChange++; return; }

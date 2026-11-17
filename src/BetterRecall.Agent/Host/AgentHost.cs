@@ -123,9 +123,9 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         _guard = new GuardrailService(() => S, () => _sessionLocked, () => _capture?.MonitorBounds() ?? [], _opt.InstallDir);
         _guard.ForegroundChanged += _ => _capture?.OnForegroundChanged();
         _window.ForegroundChanged += () => _guard?.OnForegroundEvent();
-        _transcriber = new Transcriber(_worker, () => Store, () => S, () => _guard?.Current().Foreground?.ProcessName.Replace(".exe", "", StringComparison.OrdinalIgnoreCase) ?? "", () => _scheduler?.Signal());
+        _transcriber = new Transcriber(_worker, () => Store, () => S, () => _scheduler?.Signal());
 
-        if (_core is BetterRecall.Core.CoreHostImpl coreImpl) coreImpl.DescribeRedactor = new Privacy.DescribeRedactor(new WorkerKeyframeReader(_worker), () => S);
+        if (_core is BetterRecall.Core.CoreHostImpl coreImpl) coreImpl.DescribeRedactor = new Privacy.DescribeRedactor(new WorkerKeyframeReader(_worker), () => S, () => Store, () => _pipeline?.OcrWait ?? KeyframePipeline.OcrTimeout);
         _core.Purged += OnPurged;
         _core.StartPipes(this, new QueryEmbedder(_worker), _thumbs);
         if (!s.Capture.Consented) _pause.Set("consent");
@@ -213,8 +213,9 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         }
         _capture = new CaptureService(() => S, KeyframesPaused, ReplayPaused, _guard!, _pipeline!, _loopback, lockMem, _redactions)
         {
-            // Fullscreen and storage pauses stop keyframes and inference but not the replay: no sample OCR either (A9).
-            SamplesPaused = () => _pause.KeyframesPaused,
+            // Fullscreen, battery and storage pauses stop keyframes and inference but not the replay: samples and their OCR
+            // go on, so the replay text masks stay fresh (C2; A9 had stopped them for cost).
+            SamplesPaused = () => _pause.ContinuousPaused(duringFullscreen: true),
             MonitorSelectionFile = Path.Combine(_opt.Home, MonitorSelection.FileName),
         };
         _capture.Start();
@@ -269,7 +270,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
                 {
                     try
                     {
-                        _systemAudio = new TranscriptSource("system", _loopback, () => S, () => _pause.ContinuousPaused(true));
+                        _systemAudio = new TranscriptSource("system", _loopback, () => S, () => _pause.ContinuousPaused(true), _guard!.AudioNow);
                         _ = _transcriber!.RunAsync(_systemAudio, _cts.Token);
                         _systemRetry.Succeeded();
                     }
@@ -283,7 +284,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
                 {
                     try
                     {
-                        _micAudio = new TranscriptSource("mic", null, () => S, () => _pause.ContinuousPaused(true));
+                        _micAudio = new TranscriptSource("mic", null, () => S, () => _pause.ContinuousPaused(true), _guard!.AudioNow);
                         _ = _transcriber!.RunAsync(_micAudio, _cts.Token);
                         _micRetry.Succeeded();
                     }
@@ -340,8 +341,21 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
             RaiseStatus(force: true);
         });
         if (!StorageEqual(old.Storage, s.Storage)) _ = Task.Run(StorageCheck);
+        // R S3: OCR or a text detector turned on: the replay masks hold no boxes for what is on screen now. Mark them
+        // unchecked and grab every monitor again, also a still one.
+        if (TextDetectionTurnedOn(old, s)) { _pipeline?.MarkAllUnchecked(); _capture?.RetryAll(); }
         // S4: the worker reads these once at start; restart it (once no request is in flight) so they apply now.
         if (WorkerSettingsDiff.Changed(old, s) is { } key) _supervisor.RequestRestart(key);
+    }
+
+    /// <summary>ocr.enabled or a privacy.redact* text detector went from off to on. Pure.</summary>
+    internal static bool TextDetectionTurnedOn(Settings old, Settings s)
+    {
+        var a = Privacy.RedactionOptions.From(old.Privacy);
+        var b = Privacy.RedactionOptions.From(s.Privacy);
+        if (!s.Ocr.Enabled || !b.AnyText) return false;
+        return !old.Ocr.Enabled || (b.Passwords && !a.Passwords) || (b.Cards && !a.Cards) || (b.Ids && !a.Ids) || (b.BirthDates && !a.BirthDates)
+            || (b.Emails && !a.Emails) || (b.Phones && !a.Phones) || (b.Names && !a.Names) || (b.Addresses && !a.Addresses);
     }
 
     private static bool StorageEqual(StorageSettings a, StorageSettings b) =>
@@ -642,12 +656,15 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
     /// <summary>ocr-failing: text recognition keeps failing (keyframes dropped, or stored without text) (A21).
     /// ner-unavailable: names or addresses are on but their detector model is missing or broken (C9).
     /// settings-unreadable: settings.json did not parse; defaults are in use and the file is kept until a save (D3).
-    /// vc-runtime-missing: the worker cannot start without the Visual C++ 2015-2022 runtime (T2).</summary>
+    /// vc-runtime-missing: the worker cannot start without the Visual C++ 2015-2022 runtime (T2).
+    /// replay-text-unchecked: the replay records while text recognition is failing or has not run yet, so the foreground
+    /// window is masked in it (C2, D2).</summary>
     private string[]? Warnings()
     {
         var list = new List<string>(3);
         if ((_core.Settings as BetterRecall.Core.SettingsStore)?.LoadError is not null) list.Add("settings-unreadable");
         if (!VcRuntime.Present) list.Add("vc-runtime-missing");
+        if (_capture?.ReplayTextUnchecked() == true) list.Add("replay-text-unchecked");
         var h = _pipeline?.OcrHealth;
         if (h is null || !S.Ocr.Enabled) return list.Count > 0 ? [.. list] : null;
         if (h.Failing) list.Add("ocr-failing");
@@ -847,6 +864,8 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
     private void OnEndSession()
     {
         Log.Info("session ending: stopping pipes, checkpointing the store");
+        // Transcripts held for redaction across segments are text already: store them before the process ends (R M3).
+        try { _transcriber?.FlushHeld(); } catch (Exception ex) { Log.Warn("end session: held transcripts", ex); }
         // Under Windows' 5 s hung-app limit at shutdown.
         try { _core.StopPipesAsync().Wait(TimeSpan.FromSeconds(2.5)); } catch (Exception ex) { Log.Warn("end session: stop pipes", ex); }
         try { (_core as BetterRecall.Core.CoreHostImpl)?.EncryptedStore?.Checkpoint(); } catch (Exception ex) { Log.Warn("end session: checkpoint", ex); }
@@ -865,6 +884,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
     {
         _quitWait?.Unregister(null);
         _quitEvent?.Dispose();
+        try { _transcriber?.FlushHeld(); } catch (Exception ex) { Log.Warn("held transcripts", ex); }   // R M3: before the cancel
         _cts.Cancel();
         if (_statusTimer is not null) await _statusTimer.DisposeAsync().ConfigureAwait(false);
         if (_maintenanceTimer is not null) await _maintenanceTimer.DisposeAsync().ConfigureAwait(false);

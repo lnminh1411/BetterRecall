@@ -247,7 +247,7 @@ public class Sweep3JAgentTests
     public void A16_segments_evicted_by_drop_oldest_are_zeroed()
     {
         var hub = new LoopbackHub(_ => new FakeCapture());
-        using var src = new TranscriptSource("system", hub, () => new Settings(), () => false);
+        using var src = new TranscriptSource("system", hub, () => new Settings(), () => false, () => AudioVerdict.Allowed);
         var q = (Channel<SpeechSegment>)Get(src, "_queue")!;
         var segs = Enumerable.Range(0, 9).Select(i => new SpeechSegment(Enumerable.Repeat(0.25f, 16000).ToArray(), i, 1000)).ToList();
         foreach (var s in segs) q.Writer.TryWrite(s);   // worker busy: the 9th evicts the 1st

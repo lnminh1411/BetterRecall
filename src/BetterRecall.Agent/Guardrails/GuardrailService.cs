@@ -6,6 +6,17 @@ using BetterRecall.Contracts;
 
 namespace BetterRecall.Agent.Guardrails;
 
+/// <summary>What the guard says about audio heard at one moment (A-H2).</summary>
+internal enum AudioGate { Allowed, Blocked, Unknown }
+
+/// <summary>Guard verdict for audio, plus the foreground app (file name without extension) as the transcript label.
+/// Epoch: the foreground-change count the verdict belongs to (a scan's own count; for Unknown, the current count), so a
+/// span the guard never scanned is not resolved by the next window's verdict (review M1).</summary>
+internal readonly record struct AudioVerdict(AudioGate Gate, string App, long Epoch = 0)
+{
+    public static readonly AudioVerdict Allowed = new(AudioGate.Allowed, "");
+}
+
 /// <summary>
 /// Re-evaluates the guardrails on every foreground change and twice a second, on its own MTA thread
 /// (UI Automation calls can be slow). Readers take the latest snapshot; a stale snapshot counts as closed.
@@ -73,6 +84,44 @@ internal sealed class GuardrailService : IDisposable
     }
 
     internal static readonly GuardSnapshot ForegroundMoved = GuardSnapshot.Closed with { Decision = GuardDecision.Deny(GuardReason.ForegroundChanged) };
+
+    /// <summary>For audio heard now (A-H2, D1): blocked while a denied, private or protected window is in front, unknown
+    /// while the foreground changed since the last scan, with the foreground app as the transcript label. A stale
+    /// snapshot is blocked. No Win32 call: it runs for every audio packet.</summary>
+    public AudioVerdict AudioNow()
+    {
+        var s = Current();
+        return AudioNow(s, Interlocked.Read(ref _fgEpoch), AppOf(s.Foreground?.ExePath ?? ""));
+    }
+
+    /// <summary>Pure part of <see cref="AudioNow()"/>.</summary>
+    internal static AudioVerdict AudioNow(GuardSnapshot s, long fgEpochNow) => AudioNow(s, fgEpochNow, AppName(s.Foreground?.ExePath ?? ""));
+
+    private static AudioVerdict AudioNow(GuardSnapshot s, long fgEpochNow, string app)
+    {
+        if (ReferenceEquals(s, GuardSnapshot.Closed)) return new(AudioGate.Blocked, "", fgEpochNow);
+        if (s.FgEpoch != fgEpochNow) return new(AudioGate.Unknown, app, fgEpochNow);
+        return new(BlocksAudio(s.Decision.Reason) ? AudioGate.Blocked : AudioGate.Allowed, app, s.FgEpoch);
+    }
+
+    private static string AppName(string exe) => exe.Length == 0 ? "" : Path.GetFileNameWithoutExtension(exe);
+
+    private sealed record AppLabel(string Exe, string App);
+    private volatile AppLabel? _appLabel;
+
+    /// <summary>AppName, kept for the snapshot's path: audio asks for it on every packet.</summary>
+    private string AppOf(string exe)
+    {
+        var c = _appLabel;
+        if (c is not null && ReferenceEquals(c.Exe, exe)) return c.App;
+        var app = AppName(exe);
+        _appLabel = new AppLabel(exe, app);
+        return app;
+    }
+
+    /// <summary>Guard reasons that keep audio out: the deny lists, display affinity, a private (or unchecked) browser
+    /// window, a locked session. No foreground window at all (desktop, a switch in progress) does not.</summary>
+    internal static bool BlocksAudio(GuardReason r) => r is not (GuardReason.None or GuardReason.NoForeground or GuardReason.KeyLocked);
 
     /// <summary>The snapshot when no foreground event arrived since its scan started and the foreground window is still
     /// the one it scanned; else a deny snapshot. Pure.</summary>
