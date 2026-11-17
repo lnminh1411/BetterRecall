@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO.Pipes;
 using System.Security.AccessControl;
 using System.Security.Principal;
+using System.Text;
 using BetterRecall.Agent.Native;
 using BetterRecall.Agent.Util;
 using BetterRecall.Contracts;
@@ -19,8 +20,9 @@ internal interface IWorkerLauncher
     bool HasExited(int pid);
 }
 
-/// <param name="settingsJson">The agent's worker keys (<see cref="WorkerSettingsDiff.Json"/>), passed as --settings so the
-/// worker runs on what the agent accepted, never on a settings.json the agent has not loaded (sweep 4 C5).</param>
+/// <param name="settingsJson">The agent's worker keys (<see cref="WorkerSettingsDiff.Json"/>), written to the worker's
+/// stdin (flag --settings-stdin), so the worker runs on what the agent accepted, never on a settings.json the agent has not
+/// loaded (sweep 4 C5). Not on the command line: process-creation logs keep command lines outside BetterRecall's purge.</param>
 internal sealed class ProcessWorkerLauncher(string workerExe, Func<bool> ecoQos, Func<string>? settingsJson = null) : IWorkerLauncher
 {
     // Every started worker until it exits, by pid: a late kill of an old worker must still reach it after a new start.
@@ -47,20 +49,45 @@ internal sealed class ProcessWorkerLauncher(string workerExe, Func<bool> ecoQos,
         psi.ArgumentList.Add(pipeName);
         psi.ArgumentList.Add("--home");
         psi.ArgumentList.Add(home);
-        if (settingsJson?.Invoke() is { } json)
+        byte[]? settings = settingsJson?.Invoke() is { } json ? new UTF8Encoding(false).GetBytes(json) : null;
+        if (settings is not null)
         {
-            psi.ArgumentList.Add("--settings");
-            psi.ArgumentList.Add(json);
+            if (settings.Length > MaxSettingsBytes) throw new WorkerException("Worker settings too large.");
+            psi.ArgumentList.Add("--settings-stdin");
+            psi.RedirectStandardInput = true;
         }
         foreach (var (id, old) in _processes)
             try { if (old.HasExited && _processes.TryRemove(id, out _)) old.Dispose(); } catch { }
+        LastStartInfo = psi;
         var p = Process.Start(psi) ?? throw new WorkerException("Worker failed to start.");
         _processes[p.Id] = p;
         try { if (Job.Value is { } job && !job.Assign(p.Handle)) Log.Warn("worker not in the job object: it could outlive the agent"); }
         catch (Exception ex) { Log.Debug($"worker job: {ex.Message}"); }
         if (ecoQos()) Governance.ApplyEcoQos(p.Handle, idlePriority: true);   // read per start: governance.ecoQos applies at the next start
+        if (settings is not null)
+        {
+            // The worker reads stdin to its end before anything else; a worker that cannot take it exits with code 2.
+            try
+            {
+                var stdin = p.StandardInput.BaseStream;
+                stdin.Write(settings);
+                stdin.Flush();
+                p.StandardInput.Close();
+            }
+            catch (Exception ex) when (ex is IOException or ObjectDisposedException)
+            {
+                Kill(p.Id);
+                throw new WorkerException("Worker did not take its settings.");
+            }
+        }
         return p.Id;
     }
+
+    /// <summary>Tests: the start info of the last worker started (its command line must hold no settings).</summary>
+    internal ProcessStartInfo? LastStartInfo { get; private set; }
+
+    /// <summary>Cap on the settings handed over stdin (the worker has the same cap). Typical size is under 1 KB.</summary>
+    internal const int MaxSettingsBytes = 64 * 1024;
 
     public void Kill(int pid)
     {
@@ -112,6 +139,15 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
     /// <summary>Clock (ms) the liveness check runs on. Default <see cref="BetterRecall.Agent.Worker.LivenessClock.NowMs"/>, which skips time
     /// the PC slept: TickCount64 counted a sleep as worker silence and recycled a healthy worker on resume (C8).</summary>
     public Func<long>? LivenessClock { get; init; }
+    /// <summary>Clock (ms) of the gap between liveness checks (default TickCount64; tests inject one).</summary>
+    public Func<long>? CheckClock { get; init; }
+    /// <summary>A gap between two checks (timer every 5 s) longer than this means the agent itself did not run.</summary>
+    internal const long FrozenGapMs = 30_000;
+    /// <summary>No "not answering" verdict for this long after such a gap: more than the worker's keepalive period (20 s),
+    /// so a thawed worker's keepalive or reply resets the silence first.</summary>
+    internal const long FrozenGraceMs = 45_000;
+    private long _lastCheckMs = long.MinValue;
+    private long _graceUntilMs = long.MinValue;
     /// <summary>Workers recycled because they stopped answering.</summary>
     public int Recycled => _recycled;
     private int _recycled;
@@ -268,6 +304,8 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
 
     public void MarkHealthy() => Interlocked.Exchange(ref _failures, 0);
 
+    private static long TickCount() => Environment.TickCount64;
+
     private readonly Lock _helloGate = new();
 
     /// <summary>A reply named the embedder that served it (A-M3, CA-S2). A bench or a run-time replan in the running
@@ -275,7 +313,7 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
     /// is raised as a hello so the scheduler files vectors under it and checks it like one.</summary>
     internal void NoteEmbedder(WorkerResponse r)
     {
-        if (r.Model is null || r.Revision is null) return;
+        if (string.IsNullOrEmpty(r.Model) || string.IsNullOrEmpty(r.Revision)) return;
         WorkerHello next;
         lock (_helloGate)
         {
@@ -284,7 +322,10 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
             if (h.Model == r.Model && h.Revision == r.Revision && h.Device == device) return;
             next = h with { Model = r.Model, Revision = r.Revision, Device = device, Dim = r.Dim ?? h.Dim };
             Hello = next;
-            Log.Info($"worker embedder now {next.Model} rev {next.Revision} on {next.Device} (was {h.Model} rev {h.Revision} on {h.Device})");
+            string line = $"worker embedder now {next.Model} rev {next.Revision} on {next.Device} (was {h.Model} rev {h.Revision} on {h.Device})";
+            // SF5 (review): a model switch (a benchmark's new choice) queues the whole history for re-embedding.
+            if (h.Revision != "" && (h.Model != next.Model || h.Revision != next.Revision)) Log.Warn(line + "; stored rows will be embedded again");
+            else Log.Info(line);
         }
         try { HelloReceived?.Invoke(next); } catch (Exception ex) { Log.Warn("hello handler", ex); }
     }
@@ -306,6 +347,17 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
 
     private void CheckIdle()
     {
+        // MF1 (review): the unbiased clock skips S3 sleep and hibernate, but not Modern Standby (S0 low-power idle, where
+        // desktop apps are frozen) or a frozen process. Both freeze the agent's own timer too, so a long gap between two
+        // checks means the agent did not run: give the worker a grace instead of judging silence it could not break.
+        long nowMs = (CheckClock ?? TickCount)();
+        long last = Interlocked.Exchange(ref _lastCheckMs, nowMs);
+        if (last != long.MinValue && nowMs - last > FrozenGapMs)
+        {
+            Interlocked.Exchange(ref _graceUntilMs, nowMs + FrozenGraceMs);
+            Log.Info($"liveness: agent did not run for {(nowMs - last) / 1000} s (sleep, standby or freeze), grace {FrozenGraceMs / 1000} s");
+        }
+        bool grace = nowMs < Interlocked.Read(ref _graceUntilMs);
         var c = _conn;
         if (c is null || c.IsClosed)
         {
@@ -314,7 +366,7 @@ internal sealed class WorkerSupervisor : IAsyncDisposable
             lock (_startGate) if (_start is not { IsCompleted: false }) Volatile.Write(ref _restartFor, null);
             return;
         }
-        if (c.Oldest is { } sv && IsUnresponsive(sv.Op, sv.Ms, (long)UnresponsiveAfter.TotalMilliseconds))
+        if (!grace && c.Oldest is { } sv && IsUnresponsive(sv.Op, sv.Ms, (long)UnresponsiveAfter.TotalMilliseconds))
         {
             Log.Warn($"worker not answering ({sv.Op} for {sv.Ms / 1000} s, {c.Pending} waiting), restarting it");
             _ = RecycleAsync(c);

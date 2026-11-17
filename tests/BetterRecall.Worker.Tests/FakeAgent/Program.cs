@@ -10,7 +10,7 @@ using BetterRecall.Contracts;
 // FakeAgent <workerExe> <home> <out.json> [--real] [--wav <path>] [--settings <json>] [--space]
 // Creates the private pipe, starts the worker, sends hello, embed_text (query + document), embed_image (bgra8),
 // transcribe, shutdown; writes every response header plus the worker exit code to out.json.
-// --settings is handed to the worker as the agent's worker keys (sweep 4 C5). --space sends hello, bench, embed_text
+// --settings is handed to the worker on stdin (--settings-stdin) as the agent's worker keys (sweep 4 C5). --space sends hello, bench, embed_text
 // and shutdown only, to see which embedder each reply names (sweep 4 A-M3).
 var workerExe = args[0];
 var home = args[1];
@@ -28,8 +28,13 @@ for (int i = 3; i < args.Length; i++)
 var name = PipeNames.NewWorker();
 await using var server = new NamedPipeServerStream(name, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
 var psi = new ProcessStartInfo(workerExe, ["--pipe", name, "--home", home]) { UseShellExecute = false };
-if (workerSettings is not null) { psi.ArgumentList.Add("--settings"); psi.ArgumentList.Add(workerSettings); }
+if (workerSettings is not null) { psi.ArgumentList.Add("--settings-stdin"); psi.RedirectStandardInput = true; }
 using var worker = Process.Start(psi)!;
+if (workerSettings is not null)
+{
+    worker.StandardInput.BaseStream.Write(new UTF8Encoding(false).GetBytes(workerSettings));
+    worker.StandardInput.Close();
+}
 var lines = new List<string>();
 try
 {

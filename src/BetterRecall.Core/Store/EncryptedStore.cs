@@ -384,9 +384,9 @@ public sealed partial class EncryptedStore : IStore
             if (old != null && old.ModelId == info.ModelId && old.Revision == info.Revision)
             {
                 if (info.Dim < old.Dim) TruncateVectors(info.Dim);
+                if (info.Dim > old.Dim) QueueShortVectors(info);   // before WriteSpace: a failure here is retried next call
                 if (info.Dim != old.Dim) { WriteSpace(info); Log.Info($"embedding dim {old.Dim} -> {info.Dim}"); }
                 if (info.Dim < old.Dim) { lock (_rl) LoadIndex(); }
-                if (info.Dim > old.Dim) QueueShortVectors(info);
                 return;
             }
             WriteSpace(info);
@@ -581,7 +581,8 @@ public sealed partial class EncryptedStore : IStore
     /// <summary>How long a job handed out by <see cref="TakePendingEmbeddings"/> is held back from the next take
     /// (A-M1). The agent's scheduler takes jobs only once it holds none, so a lease older than this belongs to jobs it
     /// dropped without a reply (panic clears its RAM queue): they are handed out again instead of staying hidden, and
-    /// out of status.queue.pending's drain, until the agent restarts.</summary>
+    /// out of status.queue.pending's drain, until the agent restarts. Contract this relies on: one consumer, which takes
+    /// only while it holds no job (a second take of a held job costs a duplicate embed, never a lost row).</summary>
     public TimeSpan EmbeddingLeaseTimeout { get; set; } = TimeSpan.FromMinutes(2);
 
     private bool Leased(long rid, long now) => _inflight.TryGetValue(rid, out var at) && now - at < (long)EmbeddingLeaseTimeout.TotalMilliseconds;
@@ -593,6 +594,8 @@ public sealed partial class EncryptedStore : IStore
         {
             ThrowIfDisposed();
             long leaseNow = Environment.TickCount64;
+            if (_inflight.Count > 0)
+                foreach (var rid in _inflight.Where(kv => !Leased(kv.Key, leaseNow)).Select(kv => kv.Key).ToList()) _inflight.Remove(rid);
             var rows = new List<(long Rid, string Id, int Kind, string? Text, string? Month, bool HasKf)>();
             using (var cmd = Cmd(_w, """
                 SELECT j.rid, c.id, c.kind, c.text, c.kf_month, c.has_keyframe FROM jobs j JOIN captures c ON c.rid = j.rid

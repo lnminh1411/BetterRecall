@@ -7,9 +7,11 @@ using BetterRecall.Worker.Protocol;
 
 namespace BetterRecall.Worker;
 
-/// <summary>BetterRecall.Worker.exe --pipe &lt;name&gt; --home &lt;data dir&gt; [--settings &lt;json&gt;]. --settings carries the
-/// agent's worker keys (sweep 4 C5): the agent's accepted settings, not settings.json, which a hand edit can change
-/// behind the agent's back. Without it (manual runs, tests) the worker reads settings.json. Exit codes: 0 normal, 2 bad arguments,
+/// <summary>BetterRecall.Worker.exe --pipe &lt;name&gt; --home &lt;data dir&gt; [--settings-stdin]. With --settings-stdin the
+/// agent writes its worker keys to stdin (sweep 4 C5): the agent's accepted settings, not settings.json, which a hand edit
+/// can change behind the agent's back. Stdin, not the command line, which process-creation logs keep. Missing, too large
+/// or unreadable input exits with 2; it never runs on defaults. Without the flag (manual runs, tests) the worker reads
+/// settings.json. Exit codes: 0 normal, 2 bad arguments or settings,
 /// 3 pipe connect failed, 4 server is not the agent, 5 protocol error, 1 unexpected.</summary>
 public static class Program
 {
@@ -21,9 +23,21 @@ public static class Program
 
         // Logging first, so a settings.json parse warning is written; then again at the configured level.
         Log.Init(DataPaths.LogsDir(home), "info");
-        var settings = parsed.Settings is { } fromAgent ? WorkerSettings.FromJson(fromAgent, home) : WorkerSettings.Load(home);
+        WorkerSettings settings;
+        if (parsed.SettingsFromStdin)
+        {
+            var fromAgent = WorkerSettings.ReadAgentInput(Console.OpenStandardInput(), out var why);
+            if (fromAgent is null) { Log.Error($"settings from the agent: {why}; exiting"); return 2; }
+            if (WorkerSettings.TryFromJson(fromAgent, home, out why) is not { } agentSettings)
+            {
+                Log.Error($"settings from the agent unreadable ({why}); exiting");
+                return 2;
+            }
+            settings = agentSettings;
+        }
+        else settings = WorkerSettings.Load(home);
         Log.Init(DataPaths.LogsDir(home), settings.LogLevel);
-        Log.Info($"start settings={(parsed.Settings is null ? "file" : "agent")} fake={settings.Fake} device={settings.Device} gpuAdapter={settings.GpuAdapter} dim={settings.Dim} tokens={settings.ImageTokens} nsfwDevice={settings.NsfwDevice}");
+        Log.Info($"start settings={(parsed.SettingsFromStdin ? "agent" : "file")} modelDir={settings.ModelDir} fake={settings.Fake} device={settings.Device} gpuAdapter={settings.GpuAdapter} dim={settings.Dim} tokens={settings.ImageTokens} nsfwDevice={settings.NsfwDevice}");
         ProcessHardening.Apply(settings.MemoryIsolation, settings.EcoQos);
 
         System.IO.Pipes.NamedPipeClientStream pipe;
@@ -56,25 +70,25 @@ public static class Program
     }
 }
 
-public sealed record WorkerArgs(string Pipe, string Home, string? Settings = null)
+public sealed record WorkerArgs(string Pipe, string Home, bool SettingsFromStdin = false)
 {
     public static WorkerArgs? Parse(string[] args)
     {
-        string? pipe = null, home = null, settings = null;
-        for (int i = 0; i + 1 < args.Length; i += 2)
+        string? pipe = null, home = null;
+        bool stdin = false;
+        for (int i = 0; i < args.Length; i++)
         {
             switch (args[i])
             {
-                case "--pipe": pipe = args[i + 1]; break;
-                case "--home": home = args[i + 1]; break;
-                case "--settings": settings = args[i + 1]; break;
+                case "--pipe" when i + 1 < args.Length: pipe = args[++i]; break;
+                case "--home" when i + 1 < args.Length: home = args[++i]; break;
+                case "--settings-stdin": stdin = true; break;
                 default: return null;
             }
         }
-        if (args.Length % 2 != 0) return null;
         var name = AgentPipe.NormalizeName(pipe);
         if (name is null || string.IsNullOrWhiteSpace(home)) return null;
         try { home = Path.GetFullPath(home); } catch { return null; }
-        return new WorkerArgs(name, home, settings);
+        return new WorkerArgs(name, home, stdin);
     }
 }

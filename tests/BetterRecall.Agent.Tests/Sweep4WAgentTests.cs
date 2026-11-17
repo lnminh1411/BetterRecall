@@ -100,7 +100,7 @@ public class Sweep4WAgentTests
         Assert.Empty(store.Vectors);
         Assert.Empty(store.Failed);              // kept for a worker on the agent's settings
         Assert.Equal(1, sched.Queued);
-        Assert.Equal("worker-unavailable", sched.LastDecision);
+        Assert.Equal("space-refused", sched.LastDecision);   // SF2: waits for an accepted hello, not 15 s re-embeds
         Assert.True(sup.RestartPending);
     }
 
@@ -160,14 +160,38 @@ public class Sweep4WAgentTests
         await client.BenchAsync(CancellationToken.None);
         Assert.Equal("GPU", sup.Hello!.Device);
         Assert.Equal("r2", sup.Hello.Revision);
-        Assert.Equal(2, rs.Pending);   // both rows were embedded by r1: queued for the model now in use
+        Assert.Equal(0, rs.Pending);   // SF4: the store hears of the switch on the scheduler loop, not on the bench call
 
-        // A-M3: a new row's vector comes from r2 and is filed under it (it is not queued again).
+        // A-M3: the loop moves the store to r2 (both rows embedded by r1 are queued again); a new row's vector comes
+        // from r2 and is filed under it.
         model = "fake-model";
         rs.Add(2);
+        int before = sched.Processed;
         await sched.StepAsync(CancellationToken.None);
+        Assert.Equal(3, sched.Processed - before);   // 2 re-embedded for r2 + the new row
         Assert.Equal(0, rs.Pending);
         Assert.Equal(3, rs.Store.Stats().Vectors);
+    }
+
+    /// <summary>SF3 (review): a reply naming an embedder other than the accepted space (here one with no revision,
+    /// which raises no hello) is never filed under the accepted space; the job waits.</summary>
+    [Fact]
+    public async Task Vector_from_another_embedder_is_not_filed_under_the_accepted_space()
+    {
+        var store = new FakeStore();
+        store.AddAudioCapture(new NewAudioCapture(DateTimeOffset.UtcNow, "mic", 1000, "hello world", "en", ""));
+        var launcher = new FakeWorkerLauncher();
+        launcher.Handler = (req, _) => req.Op == "embed_text"
+            ? (new WorkerResponse(req.Id, true, Dim: 4, Ms: 1, Model: "other-model", Revision: "", Device: "CPU"), BinaryFrame.FloatsToBytes([1, 0, 0, 0]))
+            : null;
+        await using var sup = new WorkerSupervisor(launcher, "x", () => 120);
+        var settings = new Settings();
+        await using var sched = new EmbeddingScheduler(() => store, () => settings, new WorkerClient(sup), Idle, () => false);
+        Assert.Equal(TimeSpan.FromSeconds(60), await sched.StepAsync(CancellationToken.None));
+        Assert.Equal("space-refused", sched.LastDecision);
+        Assert.Empty(store.Vectors);
+        Assert.Equal(1, sched.Queued);
+        Assert.Equal("fake-model", sup.Hello!.Model);   // N7: an empty revision names no embedder
     }
 
     // ---------------- A-M1: panic and the store's job leases ----------------
@@ -251,6 +275,16 @@ public class Sweep4WAgentTests
         await sched.StepAsync(CancellationToken.None);
         Assert.Equal(1, sends);
         Assert.Empty(store.Failed);
+
+        // N4: panic (Clear) while a job is in flight drops it the same way; the store's lease brings the row back later.
+        store.AddScreenCapture(new NewScreenCapture(DateTimeOffset.UtcNow, "app", "", "t", 0, 10, 10, 0, [4, 5, 6], "image/webp", true));
+        step = sched.StepAsync(CancellationToken.None);
+        Assert.True(await entered.WaitAsync(TimeSpan.FromSeconds(10)));
+        sched.Clear();
+        gate.Release();
+        await step;
+        Assert.Equal(0, sched.Queued);
+        Assert.Equal(2, sends);
     }
 
     // ---------------- A-L1 + C8: what counts as a crash ----------------
@@ -361,18 +395,142 @@ public class Sweep4WAgentTests
         var client = new WorkerClient(sup);
         await client.PrewarmAsync(CancellationToken.None);
 
+        var conn = await sup.EnsureAsync(CancellationToken.None);
+
         var t = client.TranscribeAsync(new float[1600], "mic", "auto", CancellationToken.None);
         Assert.True(await running.WaitAsync(TimeSpan.FromSeconds(10)));
         static byte[] Big(byte mark) { var b = new byte[2 << 20]; b[0] = mark; return b; }   // larger than any pipe buffer
+        // Each call reaches the write gate before it returns its task; the gate state is the signal, no timed sleeps.
         var i1 = client.EmbedImageAsync(Big(1), "image/webp", null, 1, null, CancellationToken.None);
-        await Task.Delay(200);
+        await Until(() => conn.WriteGateState is { Held: true, Normal: 0, Urgent: 0 });   // i1's frame is going out
         var i2 = client.EmbedImageAsync(Big(2), "image/webp", null, 1, null, CancellationToken.None);
-        await Task.Delay(200);
+        await Until(() => conn.WriteGateState.Normal == 1);
         var q = client.EmbedTextAsync("where is the invoice", "query", CancellationToken.None);
-        await Task.Delay(200);
+        await Until(() => conn.WriteGateState.Urgent == 1);
         gate.Release();
         await Task.WhenAll(t, i1, i2, q);
         Assert.Equal(["transcribe:", "image1", "embed_text:query", "image2"], order.ToArray());
+    }
+
+    private static async Task Until(Func<bool> condition)
+    {
+        var until = Environment.TickCount64 + 20_000;
+        while (!condition())
+        {
+            Assert.True(Environment.TickCount64 < until, "condition not reached");
+            await Task.Delay(5);
+        }
+    }
+
+    /// <summary>MF1 (review): Modern Standby and a frozen process (T's SuspendProbe) stop the agent's timer while the
+    /// unbiased clock keeps running. A gap between two checks over 30 s gives a 45 s grace before any "not answering"
+    /// verdict, so the thawed worker can answer; a worker still silent after the grace is recycled.</summary>
+    [Fact]
+    public async Task Liveness_gives_a_grace_after_the_agent_itself_was_frozen()
+    {
+        long live = 1_000, check = 1_000;
+        void Jump(long ms) { Interlocked.Add(ref live, ms); Interlocked.Add(ref check, ms); }
+        var launcher = new FakeWorkerLauncher { NoReply = r => r.Op == "embed_text" };
+        await using var sup = new WorkerSupervisor(launcher, "x", () => 3600)
+        {
+            UnresponsiveAfter = TimeSpan.FromSeconds(90),
+            LivenessClock = () => Interlocked.Read(ref live),
+            CheckClock = () => Interlocked.Read(ref check),
+        };
+        var client = new WorkerClient(sup);
+        await client.PrewarmAsync(CancellationToken.None);
+        var owed = client.EmbedTextAsync("frozen", "document", CancellationToken.None);
+        sup.CheckNow();
+        Jump(120_000);             // agent and worker frozen 120 s; the unbiased clock ran on
+        sup.CheckNow();
+        Assert.Equal(0, sup.Recycled);
+        Jump(20_000);
+        sup.CheckNow();
+        Jump(20_000);              // 40 s into the 45 s grace
+        sup.CheckNow();
+        Assert.Equal(0, sup.Recycled);
+        Assert.False(owed.IsCompleted);
+        Jump(10_000);              // grace over, still silent: a real hang
+        sup.CheckNow();
+        Assert.Equal(1, sup.Recycled);
+        await Assert.ThrowsAnyAsync<WorkerException>(() => owed);
+    }
+
+    /// <summary>SF7 (review): a worker that dies by itself can only have died on the request it was serving; the one
+    /// queued behind is not counted as a crash (an innocent audio row used to be set aside after three such crashes).</summary>
+    [Fact]
+    public async Task Self_crash_blames_only_the_served_request()
+    {
+        var launcher = new FakeWorkerLauncher { NoReply = r => r.Text == "served", CrashWhen = r => r.Text == "behind" };
+        await using var sup = new WorkerSupervisor(launcher, "x", () => 120);
+        var client = new WorkerClient(sup);
+        await client.PrewarmAsync(CancellationToken.None);
+        var served = client.EmbedTextAsync("served", "document", CancellationToken.None);
+        var behind = client.EmbedTextAsync("behind", "document", CancellationToken.None);
+        var e1 = await Assert.ThrowsAnyAsync<WorkerException>(() => served);
+        var e2 = await Assert.ThrowsAnyAsync<WorkerException>(() => behind);
+        Assert.True(EmbeddingScheduler.IsCrash(e1));
+        Assert.False(EmbeddingScheduler.IsCrash(e2));
+        Assert.Equal(WorkerConnection.CrashedElsewhereMessage, e2.Message);
+    }
+
+    /// <summary>The worker gets exactly these keys (on stdin). Adding one is a review point: nothing secret may go there.</summary>
+    [Fact]
+    public void Worker_settings_keys_are_pinned()
+    {
+        Assert.Equal(
+        [
+            "inference.device", "inference.gpuAdapter", "inference.modelDir", "inference.imageTokens", "inference.idleExitS",
+            "inference.fake", "index.dim", "audio.language", "governance.ecoQos", "security.memoryIsolation", "log.level",
+            "privacy.nsfwFilter", "privacy.nsfwDetector", "privacy.nsfwDevice", "privacy.nsfwGpuAdapter",
+            "ocr.enabled", "ocr.engine", "ocr.languages", "ocr.device",
+        ], WorkerSettingsDiff.KeyNames);
+    }
+
+    /// <summary>C5 + SF9 seam: the agent's real launcher starts the real worker exe and hands it the settings on stdin,
+    /// with a modelDir holding spaces, a quote, non-ASCII and a trailing backslash. The worker logs what it parsed
+    /// before it tries the pipe (it then waits for a pipe nobody serves and is killed). Nothing of the settings is on the
+    /// command line.</summary>
+    [Fact]
+    public async Task Agent_launcher_hands_its_settings_to_the_real_worker()
+    {
+        var root = TempDir();
+        var pivot = new DirectoryInfo(AppContext.BaseDirectory.TrimEnd('\\')).Name;
+        var artifacts = AppContext.BaseDirectory;
+        while (!Directory.Exists(Path.Combine(artifacts, "bin", "BetterRecall.Worker"))) artifacts = Path.GetDirectoryName(artifacts.TrimEnd('\\'))!;
+        var workerExe = Path.Combine(artifacts, "bin", "BetterRecall.Worker", pivot, "BetterRecall.Worker.exe");
+        Assert.True(File.Exists(workerExe), workerExe);
+
+        var s = new Settings();
+        s.Inference.Fake = true;
+        s.Index.Dim = 256;
+        s.Inference.ModelDir = Path.Combine(root, "Models dir", "with \"quote\" \u00e9t\u00e9") + "\\";
+        var home = Path.Combine(root, "home dir");
+        var launcher = new ProcessWorkerLauncher(workerExe, () => false, () => WorkerSettingsDiff.Json(s));
+        int pid = launcher.Start(PipeNames.NewWorker(), home);
+        string log = "";
+        try
+        {
+            var until = Environment.TickCount64 + 30_000;
+            while (Environment.TickCount64 < until)
+            {
+                var f = Directory.Exists(Path.Combine(home, "logs")) ? Directory.GetFiles(Path.Combine(home, "logs"), "worker-*.log").FirstOrDefault() : null;
+                if (f is not null)
+                {
+                    try { log = File.ReadAllText(f); } catch (IOException) { }
+                    if (log.Contains("start settings=")) break;
+                }
+                await Task.Delay(50);
+            }
+        }
+        finally { launcher.Kill(pid); }
+        Assert.Contains("start settings=agent ", log);
+        Assert.Contains($"modelDir={Path.GetFullPath(s.Inference.ModelDir)} ", log);
+        Assert.Contains(" dim=256 ", log);
+        Assert.Contains(" fake=True ", log);
+        var args = launcher.LastStartInfo!.ArgumentList;
+        Assert.Contains("--settings-stdin", args);
+        Assert.DoesNotContain(args, a => a.Contains("Models dir", StringComparison.Ordinal) || a.Contains('{'));
     }
 
     // ---------------- C10: idle exit disposes the connection ----------------

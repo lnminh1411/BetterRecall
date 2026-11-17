@@ -112,10 +112,16 @@ internal sealed class WorkerConnection : IAsyncDisposable
     /// serving another request). Unlike "Worker pipe closed." it does not count as a crash on that job (A-L1, C8).</summary>
     public const string StoppedMessage = "Worker stopped by the agent.";
 
+    /// <summary>The worker died by itself while serving another request: not a crash on this one (SF7).</summary>
+    public const string CrashedElsewhereMessage = "Worker died while serving another request.";
+
     /// <summary>The connection closed before this request was written: the worker never saw it (not a crash on it).</summary>
     public const string NotSentMessage = "Worker connection closed; request not sent.";
 
     internal bool IsDisposed => Volatile.Read(ref _disposed) != 0;
+
+    /// <summary>Tests: whether the write gate is held and how many writers wait in each lane.</summary>
+    internal (bool Held, int Urgent, int Normal) WriteGateState => _writeLock.State;
 
     private static bool IsLongOp(string op) => op is "bench" or "hello";
 
@@ -128,7 +134,6 @@ internal sealed class WorkerConnection : IAsyncDisposable
         var req = request with { Id = id };
         var tcs = new TaskCompletionSource<WorkerReply>(TaskCreationOptions.RunContinuationsAsynchronously);
         _pending[id] = tcs;
-        _started[id] = (request.Op, _now());
         Touch();
         bool longOp = IsLongOp(request.Op);
         if (longOp) Interlocked.Increment(ref _longOps);
@@ -149,6 +154,9 @@ internal sealed class WorkerConnection : IAsyncDisposable
             if (header.Length > BinaryFrame.MaxHeaderBytes || payload.Length > BinaryFrame.MaxPayloadBytes)
                 throw new WorkerException("Request too large.");
             await _writeLock.EnterAsync(urgent, ct).ConfigureAwait(false);   // a cancel here leaves nothing half sent
+            // SF8 (review): owed from here. With the urgent lane, gate order is not arrival order, so a request still
+            // waiting for the gate is neither the one the worker serves nor silent.
+            _started[id] = (req.Op, _now());
             // A2: once started, the frame is written whole, without the caller's token. On the 0-byte worker pipe a write
             // waits while the serial worker is busy (a cold transcribe takes minutes): cancelling it there closed the
             // pipe, failed the request in flight and counted a crash. A caller that gives up only abandons the reply.
@@ -240,14 +248,15 @@ internal sealed class WorkerConnection : IAsyncDisposable
         if (Interlocked.Exchange(ref _closed, 1) != 0) return;
         _writeLock.Close();
         int pendingAtClose = _pending.Count;
-        // A-L1/C8: "Worker pipe closed." (a crash on that job for the scheduler) only for a request the worker may have
-        // died on: every request when it went away by itself; when the agent recycled it for not answering, only the one
-        // it was serving. Requests queued behind, and all of them on an abort or a shutdown, get StoppedMessage.
+        // A-L1/C8: "Worker pipe closed." (a crash on that job for the scheduler) only for the request the serial worker
+        // was serving when it died by itself or was recycled for not answering: it cannot have died on the others.
+        // Requests queued behind get CrashedElsewhereMessage (self-crash) or StoppedMessage (the agent stopped it), and
+        // all of them get StoppedMessage on an abort or a shutdown.
         bool byAgent = Recycled || ShuttingDown || Aborted;
-        long? blamed = Recycled && !Aborted && !ShuttingDown ? ServingId() : null;
+        long? blamed = Aborted || ShuttingDown ? null : ServingId();
         foreach (var kv in _pending)
             if (_pending.TryRemove(kv.Key, out var tcs))
-                tcs.TrySetException(new WorkerException(!byAgent || kv.Key == blamed ? "Worker pipe closed." : StoppedMessage));
+                tcs.TrySetException(new WorkerException(kv.Key == blamed ? "Worker pipe closed." : byAgent ? StoppedMessage : CrashedElsewhereMessage));
         try { Closed?.Invoke(error, pendingAtClose); } catch { }
     }
 
@@ -269,6 +278,12 @@ internal sealed class WorkerConnection : IAsyncDisposable
         private readonly Lock _g = new();
         private readonly LinkedList<TaskCompletionSource> _urgent = new(), _normal = new();
         private bool _held, _closed;
+        private int _urgentRun;
+        /// <summary>Urgent grants in a row while normal writers wait before one normal writer goes (N8: overlapping
+        /// query streams, such as parallel MCP searches, cannot starve background work for good).</summary>
+        internal const int MaxUrgentRun = 8;
+
+        public (bool Held, int Urgent, int Normal) State { get { lock (_g) return (_held, _urgent.Count, _normal.Count); } }
 
         public Task EnterAsync(bool urgent, CancellationToken ct)
         {
@@ -302,8 +317,10 @@ internal sealed class WorkerConnection : IAsyncDisposable
             TaskCompletionSource next;
             lock (_g)
             {
-                var lane = _urgent.Count > 0 ? _urgent : _normal.Count > 0 ? _normal : null;
-                if (lane is null) { _held = false; return; }
+                var lane = _urgent.Count > 0 && (_normal.Count == 0 || _urgentRun < MaxUrgentRun) ? _urgent
+                    : _normal.Count > 0 ? _normal : null;
+                if (lane is null) { _held = false; _urgentRun = 0; return; }
+                _urgentRun = ReferenceEquals(lane, _urgent) && _normal.Count > 0 ? _urgentRun + 1 : 0;
                 next = lane.First!.Value;
                 lane.RemoveFirst();
             }
@@ -329,7 +346,12 @@ internal sealed class WorkerConnection : IAsyncDisposable
 /// hibernating (C8). Worker liveness runs on it, so a worker frozen by a sleep has not been silent for the sleep.</summary>
 internal static partial class LivenessClock
 {
-    public static long NowMs() => QueryUnbiasedInterruptTime(out ulong t) ? (long)(t / 10_000) : Environment.TickCount64;
+    /// <summary>Never fails on Windows 7 and later; no TickCount64 fallback, which would mix two epochs (N1).</summary>
+    public static long NowMs()
+    {
+        QueryUnbiasedInterruptTime(out ulong t);
+        return (long)(t / 10_000);
+    }
 
     [LibraryImport("kernel32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]

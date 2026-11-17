@@ -37,6 +37,9 @@ internal static class WorkerSettingsDiff
         return o.ToJsonString();
     }
 
+    /// <summary>The keys the worker gets (tests pin this list: a key added here goes to the worker's stdin).</summary>
+    internal static IReadOnlyList<string> KeyNames => Keys.Select(k => k.Key).ToArray();
+
     private static readonly (string Key, Func<Settings, string?> Get)[] Keys =
     [
         ("inference.device", s => s.Inference?.Device),

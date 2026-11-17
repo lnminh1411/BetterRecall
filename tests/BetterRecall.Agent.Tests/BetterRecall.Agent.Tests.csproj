@@ -15,6 +15,8 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\BetterRecall.Contracts\BetterRecall.Contracts.csproj" />
     <ProjectReference Include="..\..\src\BetterRecall.Agent\BetterRecall.Agent.csproj" />
+    <!-- Built, not referenced: a seam test starts the real worker exe through the agent's launcher (sweep 4 C5). -->
+    <ProjectReference Include="..\..\src\BetterRecall.Worker\BetterRecall.Worker.csproj" ReferenceOutputAssembly="false" Private="false" />
   </ItemGroup>
   <ItemGroup>
     <Using Include="Xunit" />
