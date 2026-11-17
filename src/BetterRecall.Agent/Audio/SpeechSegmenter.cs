@@ -118,7 +118,7 @@ internal sealed class Resampler
     }
 }
 
-internal sealed record SpeechSegment(float[] Samples, long StartQpc100ns, int DurationMs);
+internal sealed record SpeechSegment(float[] Samples, long StartQpc100ns, int DurationMs, string App = "");
 
 /// <summary>
 /// Energy pre-gate and segmenter on 16 kHz mono float: 20 ms frames, adaptive noise floor,
@@ -149,6 +149,19 @@ internal sealed class SpeechSegmenter
 
     /// <summary>A segment is open (speech seen, end not reached yet).</summary>
     public bool Active => _seg is not null;
+
+    /// <summary>QPC start (100 ns) of the open segment once it holds enough speech to be emitted, else null (a remainder
+    /// of trailing silence after an emit stays open without speech).</summary>
+    public long? OpenStartQpc => _seg is null || _speechFrames < MinSpeechFrames ? null : QpcAt(_segStart);
+
+    /// <summary>The caller skipped packets (digital silence, no segment open): the next packet's time is taken as is.
+    /// Without it the stream clock lagged the skipped time (up to the 0.5 s re-anchor limit), so segment times, and the
+    /// guard verdicts looked up by them (A-H2), were early.</summary>
+    public void Reanchor()
+    {
+        _streamStartQpc = long.MinValue;
+        Pcm.Wipe(_pending);
+    }
 
     public SpeechSegmenter(Func<int> maxSegmentS) { _maxSegmentS = maxSegmentS; }
 

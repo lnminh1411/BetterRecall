@@ -16,12 +16,19 @@ namespace BetterRecall.Agent.Capture;
 internal interface IKeyframeReader
 {
     Task<OcrResult> ReadAsync(ReadOnlyMemory<byte> bgra, int width, int height, int stride, bool entities, CancellationToken ct);
+
+    /// <summary>Starts the reader when it is not running and returns how many requests it still owes before the next
+    /// read (the worker is serial). Callers time a read only after this: a cold worker start (device benchmark, NPU
+    /// compile: 113 s on a fresh install) is not slow OCR (TH2).</summary>
+    Task<int> ReadyAsync(CancellationToken ct) => Task.FromResult(0);
 }
 
 internal sealed class WorkerKeyframeReader(WorkerClient worker) : IKeyframeReader
 {
     public Task<OcrResult> ReadAsync(ReadOnlyMemory<byte> bgra, int width, int height, int stride, bool entities, CancellationToken ct)
         => worker.OcrAsync(bgra, width, height, stride, entities, ct);
+
+    public async Task<int> ReadyAsync(CancellationToken ct) => (await worker.Supervisor.EnsureAsync(ct).ConfigureAwait(false)).Pending;
 }
 
 /// <summary>
@@ -116,6 +123,17 @@ internal sealed class KeyframePipeline : IAsyncDisposable
 
     /// <summary>OCR failure streak and name/address detector state, for the log and the status (A21, C9).</summary>
     public OcrHealth OcrHealth { get; } = new();
+
+    private volatile bool _masksUnchecked = true;
+    /// <summary>C2 (D2): the replay text masks cannot be trusted: no OCR read has succeeded since start, or the last one
+    /// failed for a passing reason (worker down, restarting, busy, timeout). Cleared by the next successful read, and
+    /// when OCR is not installed (text redaction is off then, as for keyframes). The replay masks the foreground window
+    /// meanwhile.</summary>
+    public bool MasksUnchecked => _masksUnchecked;
+
+    /// <summary>TH1: a grab of this monitor was dropped because its OCR failed. The capture side grabs that monitor again
+    /// at its next keyframe tick even when the screen stayed still (a still screen sends no new desktop frame).</summary>
+    public Action<int>? OcrDropped { get; set; }
 
     // Measurements.
     public long Kept, SkippedSimilar, Dropped, Failed;
@@ -257,7 +275,7 @@ internal sealed class KeyframePipeline : IAsyncDisposable
         var store = _store();
         if (store is null) return false;
         var req = g.Request;
-        bool sample = req.ReplaySample && Sampler is not null;
+        bool sample = req.ReplaySample && Sampler is not null && s.Replay.Searchable;   // else a mask refresh only (C2)
         bool keep = req.Keyframe;
         DedupFilter? dedup = null;
         ChangeMap? map = null;
@@ -284,7 +302,10 @@ internal sealed class KeyframePipeline : IAsyncDisposable
                 keep = false;
             }
         }
-        if (!keep && !sample) return false;
+        // A grab that is neither kept nor sampled still refreshes the replay text masks when they are unchecked (C2), or
+        // when it was taken for that (a sample grab with replay.searchable off, while keyframes pause).
+        bool maskOnly = !keep && !sample && (req.ReplaySample || _masksUnchecked && s.Ocr.Enabled && _reader is not null);
+        if (!keep && !sample && !maskOnly) return false;
 
         // Redaction before anything is encoded: stored keyframes and replay samples get the same black boxes.
         var red = RedactionOptions.From(s.Privacy);
@@ -304,6 +325,7 @@ internal sealed class KeyframePipeline : IAsyncDisposable
             if (result is not null)
             {
                 ocr = result;
+                _masksUnchecked = false;
                 Interlocked.Increment(ref OcrRead);
                 // Model missing or broken (the worker returns the lines with EntitiesMissing, C9): the design's fail policy
                 // for a missing detector model applies, so the keyframe is kept with pattern redaction and a warning.
@@ -313,6 +335,7 @@ internal sealed class KeyframePipeline : IAsyncDisposable
             else if (permanent)
             {
                 OcrHealth.Reset();
+                _masksUnchecked = false;   // no OCR, no text masks: keyframes are stored without text too
                 Interlocked.Increment(ref OcrUnavailable);
                 long now = Environment.TickCount64;
                 if (_lastMissingLog < 0 || now - _lastMissingLog > 600_000)
@@ -323,6 +346,7 @@ internal sealed class KeyframePipeline : IAsyncDisposable
             }
             else
             {
+                if (red.AnyText) _masksUnchecked = true;
                 if (OcrHealth.Failed())
                     Log.Warn($"text recognition failing ({OcrHealth.FailingAfter}+ reads in a row, last: {why}): "
                         + (red.AnyText ? "keyframes are dropped while it fails" : "keyframes are stored without text"));
@@ -332,6 +356,7 @@ internal sealed class KeyframePipeline : IAsyncDisposable
                     map?.Clear();
                     Interlocked.Increment(ref RedactDropped);
                     Log.Debug($"keyframe dropped: ocr failed ({why})");
+                    try { OcrDropped?.Invoke(g.Monitor); } catch (Exception ex) { Log.Debug($"keyframe retry: {ex.Message}"); }
                     return false;
                 }
                 Interlocked.Increment(ref OcrFailed);
@@ -382,6 +407,8 @@ internal sealed class KeyframePipeline : IAsyncDisposable
         var copy = CopyPixels(g);
         try
         {
+            // The worker starts (or restarts) first, outside the OCR wait (TH2).
+            _reader!.ReadyAsync(ct).GetAwaiter().GetResult();
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeout.CancelAfter(_ocrWait);
             var sw = Stopwatch.StartNew();
