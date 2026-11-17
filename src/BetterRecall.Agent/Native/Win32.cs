@@ -94,6 +94,8 @@ internal static unsafe partial class Win32
 {
     public const uint WM_DESTROY = 0x0002;
     public const uint WM_CLOSE = 0x0010;
+    public const uint WM_QUERYENDSESSION = 0x0011;
+    public const uint WM_ENDSESSION = 0x0016;
     public const uint WM_QUIT = 0x0012;
     public const uint WM_COMMAND = 0x0111;
     public const uint WM_HOTKEY = 0x0312;
