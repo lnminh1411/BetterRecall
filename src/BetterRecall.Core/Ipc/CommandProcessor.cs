@@ -112,7 +112,8 @@ public sealed partial class CommandProcessor
     internal const string UsageThumb = "Usage: thumb <id> [width]";
     internal const string UsageKeyframe = "Usage: keyframe <id>";
     internal const string UsageTimeline = "Usage: timeline <from> <to> [limit]";
-    internal const string UsageSettings = "Usage: settings get | settings set <json>";
+    internal const string UsageSettings = "Usage: settings get | settings set <json> | settings reset";
+    internal const string ErrNothingToReset = "settings.json loaded; there is nothing to reset.";
     internal const string UsageReplay = "Usage: replay save | replay list | replay export <id> <path> | replay delete <id>";
     internal const string UsageAudit = "Usage: audit [limit]";
     internal const string UsageBench = "Usage: bench | bench full | bench last";
@@ -165,6 +166,9 @@ public sealed partial class CommandProcessor
 
     internal Func<DateTimeOffset> Now { get; set; } = () => DateTimeOffset.UtcNow;
 
+    /// <summary>A status subscriber gets a status at least this often (research 7.7: 60 s). Tests shorten it.</summary>
+    internal TimeSpan StatusHeartbeat { get; set; } = TimeSpan.FromSeconds(60);
+
     private readonly Ai.ChatService? _chat;
     private readonly Queue<DateTimeOffset> _publicSearches = new(), _mcpSearches = new();
 
@@ -175,10 +179,30 @@ public sealed partial class CommandProcessor
     /// thinning, the space guard, NSFW drops and replay deletes (N5).</summary>
     internal void OnStorePurged(PurgeNotice n)
     {
+        if (n.Reason == "all") Interlocked.Increment(ref _purgeAllEpoch);
+        if (n.Ids.Count > 0 || n.From is not null)
+            try { Removed?.Invoke(n); } catch (Exception ex) { Log.Warn("purge: stream notice failed", ex); }
         if (_chat is null || (n.Ids.Count == 0 && n.From is null)) return;
         var gone = n.Ids.ToHashSet(StringComparer.Ordinal);
         _chat.ForgetCaptures(gone.Contains, n.From, n.To);
     }
+
+    /// <summary>Bumped by every purge all notice: a replay save or export that fails while it ran answers the purge
+    /// message instead of "Internal error." or "Not found." (sweep 4, batch P's purge-all fence).</summary>
+    private int _purgeAllEpoch;
+
+    /// <summary>The message a capture export gets when a purge ran during it; replay saves and exports use it too.</summary>
+    internal static readonly string ErrPurgedDuring = new Store.ExportPurgedException().Message;
+
+    /// <summary>Rows left the store: subscribe streams tell their clients (B10, A-L5).</summary>
+    private event Action<PurgeNotice>? Removed;
+
+    /// <summary>Most ids one removed event carries; more go out as a truncated event (the client reloads).</summary>
+    internal const int MaxRemovedIds = 500;
+
+    internal static RemovedEvent RemovedEventFor(PurgeNotice n) => n.Ids.Count > MaxRemovedIds
+        ? new RemovedEvent("removed", n.Reason, [], n.From, n.To, Truncated: true)
+        : new RemovedEvent("removed", n.Reason, n.Ids, n.From, n.To);
 
     private void OnPanic()
     {
@@ -329,18 +353,35 @@ public sealed partial class CommandProcessor
             try { if (!cts.IsCancellationRequested) { Log.Info("subscriber too slow, disconnected"); cts.Cancel(); } }
             catch (ObjectDisposedException) { }
         }
-        Action<AgentStatus> onStatus = st => Push(Envelope.Ok(JsonSerializer.Serialize(StatusFor(kind, st), CoreJson.Default.AgentStatus)));
+        // While the gate is closed the public and MCP copy hides the queue and store counts; a status that then reads the
+        // same as the last one sent is not sent again, as a push for each change of them would still time every capture.
+        string? lastSent = null;
+        Action<AgentStatus> onStatus = st =>
+        {
+            var line = Envelope.Ok(JsonSerializer.Serialize(StatusFor(kind, st), CoreJson.Default.AgentStatus));
+            if (kind != PipeKind.Ui && line == Volatile.Read(ref lastSent) && IsLocked(kind)) return;
+            Volatile.Write(ref lastSent, line);
+            Push(line);
+        };
         Action<CaptureMeta> onCapture = m =>
         {
             if (IsLocked(kind)) return;   // the subscriber's own pipe, not "both locked" (B18)
             Push(Envelope.Ok(JsonSerializer.Serialize(new CaptureEvent(m.Id, m.Ts, m.Kind, m.App), CoreJson.Default.CaptureEvent)));
         };
+        // Rows gone (any client's purge, retention, storage limit, NSFW drop): same gate as capture events (B10, A-L5).
+        Action<PurgeNotice> onRemoved = n =>
+        {
+            if (IsLocked(kind)) return;
+            Push(Envelope.Ok(JsonSerializer.Serialize(RemovedEventFor(n), CoreJson.Default.RemovedEvent)));
+        };
         if (sub == Subscription.Status) _d.Agent.StatusChanged += onStatus;
         else _d.Agent.CaptureStored += onCapture;
+        Removed += onRemoved;
         if (!await WriteAsync(stream, ack, ct).ConfigureAwait(false))
         {
             if (sub == Subscription.Status) _d.Agent.StatusChanged -= onStatus;
             else _d.Agent.CaptureStored -= onCapture;
+            Removed -= onRemoved;
             return;
         }
         // Drain input until the client closes the pipe.
@@ -357,7 +398,7 @@ public sealed partial class CommandProcessor
             while (!cts.IsCancellationRequested)
             {
                 using var tick = CancellationTokenSource.CreateLinkedTokenSource(cts.Token);
-                tick.CancelAfter(TimeSpan.FromSeconds(sub == Subscription.Status ? Math.Max(1, 60 - lastStatus.Elapsed.TotalSeconds) : 3600));
+                tick.CancelAfter(TimeSpan.FromSeconds(sub == Subscription.Status ? Math.Max(StatusHeartbeat.TotalSeconds / 60, StatusHeartbeat.TotalSeconds - lastStatus.Elapsed.TotalSeconds) : 3600));
                 string? msg = null;
                 try { msg = await ch.Reader.ReadAsync(tick.Token).ConfigureAwait(false); }
                 catch (OperationCanceledException) when (!cts.IsCancellationRequested) { }
@@ -365,7 +406,8 @@ public sealed partial class CommandProcessor
                 if (msg == null)
                 {
                     if (sub != Subscription.Status) continue;
-                    msg = Envelope.Ok(JsonSerializer.Serialize(_d.Agent.GetStatus(), CoreJson.Default.AgentStatus));
+                    // The heartbeat follows the same pipe rules as a pushed status (B7: it used to send raw store counts).
+                    msg = Envelope.Ok(JsonSerializer.Serialize(StatusFor(kind, _d.Agent.GetStatus()), CoreJson.Default.AgentStatus));
                 }
                 if (sub == Subscription.Status) lastStatus.Restart();
                 if (!await WriteAsync(stream, msg, cts.Token).ConfigureAwait(false)) break;
@@ -375,6 +417,7 @@ public sealed partial class CommandProcessor
         {
             if (sub == Subscription.Status) _d.Agent.StatusChanged -= onStatus;
             else _d.Agent.CaptureStored -= onCapture;
+            Removed -= onRemoved;
             cts.Cancel();
             try { await drain.ConfigureAwait(false); } catch { }
         }
@@ -467,6 +510,8 @@ public sealed partial class CommandProcessor
                 _unlockedWithPassphrase = false;
                 return Ok("null");
             case "consent":
+                // settings.json did not load: consent would write defaults over every other choice (B3, D4).
+                if (SettingsUnreadable) return Err(SettingsStore.ErrUnreadable);
                 _d.Agent.Consent();
                 return Ok("null");
             case "panic":
@@ -528,10 +573,35 @@ public sealed partial class CommandProcessor
 
     private static readonly StoreStats NoStoreStats = new(0, 0, 0, null, null, 0, 0);
 
-    /// <summary>Status as a pipe may see it: the public and MCP pipes get no store rows, bytes or oldest/newest while
-    /// their gate is closed, since those change with every capture and reveal activity (D12).</summary>
-    internal AgentStatus StatusFor(PipeKind kind, AgentStatus st) =>
-        kind != PipeKind.Ui && LockError(kind) == ErrLocked ? st with { Store = NoStoreStats } : st;
+    /// <summary>Status as a pipe may see it: the public and MCP pipes get no store rows, bytes, oldest/newest or queue
+    /// count while their gate is closed, since those change with every capture and reveal activity (D12, B7). Locked is
+    /// also true while the data key waits for its passphrase, as every data verb then answers "Store is locked." (B6).
+    /// The UI pipe learns which secret the unlock screen must ask for (B1, B8, B13).</summary>
+    internal AgentStatus StatusFor(PipeKind kind, AgentStatus st)
+    {
+        bool keyLocked = KeyNeedsPassphrase;
+        if (keyLocked && !st.Locked) st = st with { Locked = true, UnlockedUntil = null };
+        if (kind == PipeKind.Ui) return st with { UnlockNeeds = UnlockNeeds(keyLocked) };
+        return LockError(kind) == ErrLocked ? st with { Store = NoStoreStats, Queue = new QueueState(0) } : st;
+    }
+
+    /// <summary>
+    /// What an unlock needs now, from the key file and the unlock method rather than settings alone (B1): passphrase while
+    /// the data key waits for it (whatever security.keyProtection says; auto keeps a passphrase-wrapped key, D3), or
+    /// with the hello method and keyProtection passphrase (checked, or used to re-wrap, before Hello); password with the
+    /// password method and a password set, or with the hello method on a PC without Hello (T5 fallback, B13); hello
+    /// otherwise (an empty unlock: Windows Hello, or lifting a user Lock with security.requireUnlock off); none while open.
+    /// </summary>
+    private string UnlockNeeds(bool keyLocked)
+    {
+        if (keyLocked) return "passphrase";
+        if (_d.Agent.IsUnlocked) return "none";
+        bool pwSet = _d.Password?.IsSet == true;
+        if (UsesPassword) return pwSet ? "password" : "hello";   // no password file: Hello stands in (B15)
+        if (S.Security.KeyProtection == Crypto.KeyVault.ModePassphrase) return "passphrase";
+        if (S.Security.RequireUnlock && HelloMissing && pwSet) return "password";
+        return "hello";
+    }
 
     /// <summary>Null when data verbs may read. "Store is locked." while the gate is closed or the key waits for its
     /// passphrase; "Store is not open." when the gate is open but the store did not open (keylost, storeerror).</summary>
@@ -717,7 +787,8 @@ public sealed partial class CommandProcessor
         string? degraded = null;
         if (req.Mode != SearchMode.Text)
         {
-            bool cold = !_d.Embedder.Warm && req.Mode != SearchMode.Vector;
+            bool workerCold = !_d.Embedder.Warm;
+            bool cold = workerCold && req.Mode != SearchMode.Vector;
             try
             {
                 using var to = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -728,20 +799,29 @@ public sealed partial class CommandProcessor
             }
             catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
             {
-                if (req.Mode == SearchMode.Vector) throw;
-                Log.Warn("query embedding failed, text-only search", ex);
+                Log.Warn(req.Mode == SearchMode.Vector ? "query embedding failed, vector search has no answer" : "query embedding failed, text-only search", ex);
                 qv = [];
                 // K review S2: only the cold wait running out means "starting, try again". A failure (model not
                 // installed, VC++ runtime missing, restart backoff, a busy worker past 15 s) says nothing of the sort.
-                degraded = cold && ex is OperationCanceledException ? "vector" : "vector-unavailable";
+                // Vector mode always waits the full time; with a cold worker its timeout is still "starting" (T1).
+                degraded = (cold || req.Mode == SearchMode.Vector && workerCold) && ex is OperationCanceledException ? "vector" : "vector-unavailable";
             }
+            // The gate may have closed during the wait (up to 15 s): check again before reading the store (B9).
+            if (LockError(s.Kind) is { } lockedAfterWait) return Err(lockedAfterWait);
+            store = _d.Store();
+            if (store == null) return Err(NotOpenError);
         }
-        var resp = store.Search(req, qv, max, MaxResponseBytes(s.Kind));
+        // Vector mode without a query vector has nothing to rank: an empty, flagged answer instead of "Internal error." (T1).
+        var resp = req.Mode == SearchMode.Vector && qv.Length == 0
+            ? new SearchResponse(0, false, 0, [])
+            : store.Search(req, qv, max, MaxResponseBytes(s.Kind));
         if (degraded != null) resp = resp with { Degraded = degraded };
         double weakBelow = S.Index.WeakMatchBelow;
         if (weakBelow > 0)
             resp = resp with { Results = resp.Results.Select(h => h with { Weak = !h.TextMatch && (h.Cosine ?? 0) < weakBelow }).ToList() };
         resp = resp with { TookMs = sw.ElapsedMilliseconds };
+        // A lock while the store searched: the answer is not sent (B9).
+        if (LockError(s.Kind) is { } lockedAfterSearch) return Err(lockedAfterSearch);
         Audit(s, "search", resp.Count, QueryHash(req.Q));
         return Ok(JsonSerializer.Serialize(resp, CoreJson.Default.SearchResponse));
     }
@@ -1041,6 +1121,9 @@ public sealed partial class CommandProcessor
     // ------------------------------------------------------------ UI verbs
 
     private bool UsesPassword => S.Security.UnlockMethod == "password";
+
+    /// <summary>settings.json did not parse at start: defaults are in use and saves are refused until a reset (D4).</summary>
+    private bool SettingsUnreadable => _d.Settings is SettingsStore { LoadError: not null };
 
     /// <summary>The Windows Hello check finished and found none on this PC.</summary>
     private bool HelloMissing => !_d.Keys.HelloAvailable && _d.Keys is not Crypto.KeyVault { HelloChecked: false };
@@ -1386,6 +1469,12 @@ public sealed partial class CommandProcessor
         {
             case "get" when json.Length == 0:
                 return Ok(JsonSerializer.Serialize(S, CoreJson.Default.Settings));
+            case "reset" when json.Length == 0:
+                // Only while settings.json is unreadable: the defaults already in use are written out (the bad file stays
+                // as settings.json.bad). Nothing changes in effect, so the gate does not apply (B3, D4).
+                if (_d.Settings is not SettingsStore store || store.LoadError is null) return Err(ErrNothingToReset);
+                store.ResetUnreadable();
+                return Ok(JsonSerializer.Serialize(S, CoreJson.Default.Settings));
             case "set" when json.Length > 0:
                 JsonDocument doc;
                 try { doc = JsonDocument.Parse(json); }
@@ -1432,6 +1521,7 @@ public sealed partial class CommandProcessor
     {
         var (sub, tail) = SplitVerb(rest);
         var args = Args(tail);
+        int purgeEpoch = Volatile.Read(ref _purgeAllEpoch);
         try
         {
             switch (sub.ToLowerInvariant())
@@ -1458,6 +1548,12 @@ public sealed partial class CommandProcessor
                     _d.Agent.DeleteReplay(args[0]);
                     return Ok("null");
             }
+        }
+        catch (Exception) when (Volatile.Read(ref _purgeAllEpoch) != purgeEpoch)
+        {
+            // Purge all discarded the clip being saved, or cancelled the export and deleted its copy.
+            Log.Info("replay " + sub.ToLowerInvariant() + ": purge all ran during it");
+            return Err(ErrPurgedDuring);
         }
         catch (Exception ex) when (ex is KeyNotFoundException or FileNotFoundException)
         {

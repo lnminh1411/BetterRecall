@@ -809,7 +809,7 @@ State-changing verbs (need `ipc.allowControl`):
 | Verb | Request | `data` | Notes |
 |---|---|---|---|
 | `pause` | `pause` or `pause <seconds>` | `null` | Without seconds, pauses until `resume`. Seconds from 1 to `ipc.maxPauseS` |
-| `resume` | `resume` | `null` | Clears an IPC or user pause. Does not override a guardrail pause (lock, deny list) |
+| `resume` | `resume` | `null` | Clears the IPC pause only. A pause the user set (tray, hotkey, UI) stays until the user resumes. Does not override a guardrail pause (lock, deny list) |
 | `purge` | `purge last <seconds>`, `purge range <from> <to>`, `purge app <name>` | `{"confirm":"<token>","rows":1234}` | Step 1 of 2. Also needs `ipc.allowPurge` |
 | `purge confirm` | `purge confirm <token>` | `{"purged":1234}` | Token is single use, bound to the connection, valid 30 s |
 
@@ -837,6 +837,7 @@ Error strings:
 
 - `subscribe` acks with `{"ok":true,"data":{"subscribed":true}}`, then sends `{"ok":true,"data":<status>}` on every state change (pause, resume, lock, unlock, device change) and at least every 60 s.
 - `subscribe captures` acks with `{"ok":true,"data":{"subscribed":"captures"}}`, then sends one line per stored capture: `{"ok":true,"data":{"id":"...","ts":"...","kind":"screen","app":"chrome.exe"}}`. Metadata only: no title, no text. Fails with `Store is locked.` when locked.
+- Both streams also send `{"ok":true,"data":{"event":"removed","reason":"purge","ids":[...],"from":...,"to":...}}` when captures leave the store (any client's purge, retention, storage limit, NSFW drop, purge all), under the same gate as capture events. Reasons: `purge`, `all`, `retention`, `drop`, `replay`. More than 500 ids: `ids` is empty and `truncated` is true; reload what is shown. While the gate is closed, status lines on this pipe carry no store or queue counts, the heartbeat included.
 - A bad target returns `Usage: subscribe [captures]` and the connection stays in request mode.
 - After a successful subscribe the connection is a one-way stream. The server ignores further input and the client closes the pipe to stop. A slow client that lets 64 messages queue is disconnected.
 

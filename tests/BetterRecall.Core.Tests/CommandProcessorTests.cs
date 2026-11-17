@@ -224,7 +224,10 @@ public sealed class CommandProcessorTests : IDisposable
     {
         _embed.Fail = true;
         Assert.True((await Call(Pub, "search acme")).Ok);
-        Assert.Equal("Internal error.", await Err(Pub, "search {\"q\":\"acme\",\"mode\":\"vector\"}"));
+        // Sweep 4 T1: vector mode has no text answer: an empty, flagged result instead of "Internal error.".
+        var vector = await Call(Pub, "search {\"q\":\"acme\",\"mode\":\"vector\"}");
+        Assert.True(vector.Ok);
+        Assert.Equal("vector-unavailable", vector.Data.GetProperty("degraded").GetString());
         _embed.Calls = 0;
         Assert.True((await Call(Pub, "search {\"q\":\"acme\",\"mode\":\"text\"}")).Ok);
         Assert.Equal(0, _embed.Calls); // text mode skips the embedder
@@ -453,8 +456,8 @@ public sealed class CommandProcessorTests : IDisposable
         Assert.Equal("Invalid retention.days.", await Err(Ui, "settings set {\"retention\":{\"days\":0}}"));
         Assert.Equal(90, _settings.Current.Retention.Days);
         Assert.Equal("Invalid JSON.", await Err(Ui, "settings set {nope"));
-        Assert.Equal("Usage: settings get | settings set <json>", await Err(Ui, "settings"));
-        Assert.Equal("Usage: settings get | settings set <json>", await Err(Ui, "settings set"));
+        Assert.Equal("Usage: settings get | settings set <json> | settings reset", await Err(Ui, "settings"));
+        Assert.Equal("Usage: settings get | settings set <json> | settings reset", await Err(Ui, "settings set"));
     }
 
     [Fact]

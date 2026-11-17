@@ -55,15 +55,18 @@
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
                     <RowDefinition Height="*" />
                 </Grid.RowDefinitions>
                 <InfoBar x:Name="OfflineBar" Visibility="{x:Bind OfflineBar.IsOpen, Mode=OneWay}" Margin="24,8,24,0" IsClosable="False" IsOpen="False" Severity="Error" />
                 <InfoBar x:Name="StoreBar" Visibility="{x:Bind StoreBar.IsOpen, Mode=OneWay}" Grid.Row="1" Margin="24,8,24,0" IsClosable="False" IsOpen="False" />
                 <InfoBar x:Name="StorageBar" Visibility="{x:Bind StorageBar.IsOpen, Mode=OneWay}" Grid.Row="2" Margin="24,8,24,0" IsClosable="True" IsOpen="False" Severity="Warning"
                          Closed="StorageBar_Closed" />
-                <InfoBar x:Name="ActionBar" Visibility="{x:Bind ActionBar.IsOpen, Mode=OneWay}" Grid.Row="3" Margin="24,8,24,0" IsClosable="True" IsOpen="False" Severity="Warning" />
-                <Frame x:Name="ContentFrame" Grid.Row="4" />
-                <views:UnlockPanel x:Name="Unlock" Grid.Row="4" Visibility="Collapsed" />
+                <!-- One banner per status warning (settings unreadable, names not redacted, OCR failing, VC++ runtime), B3. -->
+                <StackPanel x:Name="WarningBars" Grid.Row="3" Visibility="Collapsed" />
+                <InfoBar x:Name="ActionBar" Visibility="{x:Bind ActionBar.IsOpen, Mode=OneWay}" Grid.Row="4" Margin="24,8,24,0" IsClosable="True" IsOpen="False" Severity="Warning" />
+                <Frame x:Name="ContentFrame" Grid.Row="5" />
+                <views:UnlockPanel x:Name="Unlock" Grid.Row="5" Visibility="Collapsed" />
             </Grid>
         </NavigationView>
 

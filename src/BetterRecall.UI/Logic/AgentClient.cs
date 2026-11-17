@@ -256,3 +256,30 @@ public sealed class AgentClient(string pipeName, IServerTrust trust, TimeSpan? c
         finally { _gate.Release(); }
     }
 }
+
+/// <summary>
+/// Each request on a connection of its own, closed after the answer. For requests that can wait long on the agent
+/// (launcher search: the query vector waits up to 15 s behind the worker), so the shared, serialised connections do not
+/// stall behind them (AB-S1). Only one is open per request in flight.
+/// </summary>
+public sealed class OneShotClient(Func<AgentClient> create) : IAgentClient
+{
+    private int _pid;
+
+    public int ServerPid => Volatile.Read(ref _pid);
+
+    /// <summary>Raised after every response, as AgentClient.ResponseClassified.</summary>
+    public event Action<AgentErrorKind>? ResponseClassified;
+
+    public async Task<AgentResult> SendAsync(string line, CancellationToken ct = default)
+    {
+        AgentResult r;
+        await using (var c = create())
+        {
+            r = await c.SendAsync(line, ct).ConfigureAwait(false);
+            if (c.ServerPid > 0) Volatile.Write(ref _pid, c.ServerPid);
+        }
+        ResponseClassified?.Invoke(r.Kind);
+        return r;
+    }
+}

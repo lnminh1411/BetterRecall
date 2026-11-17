@@ -286,8 +286,12 @@ public class SettingsLoadSweep3Tests
         Assert.NotNull(s.LoadError);
         Assert.Equal(bad, File.ReadAllText(path));   // not overwritten
         Assert.Equal(bad, File.ReadAllText(path + ".bad"));
+        // Sweep 4 D4: a partial save would write defaults over every other choice in the file; refused until a reset.
+        Assert.Equal(SettingsStore.ErrUnreadable, s.TryUpdate(JsonDocument.Parse("{\"retention\":{\"days\":60}}").RootElement));
+        Assert.Equal(bad, File.ReadAllText(path));
+        Assert.True(s.ResetUnreadable());
         Assert.Null(s.TryUpdate(JsonDocument.Parse("{\"retention\":{\"days\":60}}").RootElement));
-        Assert.Null(s.LoadError);                    // the user saved: the file is the settings again
+        Assert.Null(s.LoadError);                    // the user reset: the file is the settings again
         Assert.Equal(60, SettingsStore.ReadOnly(h.Path).Retention.Days);
     }
 

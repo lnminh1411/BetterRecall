@@ -18,6 +18,9 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\BetterRecall.Contracts\BetterRecall.Contracts.csproj" />
+    <!-- Seam tests (sweep 4 B2): the UI's client logic against the real agent command processor on a real pipe, so the
+         UI and the agent cannot disagree on a contract the mock gets wrong. Test-only; the UI itself never references Core. -->
+    <ProjectReference Include="..\..\src\BetterRecall.Core\BetterRecall.Core.csproj" />
   </ItemGroup>
   <ItemGroup>
     <Using Include="Xunit" />

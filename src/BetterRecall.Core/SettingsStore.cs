@@ -32,6 +32,10 @@ public sealed partial class SettingsStore : ISettingsStore
     /// settings-unreadable (D3).</summary>
     public string? LoadError { get; private set; }
 
+    /// <summary>TryUpdate's answer while LoadError is set: a partial save would write defaults over every other choice
+    /// in the file (deny list, redaction, retention, key protection) (B3, D4).</summary>
+    public const string ErrUnreadable = "settings.json could not be read. Reset the settings or fix the file first.";
+
     /// <summary>Loads settings.json from home. Missing file: defaults, written out. Bad keys are reset to defaults and
     /// logged. A file that does not parse at all is not overwritten: a hand edit with one typo (an unescaped backslash)
     /// used to replace every choice (consent, IPC, key protection) with defaults for good (D3).</summary>
@@ -45,7 +49,7 @@ public sealed partial class SettingsStore : ISettingsStore
         {
             try
             {
-                var json = File.ReadAllText(path);
+                var json = ReadShared(path);
                 var node = JsonNode.Parse(json, documentOptions: new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true });
                 if (node is not JsonObject obj) throw new JsonException("Not an object.");
                 s = LoadLenient(obj, out write);
@@ -72,10 +76,19 @@ public sealed partial class SettingsStore : ISettingsStore
         {
             var path = DataPaths.SettingsFile(home);
             if (!File.Exists(path)) return new Settings();
-            var node = JsonNode.Parse(File.ReadAllText(path), documentOptions: new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true });
+            var node = JsonNode.Parse(ReadShared(path), documentOptions: new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true });
             return node is JsonObject obj ? LoadLenient(obj, out _) : new Settings();
         }
         catch { return new Settings(); }
+    }
+
+    /// <summary>Reads the file without blocking the agent's replace (File.Move onto it): File.ReadAllText shares Read
+    /// only, so a save while the CLI or the worker read it failed with "Internal error." (C9).</summary>
+    private static string ReadShared(string path)
+    {
+        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        using var r = new StreamReader(fs, System.Text.Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+        return r.ReadToEnd();
     }
 
     /// <summary>Applies each known key of obj over the defaults, skipping keys that do not parse or validate.</summary>
@@ -147,6 +160,7 @@ public sealed partial class SettingsStore : ISettingsStore
         Settings next;
         lock (_gate)
         {
+            if (LoadError is not null) return ErrUnreadable;
             var schema = (JsonObject)JsonSerializer.SerializeToNode(new Settings(), ContractsJson.Default.Settings)!;
             var merged = (JsonObject)JsonSerializer.SerializeToNode(_current, ContractsJson.Default.Settings)!;
             var touched = new List<string>();
@@ -194,6 +208,23 @@ public sealed partial class SettingsStore : ISettingsStore
         };
     }
 
+    /// <summary>"Reset the settings" while settings.json is unreadable: writes the defaults already in use (the bad file
+    /// stays as settings.json.bad) and allows saves again (D4). False when the file had loaded.</summary>
+    public bool ResetUnreadable()
+    {
+        Settings snapshot;
+        lock (_gate)
+        {
+            if (LoadError is null) return false;
+            snapshot = _current;
+            WriteFile(snapshot);
+            LoadError = null;
+        }
+        Log.Info("settings.json reset to defaults (the unreadable file is kept as settings.json.bad)");
+        RaiseChanged(snapshot);
+        return true;
+    }
+
     public void Save()
     {
         Settings snapshot;
@@ -232,8 +263,27 @@ public sealed partial class SettingsStore : ISettingsStore
             fs.Write(bytes);
             fs.Flush(flushToDisk: true);
         }
-        File.Move(tmp, _path, overwrite: true);
+        // Another process may hold settings.json open for a moment (CLI, worker start, an editor or a virus scan):
+        // retry the replace briefly instead of losing the save as "Internal error." (C9).
+        for (int attempt = 0; ; attempt++)
+        {
+            try
+            {
+                // ReplaceFile renames the old file aside and deletes it, which readers that share Delete allow; MoveFileEx
+                // cannot supersede a file someone has open.
+                if (File.Exists(_path)) File.Replace(tmp, _path, destinationBackupFileName: null, ignoreMetadataErrors: true);
+                else File.Move(tmp, _path, overwrite: true);
+                return;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && attempt < MoveRetries)
+            {
+                Thread.Sleep(MoveRetryDelayMs * (attempt + 1));
+            }
+        }
     }
+
+    internal const int MoveRetries = 8;
+    internal const int MoveRetryDelayMs = 25;
 
     // ---- validation ----
 

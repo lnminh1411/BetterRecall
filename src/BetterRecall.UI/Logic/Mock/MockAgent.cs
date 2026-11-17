@@ -9,6 +9,14 @@ using BetterRecall.Contracts;
 
 namespace BetterRecall.UI.Logic.Mock;
 
+/// <summary>Per-connection state, as the real agent keeps it (ClientSession): describe tokens live on the connection that
+/// asked for the preview, so a send on another connection answers "Invalid or expired token." (B2: the mock used to keep
+/// them globally, and the UI tests missed that the UI sent on a second connection).</summary>
+public sealed class MockSession
+{
+    internal readonly Dictionary<string, (string Id, DateTimeOffset Expires)> DescribeTokens = [];
+}
+
 public sealed record MockOptions(
     bool StartLocked = false,
     bool Passphrase = false,
@@ -46,7 +54,8 @@ public sealed class MockAgent
     private int _passwordFailures;
     private DateTimeOffset _passwordBlockedUntil;
     private bool _aiKeySet = true;
-    private readonly Dictionary<string, (string Id, DateTimeOffset Expires)> _describeTokens = [];
+    /// <summary>Session of callers that use no pipe (tests calling HandleAsync directly): one connection.</summary>
+    private readonly MockSession _directSession = new();
     private readonly Dictionary<string, (ChatSummary Summary, List<ChatMessage> Messages)> _savedChats = [];
     private readonly HashSet<string> _approvedChats = [];
     private readonly Dictionary<string, (string? ChatId, string Question, List<ChatApprovalItem> Items)> _pendingApprovals = [];
@@ -515,12 +524,15 @@ public sealed class MockAgent
         }
     }
 
-    /// <summary>One request line in, one response line out. Never throws.</summary>
-    public async Task<string> HandleAsync(string line, CancellationToken ct = default)
+    /// <summary>One request line in, one response line out. Never throws. Callers without a pipe share one session.</summary>
+    public Task<string> HandleAsync(string line, CancellationToken ct = default) => HandleAsync(line, _directSession, ct);
+
+    /// <summary>One request line of one connection (MockPipeServer gives each connection its own session).</summary>
+    public async Task<string> HandleAsync(string line, MockSession session, CancellationToken ct = default)
     {
         try
         {
-            return await DispatchAsync(line.Trim(), ct);
+            return await DispatchAsync(line.Trim(), session, ct);
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception)
@@ -529,7 +541,7 @@ public sealed class MockAgent
         }
     }
 
-    private async Task<string> DispatchAsync(string line, CancellationToken ct)
+    private async Task<string> DispatchAsync(string line, MockSession session, CancellationToken ct)
     {
         if (line.Length == 0) return Envelope.Error("Unknown command ''.");
         int sp = line.IndexOf(' ');
@@ -600,7 +612,7 @@ public sealed class MockAgent
             case "history": return History(rest);
             case "password": return PasswordVerb(rest);
             case "ai": return AiVerb(rest);
-            case "describe": return await DescribeAsync(args, ct);
+            case "describe": return await DescribeAsync(args, session, ct);
             case "export": return await ExportAsync(rest, ct);
             case "chat": return ChatVerb(args, rest);
             case "audit":
@@ -653,7 +665,12 @@ public sealed class MockAgent
                 Device: "NPU",
                 Store: new StoreStats(_rows.Count, _rows.Count * 41_000L, 0, oldest, newest, _pending, _rows.Count(r => r.Meta.Embedded)),
                 RetentionDays: SettingsSchema.Get(_settings, "retention.days")?.GetValue<int>() ?? 30,
-                UserPaused: _paused && _pauseReason is "user" or "ipc");
+                UserPaused: _paused && _pauseReason is "user" or "ipc",
+                // As the agent: the secret the unlock screen asks for (B1).
+                UnlockNeeds: !_locked ? "none"
+                    : UnlockLogic.UsesPassword(SettingsSchema.Get(_settings, "security.unlockMethod")?.GetValue<string>()) ? (_passwordSet ? "password" : "hello")
+                    : UnlockLogic.UsesPassphrase(SettingsSchema.Get(_settings, "security.keyProtection")?.GetValue<string>()) ? "passphrase"
+                    : "hello");
         }
     }
 
@@ -982,7 +999,7 @@ public sealed class MockAgent
     }
 
     /// <summary>describe preview returns the keyframe and a token; send waits a little and returns canned text. Nothing leaves the PC.</summary>
-    private async Task<string> DescribeAsync(string[] args, CancellationToken ct)
+    private async Task<string> DescribeAsync(string[] args, MockSession session, CancellationToken ct)
     {
         if (args.Length != 2) return Envelope.Error("Usage: describe preview <id> | describe send <token>");
         AiStatus st;
@@ -1000,7 +1017,7 @@ public sealed class MockAgent
                 var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
                 lock (_lock)
                 {
-                    _describeTokens[token] = (r.Meta.Id, Now.AddSeconds(120));
+                    session.DescribeTokens[token] = (r.Meta.Id, Now.AddSeconds(120));
                     Audit("describe preview", 1);
                 }
                 return Envelope.Ok(new DescribePreview(token, st.Provider, st.Model, st.Endpoint, "image/png", 960, 540, false, bytes), ContractsJson.Default.DescribePreview);
@@ -1010,7 +1027,7 @@ public sealed class MockAgent
                 (string Id, DateTimeOffset Expires) t;
                 lock (_lock)
                 {
-                    if (!_describeTokens.Remove(args[1], out t) || t.Expires <= Now) return Envelope.Error(AgentErrors.InvalidToken);
+                    if (!session.DescribeTokens.Remove(args[1], out t) || t.Expires <= Now) return Envelope.Error(AgentErrors.InvalidToken);
                 }
                 await Task.Delay(SlowVerbDelay * 3, ct);   // the provider round trip
                 Row? r;

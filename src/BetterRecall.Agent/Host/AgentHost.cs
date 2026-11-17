@@ -668,12 +668,19 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         RaiseStatus(force: true);
     }
 
+    /// <summary>The user's resume (tray, hotkey, UI) lifts both pauses; a script's (public pipe, "ipc") lifts only the IPC
+    /// pause, never a pause the user set for privacy (B11, D5).</summary>
     public void Resume(string reason)
     {
-        _pause.Clear("user");
-        _pause.Clear("ipc");
-        Log.Info("resumed");
+        ClearForResume(_pause, reason);
+        Log.Info(reason == "ipc" ? "resumed (ipc)" : "resumed");
         RaiseStatus(force: true);
+    }
+
+    internal static void ClearForResume(PauseController pause, string reason)
+    {
+        if (reason != "ipc") pause.Clear("user");
+        pause.Clear("ipc");
     }
 
     public bool IsUnlocked => _gate.IsOpen(S.Security.RequireUnlock);

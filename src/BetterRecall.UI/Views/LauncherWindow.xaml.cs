@@ -43,8 +43,11 @@ public sealed partial class LauncherWindow : Window
     {
         InitializeComponent();
         var s = Services.Current;
-        _vm = new SearchViewModel(s.Api);
+        // Searches wait up to 15 s for the query vector: each on its own connection, so settings, timeline and unlock
+        // on the main one do not queue behind them (AB-S1).
+        _vm = new SearchViewModel(new AgentApi(s.CreateOneShotClient()));
         _detail = new DetailViewModel(s.MediaApi);
+        s.Removed += OnRemoved;
         Detail.ViewModel = _detail;
         Detail.ModalChanged += open => _modal = Math.Max(0, _modal + (open ? 1 : -1));
         AskView.SourceInvoked += src => _ = _detail.LoadAsync(ChatViewModel.ToCaptureItem(src));
@@ -151,6 +154,21 @@ public sealed partial class LauncherWindow : Window
         _vm.DropAll();   // also makes a search, history or facets load still in flight discard its answer
         _detail.Clear();
         Services.Current.Thumbs.Clear();
+    }
+
+    /// <summary>Captures purged by another client, retention or the NSFW gate leave the results and the preview (B10).</summary>
+    private void OnRemoved(RemovedEvent e)
+    {
+        if (!IsShown) return;   // hidden: nothing is held (DropData)
+        if (e.Truncated)
+        {
+            if (_vm.Query.Trim().Length > 0) _ = _vm.SearchNowAsync();
+            _detail.Clear();
+            return;
+        }
+        var match = RemovedMatch.For(e);
+        if (_detail.Item is { } shown && match(shown.Id, shown.Ts)) _detail.Clear();
+        if (_vm.RemoveWhere(i => match(i.Id, i.Ts)) > 0) _ = _vm.LoadFacetsAsync();
     }
 
     private async Task LoadSideDataAsync()

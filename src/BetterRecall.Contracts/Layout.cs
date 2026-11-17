@@ -167,6 +167,7 @@ public sealed class UtcTimestampConverter : JsonConverter<DateTimeOffset>
 [JsonSerializable(typeof(ThumbData))]
 [JsonSerializable(typeof(StoreStats))]
 [JsonSerializable(typeof(AgentStatus))]
+[JsonSerializable(typeof(RemovedEvent))]
 [JsonSerializable(typeof(AuditEntry))]
 [JsonSerializable(typeof(List<AuditEntry>))]
 [JsonSerializable(typeof(PurgeResult))]

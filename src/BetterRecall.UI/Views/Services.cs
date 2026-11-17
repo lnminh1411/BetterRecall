@@ -76,12 +76,14 @@ internal sealed class Services
         MainClient.ResponseClassified += k => ui.TryEnqueue(() => OnClassified(k));
         MediaClient.ResponseClassified += k => ui.TryEnqueue(() => OnClassified(k));
         Subscription.StatusReceived += s => ui.TryEnqueue(() => { SetConnection(AgentErrorKind.None); ApplyStatus(s); });
+        Subscription.Removed += e => ui.TryEnqueue(() => OnRemoved(e));
         Subscription.Disconnected += k => ui.TryEnqueue(() => SetConnection(k));
         Subscription.Connected += () => ui.TryEnqueue(() =>
         {
             // The first connection follows InitAsync's fetch; every later one may face a restarted agent whose settings
-            // changed (reset to defaults, file edited): window exclusion, isolation and consent follow them (D2).
-            if (++_subscriptionConnects > 1) _ = ReloadSettingsAsync();
+            // changed (reset to defaults, file edited): window exclusion, isolation and consent follow them (D2). A UI
+            // started before the agent never got them from InitAsync: the first connection loads them then (B8).
+            if (SettingsReload.OnConnect(++_subscriptionConnects, Settings.Loaded)) _ = ReloadSettingsAsync();
         });
         _agentWatch.Exited += () => ui.TryEnqueue(() => AgentExited?.Invoke());
     }
@@ -94,6 +96,49 @@ internal sealed class Services
 
     /// <summary>A fresh connection for one long request (bench full). The caller disposes it; disposing closes the pipe.</summary>
     public AgentClient CreateRunClient() => new(_pipe, _trust);
+
+    /// <summary>Requests that may wait long on the agent (launcher search: up to 15 s for the query vector) each on their
+    /// own short connection, so settings, timeline and unlock on the main connection do not queue behind them (AB-S1).
+    /// Answers are classified like the main connection's (lock screen, offline banner).</summary>
+    public OneShotClient CreateOneShotClient()
+    {
+        var c = new OneShotClient(CreateRunClient);
+        c.ResponseClassified += k => Ui.TryEnqueue(() => OnClassified(k));
+        return c;
+    }
+
+    /// <summary>One describe dialog's connection: preview and send on it, closed with the dialog (B2, AB-S1).</summary>
+    public DescribeSession CreateDescribeSession()
+    {
+        var c = CreateRunClient();
+        c.ResponseClassified += k => Ui.TryEnqueue(() => OnClassified(k));
+        return new DescribeSession(c);
+    }
+
+    /// <summary>Captures left the store (another client's purge, retention, storage limit, NSFW drop): their thumbnails
+    /// leave the cache and pages drop them (B10, A-L5). Raised on the UI thread.</summary>
+    public event Action<RemovedEvent>? Removed;
+
+    private void OnRemoved(RemovedEvent e)
+    {
+        if (e.Truncated || e.From is not null) Thumbs.Clear();
+        else Thumbs.Remove(e.Ids);
+        Removed?.Invoke(e);
+    }
+
+    /// <summary>"settings reset" while settings.json is unreadable (D4), then fresh settings and status.</summary>
+    public async Task<AgentResult<System.Text.Json.Nodes.JsonObject>> ResetSettingsAsync()
+    {
+        var r = await Api.SettingsResetAsync();
+        if (r.Ok)
+        {
+            Settings.Refresh(r.Value!);
+            ApplySecurity();
+            SettingsLoaded?.Invoke();
+            await RefreshStatusAsync();
+        }
+        return r;
+    }
 
     /// <summary>Last full benchmark ("bench last"), fetched once and cached. Null when none exists or the agent is unreachable.</summary>
     public Task<BenchReport?> GetLastBenchAsync() => _lastBench ??= FetchLastBenchAsync();
@@ -153,8 +198,13 @@ internal sealed class Services
     public string UnlockMethod => SettingsSchema.Get(Settings.Original, "security.unlockMethod")?.GetValue<string>() ?? "hello";
     public bool AiEnabled => SettingsSchema.Get(Settings.Original, "ai.enabled")?.GetValue<bool>() ?? false;
 
-    /// <summary>Unlock screen mode; the data key still waits for its passphrase while the agent reports pause reason keylocked.</summary>
-    public UnlockMode UnlockMode => UnlockLogic.Mode(KeyProtection, UnlockMethod, Status?.PauseReason == "keylocked");
+    /// <summary>Unlock screen mode: what the agent waits for (status.unlockNeeds), not what settings say (B1). The password
+    /// box also after the agent answered that Hello is missing and the password stands in (B13), until the next unlock.</summary>
+    public UnlockMode UnlockMode => PasswordFallback ? UnlockMode.Password
+        : UnlockLogic.Mode(Status?.UnlockNeeds, KeyProtection, UnlockMethod, Status?.PauseReason == "keylocked");
+
+    /// <summary>Set by the unlock panel on the "Windows Hello is not available" answer (B13).</summary>
+    public bool PasswordFallback { get; set; }
 
     /// <summary>security.excludeOwnWindows and security.memoryIsolation, from the saved settings.</summary>
     public void ApplySecurity()
@@ -236,6 +286,7 @@ internal sealed class Services
     /// <summary>After a successful unlock verb.</summary>
     public void MarkUnlocked()
     {
+        PasswordFallback = false;
         SetLocked(false);
         _ = RefreshStatusAsync();
     }

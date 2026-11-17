@@ -176,7 +176,13 @@ public sealed record AgentStatus(
     int RetentionDays,
     string[]? HotkeysFailed = null,    // hotkey actions whose RegisterHotKey failed (combination taken by another app)
     string[]? Warnings = null,         // ocr-failing (keyframes dropped or stored without text), ner-unavailable (names and addresses not redacted), settings-unreadable (settings.json did not parse: defaults in use, file kept until a save), vc-runtime-missing (worker needs the Visual C++ 2015-2022 x64 runtime)
-    bool UserPaused = false);          // a user or ipc pause is set, even when a higher-priority reason is reported
+    bool UserPaused = false,           // a user or ipc pause is set, even when a higher-priority reason is reported
+    string? UnlockNeeds = null);       // UI pipe only: the secret the unlock screen asks for: passphrase | password | hello | none (B1)
+
+/// <summary>Stream event (subscribe and subscribe captures): captures left the store (purge by any client, retention,
+/// storage limit, NSFW drop, purge all). Ids are the deleted rows; From/To a purged window (purge all: from the start);
+/// Truncated: too many ids for one line, so ids is empty and the client reloads what it shows (B10, A-L5).</summary>
+public sealed record RemovedEvent(string Event, string Reason, IReadOnlyList<string> Ids, DateTimeOffset? From = null, DateTimeOffset? To = null, bool Truncated = false);
 
 public sealed record AuditEntry(
     DateTimeOffset Ts,
