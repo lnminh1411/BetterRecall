@@ -52,6 +52,9 @@ public sealed partial class EncryptedStore : IStore
     // its end) and ranges ending about now. Each expires FenceLifetime after it was set, by the monotonic clock, so a wall
     // clock that steps back after the purge cannot refuse new captures for long.
     private readonly List<(long From, long To, long SetAt)> _fences = [];
+    // App and site purges (A-M2): items of that app (process name, with or without .exe) or site stamped up to the purge
+    // instant. Same lifetime as the time fences.
+    private readonly List<(string Kind, string A, string B, long To, long SetAt)> _scopeFences = [];
     private readonly List<(string Id, long Ts)> _deleted = [];   // rows deleted under _wl, for the next Purged notice
 
     /// <summary>A range purge ending this close to now (or later) fences its window like "purge last N".</summary>
@@ -437,7 +440,7 @@ public sealed partial class EncryptedStore : IStore
         lock (_wl)
         {
             ThrowIfDisposed();
-            ThrowIfFenced(c.Ts);
+            ThrowIfFenced(c.Ts, app: c.App, site: c.Site);
             var id = Ids.New('s', c.Ts);
             long ts = c.Ts.ToUnixTimeMilliseconds();
             var month = Month(ts);
@@ -477,9 +480,9 @@ public sealed partial class EncryptedStore : IStore
         lock (_wl)
         {
             ThrowIfDisposed();
-            ThrowIfFenced(f.Ts);
+            ThrowIfFenced(f.Ts, app: f.App, site: f.Site);
             // A carry-in sample is re-stamped to the clip start: the pixels are older, and the fence checks those too (N4).
-            if (f.CapturedAt is { } grabbed && grabbed < f.Ts) ThrowIfFenced(grabbed);
+            if (f.CapturedAt is { } grabbed && grabbed < f.Ts) ThrowIfFenced(grabbed, app: f.App, site: f.Site);
             var id = Ids.New('r', f.Ts);
             long ts = f.Ts.ToUnixTimeMilliseconds();
             var month = Month(ts);
@@ -538,7 +541,8 @@ public sealed partial class EncryptedStore : IStore
         lock (_wl)
         {
             ThrowIfDisposed();
-            ThrowIfFenced(c.Ts);
+            // A segment is stamped at its start: one that runs into a purged window carries speech from inside it (A-L6).
+            ThrowIfFenced(c.Ts, Math.Max(0, c.DurationMs), app: c.App);
             var id = Ids.New('a', c.Ts);
             long ts = c.Ts.ToUnixTimeMilliseconds();
             using var tx = BeginWrite();
@@ -749,7 +753,7 @@ public sealed partial class EncryptedStore : IStore
                 if (scope.From == null || scope.To == null) throw new ArgumentException("Range needs from and to.");
                 where = "ts >= $from AND ts <= $to";
                 ps.Add(("$from", scope.From.Value.ToUnixTimeMilliseconds()));
-                ps.Add(("$to", scope.To.Value.ToUnixTimeMilliseconds()));
+                ps.Add(("$to", UpperBound(scope).ToUnixTimeMilliseconds()));
                 break;
             case "app":
                 if (string.IsNullOrWhiteSpace(scope.App)) throw new ArgumentException("App needed.");
@@ -805,23 +809,32 @@ public sealed partial class EncryptedStore : IStore
             // A time-window purge (panic flush, "delete the last hour") also forgets searches typed in that window.
             if (scope.Kind is "last" or "range" && scope.From != null && scope.To != null)
             {
+                var upper = UpperBound(scope);
                 Exec(_w, "DELETE FROM search_history WHERE ts >= $from AND ts <= $to",
-                    ("$from", scope.From.Value.ToUnixTimeMilliseconds()), ("$to", scope.To.Value.ToUnixTimeMilliseconds()));
+                    ("$from", scope.From.Value.ToUnixTimeMilliseconds()), ("$to", upper.ToUnixTimeMilliseconds()));
                 // The audit rows stay (who searched, when), but not the hash of what was searched in the window (B9).
                 Exec(_w, "UPDATE audit SET sha = '' WHERE verb = 'search' AND ts >= $from AND ts <= $to",
-                    ("$from", scope.From.Value.ToUnixTimeMilliseconds()), ("$to", scope.To.Value.ToUnixTimeMilliseconds()));
-                DeleteChatsInWindowLocked(scope.From.Value, scope.To.Value);   // chats active in the window go too
+                    ("$from", scope.From.Value.ToUnixTimeMilliseconds()), ("$to", upper.ToUnixTimeMilliseconds()));
+                DeleteChatsInWindowLocked(scope.From.Value, upper);   // chats active in the window go too
             }
             // App and site purges forget saved searches that name the app or site ("pornhub" after purge site pornhub.com).
             if (scope.Kind is "app" or "site") DeleteHistoryContainingLocked(HistoryNeedles(scope));
             CheckpointLocked();
             Log.Info($"purge ({scope.Kind}) removed {n} rows");
             bool window = scope.Kind is "last" or "range";
-            notice = TakeNoticeLocked("purge", window ? scope.From : null, window ? scope.To : null);
+            // App and site purges always tell the agent, even with no stored row: the replay ring may still hold the app (A-M2).
+            notice = TakeNoticeLocked("purge", window ? scope.From : null, window ? scope.To : null, scope.Kind is "app" or "site" ? scope.Kind : null);
         }
         Raise(notice);
         return n;
     }
+
+    /// <summary>The upper end a time-window purge deletes up to. "purge last N" (and the panic flush) is open-ended: a row
+    /// stamped after now (the clock stepped back since it was captured) is among the newest and goes too (C7). A zero
+    /// span (panic with 0 minutes; PurgeScope.Last reads the clock twice, so From and To differ by ticks) still deletes
+    /// nothing.</summary>
+    private static DateTimeOffset UpperBound(PurgeScope scope) =>
+        scope.Kind == "last" && scope.From is { } f && scope.To is { } t && t - f >= TimeSpan.FromSeconds(1) ? DateTimeOffset.MaxValue : scope.To!.Value;
 
     /// <summary>Blanks the hash of audit search rows whose hash is one of these (an app or site purge, B9). The rows stay.</summary>
     public int ClearAuditQueryHashes(IReadOnlyCollection<string> hashes)
@@ -844,11 +857,25 @@ public sealed partial class EncryptedStore : IStore
     /// FenceSlack of now (or later) refuses its window up to now. Caller holds _wl.</summary>
     private void FenceLocked(PurgeScope scope)
     {
-        if (scope.To is not { } to) return;
         var now = DateTimeOffset.UtcNow;
         long mono = MonoMs();
         long life = (long)FenceLifetime.TotalMilliseconds;
         _fences.RemoveAll(x => mono - x.SetAt >= life);
+        _scopeFences.RemoveAll(x => mono - x.SetAt >= life);
+        // App and site purges (A-M2): a frame of that app or site grabbed before the purge but still in OCR, encode or the
+        // replay sampler, or a transcript taken while it was in front, must not come back after it.
+        if (scope.Kind == "app" && !string.IsNullOrWhiteSpace(scope.App))
+        {
+            var a = scope.App.Trim().ToLowerInvariant();
+            _scopeFences.Add(("app", a, a.EndsWith(".exe", StringComparison.Ordinal) ? a[..^4] : a + ".exe", now.ToUnixTimeMilliseconds(), mono));
+            return;
+        }
+        if (scope.Kind == "site" && NormalizeSite(scope.Site) is { Length: > 0 } site)
+        {
+            _scopeFences.Add(("site", site, site, now.ToUnixTimeMilliseconds(), mono));
+            return;
+        }
+        if (scope.To is not { } to) return;
         if (scope.Kind == "last")
             _fences.Add((long.MinValue, to.ToUnixTimeMilliseconds(), mono));
         else if (scope.Kind == "range" && scope.From is { } from && to >= now - FenceSlack)
@@ -858,28 +885,52 @@ public sealed partial class EncryptedStore : IStore
         }
     }
 
-    /// <summary>Caller holds _wl.</summary>
-    private void ThrowIfFenced(DateTimeOffset ts)
+    /// <summary>Purge all (A-H1): the store opened after it refuses anything stamped up to the purge instant. Frames in
+    /// OCR and transcripts in the worker when the purge ran are stored after it, against this new store. RAM only: after a
+    /// restart nothing from before the purge is in flight.</summary>
+    public void FenceUpTo(DateTimeOffset instant)
     {
-        if (_fences.Count == 0) return;
+        lock (_wl)
+        {
+            ThrowIfDisposed();
+            _fences.Add((long.MinValue, instant.ToUnixTimeMilliseconds(), MonoMs()));
+        }
+    }
+
+    /// <summary>Throws PurgedWindowException when [ts, ts + durationMs] meets a fenced window, or the item belongs to a
+    /// purged app or site and is stamped up to that purge. Caller holds _wl.</summary>
+    private void ThrowIfFenced(DateTimeOffset ts, int durationMs = 0, string? app = null, string? site = null)
+    {
+        if (_fences.Count == 0 && _scopeFences.Count == 0) return;
         long mono = MonoMs();
         long life = (long)FenceLifetime.TotalMilliseconds;
         _fences.RemoveAll(x => mono - x.SetAt >= life);
+        _scopeFences.RemoveAll(x => mono - x.SetAt >= life);
         long t = ts.ToUnixTimeMilliseconds();
+        long end = t + durationMs;
         foreach (var (from, to, _) in _fences)
-            if (t >= from && t <= to) throw new PurgedWindowException(ts);
+            if (t <= to && end >= from) throw new PurgedWindowException(ts);
+        if (_scopeFences.Count == 0) return;
+        var appLc = (app ?? "").ToLowerInvariant();   // as stored in app_lc
+        var siteN = NormalizeSite(site);
+        foreach (var (kind, a, b, to, _) in _scopeFences)
+        {
+            if (t > to) continue;
+            bool hit = kind == "app" ? appLc.Length > 0 && (appLc == a || appLc == b) : siteN.Length > 0 && siteN == a;
+            if (hit) throw new PurgedWindowException(ts);
+        }
     }
 
-    /// <summary>The rows deleted since the last notice, as a notice; null when nothing was deleted and no window was
-    /// purged. Caller holds _wl.</summary>
-    private PurgeNotice? TakeNoticeLocked(string reason, DateTimeOffset? from = null, DateTimeOffset? to = null)
+    /// <summary>The rows deleted since the last notice, as a notice; null when nothing was deleted, no window was purged
+    /// and no app or site was purged. Caller holds _wl.</summary>
+    private PurgeNotice? TakeNoticeLocked(string reason, DateTimeOffset? from = null, DateTimeOffset? to = null, string? scope = null)
     {
         bool window = from is { } f && to is { } t && t > f;
-        if (_deleted.Count == 0 && !window) return null;
+        if (_deleted.Count == 0 && !window && scope is null) return null;
         var ids = _deleted.Select(d => d.Id).ToArray();
         DateTimeOffset? newest = _deleted.Count == 0 ? null : DateTimeOffset.FromUnixTimeMilliseconds(_deleted.Max(d => d.Ts));
         _deleted.Clear();
-        return new PurgeNotice(reason, ids, window ? from : null, window ? to : null, newest);
+        return new PurgeNotice(reason, ids, window ? from : null, window ? to : null, newest, scope);
     }
 
     /// <summary>Raises Purged outside the store lock; a failing listener does not stop the others.</summary>
@@ -1593,15 +1644,28 @@ public sealed partial class EncryptedStore : IStore
 
     // ---------------------------------------------------------------- lifecycle
 
+    /// <summary>The data folder this store lives in.</summary>
+    public string Home => _home;
+
     /// <summary>Closes every connection and deletes store.db and all keyframe files (purge all). The instance is unusable afterwards.</summary>
     public void DeleteAllFiles()
     {
+        CloseForPurgeAll();
         lock (_wl)
         lock (_rl)
-        {
-            CloseLocked();
             DeleteFiles(_home);
-        }
+    }
+
+    /// <summary>Purge all, first half: listeners on this instance (a running capture export) hear "all" before the store
+    /// goes away, so they stop with the purge message instead of failing on a disposed store or publishing their file
+    /// (C1, BC-S2). Then every connection closes: a reader still holding this instance (the embedding scheduler) gets
+    /// ObjectDisposedException instead of pre-purge rows. The files stay until DeleteFiles.</summary>
+    public void CloseForPurgeAll()
+    {
+        Raise(new PurgeNotice("all", [], DateTimeOffset.MinValue, DateTimeOffset.UtcNow));
+        lock (_wl)
+        lock (_rl)
+            CloseLocked();
     }
 
     /// <summary>Deletes store.db (+ -wal, -shm) and every keyframe file of a data folder without opening them; purge all

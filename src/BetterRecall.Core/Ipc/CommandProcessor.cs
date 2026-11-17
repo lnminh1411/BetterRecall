@@ -51,6 +51,8 @@ public sealed class CommandDeps
     public required IThumbnailer Thumbnailer { get; init; }
     /// <summary>purge all: destroys the key and deletes every store, keyframe and replay file. Returns rows deleted.</summary>
     public required Func<CancellationToken, Task<int>> PurgeAll { get; init; }
+    /// <summary>Replay files the last purge all could not delete (reply field undeleted). Null: never reported.</summary>
+    public Func<int>? PurgeAllUndeleted { get; init; }
     /// <summary>Encrypts the saved bench report. Null disables saving (bench last then answers Not found.).</summary>
     public IBlobCipher? Blobs { get; init; }
     /// <summary>Data dir, for DataPaths.BenchReport.</summary>
@@ -1060,7 +1062,7 @@ public sealed partial class CommandProcessor
                 {
                     int all = await _d.PurgeAll(ct).ConfigureAwait(false);
                     _chat?.Clear();
-                    return Ok(JsonSerializer.Serialize(new PurgeResult(all), CoreJson.Default.PurgeResult));
+                    return Ok(JsonSerializer.Serialize(new PurgeResult(all, _d.PurgeAllUndeleted?.Invoke() is > 0 and var left ? left : null), CoreJson.Default.PurgeResult));
                 }
                 var st = _d.Store();
                 if (st == null) return Err(NotOpenError);
