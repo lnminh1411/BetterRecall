@@ -1,175 +1,17 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) BetterRecall contributors
-using System.Security.Cryptography;
 using System.Text.Json;
 using BetterRecall.Contracts;
 using BetterRecall.UI.Logic;
 using BetterRecall.UI.Logic.Mock;
-using CoreIpc = BetterRecall.Core.Ipc;
-using CoreSettings = BetterRecall.Core.SettingsStore;
-using CoreStore = BetterRecall.Core.Store.EncryptedStore;
-using KeyVault = BetterRecall.Core.Crypto.KeyVault;
 
 namespace BetterRecall.UI.Tests;
 
-/// <summary>Agent control for the seam harness: a read gate and status the test sets.</summary>
-internal sealed class SeamAgent : IAgentControl
-{
-    public volatile bool Unlocked = true;
-    public AgentStatus Status = new(true, false, null, null, false, null, new AudioState(false, false), new QueueState(0), "CPU",
-        new StoreStats(0, 0, 0, null, null, 0, 0), 30);
-    public AgentStatus GetStatus() => Status with { Locked = !Unlocked };
-    public void Pause(TimeSpan? duration, string reason) { }
-    public void Resume(string reason) { }
-    public bool IsUnlocked => Unlocked;
-    public Task<bool> UnlockAsync(CancellationToken ct) { Unlocked = true; return Task.FromResult(true); }   // "Hello" passes
-    public void Lock() => Unlocked = false;
-    public void OpenReadGate() => Unlocked = true;
-    public void Consent() { }
-    public Task<ReplayClip> SaveReplayAsync(CancellationToken ct) => throw new NotSupportedException();
-    public IReadOnlyList<ReplayClip> ListReplays() => [];
-    public Task ExportReplayAsync(string id, string path, CancellationToken ct) => throw new NotSupportedException();
-    public void DeleteReplay(string id) => throw new KeyNotFoundException();
-    public void Panic() { }
-    public Task<BenchResult> BenchAsync(CancellationToken ct) => throw new NotSupportedException();
-    public event Action<AgentStatus>? StatusChanged;
-    public event Action<CaptureMeta>? CaptureStored { add { } remove { } }
-    public void RaiseStatus() => StatusChanged?.Invoke(GetStatus());
-}
-
-internal sealed class SeamKeys : IKeyVault
-{
-    public string Protection => "dpapi";
-    public bool HelloAvailable => true;
-    public bool KeyLoaded => true;
-    public bool UnlockWithPassphrase(string passphrase) => false;
-    public Task<bool> VerifyUserAsync(nint hwnd, string reason, CancellationToken ct) => Task.FromResult(true);
-    public void DestroyKey() { }
-}
-
-internal sealed class NoEmbedder : IQueryEmbedder
-{
-    public Task<float[]> EmbedQueryAsync(string text, CancellationToken ct) => Task.FromException<float[]>(new InvalidOperationException("no worker"));
-}
-
-internal sealed class NoThumbs : IThumbnailer
-{
-    public Task<ThumbData?> GetThumbAsync(string id, int width, CancellationToken ct) => Task.FromResult<ThumbData?>(null);
-    public void ClearCache() { }
-}
-
-/// <summary>
-/// The agent's real command processor, settings, store and key vault behind a real UI pipe server in this process, so
-/// UI logic (AgentClient, AgentApi, StatusSubscription, DescribeSession) talks to the code it talks to in the product.
-/// The mock (MockAgent) got the describe token rule wrong and hid B2; this harness cannot.
-/// </summary>
-internal sealed class CoreHarness : IAsyncDisposable
-{
-    public static readonly string Root = Path.Combine(
-        Environment.GetEnvironmentVariable("BR_TEST_TMP") is { Length: > 0 } t ? t : Path.GetTempPath(), "betterrecall-uiseam");
-
-    public string Home { get; }
-    public CoreSettings Settings { get; }
-    public CoreStore? Store { get; private set; }
-    public SeamAgent Agent { get; } = new();
-    public CoreIpc.CommandProcessor Processor { get; }
-    public CoreIpc.PipeServer Server { get; }
-    private readonly IDisposable? _keysOwned;
-
-    public CoreHarness(string? settingsJson = null, Func<string, CoreSettings, IKeyVault>? keys = null, bool openStore = true)
-    {
-        Home = Path.Combine(Root, "h-" + Guid.NewGuid().ToString("N")[..12]);
-        Directory.CreateDirectory(Home);
-        File.WriteAllText(DataPaths.SettingsFile(Home), settingsJson ?? "{\"security\":{\"keyProtection\":\"dpapi\"}}");
-        Settings = CoreSettings.Load(Home);
-        var vault = keys?.Invoke(Home, Settings) ?? new SeamKeys();
-        _keysOwned = vault as IDisposable;
-        if (openStore)
-        {
-            var key = RandomNumberGenerator.GetBytes(32);
-            Store = new CoreStore(Home, () => (byte[])key.Clone());
-        }
-        Processor = new CoreIpc.CommandProcessor(new CoreIpc.CommandDeps
-        {
-            Settings = Settings, Store = () => Store, Keys = vault, Agent = Agent, Embedder = new NoEmbedder(), Thumbnailer = new NoThumbs(),
-            PurgeAll = _ => Task.FromResult(0),
-            AiKey = new BetterRecall.Core.Ai.ApiKeyStore(Home),
-            Describer = new BetterRecall.Core.Ai.CloudDescriber(),
-        });
-        if (Store is not null) Store.Purged += n => Processor.GetType()
-            .GetMethod("OnStorePurged", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
-            .Invoke(Processor, [n]);   // as CoreHost wires every store (internal hook)
-        Server = new CoreIpc.PipeServer("BetterRecall.uitest.core." + Guid.NewGuid().ToString("N"), CoreIpc.PipeKind.Ui, _ => true, Processor.ServeAsync);
-        Server.Start();
-    }
-
-    public string PipeName => Server.Name;
-
-    public AgentClient NewClient() => new(PipeName, MockHarness.OwnProcessTrust());
-
-    /// <summary>A stored, indexed screen capture with a keyframe (state 1 needs its embedding).</summary>
-    public string AddScreen(string app, string title, int minutesAgo = 2)
-    {
-        var id = Store!.AddScreenCapture(new NewScreenCapture(
-            DateTimeOffset.UtcNow.AddMinutes(-minutesAgo), app, @"C:\Apps\" + app, title, 0, 1280, 720, 0x1234,
-            [.. "RIFF"u8, 0, 0, 0, 0, .. "WEBPVP8 MARKER-PIXELS-0123456789"u8], "image/webp", true));
-        var v = new float[768];
-        v[0] = 1;
-        Store.SetEmbedding(id, v, new EmbeddingInfo("fake-gemma", "r1", 768));
-        return id;
-    }
-
-    public void Set(string json) => Assert.Null(Settings.TryUpdate(JsonDocument.Parse(json).RootElement));
-
-    public async ValueTask DisposeAsync()
-    {
-        await Server.DisposeAsync();
-        Store?.Dispose();
-        _keysOwned?.Dispose();
-        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
-        for (int i = 0; i < 5; i++)
-        {
-            try { if (Directory.Exists(Home)) Directory.Delete(Home, true); return; }
-            catch (IOException) { await Task.Delay(100); }
-            catch (UnauthorizedAccessException) { await Task.Delay(100); }
-        }
-    }
-}
-
-/// <summary>Bug sweep 4, batch U (control plane): UI side, against the real agent processor where the seam matters.</summary>
+/// <summary>Bug sweep 4, batch U (control plane): UI side. The tests against the real agent processor (describe, unlock,
+/// reset, removed events, the pipe cap) are in Core.Tests (Sweep4USeamTests), so this MIT project never links the backend.</summary>
 public sealed class Sweep4UUiTests
 {
-    private const string AiOn = "{\"security\":{\"keyProtection\":\"dpapi\"},\"ai\":{\"enabled\":true,\"provider\":\"openai-compatible\",\"endpoint\":\"http://127.0.0.1:9/v1\",\"model\":\"m\"}}";
-
     // ---- B2: describe preview and send on one connection
-
-    [Fact]
-    public async Task B2_describe_session_reaches_the_provider_on_the_real_agent()
-    {
-        await using var core = new CoreHarness(AiOn);
-        var id = core.AddScreen("notepad.exe", "Quarterly notes");
-        await using var session = new DescribeSession(core.NewClient());
-        var p = await session.PreviewAsync(id);
-        Assert.True(p.Ok, p.Error);
-        var r = await session.SendAsync();
-        // The token was accepted: the send went on to the provider (a closed loopback port here).
-        Assert.False(r.Ok);
-        Assert.NotEqual(AgentErrors.InvalidToken, r.Error);
-        Assert.Equal(AgentErrors.ProviderUnreachable, r.Error);
-    }
-
-    [Fact]
-    public async Task B2_old_two_connection_flow_is_refused_by_the_real_agent()
-    {
-        await using var core = new CoreHarness(AiOn);
-        var id = core.AddScreen("notepad.exe", "Quarterly notes");
-        await using var media = core.NewClient();
-        await using var run = core.NewClient();
-        var p = await new AgentApi(media).DescribePreviewAsync(id);
-        Assert.True(p.Ok, p.Error);
-        var r = await new AgentApi(run).DescribeSendAsync(p.Value!.Token);
-        Assert.Equal(AgentErrors.InvalidToken, r.Error);   // tokens live on the connection that asked for the preview
-    }
 
     [Fact]
     public async Task B2_mock_keeps_describe_tokens_per_connection_like_the_agent()
@@ -242,37 +84,6 @@ public sealed class Sweep4UUiTests
 
     // ---- B1 + B6 + B8 + B13: the unlock screen follows the agent
 
-    [Fact]
-    public async Task B1_unlock_flow_over_the_real_agent_with_a_passphrase_key_under_auto()
-    {
-        const string pass = "correct horse battery";
-        await using var core = new CoreHarness("{\"security\":{\"keyProtection\":\"passphrase\"}}", (home, s) =>
-        {
-            using (var first = new KeyVault(home, () => s.Current, probeHello: false)) Assert.True(first.UnlockWithPassphrase(pass));
-            Assert.Null(s.TryUpdate(JsonDocument.Parse("{\"security\":{\"keyProtection\":\"auto\"}}").RootElement));   // D3
-            var v = new KeyVault(home, () => s.Current, probeHello: false);
-            Assert.False(v.TryLoadSilent());
-            return v;
-        }, openStore: false);
-        core.Agent.Unlocked = false;
-        await using var client = core.NewClient();
-        var api = new AgentApi(client);
-        var st = (await api.StatusAsync()).Value!;
-        Assert.True(st.Locked);
-        // Settings say auto and method hello; the old rule showed only the Hello button (B1).
-        Assert.Equal(UnlockMode.Hello, UnlockLogic.Mode("auto", "hello", st.PauseReason == "keylocked"));
-        Assert.Equal(UnlockMode.Passphrase, UnlockLogic.Mode(st.UnlockNeeds, "auto", "hello", st.PauseReason == "keylocked"));
-        // The empty unlock (Hello button) opens no data: status stays locked (B6), the box stays (no flip, no wipe).
-        Assert.True((await api.UnlockAsync(null)).Ok);
-        st = (await api.StatusAsync()).Value!;
-        Assert.True(st.Locked);
-        Assert.Equal("passphrase", st.UnlockNeeds);
-        Assert.True((await api.UnlockAsync(pass)).Ok);
-        st = (await api.StatusAsync()).Value!;
-        Assert.False(st.Locked);
-        Assert.Equal("none", st.UnlockNeeds);
-    }
-
     [Theory]
     [InlineData("passphrase", "auto", "hello", UnlockMode.Passphrase)]
     [InlineData("password", "auto", "hello", UnlockMode.Password)]      // B13: no Hello, the password stands in
@@ -329,53 +140,7 @@ public sealed class Sweep4UUiTests
         Assert.False(WarningBanners.Same(["ocr-failing"], null));
     }
 
-    [Fact]
-    public async Task B3_reset_over_the_real_agent_after_an_unreadable_file()
-    {
-        await using var core = new CoreHarness("{\"capture\":{\"consented\":true},\"retention\":{\"days\":7}} x");
-        await using var client = core.NewClient();
-        var api = new AgentApi(client);
-        var save = await api.SettingsSetAsync(new System.Text.Json.Nodes.JsonObject { ["ui"] = new System.Text.Json.Nodes.JsonObject { ["theme"] = "dark" } });
-        Assert.Equal(AgentErrors.SettingsUnreadable, save.Error);
-        Assert.Equal(AgentErrors.SettingsUnreadable, (await api.ConsentAsync()).Error);
-        var reset = await api.SettingsResetAsync();
-        Assert.True(reset.Ok, reset.Error);
-        Assert.True((await api.SettingsSetAsync(new System.Text.Json.Nodes.JsonObject { ["ui"] = new System.Text.Json.Nodes.JsonObject { ["theme"] = "dark" } })).Ok);
-    }
-
     // ---- B10 + A-L5: rows gone reach the UI
-
-    [Fact]
-    public async Task B10_status_subscription_hears_removed_rows_from_the_real_agent()
-    {
-        await using var core = new CoreHarness();
-        var keep = core.AddScreen("notepad.exe", "kept", 3);
-        var gone = core.AddScreen("bank.exe", "dropped", 1);
-        var sub = new StatusSubscription(core.PipeName, MockHarness.OwnProcessTrust());
-        var removed = new TaskCompletionSource<RemovedEvent>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var connected = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var statuses = new List<AgentStatus>();
-        sub.Connected += () => connected.TrySetResult();
-        sub.Removed += e => removed.TrySetResult(e);
-        sub.StatusReceived += s => { lock (statuses) statuses.Add(s); };
-        sub.Start();
-        try
-        {
-            await connected.Task.WaitAsync(TimeSpan.FromSeconds(10));
-            await Task.Delay(100);
-            core.Store!.DropCapture(gone, "nsfw");
-            var e = await removed.Task.WaitAsync(TimeSpan.FromSeconds(10));
-            Assert.Equal("drop", e.Reason);
-            Assert.Equal([gone], e.Ids);
-            lock (statuses) Assert.All(statuses, s => Assert.NotNull(s.Audio));   // never parsed as a status
-
-            // The UI side: the timeline and the thumbnail cache drop it.
-            var match = RemovedMatch.For(e);
-            Assert.True(match(gone, DateTimeOffset.UtcNow));
-            Assert.False(match(keep, DateTimeOffset.UtcNow));
-        }
-        finally { await sub.DisposeAsync(); }
-    }
 
     [Fact]
     public async Task B10_timeline_and_thumbnail_cache_drop_removed_rows()
@@ -407,6 +172,58 @@ public sealed class Sweep4UUiTests
         Assert.Null(cache.TryGet("s_a", 1280));
         Assert.NotNull(cache.TryGet("s_b", 320));
         Assert.Equal(1, cache.Bytes);
+    }
+
+    // ---- review follow-ups
+
+    [Fact]
+    public async Task S9_thumbnail_fetch_started_before_a_removal_does_not_put_it_back()
+    {
+        var cache = new ThumbnailCache(1 << 20);
+        var release = new TaskCompletionSource<byte[]?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var load = cache.GetOrLoadAsync("s_a", 320, _ => release.Task, CancellationToken.None);   // the fetch began before the row went away
+        await Task.Delay(50);
+        cache.Remove(["s_a"]);
+        release.SetResult([1, 2]);
+        Assert.NotNull(await load);
+        Assert.Null(cache.TryGet("s_a", 320));
+    }
+
+    [Fact]
+    public void R_replay_text_unchecked_has_its_own_banner()
+    {
+        var b = Assert.Single(WarningBanners.For(["replay-text-unchecked"]));
+        Assert.Equal("Warn_ReplayTextTitle", b.TitleKey);
+        Assert.True(b.Error);
+        Assert.False(b.CanReset);
+    }
+
+    [Fact]
+    public async Task P_purge_all_reports_replay_files_left_for_the_next_start()
+    {
+        var r = Responses.PurgeResult(JsonDocument.Parse("{\"purged\":12,\"undeleted\":2}").RootElement);
+        Assert.Equal(new PurgeResult(12, 2), r);
+        Assert.Equal(["Danger_AllDone", "Danger_AllUndeleted"], PurgeFlow.AllDoneText(r).Select(t => t.Key));
+        Assert.Equal(["Danger_AllDone"], PurgeFlow.AllDoneText(Responses.PurgeResult(JsonDocument.Parse("{\"purged\":3}").RootElement)).Select(t => t.Key));
+        Assert.Equal(["Danger_AllDone"], PurgeFlow.AllDoneText(new PurgeResult(3, 0)).Select(t => t.Key));
+        // And over the mock, end to end.
+        await using var h = new MockHarness();
+        var all = await PurgeFlow.PurgeAllAsync(h.Api, null);
+        Assert.True(all.Ok, all.Error);
+    }
+
+    [Fact]
+    public async Task M1_one_shot_falls_back_to_the_main_connection_when_the_pipe_is_busy()
+    {
+        await using var server = new FakeLineServer(_ => Envelope.Ok("{\"count\":0,\"truncated\":false,\"tookMs\":1,\"results\":[]}"));
+        await using var main = new AgentClient(server.Name, new AcceptAll());
+        var busy = new OneShotClient(() => new AgentClient("BetterRecall.nobody." + Guid.NewGuid().ToString("N"), new AcceptAll(), TimeSpan.FromMilliseconds(100)), main);
+        AgentErrorKind? classified = null;
+        busy.ResponseClassified += k => classified = k;
+        Assert.True((await new AgentApi(busy).SearchAsync(new SearchQuery("acme"))).Ok);   // read-only: answered on main
+        Assert.Null(classified);   // no "agent not running" from the one-shot side
+        var write = await busy.SendAsync("pause");
+        Assert.Equal(AgentErrorKind.NotRunning, write.Kind);   // a change is never sent twice
     }
 
     private sealed class FixedLine(string data) : IAgentClient

@@ -90,6 +90,7 @@ public sealed class ThumbnailCache(long maxBytes)
         if (gone.Count == 0) return;
         lock (_lock)
         {
+            _gen++;   // a fetch that started before the removal must not put the thumbnail back (review S9)
             for (var node = _lru.First; node is not null;)
             {
                 var next = node.Next;

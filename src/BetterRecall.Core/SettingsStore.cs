@@ -12,6 +12,9 @@ public sealed partial class SettingsStore : ISettingsStore
 {
     private readonly string _path;
     private readonly Lock _gate = new();
+    /// <summary>Serialises saves (merge, write, swap). Readers of Current never wait on it, so a save that retries its
+    /// file replace does not stall every pipe request (sweep 4 review S3).</summary>
+    private readonly Lock _writeGate = new();
     private Settings _current;
 
     public event Action<Settings>? Changed;
@@ -35,6 +38,9 @@ public sealed partial class SettingsStore : ISettingsStore
     /// <summary>TryUpdate's answer while LoadError is set: a partial save would write defaults over every other choice
     /// in the file (deny list, redaction, retention, key protection) (B3, D4).</summary>
     public const string ErrUnreadable = "settings.json could not be read. Reset the settings or fix the file first.";
+
+    /// <summary>TryUpdate's answer when the file could not be replaced (held open, read-only, no access).</summary>
+    public const string ErrWrite = "settings.json could not be written.";
 
     /// <summary>Loads settings.json from home. Missing file: defaults, written out. Bad keys are reset to defaults and
     /// logged. A file that does not parse at all is not overwritten: a hand edit with one typo (an unescaped backslash)
@@ -69,18 +75,29 @@ public sealed partial class SettingsStore : ISettingsStore
         return store;
     }
 
-    /// <summary>Reads a settings file without creating or fixing it (CLI, MCP). Defaults when missing or bad.</summary>
+    /// <summary>Reads a settings file without creating or fixing it (CLI, MCP). Defaults when missing or bad. A file that
+    /// is briefly missing or held (the agent's replace swaps it) is read again a few times first: the CLI takes its pipe
+    /// name from here, and a default one reads as "agent not running" (sweep 4 review S4).</summary>
     public static Settings ReadOnly(string home)
     {
-        try
+        var path = DataPaths.SettingsFile(home);
+        for (int attempt = 0; ; attempt++)
         {
-            var path = DataPaths.SettingsFile(home);
-            if (!File.Exists(path)) return new Settings();
-            var node = JsonNode.Parse(ReadShared(path), documentOptions: new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true });
-            return node is JsonObject obj ? LoadLenient(obj, out _) : new Settings();
+            try
+            {
+                var node = JsonNode.Parse(ReadShared(path), documentOptions: new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true });
+                return node is JsonObject obj ? LoadLenient(obj, out _) : new Settings();
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && attempt < ReadRetries)
+            {
+                Thread.Sleep(ReadRetryDelayMs);
+            }
+            catch { return new Settings(); }
         }
-        catch { return new Settings(); }
     }
+
+    internal const int ReadRetries = 3;
+    internal const int ReadRetryDelayMs = 25;
 
     /// <summary>Reads the file without blocking the agent's replace (File.Move onto it): File.ReadAllText shares Read
     /// only, so a save while the CLI or the worker read it failed with "Internal error." (C9).</summary>
@@ -158,11 +175,16 @@ public sealed partial class SettingsStore : ISettingsStore
     {
         if (partial.ValueKind != JsonValueKind.Object) return "Invalid JSON.";
         Settings next;
-        lock (_gate)
+        lock (_writeGate)
         {
-            if (LoadError is not null) return ErrUnreadable;
+            Settings current;
+            lock (_gate)
+            {
+                if (LoadError is not null) return ErrUnreadable;
+                current = _current;
+            }
             var schema = (JsonObject)JsonSerializer.SerializeToNode(new Settings(), ContractsJson.Default.Settings)!;
-            var merged = (JsonObject)JsonSerializer.SerializeToNode(_current, ContractsJson.Default.Settings)!;
+            var merged = (JsonObject)JsonSerializer.SerializeToNode(current, ContractsJson.Default.Settings)!;
             var touched = new List<string>();
             foreach (var section in partial.EnumerateObject())
             {
@@ -189,9 +211,13 @@ public sealed partial class SettingsStore : ISettingsStore
                 return $"Invalid {bad}.";
             }
             next = parsed;
-            WriteFile(next);
-            _current = next;
-            LoadError = null;
+            try { WriteFile(next); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                Log.Warn("settings.json could not be written", ex);
+                return ErrWrite;
+            }
+            lock (_gate) { _current = next; LoadError = null; }
         }
         RaiseChanged(next);
         return null;
@@ -208,17 +234,28 @@ public sealed partial class SettingsStore : ISettingsStore
         };
     }
 
-    /// <summary>"Reset the settings" while settings.json is unreadable: writes the defaults already in use (the bad file
-    /// stays as settings.json.bad) and allows saves again (D4). False when the file had loaded.</summary>
+    /// <summary>"Reset the settings" while settings.json is unreadable: copies the file as it is now to settings.json.bad
+    /// (the user may have edited it since the start), writes the defaults already in use and allows saves again (D4).
+    /// False when the file had loaded. Throws IOException when the copy or the write fails; nothing is reset then.</summary>
     public bool ResetUnreadable()
     {
         Settings snapshot;
-        lock (_gate)
+        lock (_writeGate)
         {
-            if (LoadError is null) return false;
-            snapshot = _current;
-            WriteFile(snapshot);
-            LoadError = null;
+            lock (_gate)
+            {
+                if (LoadError is null) return false;
+                snapshot = _current;
+            }
+            try { if (File.Exists(_path)) File.Copy(_path, _path + ".bad", overwrite: true); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                Log.Warn("settings reset: copy to settings.json.bad failed, nothing reset", ex);
+                throw new IOException("settings.json could not be kept as settings.json.bad, so nothing was reset.", ex);
+            }
+            try { WriteFile(snapshot); }
+            catch (Exception ex) when (ex is UnauthorizedAccessException) { throw new IOException(ErrWrite, ex); }
+            lock (_gate) LoadError = null;
         }
         Log.Info("settings.json reset to defaults (the unreadable file is kept as settings.json.bad)");
         RaiseChanged(snapshot);
@@ -227,8 +264,12 @@ public sealed partial class SettingsStore : ISettingsStore
 
     public void Save()
     {
-        Settings snapshot;
-        lock (_gate) { snapshot = _current; WriteFile(snapshot); LoadError = null; }
+        lock (_writeGate)
+        {
+            var snapshot = Current;
+            WriteFile(snapshot);
+            lock (_gate) LoadError = null;
+        }
     }
 
     /// <summary>Replaces the settings in code (agent use, for example capture.consented). Validates first.</summary>
@@ -236,7 +277,11 @@ public sealed partial class SettingsStore : ISettingsStore
     {
         var bad = Validate(next);
         if (bad != null) return $"Invalid {bad}.";
-        lock (_gate) { WriteFile(next); _current = next; LoadError = null; }
+        lock (_writeGate)
+        {
+            WriteFile(next);
+            lock (_gate) { _current = next; LoadError = null; }
+        }
         RaiseChanged(next);
         return null;
     }
@@ -264,21 +309,29 @@ public sealed partial class SettingsStore : ISettingsStore
             fs.Flush(flushToDisk: true);
         }
         // Another process may hold settings.json open for a moment (CLI, worker start, an editor or a virus scan):
-        // retry the replace briefly instead of losing the save as "Internal error." (C9).
-        for (int attempt = 0; ; attempt++)
+        // retry the replace briefly instead of losing the save as "Internal error." (C9). Caller holds _writeGate only.
+        try
         {
-            try
+            for (int attempt = 0; ; attempt++)
             {
-                // ReplaceFile renames the old file aside and deletes it, which readers that share Delete allow; MoveFileEx
-                // cannot supersede a file someone has open.
-                if (File.Exists(_path)) File.Replace(tmp, _path, destinationBackupFileName: null, ignoreMetadataErrors: true);
-                else File.Move(tmp, _path, overwrite: true);
-                return;
+                try
+                {
+                    // ReplaceFile renames the old file aside and deletes it, which readers that share Delete allow;
+                    // MoveFileEx cannot supersede a file someone has open.
+                    if (File.Exists(_path)) File.Replace(tmp, _path, destinationBackupFileName: null, ignoreMetadataErrors: true);
+                    else File.Move(tmp, _path, overwrite: true);
+                    return;
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && attempt < MoveRetries)
+                {
+                    Thread.Sleep(MoveRetryDelayMs * (attempt + 1));
+                }
             }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && attempt < MoveRetries)
-            {
-                Thread.Sleep(MoveRetryDelayMs * (attempt + 1));
-            }
+        }
+        finally
+        {
+            // Never leave the temporary copy behind after the last try failed (review N8).
+            try { if (File.Exists(tmp)) File.Delete(tmp); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
         }
     }
 

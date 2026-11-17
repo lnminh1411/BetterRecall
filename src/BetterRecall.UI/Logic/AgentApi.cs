@@ -69,6 +69,9 @@ public static class Responses
 
     public static int Purged(JsonElement d) => d.GetProperty("purged").GetInt32();
 
+    /// <summary>"purge confirm" with purge all's undeleted count (replay files deleted at the next start).</summary>
+    public static PurgeResult PurgeResult(JsonElement d) => d.Deserialize(ContractsJson.Default.PurgeResult) ?? throw new JsonException();
+
     public static VersionReply Version(JsonElement d) => d.Deserialize(ContractsJson.Default.VersionReply) ?? throw new JsonException();
 
     public static JsonObject SettingsObject(JsonElement d) =>
@@ -203,6 +206,9 @@ public sealed class AgentApi(IAgentClient client)
 
     public async Task<AgentResult<int>> PurgeConfirmAsync(string token, CancellationToken ct = default) =>
         (await client.SendAsync("purge confirm " + token, ct)).As(Responses.Purged);
+
+    public async Task<AgentResult<PurgeResult>> PurgeConfirmResultAsync(string token, CancellationToken ct = default) =>
+        (await client.SendAsync("purge confirm " + token, ct)).As(Responses.PurgeResult);
 
     public async Task<AgentResult<List<AuditEntry>>> AuditAsync(int? limit = null, CancellationToken ct = default) =>
         (await client.SendAsync(limit is { } l ? "audit " + l.ToString(CultureInfo.InvariantCulture) : "audit", ct)).As(Responses.Audit);

@@ -86,6 +86,7 @@ internal sealed class Services
             if (SettingsReload.OnConnect(++_subscriptionConnects, Settings.Loaded)) _ = ReloadSettingsAsync();
         });
         _agentWatch.Exited += () => ui.TryEnqueue(() => AgentExited?.Invoke());
+        Reconnected += () => PasswordFallback = false;   // a restarted agent says again what it needs (review N2)
     }
 
     /// <summary>Watches the agent behind the main connection (mock mode: none, the server is this process).</summary>
@@ -102,7 +103,7 @@ internal sealed class Services
     /// Answers are classified like the main connection's (lock screen, offline banner).</summary>
     public OneShotClient CreateOneShotClient()
     {
-        var c = new OneShotClient(CreateRunClient);
+        var c = new OneShotClient(CreateRunClient, MainClient);
         c.ResponseClassified += k => Ui.TryEnqueue(() => OnClassified(k));
         return c;
     }

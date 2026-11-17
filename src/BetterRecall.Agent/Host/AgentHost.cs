@@ -677,7 +677,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
     public void Resume(string reason)
     {
         ClearForResume(_pause, reason);
-        Log.Info(reason == "ipc" ? "resumed (ipc)" : "resumed");
+        Log.Info(reason != "ipc" ? "resumed" : _pause.Has("user") ? "resumed (ipc), user pause kept" : "resumed (ipc)");
         RaiseStatus(force: true);
     }
 

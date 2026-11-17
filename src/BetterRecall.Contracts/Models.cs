@@ -175,7 +175,7 @@ public sealed record AgentStatus(
     StoreStats Store,
     int RetentionDays,
     string[]? HotkeysFailed = null,    // hotkey actions whose RegisterHotKey failed (combination taken by another app)
-    string[]? Warnings = null,         // ocr-failing (keyframes dropped or stored without text), ner-unavailable (names and addresses not redacted), settings-unreadable (settings.json did not parse: defaults in use, file kept until a save), vc-runtime-missing (worker needs the Visual C++ 2015-2022 x64 runtime)
+    string[]? Warnings = null,         // ocr-failing (keyframes dropped or stored without text), ner-unavailable (names and addresses not redacted), settings-unreadable (settings.json did not parse: defaults in use, file kept until a save), vc-runtime-missing (worker needs the Visual C++ 2015-2022 x64 runtime), replay-text-unchecked (replay cannot check screen text: text recognition failing or not run yet; the foreground window is masked)
     bool UserPaused = false,           // a user or ipc pause is set, even when a higher-priority reason is reported
     string? UnlockNeeds = null);       // UI pipe only: the secret the unlock screen asks for: passphrase | password | hello | none (B1)
 

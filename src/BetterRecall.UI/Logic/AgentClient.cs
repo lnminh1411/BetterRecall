@@ -261,8 +261,11 @@ public sealed class AgentClient(string pipeName, IServerTrust trust, TimeSpan? c
 /// Each request on a connection of its own, closed after the answer. For requests that can wait long on the agent
 /// (launcher search: the query vector waits up to 15 s behind the worker), so the shared, serialised connections do not
 /// stall behind them (AB-S1). Only one is open per request in flight.
+/// No connection (every pipe instance busy, or the agent gone) is not classified here: a busy pipe must never read as
+/// "agent not running". A read-only request then goes out once on the fallback (the main connection), which classifies
+/// its own answer; anything else returns the failure unclassified.
 /// </summary>
-public sealed class OneShotClient(Func<AgentClient> create) : IAgentClient
+public sealed class OneShotClient(Func<AgentClient> create, IAgentClient? fallback = null) : IAgentClient
 {
     private int _pid;
 
@@ -279,6 +282,8 @@ public sealed class OneShotClient(Func<AgentClient> create) : IAgentClient
             r = await c.SendAsync(line, ct).ConfigureAwait(false);
             if (c.ServerPid > 0) Volatile.Write(ref _pid, c.ServerPid);
         }
+        if (r.Kind == AgentErrorKind.NotRunning)
+            return fallback is not null && AgentClient.IsReadOnly(line) ? await fallback.SendAsync(line, ct).ConfigureAwait(false) : r;
         ResponseClassified?.Invoke(r.Kind);
         return r;
     }

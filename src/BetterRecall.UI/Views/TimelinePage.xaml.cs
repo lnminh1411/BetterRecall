@@ -37,7 +37,7 @@ public sealed partial class TimelinePage : Page, IDataPage
         DayPicker.Date = DateTime.Now.Date;
         DayPicker.MaxDate = DateTime.Now.Date;
         _updating = false;
-        Loaded += (_, _) => { s.Removed += OnRemoved; Reload(); };
+        Loaded += (_, _) => { s.Removed -= OnRemoved; s.Removed += OnRemoved; Reload(); };   // Loaded can fire twice
         Unloaded += (_, _) => { s.Removed -= OnRemoved; _vm.Clear(); _detail.Clear(); };   // a load still in flight is discarded too
     }
 

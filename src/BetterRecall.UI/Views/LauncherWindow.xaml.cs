@@ -47,7 +47,7 @@ public sealed partial class LauncherWindow : Window
         // on the main one do not queue behind them (AB-S1).
         _vm = new SearchViewModel(new AgentApi(s.CreateOneShotClient()));
         _detail = new DetailViewModel(s.MediaApi);
-        s.Removed += OnRemoved;
+        s.Removed += OnRemoved;   // never removed: the launcher window lives as long as the app
         Detail.ViewModel = _detail;
         Detail.ModalChanged += open => _modal = Math.Max(0, _modal + (open ? 1 : -1));
         AskView.SourceInvoked += src => _ = _detail.LoadAsync(ChatViewModel.ToCaptureItem(src));

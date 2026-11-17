@@ -196,6 +196,14 @@ public sealed partial class CommandProcessor
     /// <summary>The message a capture export gets when a purge ran during it; replay saves and exports use it too.</summary>
     internal static readonly string ErrPurgedDuring = new Store.ExportPurgedException().Message;
 
+    /// <summary>The agent's replay library (batch P) refuses a save that starts while purge all runs, and drops one a purge
+    /// cut through. Purge all sets its flag before its notice bumps the epoch, so the epoch alone can miss the first case.
+    /// Agent.Tests pins these texts against the real ReplayLibrary.</summary>
+    internal static readonly string[] ReplayPurgeRefusals =
+        ["Purge all is running.", "A purge ran during the replay save; the clip was discarded."];
+
+    private static bool IsReplayPurgeRefusal(Exception ex) => ex is InvalidOperationException && ReplayPurgeRefusals.Contains(ex.Message);
+
     /// <summary>Rows left the store: subscribe streams tell their clients (B10, A-L5).</summary>
     private event Action<PurgeNotice>? Removed;
 
@@ -331,6 +339,9 @@ public sealed partial class CommandProcessor
         if (parts.Length >= 3 && parts[0].Equals("replay", StringComparison.OrdinalIgnoreCase) && parts[1].Equals("export", StringComparison.OrdinalIgnoreCase)) return true;
         if (parts.Length >= 2 && parts[0].Equals("chat", StringComparison.OrdinalIgnoreCase)
             && parts[1].ToLowerInvariant() is "send" or "approve" or "deny") return true;
+        // UI search waits up to 15 s for the query vector: a closed pipe (debounced keystroke, launcher hidden) cancels
+        // the wait and frees the pipe instance at once (sweep 4 AB-S1).
+        if (parts.Length >= 2 && parts[0].Equals("search", StringComparison.OrdinalIgnoreCase)) return true;
         if (parts.Length == 3 && parts[0].Equals("describe", StringComparison.OrdinalIgnoreCase) && parts[1].Equals("send", StringComparison.OrdinalIgnoreCase)) return true;
         return parts.Length == 2 && parts[0].Equals("bench", StringComparison.OrdinalIgnoreCase) && parts[1].Equals("full", StringComparison.OrdinalIgnoreCase);
     }
@@ -371,19 +382,24 @@ public sealed partial class CommandProcessor
             Push(Envelope.Ok(JsonSerializer.Serialize(new CaptureEvent(m.Id, m.Ts, m.Kind, m.App), CoreJson.Default.CaptureEvent)));
         };
         // Rows gone (any client's purge, retention, storage limit, NSFW drop): same gate as capture events (B10, A-L5).
+        // Purge all raises its notice with no store open (batch P), so only the agent's gate applies to it: the ids
+        // are none and the window is "everything".
         Action<PurgeNotice> onRemoved = n =>
         {
-            if (IsLocked(kind)) return;
+            if (n.Reason == "all" ? AgentGateClosed(kind) : IsLocked(kind)) return;
             Push(Envelope.Ok(JsonSerializer.Serialize(RemovedEventFor(n), CoreJson.Default.RemovedEvent)));
         };
+        // Only streams that carry capture ids already get them: every captures stream (the retraction of A-L5) and the
+        // UI's own status stream. A plain status stream on the public pipe stays status lines only (sweep 4 review S2).
+        bool removedEvents = sub == Subscription.Captures || kind == PipeKind.Ui;
         if (sub == Subscription.Status) _d.Agent.StatusChanged += onStatus;
         else _d.Agent.CaptureStored += onCapture;
-        Removed += onRemoved;
+        if (removedEvents) Removed += onRemoved;
         if (!await WriteAsync(stream, ack, ct).ConfigureAwait(false))
         {
             if (sub == Subscription.Status) _d.Agent.StatusChanged -= onStatus;
             else _d.Agent.CaptureStored -= onCapture;
-            Removed -= onRemoved;
+            if (removedEvents) Removed -= onRemoved;
             return;
         }
         // Drain input until the client closes the pipe.
@@ -419,7 +435,7 @@ public sealed partial class CommandProcessor
         {
             if (sub == Subscription.Status) _d.Agent.StatusChanged -= onStatus;
             else _d.Agent.CaptureStored -= onCapture;
-            Removed -= onRemoved;
+            if (removedEvents) Removed -= onRemoved;
             cts.Cancel();
             try { await drain.ConfigureAwait(false); } catch { }
         }
@@ -522,7 +538,7 @@ public sealed partial class CommandProcessor
             case "bench":
                 return await BenchAsync(s, args, ct).ConfigureAwait(false);
             case "settings":
-                return Settings(rest);
+                return Settings(s, rest);
             case "timeline":
                 return Timeline(s, args);
             case "keyframe":
@@ -570,6 +586,9 @@ public sealed partial class CommandProcessor
 
     // ------------------------------------------------------------ gate, audit
 
+    /// <summary>The agent's read gate alone (no store check): closed for the UI pipe, and for IPC and MCP with ipc.requireUnlocked.</summary>
+    private bool AgentGateClosed(PipeKind kind) => (kind == PipeKind.Ui || S.Ipc.RequireUnlocked) && !_d.Agent.IsUnlocked;
+
     /// <summary>Read gate: store not open, or security.requireUnlock with the gate closed (ipc.requireUnlocked for IPC and MCP).</summary>
     internal bool IsLocked(PipeKind kind) => LockError(kind) != null;
 
@@ -584,6 +603,7 @@ public sealed partial class CommandProcessor
         bool keyLocked = KeyNeedsPassphrase;
         if (keyLocked && !st.Locked) st = st with { Locked = true, UnlockedUntil = null };
         if (kind == PipeKind.Ui) return st with { UnlockNeeds = UnlockNeeds(keyLocked) };
+        st = st with { UnlockNeeds = null };   // the UI pipe's only
         return LockError(kind) == ErrLocked ? st with { Store = NoStoreStats, Queue = new QueueState(0) } : st;
     }
 
@@ -1464,7 +1484,7 @@ public sealed partial class CommandProcessor
         return false;
     }
 
-    private Reply Settings(string rest)
+    private Reply Settings(ClientSession session, string rest)
     {
         var (sub, json) = SplitVerb(rest);
         switch (sub.ToLowerInvariant())
@@ -1474,8 +1494,11 @@ public sealed partial class CommandProcessor
             case "reset" when json.Length == 0:
                 // Only while settings.json is unreadable: the defaults already in use are written out (the bad file stays
                 // as settings.json.bad). Nothing changes in effect, so the gate does not apply (B3, D4).
-                if (_d.Settings is not SettingsStore store || store.LoadError is null) return Err(ErrNothingToReset);
-                store.ResetUnreadable();
+                // While locked, a readable file is "locked", never "nothing to reset" (review S6).
+                if (_d.Settings is not SettingsStore store || store.LoadError is null) return Err(LockError(PipeKind.Ui) == ErrLocked ? ErrLocked : ErrNothingToReset);
+                try { if (!store.ResetUnreadable()) return Err(ErrNothingToReset); }
+                catch (IOException ex) { return Err(ex.Message); }
+                Audit(session, "settings reset", 1, "");   // changes the saved privacy settings, also while locked
                 return Ok(JsonSerializer.Serialize(S, CoreJson.Default.Settings));
             case "set" when json.Length > 0:
                 JsonDocument doc;
@@ -1551,7 +1574,7 @@ public sealed partial class CommandProcessor
                     return Ok("null");
             }
         }
-        catch (Exception) when (Volatile.Read(ref _purgeAllEpoch) != purgeEpoch)
+        catch (Exception ex) when (Volatile.Read(ref _purgeAllEpoch) != purgeEpoch || IsReplayPurgeRefusal(ex))
         {
             // Purge all discarded the clip being saved, or cancelled the export and deleted its copy.
             Log.Info("replay " + sub.ToLowerInvariant() + ": purge all ran during it");

@@ -584,6 +584,8 @@ public static class WarningBanners
             "ner-unavailable" => new WarningBanner(c, "Warn_NerTitle", "Warn_NerMessage", Error: true),
             "ocr-failing" => new WarningBanner(c, "Warn_OcrTitle", "Warn_OcrMessage"),
             "vc-runtime-missing" => new WarningBanner(c, "Warn_VcTitle", "Warn_VcMessage"),
+            // The replay is masked meanwhile (D2): not closable, it ends by itself when OCR works again.
+            "replay-text-unchecked" => new WarningBanner(c, "Warn_ReplayTextTitle", "Warn_ReplayTextMessage", Error: true),
             _ => new WarningBanner(c, "Warn_OtherTitle", "Warn_OtherMessage"),
         })];
 
@@ -783,12 +785,17 @@ public static class PurgeFlow
     /// purge all: Windows Hello unlock (purge all needs an unlock in the last 60 s), then "purge all", then "purge confirm".
     /// Stops at the first failure.
     /// </summary>
-    public static async Task<AgentResult<int>> PurgeAllAsync(AgentApi api, string? passphrase, CancellationToken ct = default)
+    public static async Task<AgentResult<PurgeResult>> PurgeAllAsync(AgentApi api, string? passphrase, CancellationToken ct = default)
     {
         var u = await api.UnlockAsync(passphrase, ct);
-        if (!u.Ok) return new AgentResult<int>(false, 0, u.Kind, u.Error);
+        if (!u.Ok) return new AgentResult<PurgeResult>(false, null, u.Kind, u.Error);
         var p = await api.PurgeAllAsync(ct);
-        if (!p.Ok) return new AgentResult<int>(false, 0, p.Kind, p.Error);
-        return await api.PurgeConfirmAsync(p.Value!.Confirm, ct);
+        if (!p.Ok) return new AgentResult<PurgeResult>(false, null, p.Kind, p.Error);
+        return await api.PurgeConfirmResultAsync(p.Value!.Confirm, ct);
     }
+
+    /// <summary>The purge all result line: the count, plus the replay files it could not delete yet (batch P), if any.</summary>
+    public static IReadOnlyList<LocalizedText> AllDoneText(PurgeResult r) => r.Undeleted is > 0 and var left
+        ? [new LocalizedText("Danger_AllDone", r.Purged), new LocalizedText("Danger_AllUndeleted", left)]
+        : [new LocalizedText("Danger_AllDone", r.Purged)];
 }

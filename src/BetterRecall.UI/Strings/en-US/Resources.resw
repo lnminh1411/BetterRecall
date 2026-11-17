@@ -394,11 +394,11 @@
   <data name="S_privacy_browserBadgeDetection" xml:space="preserve"><value>Detect private browser windows</value></data>
   <data name="S_privacy_browserBadgeDetection_D" xml:space="preserve"><value>Looks for the private-mode badge in Chrome, Edge and Brave. A failed check drops the frame.</value></data>
   <data name="S_privacy_denyPathPrefixes" xml:space="preserve"><value>Never capture apps in these folders</value></data>
-  <data name="S_privacy_denyPathPrefixes_D" xml:space="preserve"><value>Full folder paths. Any app started from inside them is skipped.</value></data>
+  <data name="S_privacy_denyPathPrefixes_D" xml:space="preserve"><value>Full folder paths. Screen and speech are not captured while an app started from inside them is in front. Sound such an app plays in the background can still be captured by system audio.</value></data>
   <data name="S_privacy_denyProcesses" xml:space="preserve"><value>Never capture these apps</value></data>
-  <data name="S_privacy_denyProcesses_D" xml:space="preserve"><value>Process names, such as KeePass.exe.</value></data>
+  <data name="S_privacy_denyProcesses_D" xml:space="preserve"><value>Process names, such as KeePass.exe. Screen and speech are not captured while one of these apps is in front. Sound such an app plays in the background can still be captured by system audio.</value></data>
   <data name="S_privacy_denyTitlePatterns" xml:space="preserve"><value>Never capture windows whose title contains</value></data>
-  <data name="S_privacy_denyTitlePatterns_D" xml:space="preserve"><value>Text such as InPrivate.</value></data>
+  <data name="S_privacy_denyTitlePatterns_D" xml:space="preserve"><value>Text such as InPrivate. Screen and speech are not captured while such a window is in front; its background sound can still be captured by system audio.</value></data>
   <data name="S_privacy_honorDisplayAffinity" xml:space="preserve"><value>Respect apps that hide from capture</value></data>
   <data name="S_privacy_honorDisplayAffinity_D" xml:space="preserve"><value>Skip the keyframe while any visible window asks not to be captured.</value></data>
   <data name="S_privacy_nsfwFilter" xml:space="preserve"><value>Filter explicit images</value></data>
@@ -872,6 +872,10 @@
   <data name="Err_HelloMissing" xml:space="preserve"><value>Windows Hello is not available on this PC. Enter your unlock password instead.</value></data>
   <data name="Err_SettingsUnreadable" xml:space="preserve"><value>Settings cannot be saved because settings.json could not be read. Reset the settings from the banner at the top of the window, or fix the file and restart BetterRecall.</value></data>
   <data name="Err_PurgedDuring" xml:space="preserve"><value>Your history was purged while this ran, so nothing was saved or written.</value></data>
+  <data name="Warn_ReplayTextTitle" xml:space="preserve"><value>Replay cannot check screen text right now</value></data>
+  <data name="Warn_ReplayTextMessage" xml:space="preserve"><value>Text recognition is not working yet, so the replay cannot find what to hide. The foreground window is masked in the replay until text recognition works again.</value></data>
+  <data name="Danger_AllUndeleted" xml:space="preserve"><value>{0:N0} replay files could not be deleted yet; they will be removed the next time BetterRecall starts.</value></data>
+  <data name="BenchPage_ReindexNote.Text" xml:space="preserve"><value>A run may switch the search model. Your history is then indexed again in the background, which can take a while.</value></data>
   <data name="Warn_SettingsTitle" xml:space="preserve"><value>Settings could not be read</value></data>
   <data name="Warn_SettingsMessage" xml:space="preserve"><value>settings.json has an error, so BetterRecall runs on default settings and the choices in the file are not in effect. Nothing can be saved until you reset the settings, or fix the file and restart BetterRecall. File: {0}</value></data>
   <data name="Warn_SettingsReset" xml:space="preserve"><value>Reset settings</value></data>

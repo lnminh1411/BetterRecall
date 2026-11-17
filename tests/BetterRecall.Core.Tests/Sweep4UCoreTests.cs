@@ -274,15 +274,33 @@ public sealed class Sweep4UCoreTests : IDisposable
     public async Task B10_removed_events_follow_the_subscribers_gate_and_cap_ids()
     {
         var id = _t.Store.AddScreenCapture(Caps.Screen(DateTimeOffset.UtcNow.AddMinutes(-2), "bank.exe", "x"));
+        var id2 = _t.Store.AddScreenCapture(Caps.Screen(DateTimeOffset.UtcNow.AddMinutes(-1), "bank.exe", "y"));
         _agent.Unlocked = false;   // the public pipe's gate is closed (ipc.requireUnlocked)
         var s = new HoldStream();
-        var run = _p.StreamAsync(s, Subscription.Status, Envelope.Ok("{\"subscribed\":true}"), CancellationToken.None, PipeKind.Public);
+        var run = _p.StreamAsync(s, Subscription.Captures, Envelope.Ok("{\"subscribed\":\"captures\"}"), CancellationToken.None, PipeKind.Public);
         await Task.Delay(200);
         _t.Store.DropCapture(id, "nsfw");
         await Task.Delay(300);
         s.End();
         await run.WaitAsync(TimeSpan.FromSeconds(10));
         Assert.DoesNotContain(id, s.Written);
+
+        // Review S2: a plain status stream on the public pipe stays status lines only, even unlocked (old clients parse
+        // every line as a status); a captures stream there hears the drop.
+        _agent.Unlocked = true;
+        var status = new HoldStream();
+        var captures = new HoldStream();
+        var runS = _p.StreamAsync(status, Subscription.Status, Envelope.Ok("{\"subscribed\":true}"), CancellationToken.None, PipeKind.Public);
+        var runC = _p.StreamAsync(captures, Subscription.Captures, Envelope.Ok("{\"subscribed\":\"captures\"}"), CancellationToken.None, PipeKind.Public);
+        await Task.Delay(200);
+        _t.Store.DropCapture(id2, "nsfw");
+        await WaitFor(() => captures.Written.Contains(id2));
+        await Task.Delay(100);
+        status.End(); captures.End();
+        await Task.WhenAll(runS, runC).WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Contains(id2, captures.Written);
+        Assert.DoesNotContain("\"event\"", status.Written);
+        Assert.DoesNotContain(id2, status.Written);
 
         var many = new PurgeNotice("retention", [.. Enumerable.Range(0, CommandProcessor.MaxRemovedIds + 1).Select(i => "s_" + i)]);
         var e = CommandProcessor.RemovedEventFor(many);
@@ -358,7 +376,7 @@ public sealed class Sweep4UCoreTests : IDisposable
         await agent.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
         p.OnStorePurged(new PurgeNotice("all", [], DateTimeOffset.MinValue, DateTimeOffset.UtcNow));
         // Batch P: a discarded save throws InvalidOperationException, a cancelled export FileNotFoundException.
-        agent.Fail.SetResult(how == "discarded" ? new InvalidOperationException("Purge all ran during the replay save; the clip was discarded.")
+        agent.Fail.SetResult(how == "discarded" ? new InvalidOperationException("A purge ran during the replay save; the clip was discarded.")
             : new FileNotFoundException("Replay not found."));
         var r = await call;
         Assert.Equal(CommandProcessor.ErrPurgedDuring, r.Error);
@@ -372,6 +390,117 @@ public sealed class Sweep4UCoreTests : IDisposable
         });
         plain.Fail.SetResult(new FileNotFoundException("Replay not found."));
         Assert.Equal("Not found.", (await Call(p2, _ui, line)).Error);
+    }
+
+    [Theory]
+    [InlineData("Purge all is running.")]                                          // the save started inside purge all
+    [InlineData("A purge ran during the replay save; the clip was discarded.")]   // the epoch moved before Core's notice
+    public async Task S5_replay_purge_refusals_answer_the_purge_message_without_a_notice(string message)
+    {
+        var agent = new ReplayAgent(_agent);
+        var p = new CommandProcessor(new CommandDeps
+        {
+            Settings = _settings, Store = () => _t.Store, Keys = new FakeKeys(), Agent = agent,
+            Embedder = new FakeEmbedder(), Thumbnailer = new FakeThumbs(), PurgeAll = _ => Task.FromResult(0),
+        });
+        agent.Fail.SetResult(new InvalidOperationException(message));
+        Assert.Equal(CommandProcessor.ErrPurgedDuring, (await Call(p, _ui, "replay save")).Error);
+        var other = new ReplayAgent(_agent);
+        var p2 = new CommandProcessor(new CommandDeps
+        {
+            Settings = _settings, Store = () => _t.Store, Keys = new FakeKeys(), Agent = other,
+            Embedder = new FakeEmbedder(), Thumbnailer = new FakeThumbs(), PurgeAll = _ => Task.FromResult(0),
+        });
+        other.Fail.SetResult(new InvalidOperationException("Replay is off."));
+        Assert.NotEqual(CommandProcessor.ErrPurgedDuring, (await Call(p2, _ui, "replay save")).Error);
+    }
+
+    // ---- review S1: purge all's event while the new store is not open yet
+
+    [Fact]
+    public async Task S1_purge_all_event_reaches_an_unlocked_ui_before_the_new_store_opens()
+    {
+        var p = Processor(_settings, new FakeKeys(), _agent);   // no store: purge all closed it
+        var s = new HoldStream();
+        var run = p.StreamAsync(s, Subscription.Status, Envelope.Ok("{\"subscribed\":true}"), CancellationToken.None, PipeKind.Ui);
+        await Task.Delay(200);
+        p.OnStorePurged(new PurgeNotice("all", [], DateTimeOffset.MinValue, DateTimeOffset.UtcNow));
+        await WaitFor(() => s.Written.Contains("\"reason\":\"all\""));
+        _agent.Unlocked = false;   // a locked UI hears nothing
+        p.OnStorePurged(new PurgeNotice("retention", ["s_1"]));
+        p.OnStorePurged(new PurgeNotice("all", [], DateTimeOffset.MinValue, DateTimeOffset.UtcNow.AddSeconds(1)));
+        await Task.Delay(200);
+        s.End();
+        await run.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Single(s.Written.Split('\n'), l => l.Contains("\"reason\":\"all\""));
+        Assert.DoesNotContain("s_1", s.Written);
+    }
+
+    // ---- review S6: settings reset
+
+    [Fact]
+    public async Task S6_settings_reset_is_audited_refused_while_locked_and_keeps_the_latest_bad_file()
+    {
+        using var h = new TempHome(null);
+        var path = DataPaths.SettingsFile(h.Path);
+        File.WriteAllText(path, "{\"retention\":{\"days\":7}} x");
+        var s = SettingsStore.Load(h.Path);
+        Assert.NotNull(s.LoadError);
+        File.WriteAllText(path, "{\"retention\":{\"days\":9}} edited since the start, still broken");
+        var agent = new FakeAgent { Unlocked = false };
+        var p = new CommandProcessor(new CommandDeps
+        {
+            Settings = s, Store = () => _t.Store, Keys = new FakeKeys(), Agent = agent,
+            Embedder = new FakeEmbedder(), Thumbnailer = new FakeThumbs(), PurgeAll = _ => Task.FromResult(0),
+        });
+        // Unreadable: the reset runs while locked (D4), keeps the file as it is now, and is audited.
+        var r = await Call(p, _ui, "settings reset");
+        Assert.True(r.Ok, r.Error);
+        Assert.Contains("edited since the start", File.ReadAllText(path + ".bad"));
+        Assert.Contains(_t.Store.ReadAudit(10), a => a.Verb == "settings reset" && a.Pipe == "ui");
+        // Readable now: while locked the answer is "locked", not "nothing to reset".
+        Assert.Equal("Store is locked.", (await Call(p, _ui, "settings reset")).Error);
+        agent.Unlocked = true;
+        Assert.Equal("settings.json loaded; there is nothing to reset.", (await Call(p, _ui, "settings reset")).Error);
+    }
+
+    // ---- review S10: a script's resume reaches the agent as "ipc"
+
+    [Fact]
+    public async Task S10_public_resume_is_an_ipc_resume()
+    {
+        Assert.True((await Call("resume", _ipc)).Ok);
+        Assert.Contains("resume ipc", _agent.Calls);
+        Assert.True((await Call("resume", _ui)).Ok);
+        Assert.Contains(_agent.Calls, c => c.StartsWith("resume ", StringComparison.Ordinal) && c != "resume ipc");
+    }
+
+    // ---- review S4: readers never see the brief gap of the agent's replace as defaults
+
+    [Fact]
+    public void S4_readonly_during_saves_never_returns_defaults()
+    {
+        using var h = new TempHome();
+        var s = SettingsStore.Load(h.Path);
+        Assert.Null(s.TryUpdate(JsonDocument.Parse("{\"ui\":{\"theme\":\"dark\"}}").RootElement));
+        var stop = new CancellationTokenSource();
+        var seen = new System.Collections.Concurrent.ConcurrentBag<string>();
+        var readers = Enumerable.Range(0, 4).Select(_ => Task.Run(() =>
+        {
+            while (!stop.IsCancellationRequested) seen.Add(SettingsStore.ReadOnly(h.Path).Ui.Theme);
+        })).ToArray();
+        try
+        {
+            for (int i = 0; i < 80; i++)
+                Assert.Null(s.TryUpdate(JsonDocument.Parse("{\"ui\":{\"theme\":\"" + (i % 2 == 0 ? "light" : "dark") + "\"}}").RootElement));
+        }
+        finally
+        {
+            stop.Cancel();
+            Task.WaitAll(readers);
+        }
+        Assert.NotEmpty(seen);
+        Assert.All(seen, t => Assert.Contains(t, new[] { "dark", "light" }));
     }
 
     // ---- C9: a save while another process reads settings.json

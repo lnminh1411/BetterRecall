@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) BetterRecall contributors
 using BetterRecall.Agent.Host;
+using BetterRecall.Agent.Replay;
+using BetterRecall.Contracts;
 
 namespace BetterRecall.Agent.Tests;
 
@@ -31,5 +33,28 @@ public sealed class Sweep4UAgentTests
         Assert.False(p.Has("user"));
         Assert.False(p.Has("ipc"));
         Assert.Null(p.Current().Reason);
+    }
+
+    // ---- review S5: Core maps these exact messages to its purge answer (CommandProcessor.ReplayPurgeRefusals)
+
+    [Fact]
+    public async Task S5_replay_purge_refusals_keep_the_messages_core_matches()
+    {
+        var home = Path.Combine(Environment.GetEnvironmentVariable("BR_TEST_TMP") is { Length: > 0 } t ? t : Path.GetTempPath(), "br-s5-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(home);
+        try
+        {
+            bool purging = true;
+            var lib = new ReplayLibrary(home, () => new Settings(), null) { PurgingAll = () => purging };
+            var path = Path.Combine(home, "clip.mp4");
+            var e = await Assert.ThrowsAsync<InvalidOperationException>(() => lib.WriteClipAsync(path, false, _ => 1, CancellationToken.None));
+            Assert.Equal("Purge all is running.", e.Message);
+
+            purging = false;
+            e = await Assert.ThrowsAsync<InvalidOperationException>(() => lib.WriteClipAsync(path, false, s => { lib.OnPurgeAll(); return 1; }, CancellationToken.None));
+            Assert.Equal("A purge ran during the replay save; the clip was discarded.", e.Message);
+            Assert.False(File.Exists(path));
+        }
+        finally { Directory.Delete(home, true); }
     }
 }
