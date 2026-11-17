@@ -62,7 +62,7 @@ internal sealed class FakeStore : IStore
     public void AppendAudit(AuditEntry entry) { }
     public IReadOnlyList<AuditEntry> ReadAudit(int limit) => [];
     public StoreStats Stats() => new(Screens.Count + Audio.Count, 0, 0, null, null, Pending.Count, Vectors.Count);
-    public void RunMaintenance(Settings settings) => Maintenance++;
+    public void RunMaintenance(Settings settings, bool retention = true) => Maintenance++;
     /// <summary>Storage guard tests: bytes on disk and reusable; DeleteForSpace frees FreedPerRow per row up to Deletable rows.</summary>
     public StorageUse Use = new(0, 0);
     public int Deletable;

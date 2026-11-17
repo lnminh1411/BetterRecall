@@ -621,11 +621,25 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
             var store = Store;
             if (store is null) return;
             var sw = Stopwatch.StartNew();
-            store.RunMaintenance(S);
+            store.RunMaintenance(S, RetentionAllowed(_core.Settings as BetterRecall.Core.SettingsStore, ref _retentionSkipLogged));
             Log.Info($"maintenance done in {sw.ElapsedMilliseconds} ms");
             StorageCheck();
         }
         catch (Exception ex) { Log.Warn("maintenance", ex); }
+    }
+
+    private bool _retentionSkipLogged;
+
+    /// <summary>Retention and thinning wait while settings.json is unreadable: the defaults in use could delete far more
+    /// than the user's own retention allows (S11). They run again once the file is reset (or fixed and the agent
+    /// restarted). The skip is logged once per unreadable spell, not every hour.</summary>
+    internal static bool RetentionAllowed(BetterRecall.Core.SettingsStore? settings, ref bool skipLogged)
+    {
+        bool ok = settings?.LoadError is null;
+        if (!ok && !skipLogged) Log.Warn("maintenance: settings.json is unreadable; retention and thinning skipped until it is reset or fixed");
+        else if (ok && skipLogged) Log.Info("maintenance: settings.json readable again; retention and thinning resume");
+        skipLogged = !ok;
+        return ok;
     }
 
     // ---------------- IAgentControl ----------------

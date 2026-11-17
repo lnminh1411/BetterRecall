@@ -36,8 +36,9 @@ public interface IStore : IDisposable
 
     StoreStats Stats();
 
-    /// <summary>Applies retention.days and progressive thinning (retention.progressive*). Agent calls it hourly and at start.</summary>
-    void RunMaintenance(Settings settings);
+    /// <summary>Applies retention.days and progressive thinning (retention.progressive*). Agent calls it hourly and at start.
+    /// retention false skips both (settings.json unreadable: its retention values are not known, S11); the rest runs.</summary>
+    void RunMaintenance(Settings settings, bool retention = true);
 
     /// <summary>Store file sizes and their reusable free pages (storage.maxGb, storage.minFreeGb).</summary>
     StorageUse GetStorageUse() => new(Stats().Bytes, 0);
