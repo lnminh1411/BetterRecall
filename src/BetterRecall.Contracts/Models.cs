@@ -187,7 +187,8 @@ public sealed record AuditEntry(
     int ResultCount,
     string QuerySha256);     // empty when the verb has no query
 
-public sealed record PurgeResult(int Purged);
+/// <summary>Undeleted: purge all only, replay files it could not delete yet (held open elsewhere; deleted at the next start).</summary>
+public sealed record PurgeResult(int Purged, int? Undeleted = null);
 
 /// <summary>{"items":[...]} replies (timeline, audit, replay list).</summary>
 public sealed record ItemsReply<T>(IReadOnlyList<T> Items);

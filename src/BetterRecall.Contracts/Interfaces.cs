@@ -101,10 +101,11 @@ public sealed record PurgeScope(string Kind, DateTimeOffset? From = null, DateTi
 /// Rows left the store (ICoreHost.Purged). Reason: purge (a user purge of any scope, incl. delete one, by app or site, and
 /// the panic flush), all (purge all), retention (retention.days and progressive thinning), space (storage.overwrite),
 /// drop (NSFW gate), replay (a saved replay deleted). Ids are the deleted capture ids. From/To: the purged time window
-/// (purge last/range/all). Newest: the newest timestamp among the deleted rows. In-RAM copies (thumbnail cache, replay
-/// ring, replay samples, queued embedding jobs, chats) must go too.
+/// (purge last/range/all). Newest: the newest timestamp among the deleted rows. Scope: "app" or "site" for those user
+/// purges (raised even when no stored row matched), else null. In-RAM copies (thumbnail cache, replay ring, replay samples,
+/// queued embedding jobs, chats) must go too.
 /// </summary>
-public sealed record PurgeNotice(string Reason, IReadOnlyList<string> Ids, DateTimeOffset? From = null, DateTimeOffset? To = null, DateTimeOffset? Newest = null)
+public sealed record PurgeNotice(string Reason, IReadOnlyList<string> Ids, DateTimeOffset? From = null, DateTimeOffset? To = null, DateTimeOffset? Newest = null, string? Scope = null)
 {
     /// <summary>A user purge (reason purge or all): live buffers that may hold the content go as well, not only stored rows.</summary>
     public bool ByUser => Reason is "purge" or "all";

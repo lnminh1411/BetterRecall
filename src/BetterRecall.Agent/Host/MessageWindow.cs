@@ -35,6 +35,9 @@ internal sealed unsafe class MessageWindow : IDisposable
     public event Action? BalloonClicked;
     public event Action<int>? SessionChanged;
     public event Action? DisplayChanged;
+    /// <summary>WM_ENDSESSION with the session really ending (logoff, shutdown): runs on the window thread, and the
+    /// process ends soon after it returns.</summary>
+    public event Action? EndSession;
     public event Action? ForegroundChanged;
     public Func<(string Status, bool Paused, bool ReplayOn)>? MenuState;
 
@@ -265,6 +268,12 @@ internal sealed unsafe class MessageWindow : IDisposable
                 return 0;
             case Win32.WM_DISPLAYCHANGE:
                 Raise(() => w.DisplayChanged?.Invoke());
+                return 0;
+            case Win32.WM_QUERYENDSESSION:
+                return 1;   // never hold up a logoff or shutdown
+            case Win32.WM_ENDSESSION:
+                // Without this Windows ends the process after DefWindowProc and nothing stops cleanly (C3).
+                if (wParam != 0) Raise(() => w.EndSession?.Invoke());
                 return 0;
             case Win32.WM_SETTINGCHANGE:   // "ImmersiveColorSet" on a light/dark switch; cheap to check on any change
                 w.RefreshTrayIcon();

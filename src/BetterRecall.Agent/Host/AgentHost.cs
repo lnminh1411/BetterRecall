@@ -106,6 +106,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         _window.BalloonClicked += () => UiLauncher.Start(_opt.InstallDir, "--replays");
         _window.SessionChanged += OnSessionChanged;
         _window.DisplayChanged += () => _capture?.Rebuild();
+        _window.EndSession += OnEndSession;
         _window.MenuState = () => (StatusLine(), _pause.Current().Reason is "user" or "ipc", _capture?.Engine.Pipelines.Count > 0);
         _window.ShowTray("BetterRecall");
         RegisterHotkeys();
@@ -113,6 +114,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
 
         _replays = new ReplayLibrary(_opt.Home, () => S, _core.Blobs);
         _replays.DeletePartials();   // saves that failed or were cut off by a crash (A20)
+        _replays.PurgingAll = () => _core is BetterRecall.Core.CoreHostImpl c && c.PurgingAll;   // C1: no save or export starts inside purge all
         var encLuid = GpuDevices.Adapters().FirstOrDefault(a => a.VendorId == GpuDevices.VendorIntel)?.Luid;
         _probe = new SystemProbe(encLuid is null ? null : GpuDevices.PdhLuidToken(encLuid.Value));
         _scheduler = new EmbeddingScheduler(() => Store, () => S, _worker, ProbeLoad, () => _pause.Has("consent") || _pause.Has("keylocked") || _pause.Has("keylost") || _pause.Has("storeerror"));
@@ -481,7 +483,8 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
     internal static bool ReachesRing(PurgeNotice n, DateTimeOffset now, int replaySeconds)
     {
         if (!n.ByUser) return false;
-        if (n.Reason == "all") return true;
+        // Purge all, and an app or site purge: the ring may show the app however old its newest stored row is (A-M2).
+        if (n.Reason == "all" || n.Scope is "app" or "site") return true;
         var edge = now - TimeSpan.FromSeconds(Math.Clamp(replaySeconds, 15, 600)) - RingSlack;
         return (n.To is { } to && to >= edge) || (n.Newest is { } newest && newest >= edge);
     }
@@ -492,7 +495,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
     private void OnPurged(PurgeNotice n)
     {
         _thumbs.ClearCache();
-        if (n.Reason == "all") _scheduler?.Clear();
+        if (n.Reason == "all") { _scheduler?.Clear(); _replays?.OnPurgeAll(); }   // C1: running replay exports and saves stop
         else _scheduler?.Remove(n.Ids.ToHashSet(StringComparer.Ordinal));
         _statsCache = default;
         if (ReachesRing(n, DateTimeOffset.UtcNow, S.Replay.Seconds))
@@ -501,6 +504,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
             _sampler.Clear();
             _systemAudio?.Clear();
             _micAudio?.Clear();
+            _replays?.DiscardSavesInFlight();   // a clip being written holds the purged video
             Log.Info($"purge ({n.Reason}) reached the replay window: replay ring, samples and pending audio cleared");
         }
     }
@@ -738,24 +742,8 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         var id = lib.UniqueId(ts);
         var (path, encrypted) = lib.TargetFor(id);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        var partial = path + ".partial";
         var sw = Stopwatch.StartNew();
-        int durationMs;
-        try
-        {
-            durationMs = await Task.Run(() =>
-            {
-                using var stream = encrypted ? _core.Blobs.OpenWrite(partial) : new FileStream(partial, FileMode.Create, FileAccess.Write, FileShare.None);
-                return capture.SaveReplay(stream);
-            }, ct).ConfigureAwait(false);
-            File.Move(partial, path, overwrite: false);
-        }
-        catch
-        {
-            // Never leave a half-written clip behind (in plain-export mode it is not encrypted).
-            try { File.Delete(partial); } catch (Exception ex) { Log.Warn("replay partial delete", ex); }
-            throw;
-        }
+        int durationMs = await lib.WriteClipAsync(path, encrypted, capture.SaveReplay, ct).ConfigureAwait(false);
         long bytes = new FileInfo(path).Length;
         Log.Info($"replay saved: {durationMs} ms, {bytes / 1024} KiB, encrypted={encrypted}, {sw.ElapsedMilliseconds} ms");
         if (S.Replay.Notify) _window?.Notify("Replay saved", $"Last {durationMs / 1000} s saved. Click to open the replay list.");
@@ -800,6 +788,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         var sw = Stopwatch.StartNew();
         _capture?.Panic();
         _sampler.Clear();
+        _replays?.DiscardSavesInFlight();   // panic with 0 minutes raises no purge notice
         _scheduler?.Clear();
         _thumbs.ClearCache();
         _systemAudio?.Clear();
@@ -842,6 +831,20 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
     // ---------------- diagnostics ----------------
 
     internal void RequestQuit() => _window?.Quit();
+
+    /// <summary>WM_ENDSESSION (logoff, shutdown, update restart; C3): Windows ends the process once this returns, so
+    /// DisposeAsync never runs. Stop the pipes (running exports are cancelled and delete their partial file), then
+    /// checkpoint the store. Export partials that still survive are deleted at the next start (ExportJournal).</summary>
+    private void OnEndSession()
+    {
+        Log.Info("session ending: stopping pipes, checkpointing the store");
+        // Under Windows' 5 s hung-app limit at shutdown.
+        try { _core.StopPipesAsync().Wait(TimeSpan.FromSeconds(2.5)); } catch (Exception ex) { Log.Warn("end session: stop pipes", ex); }
+        try { (_core as BetterRecall.Core.CoreHostImpl)?.EncryptedStore?.Checkpoint(); } catch (Exception ex) { Log.Warn("end session: checkpoint", ex); }
+        Log.Flush();
+        // ENDSESSION_CLOSEAPP (Restart Manager) does not always end the process: never stay running without pipes.
+        RequestQuit();
+    }
 
     internal CaptureService? Capture => _capture;
     internal KeyframePipeline? Pipeline => _pipeline;
