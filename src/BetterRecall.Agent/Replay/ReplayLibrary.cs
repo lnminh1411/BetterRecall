@@ -19,6 +19,19 @@ internal sealed class ReplayLibrary(string home, Func<Settings> settings, IBlobC
     private static readonly string[] IdFormats = [TimeFormat, LegacyTimeFormat];
     private readonly Dictionary<string, (long Length, int DurationMs)> _durations = new();
     private readonly HashSet<string> _reserved = new();
+    private int _purgeEpoch;
+    private CancellationTokenSource _purgeCts = new();
+
+    /// <summary>Bumped by purge all. A save reads it before encoding and drops its clip when it changed (C1, BC-S1).</summary>
+    public int PurgeEpoch => Volatile.Read(ref _purgeEpoch);
+
+    /// <summary>Purge all: running decrypted exports stop and delete their output; saves in flight see a new epoch.</summary>
+    public void OnPurgeAll()
+    {
+        Interlocked.Increment(ref _purgeEpoch);
+        var old = Interlocked.Exchange(ref _purgeCts, new CancellationTokenSource());
+        try { old.Cancel(); } catch (AggregateException ex) { Util.Log.Warn("replay export cancel", ex); }
+    }
 
     public string EncryptedDir => DataPaths.ReplaysDir(home);
 
@@ -79,6 +92,34 @@ internal sealed class ReplayLibrary(string home, Func<Settings> settings, IBlobC
         }
         if (n > 0) Util.Log.Info($"replays: {n} unfinished save(s) deleted");
         return n;
+    }
+
+    /// <summary>Writes a clip through save into path + ".partial" (encrypted with the data key, or plain), then renames
+    /// it to path. A failed save never leaves the partial behind (in plain-export mode it is not encrypted). When purge
+    /// all runs while the clip is written, the clip holds pre-purge video (plain, or under the destroyed key): it is
+    /// deleted instead of renamed (C1, BC-S1). Returns save's result (the clip duration in ms).</summary>
+    public async Task<int> WriteClipAsync(string path, bool encrypted, Func<Stream, int> save, CancellationToken ct)
+    {
+        var partial = path + ".partial";
+        int epoch = PurgeEpoch;
+        try
+        {
+            int ms = await Task.Run(() =>
+            {
+                using var stream = encrypted
+                    ? (cipher ?? throw new InvalidOperationException("Store is locked.")).OpenWrite(partial)
+                    : new FileStream(partial, FileMode.Create, FileAccess.Write, FileShare.None);
+                return save(stream);
+            }, ct).ConfigureAwait(false);
+            if (PurgeEpoch != epoch) throw new InvalidOperationException("Purge all ran during the replay save; the clip was discarded.");
+            File.Move(partial, path, overwrite: false);
+            return ms;
+        }
+        catch
+        {
+            try { File.Delete(partial); } catch (Exception ex) { Util.Log.Warn("replay partial delete", ex); }
+            throw;
+        }
     }
 
     public (string Path, bool Encrypted) TargetFor(string id)
@@ -172,21 +213,39 @@ internal sealed class ReplayLibrary(string home, Func<Settings> settings, IBlobC
 
     public async Task ExportAsync(string id, string target, CancellationToken ct)
     {
+        var purge = Volatile.Read(ref _purgeCts).Token;
         var clip = Find(id) ?? throw new FileNotFoundException("Replay not found.");
         var full = Path.GetFullPath(target);
         Directory.CreateDirectory(Path.GetDirectoryName(full)!);
-        await using var src = clip.Encrypted
-            ? (cipher ?? throw new InvalidOperationException("Store is locked.")).OpenRead(clip.Path)
-            : File.OpenRead(clip.Path);
-        var dst = new FileStream(full, FileMode.Create, FileAccess.Write, FileShare.None);
+        // Written to a .partial listed in the export journal, renamed at the end: a killed agent leaves no truncated but
+        // playable decrypted clip under the user's name, and the next start deletes the partial (C3).
+        var partial = full + ".partial";
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, purge);
         try
         {
-            await using (dst) await src.CopyToAsync(dst, ct).ConfigureAwait(false);
+            await using (var src = clip.Encrypted
+                ? (cipher ?? throw new InvalidOperationException("Store is locked.")).OpenRead(clip.Path)
+                : File.OpenRead(clip.Path))
+            {
+                BetterRecall.Core.Store.ExportJournal.Add(home, partial);
+                await using (var dst = new FileStream(partial, FileMode.Create, FileAccess.Write, FileShare.None))
+                    await src.CopyToAsync(dst, linked.Token).ConfigureAwait(false);
+            }
+            linked.Token.ThrowIfCancellationRequested();
+            File.Move(partial, full, overwrite: true);
+            BetterRecall.Core.Store.ExportJournal.Remove(home, partial);
         }
-        catch
+        catch (Exception ex)
         {
             // Cancelled or failed: do not leave a partial decrypted copy behind.
-            try { File.Delete(full); } catch { }
+            try { File.Delete(partial); } catch { }
+            BetterRecall.Core.Store.ExportJournal.Remove(home, partial);
+            // Purge all during the export (C1): the clip is gone, so is the copy.
+            if (purge.IsCancellationRequested && !ct.IsCancellationRequested && ex is OperationCanceledException)
+            {
+                Util.Log.Info("replay export aborted: purge all ran during it");
+                throw new FileNotFoundException("Replay not found.");
+            }
             throw;
         }
     }

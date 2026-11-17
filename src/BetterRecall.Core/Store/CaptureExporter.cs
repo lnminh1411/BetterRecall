@@ -91,8 +91,11 @@ public static class CaptureExporter
         }
         var notices = store as EncryptedStore;
         if (notices is not null) notices.Purged += OnPurged;
+        // Recorded while it exists, so a partial left by a killed agent is deleted at the next start (C3).
+        var home = notices?.Home;
         try
         {
+            ExportJournal.Add(home, partial);
             using (var fs = new FileStream(partial, FileMode.Create, FileAccess.Write, FileShare.None))
             using (var zip = new ZipArchive(fs, ZipArchiveMode.Create))
             {
@@ -130,10 +133,20 @@ public static class CaptureExporter
             }
             if (Volatile.Read(ref purged)) throw new ExportPurgedException();
             File.Move(partial, r.Path, overwrite: true);
+            ExportJournal.Remove(home, partial);
+            // A purge that landed during the move: the finished zip goes too.
+            if (Volatile.Read(ref purged))
+            {
+                try { File.Delete(r.Path); } catch (Exception ex) { Log.Warn("export delete after purge", ex); }
+                throw new ExportPurgedException();
+            }
         }
-        catch
+        catch (Exception ex)
         {
             try { File.Delete(partial); } catch { }
+            ExportJournal.Remove(home, partial);
+            // Purge all disposes the store under the export: its next read fails, but the user is owed the purge message (BC-S2).
+            if (Volatile.Read(ref purged) && ex is not ExportPurgedException) throw new ExportPurgedException();
             throw;
         }
         finally { if (notices is not null) notices.Purged -= OnPurged; }

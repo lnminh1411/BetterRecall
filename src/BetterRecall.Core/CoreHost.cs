@@ -41,6 +41,7 @@ public sealed class CoreHostImpl : ICoreHost
         _options = options with { Home = Path.GetFullPath(options.Home), InstallDir = Path.GetFullPath(options.InstallDir) };
         Directory.CreateDirectory(_options.Home);
         if (!Log.Initialized) Log.Init(DataPaths.LogsDir(_options.Home), "core");
+        ExportJournal.Sweep(_options.Home);   // plaintext export partials a killed agent left behind (C3)
         _settings = SettingsStore.Load(_options.Home);
         Log.Level = Log.ParseLevel(_settings.Current.Log.Level);
         _settings.Changed += s =>
@@ -69,8 +70,13 @@ public sealed class CoreHostImpl : ICoreHost
     private EncryptedStore Wire(EncryptedStore store)
     {
         store.Purged += OnStorePurged;
+        // A store opened after purge all refuses what was captured before it (A-H1).
+        if (_purgedAllAt is { } at) store.FenceUpTo(at);
         return store;
     }
+
+    /// <summary>When the last purge all finished (RAM only), for the fence of the stores opened after it.</summary>
+    private DateTimeOffset? _purgedAllAt;
 
     /// <summary>Fans a purge out: chat state in Core first, then the agent's listeners (thumbnail cache, replay ring,
     /// samples, queued jobs). A failing listener does not stop the others.</summary>
@@ -161,13 +167,7 @@ public sealed class CoreHostImpl : ICoreHost
     }
 
     /// <summary>purge all: destroys the data key and deletes every store, keyframe and replay file, then starts empty.</summary>
-    internal async Task<int> PurgeAllAsync(CancellationToken ct)
-    {
-        int rows = await PurgeAllGatedAsync(ct).ConfigureAwait(false);
-        // Everything in RAM goes too: the replay ring, samples and queued jobs would otherwise outlive the data key.
-        OnStorePurged(new PurgeNotice("all", [], DateTimeOffset.MinValue, DateTimeOffset.UtcNow));
-        return rows;
-    }
+    internal Task<int> PurgeAllAsync(CancellationToken ct) => PurgeAllGatedAsync(ct);
 
     private async Task<int> PurgeAllGatedAsync(CancellationToken ct)
     {
@@ -177,19 +177,41 @@ public sealed class CoreHostImpl : ICoreHost
             var store = _store;
             int rows = 0;
             if (store != null)
-            {
                 try { rows = store.CountPurge(new PurgeScope("all")); } catch { }
-                _store = null;
+            _store = null;
+            // Everything in RAM goes first, before any file is deleted (A-H1, C1): the replay ring, samples and queued jobs
+            // would otherwise outlive the data key; a replay save in flight is discarded and a replay export cancelled
+            // (its source file can then be deleted below).
+            OnStorePurged(new PurgeNotice("all", [], DateTimeOffset.MinValue, DateTimeOffset.UtcNow));
+            if (store != null)
+            {
+                store.Purged -= OnStorePurged;   // its own "all" reaches only its direct listeners (a running capture export)
                 store.DeleteAllFiles();
             }
             else EncryptedStore.DeleteFiles(_options.Home);   // never opened: its key is lost or locked, the files are unreadable
             _vault.DestroyKey();
             var replays = DataPaths.ReplaysDir(_options.Home);
             if (Directory.Exists(replays))
-                foreach (var f in Directory.GetFiles(replays))
-                    try { File.Delete(f); } catch (Exception ex) { Log.Error("replay delete failed", ex); }
+            {
+                // A cancelled replay export or save lets go of its file a moment after the notice: retry briefly.
+                for (int attempt = 0; ; attempt++)
+                {
+                    bool last = attempt >= 20;
+                    int failed = 0;
+                    foreach (var f in Directory.GetFiles(replays))
+                        try { File.Delete(f); }
+                        catch (Exception ex)
+                        {
+                            failed++;
+                            if (last) Log.Error("replay delete failed", ex);
+                        }
+                    if (failed == 0 || last) break;
+                    await Task.Delay(100, CancellationToken.None).ConfigureAwait(false);
+                }
+            }
             try { _thumbs?.ClearCache(); } catch (Exception ex) { Log.Warn("thumbnail cache clear failed", ex); }
             Log.Info("purge all done");
+            _purgedAllAt = DateTimeOffset.UtcNow;
             if (_vault.TryLoadSilent())
                 _store = Wire(new EncryptedStore(_options.Home, () => _vault.Derive("betterrecall-sqlite")));
             else
