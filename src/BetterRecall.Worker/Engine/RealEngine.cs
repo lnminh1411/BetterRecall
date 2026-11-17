@@ -45,6 +45,9 @@ public sealed class RealEngine : IWorkerEngine
     /// the next load of that component skips them. A new worker process (idle exit, restart) tries them again.</summary>
     private readonly HashSet<string> _failedDevices = new(StringComparer.Ordinal);
     private readonly Dictionary<string, int> _runFailures = new(StringComparer.Ordinal);
+    /// <summary>Model of the embedder a run-time failure unloaded (sweep 4 A-M3): the replan keeps it when it passes on
+    /// another device, so one worker does not switch the store's embedding space and re-embed the whole history.</summary>
+    private string? _replanModel;
 
     /// <summary>Run-time failures in a row on a loaded component before it is unloaded and planned again (one bad input
     /// alone does not move it off its device).</summary>
@@ -185,8 +188,12 @@ public sealed class RealEngine : IWorkerEngine
     public BenchResult Bench()
     {
         _embedder?.Dispose(); _embedder = null; _choice = null;
+        _replanModel = null;   // a user's bench chooses afresh; its reply tells the agent the model it chose
         return SelectDevice(force: true);
     }
+
+    public EmbedderIdentity? Embedder
+        => _embedder is { } e && _choice is { } c ? new EmbedderIdentity(e.Manifest.Id, e.Manifest.Revision, c.Device) : null;
 
     private void EnsureEmbedder()
     {
@@ -258,13 +265,17 @@ public sealed class RealEngine : IWorkerEngine
         bool npuPrimaryFailed = outcomes.Any(o => o.Model == ModelCatalog.EmbeddingGemma && o.Device.Kind == DeviceKind.Npu && !o.Ok);
         // Measure-only GPU rows do not count: the fallback is for when nothing the setting allows passed.
         bool primaryAllFailed = primary is null || !outcomes.Any(o => o.Model == ModelCatalog.EmbeddingGemma && o.Ok && allowedIds.Contains(o.Device.Id));
-        if (fallback is not null && (npuPrimaryFailed || primaryAllFailed))
+        bool keepFallback = !force && _replanModel == ModelCatalog.Siglip;
+        if (fallback is not null && (npuPrimaryFailed || primaryAllFailed || keepFallback))
         {
             var fbDevices = npuPrimaryFailed ? allowed.Where(d => d.Kind is DeviceKind.Npu or DeviceKind.Cpu).ToList() : allowed.ToList();
             BenchModel(fallback, fbDevices, key, outcomes, keep, tokens, allowedIds);
         }
 
-        var chosen = DevicePolicy.Choose(outcomes.Where(o => allowedIds.Contains(o.Device.Id)).ToList(), ModelCatalog.EmbeddingGemma, ModelCatalog.Siglip);
+        var candidates = outcomes.Where(o => allowedIds.Contains(o.Device.Id)).ToList();
+        // A replan after a run-time failure keeps the model it unloaded when that model passes somewhere (A-M3).
+        if (!force && _replanModel is { } km && candidates.Any(o => o.Ok && o.Model == km)) candidates = candidates.Where(o => o.Model == km).ToList();
+        var chosen = DevicePolicy.Choose(candidates, ModelCatalog.EmbeddingGemma, ModelCatalog.Siglip);
         foreach (var (o, e) in keep) if (!ReferenceEquals(o, chosen)) e.Dispose();
         // Image-token budgets only on the chosen device: other budgets compile extra graphs (slow on a first NPU run).
         if (tokens is not null && chosen is not null) BenchBudgets(keep[chosen], chosen, tokens);
@@ -285,8 +296,14 @@ public sealed class RealEngine : IWorkerEngine
         _choice = new DeviceChoice(chosen.Device.Label, chosen.Device.Id, chosen.Device.Ep, chosen.Model, chosen.Split ? chosen.TextDevice!.Id : null);
         // A choice made around a device that failed at run time is for this process only: device.json keeps the normal
         // choice, so the next worker tries that device again (a TDR or driver update is usually over by then).
-        if (_failedDevices.Count == 0)
+        // SF6 (review): unless the replan had to switch model (the kept one failed everywhere left). The agent follows
+        // the switch and queues the history for the new model; a next worker back on the cached model would queue it all
+        // again, every worker cycle. Persist the switch; a benchmark chooses afresh.
+        bool modelSwitched = !force && _replanModel is { } was && was != _choice.Model;
+        if (modelSwitched) Log.Warn($"replan switched the embedding model {_replanModel} -> {_choice.Model}; device.json keeps it");
+        if (_failedDevices.Count == 0 || modelSwitched)
             DeviceCache.Write(cachePath, new DeviceCacheFile { Key = key, Chosen = _choice, Bench = result, WrittenUtc = DateTimeOffset.UtcNow });
+        if (modelSwitched) _replanModel = _choice.Model;
         Log.Info($"device chosen: {_choice.Device} ({_choice.DeviceId} {chosen.Device.Name}) {_choice.Model}{(_choice.TextDeviceId is { } t ? " text on " + t : "")}");
         return result;
     }
@@ -699,7 +716,7 @@ public sealed class RealEngine : IWorkerEngine
         }
     }
 
-    private void DropEmbedder() { _embedder?.Dispose(); _embedder = null; _choice = null; }
+    private void DropEmbedder() { _replanModel = _choice?.Model ?? _replanModel; _embedder?.Dispose(); _embedder = null; _choice = null; }
     private void DropNsfw() { _nsfw?.Dispose(); _nsfw = null; }
     private void DropOcr() { _ocr?.Dispose(); _ocr = null; }
 

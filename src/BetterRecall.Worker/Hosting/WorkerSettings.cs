@@ -9,7 +9,9 @@ namespace BetterRecall.Worker.Hosting;
 /// <summary>The worker's view of settings.json: inference.* (gpuAdapter included), index.dim, audio.language, governance.ecoQos,
 /// security.memoryIsolation, log.level, and the NSFW gate's privacy.nsfwFilter / nsfwDetector / nsfwDevice /
 /// nsfwGpuAdapter, and ocr.enabled / engine / languages / device. Out-of-range values fall back to defaults (Core validates the file). Read once at start: a change
-/// takes effect when the agent next starts the worker (after the idle exit, inference.idleExitS).</summary>
+/// takes effect when the agent next starts the worker (after the idle exit, inference.idleExitS). The agent passes its own
+/// copy on stdin (<see cref="ReadAgentInput"/>, <see cref="TryFromJson"/>); settings.json is read only when it does not
+/// (sweep 4 C5).</summary>
 public sealed record WorkerSettings(
     bool Fake,
     string Device,          // auto | npu | gpu | cpu
@@ -62,6 +64,48 @@ public sealed record WorkerSettings(
             s = new Settings();
         }
         return From(s, home);
+    }
+
+    /// <summary>Cap on the agent's settings input (the agent has the same cap). Typical size is under 1 KB.</summary>
+    public const int MaxAgentInputBytes = 64 * 1024;
+
+    /// <summary>Reads the agent's settings from stdin to its end: UTF-8 text, or null with the reason when it is empty,
+    /// larger than <see cref="MaxAgentInputBytes"/>, not UTF-8, or cannot be read.</summary>
+    public static string? ReadAgentInput(Stream input, out string why)
+    {
+        try
+        {
+            var buf = new byte[MaxAgentInputBytes + 1];
+            int n = 0, r;
+            while (n < buf.Length && (r = input.Read(buf, n, buf.Length - n)) > 0) n += r;
+            if (n > MaxAgentInputBytes) { why = "larger than " + MaxAgentInputBytes + " bytes"; return null; }
+            if (n == 0) { why = "missing"; return null; }
+            why = "";
+            return new System.Text.UTF8Encoding(false, throwOnInvalidBytes: true).GetString(buf, 0, n);
+        }
+        catch (Exception e) when (e is IOException or ObjectDisposedException or NotSupportedException or System.Text.DecoderFallbackException)
+        {
+            why = e.GetType().Name;
+            return null;
+        }
+    }
+
+    /// <summary>The agent's worker keys (a partial settings.json object), or null with the reason when the text is not a
+    /// JSON object. Never the defaults in its place (SF1: a worker on defaults is C5's failure again); settings.json is
+    /// not consulted. A key of the wrong type keeps its default, as in <see cref="Parse"/>.</summary>
+    public static WorkerSettings? TryFromJson(string json, string home, out string why)
+    {
+        try
+        {
+            var s = From(Parse(json), home);
+            why = "";
+            return s;
+        }
+        catch (Exception e) when (e is JsonException or InvalidOperationException or ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            why = e.GetType().Name;
+            return null;
+        }
     }
 
     /// <summary>Reads settings.json as leniently as the agent's SettingsStore: a UTF-8 BOM (ReadAllText strips it),

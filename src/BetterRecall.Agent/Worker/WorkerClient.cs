@@ -4,19 +4,24 @@ using BetterRecall.Contracts;
 
 namespace BetterRecall.Agent.Worker;
 
-internal sealed record ImageEmbedResult(float[]? Vector, bool DroppedNsfw, double Ms);
+/// <summary>Model and Revision: the embedder that made Vector, as the reply named it (null when it named none).</summary>
+internal sealed record ImageEmbedResult(float[]? Vector, bool DroppedNsfw, double Ms, string? Model = null, string? Revision = null);
+
+/// <summary>A text vector and the embedder the reply named (SF3: the vector is filed under it, not the latest hello).</summary>
+internal readonly record struct TextEmbedResult(float[] Vector, string? Model, string? Revision);
 
 /// <summary>Typed worker operations on top of the supervisor. Starts the worker on demand.</summary>
 internal sealed class WorkerClient(WorkerSupervisor supervisor)
 {
     public WorkerSupervisor Supervisor => supervisor;
 
-    private async Task<WorkerReply> CallAsync(WorkerRequest req, ReadOnlyMemory<byte> payload, CancellationToken ct)
+    private async Task<WorkerReply> CallAsync(WorkerRequest req, ReadOnlyMemory<byte> payload, CancellationToken ct, bool urgent = false)
     {
         var conn = await supervisor.EnsureAsync(ct).ConfigureAwait(false);
-        var reply = await conn.SendAsync(req, payload, ct).ConfigureAwait(false);
+        var reply = await conn.SendAsync(req, payload, ct, urgent).ConfigureAwait(false);
         if (!reply.Header.Ok) throw new WorkerReplyException(reply.Header.Error ?? "Internal error.");
         supervisor.MarkHealthy();
+        supervisor.NoteEmbedder(reply.Header);   // before the caller files the vector (A-M3)
         return reply;
     }
 
@@ -34,7 +39,7 @@ internal sealed class WorkerClient(WorkerSupervisor supervisor)
         };
         var reply = await CallAsync(new WorkerRequest(0, "embed_image", Format: format, Nsfw: nsfwThreshold, NsfwGrid: nsfwGrid, NsfwDetector: nsfwDetector), image, ct).ConfigureAwait(false);
         if (reply.Header.Dropped == "nsfw") return new ImageEmbedResult(null, true, reply.Header.Ms ?? 0);
-        return new ImageEmbedResult(BinaryFrame.BytesToFloats(reply.Payload), false, reply.Header.Ms ?? 0);
+        return new ImageEmbedResult(BinaryFrame.BytesToFloats(reply.Payload), false, reply.Header.Ms ?? 0, reply.Header.Model, reply.Header.Revision);
     }
 
     /// <summary>Raw BGRA (stride width * 4), for keyframes the worker cannot decode (AVIF, JPEG XL).</summary>
@@ -43,13 +48,17 @@ internal sealed class WorkerClient(WorkerSupervisor supervisor)
         var reply = await CallAsync(new WorkerRequest(0, "embed_image", Format: "bgra8", Width: width, Height: height, Stride: width * 4,
             Nsfw: nsfwThreshold, NsfwGrid: nsfwGrid, NsfwDetector: nsfwDetector), bgra, ct).ConfigureAwait(false);
         if (reply.Header.Dropped == "nsfw") return new ImageEmbedResult(null, true, reply.Header.Ms ?? 0);
-        return new ImageEmbedResult(BinaryFrame.BytesToFloats(reply.Payload), false, reply.Header.Ms ?? 0);
+        return new ImageEmbedResult(BinaryFrame.BytesToFloats(reply.Payload), false, reply.Header.Ms ?? 0, reply.Header.Model, reply.Header.Revision);
     }
 
+    /// <summary>kind "query" (a search) is interactive: it is written before queued background requests (A-L4).</summary>
     public async Task<float[]> EmbedTextAsync(string text, string kind, CancellationToken ct)
+        => (await EmbedTextLabelledAsync(text, kind, ct).ConfigureAwait(false)).Vector;
+
+    public async Task<TextEmbedResult> EmbedTextLabelledAsync(string text, string kind, CancellationToken ct)
     {
-        var reply = await CallAsync(new WorkerRequest(0, "embed_text", Text: text, Kind: kind), ReadOnlyMemory<byte>.Empty, ct).ConfigureAwait(false);
-        return BinaryFrame.BytesToFloats(reply.Payload);
+        var reply = await CallAsync(new WorkerRequest(0, "embed_text", Text: text, Kind: kind), ReadOnlyMemory<byte>.Empty, ct, urgent: kind == "query").ConfigureAwait(false);
+        return new TextEmbedResult(BinaryFrame.BytesToFloats(reply.Payload), reply.Header.Model, reply.Header.Revision);
     }
 
     public async Task<TranscribeResult> TranscribeAsync(float[] pcm16kMono, string source, string language, CancellationToken ct)
@@ -86,6 +95,7 @@ internal sealed class WorkerClient(WorkerSupervisor supervisor)
         }
         if (!reply.Header.Ok) throw new WorkerReplyException(reply.Header.Error ?? "Internal error.");
         supervisor.MarkHealthy();
+        supervisor.NoteEmbedder(reply.Header);   // the bench may have chosen another model or device (A-M3, CA-S2)
         return reply.Header.Bench ?? throw new WorkerException("Internal error.");
     }
 }

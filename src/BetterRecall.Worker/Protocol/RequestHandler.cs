@@ -75,9 +75,9 @@ public sealed class RequestHandler(IWorkerEngine engine, Func<WorkerSettings> se
                 if (r.NsfwDetector is { } dt && (double.IsNaN(dt) || dt <= 0 || dt > 1)) throw new BadRequestException("nsfw detector range");
                 var result = engine.EmbedImage(image, r.Nsfw, r.NsfwGrid ?? 1, r.NsfwDetector);
                 if (result.Dropped is not null)
-                    return new WorkerReply(new WorkerResponse(r.Id, true, Ms: Ms(sw), Dropped: result.Dropped), []);
+                    return new WorkerReply(Served(new WorkerResponse(r.Id, true, Ms: Ms(sw), Dropped: result.Dropped)), []);
                 var v = Finish(result.Vector!, s.Dim);
-                return new WorkerReply(new WorkerResponse(r.Id, true, Dim: v.Length, Ms: Ms(sw)), BinaryFrame.FloatsToBytes(v));
+                return new WorkerReply(Served(new WorkerResponse(r.Id, true, Dim: v.Length, Ms: Ms(sw))), BinaryFrame.FloatsToBytes(v));
             }
 
             case "embed_text":
@@ -90,7 +90,7 @@ public sealed class RequestHandler(IWorkerEngine engine, Func<WorkerSettings> se
                     _ => throw new BadRequestException("kind"),
                 };
                 var v = Finish(engine.EmbedText(r.Text, kind), s.Dim);
-                return new WorkerReply(new WorkerResponse(r.Id, true, Dim: v.Length, Ms: Ms(sw)), BinaryFrame.FloatsToBytes(v));
+                return new WorkerReply(Served(new WorkerResponse(r.Id, true, Dim: v.Length, Ms: Ms(sw))), BinaryFrame.FloatsToBytes(v));
             }
 
             case "transcribe":
@@ -119,7 +119,7 @@ public sealed class RequestHandler(IWorkerEngine engine, Func<WorkerSettings> se
             }
 
             case "bench":
-                return new WorkerReply(new WorkerResponse(r.Id, true, Ms: Ms(sw), Bench: engine.Bench()), []);
+                return new WorkerReply(Served(new WorkerResponse(r.Id, true, Ms: Ms(sw), Bench: engine.Bench())), []);
 
             case "shutdown":
                 return new WorkerReply(new WorkerResponse(r.Id, true), [], Shutdown: true);
@@ -128,6 +128,11 @@ public sealed class RequestHandler(IWorkerEngine engine, Func<WorkerSettings> se
                 throw new BadRequestException("op");
         }
     }
+
+    /// <summary>Stamps the embedder that served the request (A-M3): the agent files the vector under it and follows a
+    /// model or device switch that came without a new hello.</summary>
+    private WorkerResponse Served(WorkerResponse r)
+        => engine.Embedder is { } e ? r with { Model = e.Model, Revision = e.Revision, Device = e.Device } : r;
 
     internal static ImageInput ValidateImage(WorkerRequest r, byte[] payload)
     {

@@ -76,6 +76,70 @@ public class EndToEndTests(ITestOutputHelper output)
         Assert.DoesNotContain("hello world", text); // no content in logs
     }
 
+    /// <summary>Sweep 4 C5 + A-M3 seam, real worker exe in fake mode: the agent's worker keys come on stdin and win
+    /// over a settings.json the agent never loaded (here: not fake, dim 768), and every embed and bench reply
+    /// names the embedder that served it.</summary>
+    [Fact]
+    public void Worker_exe_runs_on_the_agents_settings_and_names_its_embedder()
+    {
+        using var scratch = TestEnv.Scoped("e2e-s4w");
+        var root = scratch.Path;
+        var install = Path.Combine(root, "install");
+        CopyTree(BuildDir("BetterRecall.Worker"), Path.Combine(install, "worker"));
+        CopyTree(BuildDir("FakeAgent"), install);
+        File.Move(Path.Combine(install, "FakeAgent.exe"), Path.Combine(install, InstallLayout.AgentExe));
+
+        var home = Path.Combine(root, "home");
+        TestEnv.Settings(home, s => { s.Inference.Fake = false; s.Index.Dim = 768; s.Security.MemoryIsolation = false; });   // a hand edit
+        const string agentKeys = """{"inference":{"fake":true},"index":{"dim":512},"security":{"memoryIsolation":false}}""";
+        var outFile = Path.Combine(root, "out.txt");
+        var psi = new ProcessStartInfo(Path.Combine(install, InstallLayout.AgentExe),
+            [InstallLayout.Full(install, InstallLayout.WorkerExe), home, outFile, "--space", "--settings", agentKeys]) { UseShellExecute = false };
+        using var agent = Process.Start(psi)!;
+        Assert.True(agent.WaitForExit(90_000), "fake agent timed out");
+        var lines = File.ReadAllLines(outFile);
+        foreach (var l in lines) output.WriteLine(l);
+        Assert.Equal(5, lines.Length);
+        Assert.Contains("\"ep\":\"fake\"", lines[0]);                       // fake from the agent, not the file
+        Assert.Contains("\"dim\":512", lines[0]);
+        Assert.Contains("\"model\":\"fake/embeddinggemma-2\"", lines[1]);  // bench
+        Assert.Contains("\"device\":\"CPU\"", lines[1]);
+        Assert.Contains("\"model\":\"fake/embeddinggemma-2\"", lines[2]);  // embed_text
+        Assert.Contains("\"revision\":\"fake-1\"", lines[2]);
+        Assert.EndsWith("payload=2048", lines[2]);                         // 512 floats
+        Assert.Equal("exit=0", lines[4]);
+        var log = File.ReadAllText(Directory.GetFiles(DataPaths.LogsDir(home), "worker-*.log").Single());
+        Assert.Contains("start settings=agent ", log);
+        Assert.Contains(" fake=True ", log);
+    }
+
+    /// <summary>SF1 (review): --settings-stdin with input that is missing, not JSON or too large: the real worker exe
+    /// exits with 2 (bad arguments or settings) instead of running on defaults.</summary>
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("garbage")]
+    [InlineData("huge")]
+    public void Worker_exe_exits_on_bad_settings_input(string kind)
+    {
+        using var scratch = TestEnv.Scoped("s4w-bad");
+        var home = Path.Combine(scratch.Path, "home");
+        var psi = new ProcessStartInfo(Path.Combine(BuildDir("BetterRecall.Worker"), "BetterRecall.Worker.exe"),
+            ["--pipe", PipeNames.NewWorker(), "--home", home, "--settings-stdin"]) { UseShellExecute = false, RedirectStandardInput = true };
+        using var worker = Process.Start(psi)!;
+        byte[] input = kind switch
+        {
+            "garbage" => "{ not json"u8.ToArray(),
+            "huge" => System.Text.Encoding.UTF8.GetBytes("{\"log\":{\"level\":\"" + new string('a', 70_000) + "\"}}"),
+            _ => [],
+        };
+        try { worker.StandardInput.BaseStream.Write(input); worker.StandardInput.Close(); } catch (IOException) { }
+        Assert.True(worker.WaitForExit(30_000), "worker did not exit");
+        Assert.Equal(2, worker.ExitCode);
+        var log = File.ReadAllText(Directory.GetFiles(DataPaths.LogsDir(home), "worker-*.log").Single());
+        Assert.Contains("settings from the agent", log);
+        Assert.DoesNotContain("start settings=", log);
+    }
+
     /// <summary>Real mode in the real exe with memory isolation on: OpenVINO, ONNX Runtime and Skia must still load
     /// under the mitigation policies (child processes blocked, strict handles, DLL search limited to app dir + System32).</summary>
     [Fact]
