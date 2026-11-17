@@ -20,6 +20,53 @@ public static class InstallLayout
 
     public static string Full(string installDir, string relative) => Path.GetFullPath(Path.Combine(installDir, relative));
 
+    // D6: stable paths. The launcher installs each version into <root>\<version>-<hash12> (root = <data>\app) and keeps
+    // <root>\bin pointing at the current one: bin\current names the install folder, bin\betterrecall.cmd runs its CLI,
+    // and two copies of the small payload-less stub (StubExe) start the current install: bin\BetterRecall.exe for
+    // autostart, bin\betterrecall-mcp.exe for MCP clients.
+    public const string BinDir = "bin";
+    public const string CurrentFile = "current";
+    public const string CliShim = "betterrecall.cmd";
+    public const string StubExe = "BetterRecall.Stub.exe";
+    public const string AutostartExe = "BetterRecall.exe";
+
+    /// <summary>Set by the bin\betterrecall-mcp.exe relay for the MCP server it starts: the relay restarts a server that
+    /// exits with McpRestartExitCode against the current install and sends it the requests left unanswered.</summary>
+    public const string McpRelayEnv = "BETTERRECALL_MCP_RELAY";
+    public const int McpRestartExitCode = 75;
+
+    /// <summary>A launcher install folder name: "&lt;version&gt;-&lt;hash12&gt;" (12 lower-case hex digits).</summary>
+    public static bool IsVersionFolder(string name)
+    {
+        int dash = name.LastIndexOf('-');
+        if (dash <= 0 || name.Length - dash - 1 != 12 || !char.IsAsciiDigit(name[0])) return false;
+        for (int i = dash + 1; i < name.Length; i++)
+            if (!char.IsAsciiHexDigitLower(name[i]) && !char.IsAsciiDigit(name[i])) return false;
+        return true;
+    }
+
+    /// <summary>The install folder bin\current under root names, or null (no file, or not a version folder name).
+    /// The launcher writes the real path (SUBST drives and junctions resolved; trust checks compare real image paths);
+    /// it is used as written when the folder it names sits next to a bin\current with the same text, else the folder
+    /// name is taken under root, so the result never leaves a launcher root.</summary>
+    public static string? CurrentInstall(string root)
+    {
+        var text = ReadCurrent(root);
+        if (text is null) return null;
+        var name = Path.GetFileName(text.TrimEnd('\\', '/'));
+        if (name.Length == 0 || !IsVersionFolder(name)) return null;
+        if (Path.IsPathFullyQualified(text) && Path.GetDirectoryName(text.TrimEnd('\\', '/')) is { } parent
+            && string.Equals(ReadCurrent(parent), text, StringComparison.OrdinalIgnoreCase))
+            return text.TrimEnd('\\', '/');
+        return Path.Combine(root, name);
+    }
+
+    private static string? ReadCurrent(string root)
+    {
+        try { return File.ReadAllText(Path.Combine(root, BinDir, CurrentFile)).Trim(); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { return null; }
+    }
+
     /// <summary>Marker file Scripts/dev_build.py writes into its output folder: this install dir is a dev build.</summary>
     public const string DevBuildMarker = ".devbuild";
 

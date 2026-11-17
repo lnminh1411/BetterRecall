@@ -25,13 +25,27 @@ internal static class StartupRegistration
         return Path.GetFullPath(installDir).StartsWith(app, StringComparison.OrdinalIgnoreCase);
     }
 
-    public static void Register(string installDir)
+    /// <summary>What autostart runs. C6 (D6): the stable stub &lt;root&gt;\bin\BetterRecall.exe first, which starts whatever
+    /// install bin\current names: the downloaded launcher (BETTERRECALL_LAUNCHER) may be moved or deleted after the
+    /// first run, and this versioned agent exe goes with the next upgrade (an agent the UI started has no launcher
+    /// variable). Then the launcher, then this agent exe.</summary>
+    internal static string AutostartExe(string installDir, string? launcher)
     {
-        // Started by the single-file launcher: autostart runs the launcher, so upgrades keep working.
-        var launcher = Environment.GetEnvironmentVariable(InstallLayout.LauncherEnv);
-        var exe = !string.IsNullOrWhiteSpace(launcher) && File.Exists(launcher)
+        var install = Path.GetFullPath(installDir).TrimEnd(Path.DirectorySeparatorChar);
+        if (Path.GetDirectoryName(install) is { } root)
+        {
+            var stub = Path.Combine(root, InstallLayout.BinDir, InstallLayout.AutostartExe);
+            if (File.Exists(stub) && InstallLayout.CurrentInstall(root) is not null) return stub;
+        }
+        return !string.IsNullOrWhiteSpace(launcher) && File.Exists(launcher)
             ? Path.GetFullPath(launcher)
             : InstallLayout.Full(installDir, InstallLayout.AgentExe);
+    }
+
+    public static void Register(string installDir)
+    {
+        // Started by the single-file launcher or from its install: autostart runs a stable path, so upgrades keep working.
+        var exe = AutostartExe(installDir, Environment.GetEnvironmentVariable(InstallLayout.LauncherEnv));
         string cmd = $"\"{exe}\"";
         using (var run = Registry.CurrentUser.CreateSubKey(RunKey))
         {

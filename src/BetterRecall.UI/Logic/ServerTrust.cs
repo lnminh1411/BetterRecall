@@ -22,6 +22,7 @@ public sealed class ServerTrustVerifier : IServerTrust
     private readonly Func<int, DateTime, string?> _imageOf;
     private readonly Func<int, int?> _sessionOf;
     private readonly int _ownSession;
+    private readonly Func<DateTime> _startBound;
 
     public ServerTrustVerifier(
         string expectedImage,
@@ -29,7 +30,8 @@ public sealed class ServerTrustVerifier : IServerTrust
         Func<int, string?>? imageOf = null,
         Func<int, int?>? sessionOf = null,
         int? ownSession = null,
-        Func<int, DateTime?>? startedOf = null)
+        Func<int, DateTime?>? startedOf = null,
+        Func<DateTime>? startBound = null)
     {
         _expectedImage = Normalize(expectedImage);
         _serverPid = serverPid ?? Win32Trust.ServerPid;
@@ -39,6 +41,22 @@ public sealed class ServerTrustVerifier : IServerTrust
         _imageOf = startedOf is null ? image : (pid, at) => startedOf(pid) is { } s && s <= at ? image(pid, at) : null;
         _sessionOf = sessionOf ?? Win32Trust.SessionOf;
         _ownSession = ownSession ?? Win32Trust.SessionOf(Environment.ProcessId) ?? -1;
+        _startBound = startBound ?? (() => StartBound(DateTime.UtcNow, Environment.TickCount64, Win32Trust.SystemStartedUtc.Value));
+    }
+
+    /// <summary>Backward clock steps up to this size are left to the wall clock (same rule as Core ProcessInfo).</summary>
+    public static readonly TimeSpan StepTolerance = TimeSpan.FromSeconds(10);
+
+    /// <summary>Latest start time a process that already ran at wallNowUtc can show. Start times are wall-clock stamps a
+    /// later clock change leaves alone, so after a step back the running agent "started in the future" and was refused
+    /// until the clock caught up (T2). Boot start (the System process) plus the time since boot (TickCount64, does not
+    /// step) is "now" on the clock that stamped it; it wins when ahead of the wall clock by more than StepTolerance.
+    /// Same rule as Core ProcessInfo.StartBound.</summary>
+    public static DateTime StartBound(DateTime wallNowUtc, long msSinceBoot, DateTime? systemStartedUtc)
+    {
+        if (systemStartedUtc is not { } boot) return wallNowUtc;
+        var monotonic = boot.AddMilliseconds(msSinceBoot);
+        return monotonic - wallNowUtc > StepTolerance ? monotonic : wallNowUtc;
     }
 
     /// <summary>The agent path for the installed layout: install dir is the parent of the UI exe's folder.</summary>
@@ -51,7 +69,7 @@ public sealed class ServerTrustVerifier : IServerTrust
 
     public TrustCheck Verify(SafePipeHandle pipe)
     {
-        var connectedUtc = DateTime.UtcNow;   // Verify runs right after the connect
+        var connectedUtc = _startBound();   // Verify runs right after the connect
         var pid = _serverPid(pipe);
         if (pid is null or <= 0) return new TrustCheck(false, 0);
         var image = _imageOf(pid.Value, connectedUtc);
@@ -128,4 +146,13 @@ internal static partial class Win32Trust
     }
 
     public static int? SessionOf(int pid) => ProcessIdToSessionId((uint)pid, out var s) ? (int)s : null;
+
+    /// <summary>Start time of the System process (pid 4), i.e. the boot on the clock of that moment; null when unreadable.</summary>
+    public static readonly Lazy<DateTime?> SystemStartedUtc = new(() =>
+    {
+        var h = OpenProcess(ProcessQueryLimitedInformation, false, 4);
+        if (h == 0) return null;
+        try { return GetProcessTimes(h, out var created, out _, out _, out _) && created > 0 ? DateTime.FromFileTimeUtc(created) : null; }
+        finally { CloseHandle(h); }
+    });
 }

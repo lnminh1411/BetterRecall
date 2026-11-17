@@ -33,6 +33,9 @@ THIRD_PARTY = Path("LICENSES") / "third-party"
 # Imported by worker/*.dll (msvcp140_1 and _codecvt_ids by OpenVINO GenAI) and by the agent's libvpl.dll (dumpbin /dependents).
 VC_RUNTIME_DLLS = ("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "msvcp140_1.dll", "msvcp140_codecvt_ids.dll")
 VC_RUNTIME_DIRS = (".", "worker")
+# src/BetterRecall.<name> projects published into a release layout (dev_build.py LAYOUT; package_single.py lists them for
+# the notices). Stub (D6): the launcher copies BetterRecall.Stub.exe to <data>ppin as the autostart and MCP stable paths.
+SHIPPED_PROJECTS = ("Agent", "Cli", "Mcp", "Stub", "Worker", "UI")
 
 
 def is_shipped(rel: Path) -> bool:
@@ -218,6 +221,8 @@ def finish(layout: Path, projects: list[str]) -> None:
 
 
 def _self_test() -> None:
+    import dev_build  # every published project ships, and nothing else does
+    assert set(dev_build.LAYOUT) == set(SHIPPED_PROJECTS), (sorted(dev_build.LAYOUT), SHIPPED_PROJECTS)
     assert not is_shipped(Path("worker/createdump.exe")) and not is_shipped(Path("ui/CreateDump.exe"))
     assert not is_shipped(Path("worker/onnxruntime.lib")) and not is_shipped(Path("BetterRecall.Agent.pdb"))
     assert not is_shipped(Path(DEV_MARKER))

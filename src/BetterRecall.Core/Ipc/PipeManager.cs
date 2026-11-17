@@ -66,8 +66,39 @@ public sealed class PipeManager : IAsyncDisposable
             case PipeKind.Mcp: return ProcessInfo.SamePath(image, InstallLayout.Full(_installDir, InstallLayout.McpExe));
             default:
                 var allow = _settings.Current.Ipc.AllowClients;
-                return allow.Length == 0 || allow.Any(a => ProcessInfo.SamePath(image, a));
+                return allow.Length == 0 || allow.Any(a => ProcessInfo.SamePath(image, a) || SameInstallFile(_installDir, image, a));
         }
+    }
+
+    /// <summary>
+    /// B12 (D6): the launcher installs every version into its own folder &lt;root&gt;\&lt;version&gt;-&lt;hash12&gt;, so an
+    /// ipc.allowClients entry naming a bundled exe (the CLI) stopped matching after each update. An entry inside any
+    /// version folder of the agent's install root, or the stable bin\betterrecall.cmd shim (it runs the CLI), matches
+    /// the same install-relative file in the agent's own install folder. Only the agent's own files gain from this.
+    /// </summary>
+    internal static bool SameInstallFile(string installDir, string? image, string entry)
+    {
+        if (image is null || string.IsNullOrWhiteSpace(entry)) return false;
+        string install, img, ent;
+        try
+        {
+            install = Path.GetFullPath(installDir).TrimEnd('\\');
+            img = Path.GetFullPath(image);
+            ent = Path.GetFullPath(entry);
+        }
+        catch (Exception e) when (e is ArgumentException or NotSupportedException or PathTooLongException) { return false; }
+        if (!img.StartsWith(install + "\\", StringComparison.OrdinalIgnoreCase) || Path.GetDirectoryName(install) is not { } root) return false;
+        var rel = img[(install.Length + 1)..];
+        if (!ent.StartsWith(root.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase)) return false;
+        var inRoot = ent[(root.TrimEnd('\\').Length + 1)..];
+        int cut = inRoot.IndexOf('\\');
+        if (cut <= 0) return false;
+        var folder = inRoot[..cut];
+        var entRel = inRoot[(cut + 1)..];
+        if (string.Equals(folder, InstallLayout.BinDir, StringComparison.OrdinalIgnoreCase))
+            return string.Equals(entRel, InstallLayout.CliShim, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(rel, InstallLayout.CliExe, StringComparison.OrdinalIgnoreCase);
+        return InstallLayout.IsVersionFolder(folder) && string.Equals(entRel, rel, StringComparison.OrdinalIgnoreCase);
     }
 
     private PipeServer Create(PipeKind kind, Settings s)

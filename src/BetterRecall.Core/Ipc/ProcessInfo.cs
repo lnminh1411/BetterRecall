@@ -39,8 +39,37 @@ internal static class ProcessInfo
     public static DateTime? CreatedUtc(SafeProcessHandle h)
         => Win32.GetProcessTimes(h, out var created, out _, out _, out _) && created > 0 ? DateTime.FromFileTimeUtc(created) : null;
 
+    /// <summary>Start time of the System process (pid 4): the boot, stamped on the clock of that moment. Null when it
+    /// cannot be read.</summary>
+    private static readonly Lazy<DateTime?> SystemStarted = new(() =>
+    {
+        using var h = Win32.OpenProcess(Win32.PROCESS_QUERY_LIMITED_INFORMATION, false, 4);
+        return h.IsInvalid ? null : CreatedUtc(h);
+    });
+
+    /// <summary>Backward clock steps up to this size are left to the wall clock: they reject a new process for at most
+    /// this long, and the boot bound below is a few seconds generous (the System process starts after boot).</summary>
+    internal static readonly TimeSpan StepTolerance = TimeSpan.FromSeconds(10);
+
     /// <summary>
-    /// Image path of pid, but only when that process started before notAfterUtc (the moment the pipe connected).
+    /// Latest start time a process that already ran at wallNowUtc can show (PID reuse checks). Start times are
+    /// wall-clock stamps that a later clock change leaves alone: once the clock steps back (NTP fixing a clock that ran
+    /// ahead at boot), a process started before the step shows a start "after now", and every peer was taken for a
+    /// reused pid until the clock caught up (T2). Boot start plus the time since boot (TickCount64 counts sleep and does
+    /// not step) is "now" on the clock that stamped the processes started before the step; it wins when it is ahead of
+    /// the wall clock by more than StepTolerance (a step back was detected), else the wall clock stays the bound.
+    /// </summary>
+    public static DateTime StartBound(DateTime wallNowUtc) => StartBound(wallNowUtc, Environment.TickCount64, SystemStarted.Value);
+
+    internal static DateTime StartBound(DateTime wallNowUtc, long msSinceBoot, DateTime? systemStartedUtc)
+    {
+        if (systemStartedUtc is not { } boot) return wallNowUtc;
+        var monotonic = boot.AddMilliseconds(msSinceBoot);
+        return monotonic - wallNowUtc > StepTolerance ? monotonic : wallNowUtc;
+    }
+
+    /// <summary>
+    /// Image path of pid, but only when that process started before notAfterUtc (the moment the pipe connected, see StartBound).
     /// A later start means the pid was freed and reused, so the image says nothing about the peer. One handle for both.
     /// </summary>
     public static string? ImagePathIfStartedBefore(int pid, DateTime notAfterUtc)

@@ -29,8 +29,13 @@ public sealed class PipeClient : IAsyncDisposable, IDisposable
     public int ServerPid { get; private set; }
 
     /// <summary>Connects and runs the trust check. Client is null unless the result is Ok.</summary>
-    public static async Task<(PipeConnectResult Result, PipeClient? Client)> ConnectAsync(
+    public static Task<(PipeConnectResult Result, PipeClient? Client)> ConnectAsync(
         string pipeName, string expectedServerImage, int timeoutMs = 1000, CancellationToken ct = default)
+        => ConnectAsync(pipeName, expectedServerImage, timeoutMs, () => DateTime.UtcNow, ct);
+
+    /// <summary>wallClock: tests step the clock without touching the PC's.</summary>
+    internal static async Task<(PipeConnectResult Result, PipeClient? Client)> ConnectAsync(
+        string pipeName, string expectedServerImage, int timeoutMs, Func<DateTime> wallClock, CancellationToken ct)
     {
         var stream = new NamedPipeClientStream(".", PipeNames.Base(pipeName), PipeDirection.InOut, PipeOptions.Asynchronous, TokenImpersonationLevel.Anonymous);
         DateTime connectedUtc;
@@ -38,7 +43,8 @@ public sealed class PipeClient : IAsyncDisposable, IDisposable
         {
             await stream.ConnectAsync(timeoutMs, ct).ConfigureAwait(false);
             // The server process existed when we connected: a pid whose process started later was freed and reused.
-            connectedUtc = DateTime.UtcNow;
+            // Not the wall clock alone: after it steps back the running agent "started in the future" (T2).
+            connectedUtc = ProcessInfo.StartBound(wallClock());
         }
         catch (TimeoutException) { await stream.DisposeAsync().ConfigureAwait(false); return (PipeConnectResult.NotRunning, null); }
         catch (IOException) { await stream.DisposeAsync().ConfigureAwait(false); return (PipeConnectResult.NotRunning, null); }
