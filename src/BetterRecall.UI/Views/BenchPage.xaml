@@ -7,6 +7,7 @@
         <StackPanel Style="{StaticResource PageStackStyle}" Spacing="12" MaxWidth="1100">   <!-- the encoder table needs the extra width -->
             <TextBlock x:Uid="BenchPage_Title" Style="{StaticResource PageTitleStyle}" AutomationProperties.HeadingLevel="Level1" />
             <TextBlock x:Uid="BenchPage_Desc" TextWrapping="Wrap" Margin="0,-8,0,0" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            <TextBlock x:Uid="BenchPage_ReindexNote" TextWrapping="Wrap" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />   <!-- batch W: applying a new search model re-indexes -->
 
             <!-- Grid, not a horizontal StackPanel: the status text gets the remaining width, so it wraps. -->
             <Grid ColumnSpacing="8">

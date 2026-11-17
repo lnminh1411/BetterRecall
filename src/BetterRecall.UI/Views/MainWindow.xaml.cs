@@ -247,6 +247,7 @@ public sealed partial class MainWindow : Window
         // Offline: the last status is stale, so its banners go until the agent is back (D10).
         UpdateStorageBar(connected ? st : null);
         UpdateStoreBar(connected ? st : null);
+        UpdateWarningBars(connected ? st : null);
         if (!connected) ActionBar.IsOpen = false;
         bool dataPage = _pageType is not null && typeof(IDataPage).IsAssignableFrom(_pageType);
         ContentFrame.Opacity = connected || !dataPage ? 1 : 0.5;   // what a data page shows may be out of date
@@ -273,6 +274,54 @@ public sealed partial class MainWindow : Window
         }
         else StoreBar.ActionButton = null;
         StoreBar.IsOpen = true;
+    }
+
+    private string[]? _warnings;
+
+    /// <summary>One banner per status warning (B3): settings.json unreadable (with Reset, D4), names and addresses not
+    /// redacted, OCR failing, VC++ runtime missing. The agent used to report them only to the CLI and MCP.</summary>
+    private void UpdateWarningBars(AgentStatus? st)
+    {
+        var codes = st?.Warnings;
+        if (WarningBanners.Same(codes, _warnings)) return;
+        _warnings = codes;
+        WarningBars.Children.Clear();
+        foreach (var w in WarningBanners.For(codes))
+        {
+            var bar = new InfoBar
+            {
+                Title = Loc.Get(w.TitleKey),
+                Message = w.Code == "settings-unreadable" ? Loc.Format(w.MessageKey, DataPaths.SettingsFile(DataPaths.Home()))
+                    : w.TitleKey == "Warn_OtherTitle" ? Loc.Format(w.MessageKey, w.Code) : Loc.Get(w.MessageKey),
+                Severity = w.Error ? InfoBarSeverity.Error : InfoBarSeverity.Warning,
+                IsClosable = !w.Error,
+                IsOpen = true,
+                Margin = new Thickness(24, 8, 24, 0),
+            };
+            if (w.CanReset)
+            {
+                var b = new Button { Content = Loc.Get("Warn_SettingsReset") };
+                b.Click += async (_, _) => await ResetSettingsAsync(b);
+                bar.ActionButton = b;
+            }
+            bar.Closed += (sender, _) => { WarningBars.Children.Remove(sender); WarningBars.Visibility = WarningBars.Children.Count > 0 ? Visibility.Visible : Visibility.Collapsed; };
+            WarningBars.Children.Add(bar);
+        }
+        WarningBars.Visibility = WarningBars.Children.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>"Reset settings" on the settings-unreadable banner: confirm, then write the defaults in use (D4).</summary>
+    private async Task ResetSettingsAsync(Button button)
+    {
+        if (Content?.XamlRoot is not { } root) return;
+        var dialog = WindowHelpers.Dialog(root, Loc.Get("Warn_ResetTitle"),
+            new TextBlock { Text = Loc.Format("Warn_ResetBody", DataPaths.SettingsFile(DataPaths.Home()) + ".bad"), TextWrapping = TextWrapping.Wrap },
+            Loc.Get("Warn_SettingsReset"));
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+        button.IsEnabled = false;
+        var r = await Services.Current.ResetSettingsAsync();
+        button.IsEnabled = true;
+        ShowActionResult(r.Ok, r.Kind, r.Error);
     }
 
     private bool _storageBarClosed;

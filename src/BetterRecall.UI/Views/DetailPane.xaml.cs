@@ -111,9 +111,12 @@ public sealed partial class DetailPane : UserControl
         ModalChanged?.Invoke(true);
         DescribeButton.IsEnabled = false;
         DescribeBusy.IsActive = true;
+        // Preview and send on one connection of this dialog: the agent keeps the token per connection (B2), and the
+        // preview's OCR wait stays off the thumbnail connection (AB-S1). Closing it drops an unsent token.
+        await using var session = s.CreateDescribeSession();
         try
         {
-            var p = await s.MediaApi.DescribePreviewAsync(item.Id);
+            var p = await session.PreviewAsync(item.Id);
             if (!p.Ok) { ShowDescribe(InfoBarSeverity.Warning, Loc.Error(p.Kind, p.Error), item.Id); return; }
             var preview = p.Value!;
             var body = new StackPanel { Spacing = 10, MaxWidth = 520 };
@@ -137,8 +140,7 @@ public sealed partial class DetailPane : UserControl
             img.Source = null;
             if (s.Locked) return;
             if (choice != ContentDialogResult.Primary) return;
-            await using var client = s.CreateRunClient();
-            var r = await new AgentApi(client).DescribeSendAsync(preview.Token);
+            var r = await session.SendAsync();
             if (r.Ok) ShowDescribe(InfoBarSeverity.Informational, r.Value!.Text, item.Id, Loc.Format("Describe_ResultTitle", r.Value.Model));
             else ShowDescribe(InfoBarSeverity.Warning, Loc.Error(r.Kind, r.Error), item.Id);
         }

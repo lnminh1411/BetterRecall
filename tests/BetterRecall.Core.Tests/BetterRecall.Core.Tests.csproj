@@ -8,6 +8,11 @@
     <NoWarn>$(NoWarn);xUnit1031;xUnit1030</NoWarn>
   </PropertyGroup>
   <ItemGroup>
+    <!-- Seam tests (Sweep4USeamTests): the UI's XAML-free client logic (MIT) against the real command processor on a
+         real pipe. MIT code compiled into this AGPL project is fine; UI.Tests keeps no backend reference. -->
+    <Compile Include="..\..\src\BetterRecall.UI\Logic\**\*.cs" Link="UiLogic\%(RecursiveDir)%(Filename)%(Extension)" />
+  </ItemGroup>
+  <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />

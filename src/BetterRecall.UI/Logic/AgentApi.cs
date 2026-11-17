@@ -24,6 +24,12 @@ public sealed record SearchQuery(
 public static class Responses
 {
     public static AgentStatus? Status(JsonElement d) => d.Deserialize(ContractsJson.Default.AgentStatus);
+
+    /// <summary>A "removed" stream event (captures left the store, B10), else null: subscribe streams carry status or
+    /// capture lines too.</summary>
+    public static RemovedEvent? Removed(JsonElement d) =>
+        d.ValueKind == JsonValueKind.Object && d.TryGetProperty("event", out var e) && e.ValueKind == JsonValueKind.String && e.GetString() == "removed"
+            ? d.Deserialize(ContractsJson.Default.RemovedEvent) : null;
     public static SearchResponse? Search(JsonElement d) => d.Deserialize(ContractsJson.Default.SearchResponse);
     public static CaptureDetail? Detail(JsonElement d) => d.Deserialize(ContractsJson.Default.CaptureDetail);
     public static BenchResult? Bench(JsonElement d) => d.Deserialize(ContractsJson.Default.BenchResult);
@@ -62,6 +68,9 @@ public static class Responses
     }
 
     public static int Purged(JsonElement d) => d.GetProperty("purged").GetInt32();
+
+    /// <summary>"purge confirm" with purge all's undeleted count (replay files deleted at the next start).</summary>
+    public static PurgeResult PurgeResult(JsonElement d) => d.Deserialize(ContractsJson.Default.PurgeResult) ?? throw new JsonException();
 
     public static VersionReply Version(JsonElement d) => d.Deserialize(ContractsJson.Default.VersionReply) ?? throw new JsonException();
 
@@ -143,6 +152,10 @@ public sealed class AgentApi(IAgentClient client)
     public async Task<AgentResult<JsonObject>> SettingsGetAsync(CancellationToken ct = default) =>
         (await client.SendAsync("settings get", ct)).As(Responses.SettingsObject);
 
+    /// <summary>settings reset: only while settings.json is unreadable; writes the defaults in use (D4).</summary>
+    public async Task<AgentResult<JsonObject>> SettingsResetAsync(CancellationToken ct = default) =>
+        (await client.SendAsync("settings reset", ct)).As(Responses.SettingsObject);
+
     public async Task<AgentResult<JsonObject>> SettingsSetAsync(JsonObject partial, CancellationToken ct = default) =>
         (await client.SendAsync("settings set " + partial.ToJsonString(), ct)).As(Responses.SettingsObject);
 
@@ -193,6 +206,9 @@ public sealed class AgentApi(IAgentClient client)
 
     public async Task<AgentResult<int>> PurgeConfirmAsync(string token, CancellationToken ct = default) =>
         (await client.SendAsync("purge confirm " + token, ct)).As(Responses.Purged);
+
+    public async Task<AgentResult<PurgeResult>> PurgeConfirmResultAsync(string token, CancellationToken ct = default) =>
+        (await client.SendAsync("purge confirm " + token, ct)).As(Responses.PurgeResult);
 
     public async Task<AgentResult<List<AuditEntry>>> AuditAsync(int? limit = null, CancellationToken ct = default) =>
         (await client.SendAsync(limit is { } l ? "audit " + l.ToString(CultureInfo.InvariantCulture) : "audit", ct)).As(Responses.Audit);

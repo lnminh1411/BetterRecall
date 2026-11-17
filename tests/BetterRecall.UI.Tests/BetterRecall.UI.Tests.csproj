@@ -18,6 +18,8 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\BetterRecall.Contracts\BetterRecall.Contracts.csproj" />
+    <!-- No backend reference: this project stays MIT (LICENSING.md). Seam tests against the real agent live in
+         Core.Tests (Sweep4USeamTests). -->
   </ItemGroup>
   <ItemGroup>
     <Using Include="Xunit" />

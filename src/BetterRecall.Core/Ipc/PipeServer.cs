@@ -35,6 +35,14 @@ public sealed class PipeServer : IAsyncDisposable
 {
     public const int Instances = 4;
 
+    /// <summary>The UI pipe: the UI keeps three connections open (main, media, status) and opens short ones for long
+    /// requests (bench, chat, export), each describe dialog and each launcher search (sweep 4 B4, AB-S1); four left one
+    /// spare, and a busy pipe read as "agent not running".</summary>
+    public const int UiInstances = 8;
+
+    /// <summary>Instances this pipe accepts at once.</summary>
+    public int MaxInstances => _kind == PipeKind.Ui ? UiInstances : Instances;
+
     private readonly string _name;
     private readonly PipeKind _kind;
     private readonly Func<string?, bool> _imageAllowed;
@@ -75,7 +83,7 @@ public sealed class PipeServer : IAsyncDisposable
         lock (_gate)
         {
             _loops.Add(Task.Run(() => AcceptLoop(first)));
-            for (int i = 1; i < Instances; i++) _loops.Add(Task.Run(() => AcceptLoop(null)));
+            for (int i = 1; i < MaxInstances; i++) _loops.Add(Task.Run(() => AcceptLoop(null)));
         }
         Log.Info($"pipe {_kind} listening");
     }
@@ -90,7 +98,7 @@ public sealed class PipeServer : IAsyncDisposable
             var sa = new Win32.SECURITY_ATTRIBUTES { nLength = Marshal.SizeOf<Win32.SECURITY_ATTRIBUTES>(), lpSecurityDescriptor = sd, bInheritHandle = 0 };
             uint open = Win32.PIPE_ACCESS_DUPLEX | Win32.FILE_FLAG_OVERLAPPED | (first ? Win32.FILE_FLAG_FIRST_PIPE_INSTANCE : 0);
             uint mode = Win32.PIPE_TYPE_BYTE | Win32.PIPE_READMODE_BYTE | Win32.PIPE_WAIT | Win32.PIPE_REJECT_REMOTE_CLIENTS;
-            SafePipeHandle h = Win32.CreateNamedPipe(@"\\.\pipe\" + _name, open, mode, Instances, 65536, 65536, 0, ref sa);
+            SafePipeHandle h = Win32.CreateNamedPipe(@"\\.\pipe\" + _name, open, mode, (uint)MaxInstances, 65536, 65536, 0, ref sa);
             if (h.IsInvalid)
             {
                 int err = Marshal.GetLastPInvokeError();

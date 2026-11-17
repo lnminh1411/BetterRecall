@@ -59,6 +59,7 @@ public sealed class MockPipeServer(MockAgent agent, string pipeName) : IAsyncDis
     private async Task SessionAsync(NamedPipeServerStream pipe, CancellationToken ct)
     {
         await using var _ = pipe;
+        var session = new MockSession();   // per connection, as the agent's ClientSession (B2)
         try
         {
             while (!ct.IsCancellationRequested)
@@ -77,7 +78,7 @@ public sealed class MockPipeServer(MockAgent agent, string pipeName) : IAsyncDis
                     await agent.StreamAsync(line, l => LineProtocol.WriteLineAsync(pipe, l, ct), ct).ConfigureAwait(false);
                     continue;
                 }
-                var response = await agent.HandleAsync(line, ct).ConfigureAwait(false);
+                var response = await agent.HandleAsync(line, session, ct).ConfigureAwait(false);
                 await LineProtocol.WriteLineAsync(pipe, response, ct).ConfigureAwait(false);
                 if (line.Trim().Equals("subscribe", StringComparison.OrdinalIgnoreCase) && response.StartsWith("{\"ok\":true", StringComparison.Ordinal))
                 {

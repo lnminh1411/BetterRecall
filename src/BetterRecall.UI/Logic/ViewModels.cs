@@ -385,6 +385,9 @@ public sealed class SearchViewModel : ObservableObject
         AgentErrors.InvalidToken => new LocalizedText("Err_InvalidToken"),
         AgentErrors.WrongPassword => new LocalizedText("Err_WrongPassword"),
         AgentErrors.NoPassword => new LocalizedText("Err_NoPassword"),
+        AgentErrors.HelloMissing => new LocalizedText("Err_HelloMissing"),
+        AgentErrors.SettingsUnreadable => new LocalizedText("Err_SettingsUnreadable"),
+        AgentErrors.PurgedDuring => new LocalizedText("Err_PurgedDuring"),
         AgentErrors.PasswordRule => new LocalizedText("Err_PasswordRule"),
         AgentErrors.PasswordInUse => new LocalizedText("Err_PasswordInUse"),
         AgentErrors.AiOff => new LocalizedText("Err_AiOff"),
@@ -515,6 +518,20 @@ public sealed class TimelineViewModel(AgentApi api, TimeZoneInfo? zone = null) :
         Apply();
     }
 
+    /// <summary>Captures that left the store (another client's purge, retention, NSFW drop, B10) leave the day. Returns
+    /// how many were removed.</summary>
+    public int RemoveWhere(Func<string, DateTimeOffset, bool> match)
+    {
+        int n = _all.RemoveAll(m => match(m.Id, m.Ts));
+        if (n == 0) return 0;
+        var counts = new int[24];
+        foreach (var m in _all) counts[TimeZoneInfo.ConvertTime(m.Ts, _zone).Hour]++;
+        HourCounts = counts;
+        Raise(nameof(HourCounts));
+        Apply();
+        return n;
+    }
+
     /// <summary>Page left or locked: drops the day's captures; a load still in flight discards its answer.</summary>
     public void Clear()
     {
@@ -549,6 +566,49 @@ public sealed class TimelineViewModel(AgentApi api, TimeZoneInfo? zone = null) :
         }
         Message = Items.Count == 0 ? (Pending > 0 ? new LocalizedText("Timeline_EmptyPending", Pending) : new LocalizedText("Timeline_Empty"))
             : Truncated ? new LocalizedText("Timeline_CountTruncated", Items.Count) : new LocalizedText("Timeline_Count", Items.Count);
+    }
+}
+
+/// <summary>One banner per status warning code (B3). Error: shown as an error; CanReset: offers "Reset settings".</summary>
+public sealed record WarningBanner(string Code, string TitleKey, string MessageKey, bool Error = false, bool CanReset = false);
+
+public static class WarningBanners
+{
+    /// <summary>Banners for status.warnings, in the agent's order, one per code. Unknown codes get a generic banner that
+    /// names the code, so a warning added later is never silent.</summary>
+    public static IReadOnlyList<WarningBanner> For(string[]? warnings) => warnings is null ? [] :
+        [.. warnings.Where(c => !string.IsNullOrEmpty(c)).Distinct(StringComparer.Ordinal).Select(c => c switch
+        {
+            // Defaults are in use and saves are refused until a reset (D4); the message names the file.
+            "settings-unreadable" => new WarningBanner(c, "Warn_SettingsTitle", "Warn_SettingsMessage", Error: true, CanReset: true),
+            "ner-unavailable" => new WarningBanner(c, "Warn_NerTitle", "Warn_NerMessage", Error: true),
+            "ocr-failing" => new WarningBanner(c, "Warn_OcrTitle", "Warn_OcrMessage"),
+            "vc-runtime-missing" => new WarningBanner(c, "Warn_VcTitle", "Warn_VcMessage"),
+            // The replay is masked meanwhile (D2): not closable, it ends by itself when OCR works again.
+            "replay-text-unchecked" => new WarningBanner(c, "Warn_ReplayTextTitle", "Warn_ReplayTextMessage", Error: true),
+            _ => new WarningBanner(c, "Warn_OtherTitle", "Warn_OtherMessage"),
+        })];
+
+    /// <summary>Same codes in the same order: the banners need no rebuild.</summary>
+    public static bool Same(string[]? a, string[]? b) => (a ?? []).SequenceEqual(b ?? [], StringComparer.Ordinal);
+}
+
+/// <summary>When the UI re-reads settings after its status subscription connects.</summary>
+public static class SettingsReload
+{
+    /// <summary>Every reconnect (the agent may have restarted with other settings, D2), and the first connect when the
+    /// start-up fetch failed (the UI started before the agent, B8).</summary>
+    public static bool OnConnect(int connects, bool settingsLoaded) => connects > 1 || !settingsLoaded;
+}
+
+/// <summary>Which shown captures a "removed" stream event covers (B10): its ids, or its purged window.</summary>
+public static class RemovedMatch
+{
+    public static Func<string, DateTimeOffset, bool> For(RemovedEvent e)
+    {
+        var ids = e.Ids.ToHashSet(StringComparer.Ordinal);
+        DateTimeOffset? from = e.From, to = e.To;
+        return (id, ts) => ids.Contains(id) || from is { } f && to is { } t && ts >= f && ts <= t;
     }
 }
 
@@ -635,9 +695,22 @@ public static class StatusText
     }
 }
 
-/// <summary>Unlock screen logic. Passphrase mode comes from security.keyProtection, password mode from security.unlockMethod.</summary>
+/// <summary>Unlock screen logic. The agent's status says which secret it waits for (unlockNeeds); agents without that
+/// field fall back to security.keyProtection (passphrase) and security.unlockMethod (password).</summary>
 public static class UnlockLogic
 {
+    /// <summary>The box the agent asks for (status.unlockNeeds), else the settings rule below (B1, B8, B13).</summary>
+    public static UnlockMode Mode(string? unlockNeeds, string? keyProtection, string? unlockMethod, bool keyNeedsPassphrase) => unlockNeeds switch
+    {
+        "passphrase" => UnlockMode.Passphrase,
+        "password" => UnlockMode.Password,
+        "hello" => UnlockMode.Hello,
+        _ => Mode(keyProtection, unlockMethod, keyNeedsPassphrase),
+    };
+
+    /// <summary>The unlock answer says Windows Hello is missing and the password stands in for it: show the password box (B13).</summary>
+    public static bool AsksForPassword(string? error) => error == AgentErrors.HelloMissing;
+
     public static bool UsesPassphrase(string? keyProtection) => string.Equals(keyProtection, "passphrase", StringComparison.OrdinalIgnoreCase);
     public static bool UsesPassword(string? unlockMethod) => string.Equals(unlockMethod, "password", StringComparison.OrdinalIgnoreCase);
 
@@ -712,12 +785,17 @@ public static class PurgeFlow
     /// purge all: Windows Hello unlock (purge all needs an unlock in the last 60 s), then "purge all", then "purge confirm".
     /// Stops at the first failure.
     /// </summary>
-    public static async Task<AgentResult<int>> PurgeAllAsync(AgentApi api, string? passphrase, CancellationToken ct = default)
+    public static async Task<AgentResult<PurgeResult>> PurgeAllAsync(AgentApi api, string? passphrase, CancellationToken ct = default)
     {
         var u = await api.UnlockAsync(passphrase, ct);
-        if (!u.Ok) return new AgentResult<int>(false, 0, u.Kind, u.Error);
+        if (!u.Ok) return new AgentResult<PurgeResult>(false, null, u.Kind, u.Error);
         var p = await api.PurgeAllAsync(ct);
-        if (!p.Ok) return new AgentResult<int>(false, 0, p.Kind, p.Error);
-        return await api.PurgeConfirmAsync(p.Value!.Confirm, ct);
+        if (!p.Ok) return new AgentResult<PurgeResult>(false, null, p.Kind, p.Error);
+        return await api.PurgeConfirmResultAsync(p.Value!.Confirm, ct);
     }
+
+    /// <summary>The purge all result line: the count, plus the replay files it could not delete yet (batch P), if any.</summary>
+    public static IReadOnlyList<LocalizedText> AllDoneText(PurgeResult r) => r.Undeleted is > 0 and var left
+        ? [new LocalizedText("Danger_AllDone", r.Purged), new LocalizedText("Danger_AllUndeleted", left)]
+        : [new LocalizedText("Danger_AllDone", r.Purged)];
 }

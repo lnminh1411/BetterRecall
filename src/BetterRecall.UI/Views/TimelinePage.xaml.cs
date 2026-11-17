@@ -37,8 +37,18 @@ public sealed partial class TimelinePage : Page, IDataPage
         DayPicker.Date = DateTime.Now.Date;
         DayPicker.MaxDate = DateTime.Now.Date;
         _updating = false;
-        Loaded += (_, _) => Reload();
-        Unloaded += (_, _) => { _vm.Clear(); _detail.Clear(); };   // a load still in flight is discarded too
+        Loaded += (_, _) => { s.Removed -= OnRemoved; s.Removed += OnRemoved; Reload(); };   // Loaded can fire twice
+        Unloaded += (_, _) => { s.Removed -= OnRemoved; _vm.Clear(); _detail.Clear(); };   // a load still in flight is discarded too
+    }
+
+    /// <summary>Captures purged by another client, retention, the storage limit or the NSFW gate leave the day and the
+    /// preview (B10); too many to list reloads the day.</summary>
+    private void OnRemoved(Contracts.RemovedEvent e)
+    {
+        if (e.Truncated) { Reload(); return; }
+        var match = RemovedMatch.For(e);
+        if (_detail.Item is { } shown && match(shown.Id, shown.Ts)) _detail.Clear();
+        _vm.RemoveWhere(match);
     }
 
     public void Reload() => _ = LoadAsync();

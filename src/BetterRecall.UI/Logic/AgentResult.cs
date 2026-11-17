@@ -38,6 +38,12 @@ public static class AgentErrors
     public const string InvalidJson = "Invalid JSON.";
     public const string WrongPassword = "Wrong password.";
     public const string NoPassword = "No unlock password is set.";
+    /// <summary>security.unlockMethod hello on a PC without Windows Hello, with an unlock password set: unlock with the password (B13).</summary>
+    public const string HelloMissing = "Windows Hello is not available: unlock with the password (config security.unlockMethod).";
+    /// <summary>Purge all ran during a capture export, replay save or replay export: nothing was written.</summary>
+    public const string PurgedDuring = "A purge ran during the export; nothing was written.";
+    /// <summary>settings.json did not parse at the agent's start: saves are refused until a reset (B3, D4).</summary>
+    public const string SettingsUnreadable = "settings.json could not be read. Reset the settings or fix the file first.";
     public const string PasswordRule = "Password must be 6 to 256 characters.";
     public const string PasswordInUse = "Password in use (config security.unlockMethod).";
     public const string AiOff = "Cloud describe is off (config ai.enabled).";

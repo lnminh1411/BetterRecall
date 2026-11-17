@@ -12,8 +12,17 @@ public sealed partial class UnlockPanel : UserControl
     public UnlockPanel()
     {
         InitializeComponent();
-        // The mode comes from settings; they can arrive after the panel is first shown.
-        Services.Current.SettingsLoaded += () => { if (Visibility == Visibility.Visible) Refresh(); };
+        // The mode comes from the agent's status (unlockNeeds), else from settings; either can arrive after the panel
+        // is first shown. Only a different mode rebuilds the panel: a status push must not clear what the user typed (B6).
+        Services.Current.SettingsLoaded += RefreshIfModeChanged;
+        Services.Current.StatusChanged += RefreshIfModeChanged;
+    }
+
+    private UnlockMode? _shown;
+
+    private void RefreshIfModeChanged()
+    {
+        if (Visibility == Visibility.Visible && Services.Current.UnlockMode != _shown) Refresh();
     }
 
     public event Action? UnlockedOk;
@@ -22,6 +31,7 @@ public sealed partial class UnlockPanel : UserControl
     public void Refresh()
     {
         var mode = Services.Current.UnlockMode;
+        _shown = mode;
         bool pass = mode != UnlockMode.Hello;
         PassPanel.Visibility = pass ? Visibility.Visible : Visibility.Collapsed;
         HelloButton.Visibility = pass ? Visibility.Collapsed : Visibility.Visible;
@@ -69,6 +79,12 @@ public sealed partial class UnlockPanel : UserControl
             s.MarkUnlocked();
             UnlockedOk?.Invoke();
             return;
+        }
+        if (UnlockLogic.AsksForPassword(r.Error) && !s.PasswordFallback)
+        {
+            // No Windows Hello on this PC; the unlock password stands in (B13): show its box under the message.
+            s.PasswordFallback = true;
+            Refresh();
         }
         ErrorBar.Message = Loc.Error(r.Kind, r.Error);
         ErrorBar.IsOpen = true;

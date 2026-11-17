@@ -39,7 +39,10 @@ public sealed partial class ChatPage : Page, IDataPage
 
         Loaded += (_, _) =>
         {
+            Services.Current.SettingsLoaded -= UpdateAiState;
             Services.Current.SettingsLoaded += UpdateAiState;
+            Services.Current.Removed -= OnRemoved;
+            Services.Current.Removed += OnRemoved;
             UpdateAiState();
             _ = ReloadListAsync();
         };
@@ -47,6 +50,7 @@ public sealed partial class ChatPage : Page, IDataPage
         Unloaded += (_, _) =>
         {
             Services.Current.SettingsLoaded -= UpdateAiState;
+            Services.Current.Removed -= OnRemoved;
             ChatControl.Stop();
             ChatControl.ViewModel.Reset();
             _detail.Clear();
@@ -112,6 +116,17 @@ public sealed partial class ChatPage : Page, IDataPage
     {
         SavedList.SelectedItem = null;
         ChatControl.ViewModel.Reset();
+    }
+
+    /// <summary>A capture shown in the detail pane left the store (another client's purge, NSFW drop): its keyframe
+    /// leaves the pane (sweep 4 review S8).</summary>
+    private void OnRemoved(RemovedEvent e)
+    {
+        if (_detail.Item is { } shown && (e.Truncated || RemovedMatch.For(e)(shown.Id, shown.Ts)))
+        {
+            _detail.Clear();
+            DetailHost.Visibility = Visibility.Collapsed;
+        }
     }
 
     private void OnSourceInvoked(ChatSource source)

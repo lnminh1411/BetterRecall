@@ -83,6 +83,30 @@ public sealed class ThumbnailCache(long maxBytes)
         }
     }
 
+    /// <summary>Drops every width of these captures (they left the store, B10).</summary>
+    public void Remove(IEnumerable<string> ids)
+    {
+        var gone = ids.ToHashSet(StringComparer.Ordinal);
+        if (gone.Count == 0) return;
+        lock (_lock)
+        {
+            _gen++;   // a fetch that started before the removal must not put the thumbnail back (review S9)
+            for (var node = _lru.First; node is not null;)
+            {
+                var next = node.Next;
+                var key = node.Value.Key;
+                int at = key.LastIndexOf('@');
+                if (at > 0 && gone.Contains(key[..at]))
+                {
+                    _lru.Remove(node);
+                    _map.Remove(key);
+                    _bytes -= node.Value.Bytes.Length;
+                }
+                node = next;
+            }
+        }
+    }
+
     public void Put(string id, int width, byte[] bytes)
     {
         long gen;

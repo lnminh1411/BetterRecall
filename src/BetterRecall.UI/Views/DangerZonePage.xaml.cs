@@ -208,7 +208,7 @@ public sealed partial class DangerZonePage : Page, IDataPage
         pass = null;
         AllBusy.IsActive = false;
         AllCancel_Click(sender, e);
-        if (r.Ok) Show(InfoBarSeverity.Success, Loc.Format("Danger_AllDone", r.Value));
+        if (r.Ok) Show(r.Value!.Undeleted is > 0 ? InfoBarSeverity.Warning : InfoBarSeverity.Success, string.Join(" ", PurgeFlow.AllDoneText(r.Value).Select(Loc.Text)));
         else Show(InfoBarSeverity.Error, Loc.Error(r.Kind, r.Error));
         await s.RefreshStatusAsync();
     }

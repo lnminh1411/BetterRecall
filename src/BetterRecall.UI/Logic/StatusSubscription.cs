@@ -12,6 +12,8 @@ public sealed class StatusSubscription(string pipeName, IServerTrust trust) : IA
     private Task? _loop;
 
     public event Action<AgentStatus>? StatusReceived;
+    /// <summary>Captures left the store (B10).</summary>
+    public event Action<RemovedEvent>? Removed;
     public event Action<AgentErrorKind>? Disconnected;
     /// <summary>The subscription was acknowledged: the first connection and every reconnect (agent restart, D2).</summary>
     public event Action? Connected;
@@ -52,6 +54,7 @@ public sealed class StatusSubscription(string pipeName, IServerTrust trust) : IA
                             {
                                 var r = AgentClient.Parse(line);
                                 if (!r.Ok) continue;
+                                if (Responses.Removed(r.Data) is { } removed) { Removed?.Invoke(removed); continue; }
                                 var status = Responses.Status(r.Data);
                                 if (status is not null) StatusReceived?.Invoke(status);
                             }
