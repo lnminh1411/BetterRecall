@@ -303,4 +303,86 @@ public sealed class Sweep4PCoreTests : IDisposable
         Assert.True(File.Exists(path));
         Assert.False(File.Exists(ExportJournal.PathFor(_t.Home.Path)));   // done: nothing left to sweep
     }
+
+    [Fact]
+    public void C3_failed_export_leaves_a_file_it_did_not_create()
+    {
+        Screen(_t.Store, DateTimeOffset.UtcNow.AddMinutes(-4), seed: 13);
+        var path = Path.Combine(_out.Path, "users.zip");
+        var theirs = path + ".partial";
+        File.WriteAllBytes(theirs, [9, 9]);
+        using (new FileStream(theirs, FileMode.Open, FileAccess.Read, FileShare.Read))   // our partial cannot be created
+            Assert.ThrowsAny<IOException>(() => CaptureExporter.Write(_t.Store,
+                new ExportRequest(DateTimeOffset.UtcNow.AddHours(-1), DateTimeOffset.UtcNow, path, Jpeg: true), (kf, _) => kf, CancellationToken.None));
+        Assert.True(File.Exists(theirs));
+        Assert.False(File.Exists(ExportJournal.PathFor(_t.Home.Path)));   // not listed: the next start must not delete it
+    }
+
+    // ---- review #4: the old store is closed before the agent hears purge all
+
+    [Fact]
+    public async Task Purge_all_closes_the_old_store_before_the_agent_hears_it()
+    {
+        using var h = new TempHome("dpapi");
+        var host = (CoreHostImpl)CoreHost.Create(new CoreHostOptions(h.Path, h.Path));
+        await using (host)
+        {
+            await host.OpenStoreAsync(CancellationToken.None);
+            var old = host.Store!;
+            old.AddScreenCapture(Caps.Screen(DateTimeOffset.UtcNow.AddSeconds(-5)));   // a pending embedding job
+            Exception? seen = null;
+            ((ICoreHost)host).Purged += n =>
+            {
+                // The embedding scheduler still holding the old reference: no pre-purge image may come back after Clear().
+                if (n.Reason == "all") seen = Record.Exception(() => old.TakePendingEmbeddings(10));
+            };
+            await host.PurgeAllAsync(CancellationToken.None);
+            Assert.IsType<ObjectDisposedException>(seen);
+        }
+    }
+
+    // ---- review #6: a replay file held open is reported and deleted at the next start
+
+    [Fact]
+    public async Task Purge_all_reports_a_replay_file_it_could_not_delete_and_the_next_start_deletes_it()
+    {
+        using var h = new TempHome("dpapi");
+        var clip = Path.Combine(DataPaths.ReplaysDir(h.Path), "20261117T120000000Z.mp4");
+        var host = (CoreHostImpl)CoreHost.Create(new CoreHostOptions(h.Path, h.Path));
+        await using (host)
+        {
+            await host.OpenStoreAsync(CancellationToken.None);
+            Directory.CreateDirectory(Path.GetDirectoryName(clip)!);
+            File.WriteAllBytes(clip, [1, 2, 3]);   // a plain clip
+            var p = new CommandProcessor(new CommandDeps
+            {
+                Settings = host.Settings,
+                Store = () => host.Store,
+                Keys = new FakeKeys(),
+                Agent = new FakeAgent(),
+                Embedder = new FakeEmbedder(),
+                Thumbnailer = new FakeThumbs(),
+                PurgeAll = host.PurgeAllAsync,
+                PurgeAllUndeleted = () => host.LastPurgeAllUndeleted,
+            });
+            var ui = new ClientSession(PipeKind.Ui, 101, @"C:\app\ui\BetterRecall.UI.exe");
+            ui.PurgeTokens["t1"] = new PurgeTicket(null, 0, DateTimeOffset.UtcNow.AddSeconds(30));
+            Reply reply;
+            using (new FileStream(clip, FileMode.Open, FileAccess.Read, FileShare.Read))   // a media player has it open
+                reply = await p.HandleAsync(ui, "purge confirm t1", CancellationToken.None);
+            var (ok, d, _) = Envelope.Parse(reply.Line);
+            Assert.True(ok);
+            Assert.Equal(1, d.GetProperty("undeleted").GetInt32());
+            Assert.Equal(1, host.LastPurgeAllUndeleted);
+            Assert.Contains(Path.GetFullPath(clip), File.ReadAllLines(ExportJournal.PathFor(h.Path)));
+        }
+        var next = CoreHost.Create(new CoreHostOptions(h.Path, h.Path));
+        await using (next) Assert.False(File.Exists(clip));
+    }
+
+    [Fact]
+    public void Purge_result_omits_undeleted_when_nothing_is_left()
+    {
+        Assert.Equal("{\"purged\":3}", JsonSerializer.Serialize(new PurgeResult(3), CoreJson.Default.PurgeResult));
+    }
 }

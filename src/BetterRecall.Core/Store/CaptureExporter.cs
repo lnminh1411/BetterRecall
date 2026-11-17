@@ -93,10 +93,15 @@ public static class CaptureExporter
         if (notices is not null) notices.Purged += OnPurged;
         // Recorded while it exists, so a partial left by a killed agent is deleted at the next start (C3).
         var home = notices?.Home;
+        bool created = false;
         try
         {
             ExportJournal.Add(home, partial);
-            using (var fs = new FileStream(partial, FileMode.Create, FileAccess.Write, FileShare.None))
+            FileStream fs;
+            try { fs = new FileStream(partial, FileMode.Create, FileAccess.Write, FileShare.None); }
+            catch { ExportJournal.Forget(home, partial); throw; }
+            created = true;
+            using (fs)
             using (var zip = new ZipArchive(fs, ZipArchiveMode.Create))
             {
                 foreach (var m in Rows(store, r).Reverse())
@@ -143,10 +148,14 @@ public static class CaptureExporter
         }
         catch (Exception ex)
         {
-            try { File.Delete(partial); } catch { }
-            ExportJournal.Remove(home, partial);
-            // Purge all disposes the store under the export: its next read fails, but the user is owed the purge message (BC-S2).
-            if (Volatile.Read(ref purged) && ex is not ExportPurgedException) throw new ExportPurgedException();
+            if (created)   // only ours: a file of that name that was there before stays
+            {
+                try { File.Delete(partial); } catch { }
+                ExportJournal.Remove(home, partial);
+            }
+            // Purge all disposes the store under the export: its next read fails (also when the export subscribed after
+            // the store's notice), but the user is owed the purge message (BC-S2).
+            if ((Volatile.Read(ref purged) || ex is ObjectDisposedException) && ex is not ExportPurgedException) throw new ExportPurgedException();
             throw;
         }
         finally { if (notices is not null) notices.Purged -= OnPurged; }

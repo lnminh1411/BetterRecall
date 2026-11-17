@@ -75,11 +75,24 @@ public sealed class CoreHostImpl : ICoreHost
         return store;
     }
 
-    /// <summary>When the last purge all finished (RAM only), for the fence of the stores opened after it.</summary>
+    /// <summary>When the last purge all finished (RAM only), for the fence of the stores opened after it. Taken after the
+    /// files are gone, not at the notice: an item grabbed in between (seconds; ring and grab queue already cleared) is
+    /// refused too, which also absorbs small drift between audio QPC stamps and the wall clock.</summary>
     private DateTimeOffset? _purgedAllAt;
 
+    private volatile bool _purgingAll;
+
+    /// <summary>Purge all is running: set before its notice, cleared before the new store opens. The agent refuses
+    /// replay saves and exports that would start inside it (they could open a clip under the old key).</summary>
+    public bool PurgingAll => _purgingAll;
+
+    /// <summary>Replay files the last purge all could not delete (held open elsewhere); listed in exports.pending so the
+    /// next start retries them. Reported in the purge all reply.</summary>
+    public int LastPurgeAllUndeleted { get; private set; }
+
     /// <summary>Fans a purge out: chat state in Core first, then the agent's listeners (thumbnail cache, replay ring,
-    /// samples, queued jobs). A failing listener does not stop the others.</summary>
+    /// samples, queued jobs). A failing listener does not stop the others. Purge all raises it while holding _storeGate:
+    /// a listener must never wait on the gate (OpenStoreAsync, PurgeAllAsync).</summary>
     private void OnStorePurged(PurgeNotice n)
     {
         try { _processor?.OnStorePurged(n); } catch (Exception ex) { Log.Warn("purge: chat cleanup failed", ex); }
@@ -145,6 +158,7 @@ public sealed class CoreHostImpl : ICoreHost
             Embedder = embedder,
             Thumbnailer = thumbnailer,
             PurgeAll = PurgeAllAsync,
+            PurgeAllUndeleted = () => LastPurgeAllUndeleted,
             Blobs = _blobs,
             Home = _options.Home,
             Password = new UnlockPassword(_options.Home),
@@ -178,19 +192,23 @@ public sealed class CoreHostImpl : ICoreHost
             int rows = 0;
             if (store != null)
                 try { rows = store.CountPurge(new PurgeScope("all")); } catch { }
-            _store = null;
-            // Everything in RAM goes first, before any file is deleted (A-H1, C1): the replay ring, samples and queued jobs
-            // would otherwise outlive the data key; a replay save in flight is discarded and a replay export cancelled
-            // (its source file can then be deleted below).
-            OnStorePurged(new PurgeNotice("all", [], DateTimeOffset.MinValue, DateTimeOffset.UtcNow));
+            _purgingAll = true;
+            _store = null;   // nothing new is written to the old store from here on
             if (store != null)
             {
                 store.Purged -= OnStorePurged;   // its own "all" reaches only its direct listeners (a running capture export)
-                store.DeleteAllFiles();
+                // Close before the agent hears: a reader still holding the old store (the embedding scheduler) can no
+                // longer refill its queue with pre-purge images after the agent cleared it.
+                store.CloseForPurgeAll();
             }
-            else EncryptedStore.DeleteFiles(_options.Home);   // never opened: its key is lost or locked, the files are unreadable
+            // Everything in RAM goes next, before any file is deleted (A-H1, C1): the replay ring, samples and queued jobs
+            // would otherwise outlive the data key; a replay save in flight is discarded and a replay export cancelled
+            // (its source file can then be deleted below).
+            OnStorePurged(new PurgeNotice("all", [], DateTimeOffset.MinValue, DateTimeOffset.UtcNow));
+            EncryptedStore.DeleteFiles(_options.Home);   // also when the store never opened: its key is lost or locked
             _vault.DestroyKey();
             var replays = DataPaths.ReplaysDir(_options.Home);
+            int undeleted = 0;
             if (Directory.Exists(replays))
             {
                 // A cancelled replay export or save lets go of its file a moment after the notice: retry briefly.
@@ -203,22 +221,32 @@ public sealed class CoreHostImpl : ICoreHost
                         catch (Exception ex)
                         {
                             failed++;
-                            if (last) Log.Error("replay delete failed", ex);
+                            if (!last) continue;
+                            Log.Error("replay delete failed", ex);
+                            ExportJournal.Add(_options.Home, f);   // the next start retries it
                         }
-                    if (failed == 0 || last) break;
+                    if (failed == 0 || last) { undeleted = failed; break; }
                     await Task.Delay(100, CancellationToken.None).ConfigureAwait(false);
                 }
             }
+            LastPurgeAllUndeleted = undeleted;
+            // A plain clip held open by a player stays readable until it is deleted: say so (reply and log), never "all gone".
+            if (undeleted > 0) Log.Error($"purge all: {undeleted} replay file(s) could not be deleted (in use); deleted at the next start");
             try { _thumbs?.ClearCache(); } catch (Exception ex) { Log.Warn("thumbnail cache clear failed", ex); }
             Log.Info("purge all done");
             _purgedAllAt = DateTimeOffset.UtcNow;
+            _purgingAll = false;
             if (_vault.TryLoadSilent())
                 _store = Wire(new EncryptedStore(_options.Home, () => _vault.Derive("betterrecall-sqlite")));
             else
                 _ = Task.Run(async () => { await _vault.WhenLoaded.ConfigureAwait(false); await OpenStoreAsync(CancellationToken.None).ConfigureAwait(false); });
             return rows;
         }
-        finally { _storeGate.Release(); }
+        finally
+        {
+            _purgingAll = false;
+            _storeGate.Release();
+        }
     }
 
     public async ValueTask DisposeAsync()

@@ -114,6 +114,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
 
         _replays = new ReplayLibrary(_opt.Home, () => S, _core.Blobs);
         _replays.DeletePartials();   // saves that failed or were cut off by a crash (A20)
+        _replays.PurgingAll = () => _core is BetterRecall.Core.CoreHostImpl c && c.PurgingAll;   // C1: no save or export starts inside purge all
         var encLuid = GpuDevices.Adapters().FirstOrDefault(a => a.VendorId == GpuDevices.VendorIntel)?.Luid;
         _probe = new SystemProbe(encLuid is null ? null : GpuDevices.PdhLuidToken(encLuid.Value));
         _scheduler = new EmbeddingScheduler(() => Store, () => S, _worker, ProbeLoad, () => _pause.Has("consent") || _pause.Has("keylocked") || _pause.Has("keylost") || _pause.Has("storeerror"));
@@ -503,6 +504,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
             _sampler.Clear();
             _systemAudio?.Clear();
             _micAudio?.Clear();
+            _replays?.DiscardSavesInFlight();   // a clip being written holds the purged video
             Log.Info($"purge ({n.Reason}) reached the replay window: replay ring, samples and pending audio cleared");
         }
     }
@@ -786,6 +788,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         var sw = Stopwatch.StartNew();
         _capture?.Panic();
         _sampler.Clear();
+        _replays?.DiscardSavesInFlight();   // panic with 0 minutes raises no purge notice
         _scheduler?.Clear();
         _thumbs.ClearCache();
         _systemAudio?.Clear();
@@ -835,9 +838,12 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
     private void OnEndSession()
     {
         Log.Info("session ending: stopping pipes, checkpointing the store");
-        try { _core.StopPipesAsync().Wait(TimeSpan.FromSeconds(4)); } catch (Exception ex) { Log.Warn("end session: stop pipes", ex); }
+        // Under Windows' 5 s hung-app limit at shutdown.
+        try { _core.StopPipesAsync().Wait(TimeSpan.FromSeconds(2.5)); } catch (Exception ex) { Log.Warn("end session: stop pipes", ex); }
         try { (_core as BetterRecall.Core.CoreHostImpl)?.EncryptedStore?.Checkpoint(); } catch (Exception ex) { Log.Warn("end session: checkpoint", ex); }
         Log.Flush();
+        // ENDSESSION_CLOSEAPP (Restart Manager) does not always end the process: never stay running without pipes.
+        RequestQuit();
     }
 
     internal CaptureService? Capture => _capture;

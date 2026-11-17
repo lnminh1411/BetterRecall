@@ -911,7 +911,7 @@ public sealed partial class EncryptedStore : IStore
         foreach (var (from, to, _) in _fences)
             if (t <= to && end >= from) throw new PurgedWindowException(ts);
         if (_scopeFences.Count == 0) return;
-        var appLc = (app ?? "").Trim().ToLowerInvariant();
+        var appLc = (app ?? "").ToLowerInvariant();   // as stored in app_lc
         var siteN = NormalizeSite(site);
         foreach (var (kind, a, b, to, _) in _scopeFences)
         {
@@ -1650,15 +1650,22 @@ public sealed partial class EncryptedStore : IStore
     /// <summary>Closes every connection and deletes store.db and all keyframe files (purge all). The instance is unusable afterwards.</summary>
     public void DeleteAllFiles()
     {
-        // Listeners on this instance (a running capture export) hear purge all before the store goes away, so they stop
-        // with the purge message instead of failing on a disposed store or publishing their file (C1, BC-S2).
+        CloseForPurgeAll();
+        lock (_wl)
+        lock (_rl)
+            DeleteFiles(_home);
+    }
+
+    /// <summary>Purge all, first half: listeners on this instance (a running capture export) hear "all" before the store
+    /// goes away, so they stop with the purge message instead of failing on a disposed store or publishing their file
+    /// (C1, BC-S2). Then every connection closes: a reader still holding this instance (the embedding scheduler) gets
+    /// ObjectDisposedException instead of pre-purge rows. The files stay until DeleteFiles.</summary>
+    public void CloseForPurgeAll()
+    {
         Raise(new PurgeNotice("all", [], DateTimeOffset.MinValue, DateTimeOffset.UtcNow));
         lock (_wl)
         lock (_rl)
-        {
             CloseLocked();
-            DeleteFiles(_home);
-        }
     }
 
     /// <summary>Deletes store.db (+ -wal, -shm) and every keyframe file of a data folder without opening them; purge all

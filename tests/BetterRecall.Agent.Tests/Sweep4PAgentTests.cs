@@ -276,4 +276,167 @@ public sealed class Sweep4PAgentTests : IDisposable
         Assert.False(File.Exists(done + ".partial"));
         Assert.False(File.Exists(ExportJournal.PathFor(_home)));
     }
+
+    // ---- review #7: purge all through the agent's real wiring (AgentHost.OnPurged) stops a running replay export
+
+    /// <summary>Decrypting source that holds the clip file open (a delete fails while it is), then waits.</summary>
+    private sealed class HoldingCipher : IBlobCipher
+    {
+        public HoldingSource? Last;
+        public Stream OpenWrite(string path) => throw new NotSupportedException();
+        public Stream OpenRead(string path) => Last = new HoldingSource(File.OpenRead(path));
+    }
+
+    private sealed class HoldingSource(FileStream file) : Stream
+    {
+        public readonly ManualResetEventSlim Started = new();
+        private int _reads;
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => 0; set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => 0;
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default)
+        {
+            if (_reads++ == 0) { buffer.Span[..8].Fill(7); return 8; }
+            Started.Set();
+            await Task.Delay(Timeout.Infinite, ct);
+            return 0;
+        }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        protected override void Dispose(bool disposing) { if (disposing) file.Dispose(); base.Dispose(disposing); }
+    }
+
+    private static void Wire(AgentHost agent, ICoreHost core, ReplayLibrary lib)
+    {
+        typeof(AgentHost).GetField("_replays", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(agent, lib);
+        core.Purged += typeof(AgentHost).GetMethod("OnPurged", BindingFlags.NonPublic | BindingFlags.Instance)!.CreateDelegate<Action<PurgeNotice>>(agent);
+    }
+
+    [Fact]
+    public async Task C1_purge_all_through_the_agent_stops_a_replay_export_and_empties_replays()
+    {
+        var host = (CoreHostImpl)CoreHost.Create(new CoreHostOptions(_home, _home));
+        await using (host)
+        {
+            await host.OpenStoreAsync(CancellationToken.None);
+            var agent = new AgentHost(host, new AgentOptions(_home, _home, false));
+            var cipher = new HoldingCipher();
+            var lib = new ReplayLibrary(_home, () => new Settings(), cipher) { PurgingAll = () => host.PurgingAll };
+            Wire(agent, host, lib);
+            var id = NewClip();
+            var target = Path.Combine(_home, "out", "seam.mp4");
+            var export = lib.ExportAsync(id, target, CancellationToken.None);
+            await Until(() => cipher.Last?.Started.IsSet == true, "export never started copying");
+
+            await PurgeAll(host);
+            await Assert.ThrowsAsync<FileNotFoundException>(() => export.WaitAsync(TimeSpan.FromSeconds(10)));
+            Assert.False(File.Exists(target));
+            Assert.False(File.Exists(target + ".partial"));
+            Assert.Empty(Directory.GetFiles(DataPaths.ReplaysDir(_home)));   // the notice came before the delete loop
+            Assert.Equal(0, host.LastPurgeAllUndeleted);
+        }
+    }
+
+    // ---- review #1: no save or export starts while purge all runs
+
+    [Fact]
+    public async Task C1_save_and_export_are_refused_while_purge_all_runs()
+    {
+        bool purging = true;
+        var lib = new ReplayLibrary(_home, () => new Settings(), new FakeCipher()) { PurgingAll = () => purging };
+        var id = NewClip();
+        var clip = Path.Combine(DataPaths.ReplaysDir(_home), "20261117T130000000Z.mp4.enc");
+        await Assert.ThrowsAsync<InvalidOperationException>(() => lib.WriteClipAsync(clip, true, s => 1000, CancellationToken.None));
+        Assert.False(File.Exists(clip));
+        Assert.False(File.Exists(clip + ".partial"));
+        var target = Path.Combine(_home, "out", "refused.mp4");
+        await Assert.ThrowsAsync<FileNotFoundException>(() => lib.ExportAsync(id, target, CancellationToken.None));
+        Assert.False(File.Exists(target));
+        Assert.False(File.Exists(target + ".partial"));
+        purging = false;
+    }
+
+    [Fact]
+    public async Task C1_export_whose_source_opened_as_purge_all_began_writes_nothing()
+    {
+        bool purging = false;
+        var cipher = new FlagCipher(() => purging = true);
+        var lib = new ReplayLibrary(_home, () => new Settings(), cipher) { PurgingAll = () => purging };
+        var id = NewClip();
+        purging = false;   // flips when the clip is opened: by the duration probe in Find, then by the export itself
+        var target = Path.Combine(_home, "out", "late.mp4");
+        await Assert.ThrowsAsync<FileNotFoundException>(() => lib.ExportAsync(id, target, CancellationToken.None));
+        Assert.False(File.Exists(target));
+        Assert.False(File.Exists(target + ".partial"));
+        Assert.False(File.Exists(ExportJournal.PathFor(_home)));
+    }
+
+    private sealed class FlagCipher(Action onOpen) : IBlobCipher
+    {
+        public Stream OpenWrite(string path) => throw new NotSupportedException();
+        public Stream OpenRead(string path) { onOpen(); return new MemoryStream([1, 2, 3]); }
+    }
+
+    // ---- review #3: a purge that reaches the ring (app purge, panic) discards a save in flight
+
+    [Fact]
+    public async Task App_purge_and_panic_discard_a_replay_save_in_flight()
+    {
+        var core = new FakeCoreHost();
+        var agent = new AgentHost(core, new AgentOptions(_home, _home, false));
+        var lib = new ReplayLibrary(_home, () => new Settings(), new FakeCipher());
+        typeof(AgentHost).GetField("_replays", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(agent, lib);
+        var onPurged = typeof(AgentHost).GetMethod("OnPurged", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        var dir = DataPaths.ReplaysDir(_home);
+        Directory.CreateDirectory(dir);
+
+        var app = Path.Combine(dir, "20261117T140000000Z.mp4");
+        await Assert.ThrowsAsync<InvalidOperationException>(() => lib.WriteClipAsync(app, false, s =>
+        {
+            s.Write([1]);
+            onPurged.Invoke(agent, [new PurgeNotice("purge", [], Scope: "app")]);   // purge app notepad while encoding
+            return 1000;
+        }, CancellationToken.None));
+        Assert.False(File.Exists(app));
+
+        var panic = Path.Combine(dir, "20261117T140001000Z.mp4");
+        await Assert.ThrowsAsync<InvalidOperationException>(() => lib.WriteClipAsync(panic, false, s =>
+        {
+            s.Write([1]);
+            agent.Panic();   // panic with privacy.panicPurgeMinutes 0 raises no notice
+            return 1000;
+        }, CancellationToken.None));
+        Assert.False(File.Exists(panic));
+        Assert.False(File.Exists(panic + ".partial"));
+    }
+
+    // ---- review #5: WM_ENDSESSION stops the pipes and quits
+
+    private sealed class CountingCoreHost : ICoreHost
+    {
+        private readonly FakeCoreHost _inner = new();
+        public int PipeStops;
+        public ISettingsStore Settings => _inner.Settings;
+        public IKeyVault Keys => _inner.Keys;
+        public IBlobCipher Blobs => _inner.Blobs;
+        public IStore? Store => null;
+        public Task OpenStoreAsync(CancellationToken ct) => Task.CompletedTask;
+        public void StartPipes(IAgentControl agent, IQueryEmbedder embedder, IThumbnailer thumbnailer) { }
+        public Task StopPipesAsync() { Interlocked.Increment(ref PipeStops); return Task.CompletedTask; }
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    [Fact]
+    public void C3_end_session_stops_the_pipes()
+    {
+        var core = new CountingCoreHost();
+        var agent = new AgentHost(core, new AgentOptions(_home, _home, false));
+        typeof(AgentHost).GetMethod("OnEndSession", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(agent, []);
+        Assert.Equal(1, core.PipeStops);
+    }
 }
