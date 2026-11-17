@@ -16,3 +16,6 @@ BetterRecall.Local.slnx
 # Launcher and single-file packaging are held back until the launch flow settles
 src/BetterRecall.Launcher/
 Scripts/package_single.py
+
+# graphify knowledge graph (local only)
+graphify-out/
