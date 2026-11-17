@@ -711,7 +711,7 @@ The last row is the honest limit. Turning IPC on widens what same-user malware c
 | `ipc.allowControl` | `false` | Enables `pause` and `resume` | bool |
 | `ipc.allowPurge` | `false` | Enables `purge`. Needs `ipc.allowControl` | bool |
 | `ipc.allowThumbnails` | `false` | Enables `thumb` | bool |
-| `ipc.allowClients` | `[]` | Full image paths allowed to connect. Empty means any process that passes the checks in 7.4 | absolute paths |
+| `ipc.allowClients` | `[]` | Full image paths allowed to connect. Empty means any process that passes the checks in 7.4. An entry inside a `<version>-<hash12>` folder of the agent's install root (or `bin\betterrecall.cmd`, which stands for the CLI) also matches the same file in the agent's current install folder, so the bundled CLI stays allowed after an upgrade (7.4) | absolute paths |
 | `ipc.requireUnlocked` | `true` | Data verbs fail while the store is locked. IPC can never trigger or bypass the Hello prompt | bool |
 | `ipc.maxResults` | `50` | Upper bound for `limit` | 1 to 200 |
 | `ipc.defaultResults` | `10` | `limit` when the request gives none | 1 to `ipc.maxResults` |
@@ -740,8 +740,10 @@ Server, on every connection, before reading a byte:
 
 1. `GetNamedPipeClientProcessId` and `GetNamedPipeClientSessionId`. The session must equal the agent's session.
 2. Open the client process with `PROCESS_QUERY_LIMITED_INFORMATION`, read its token: user SID equals the agent's SID, integrity level is medium or higher, token is not an AppContainer token.
-3. `QueryFullProcessImageNameW`. If `ipc.allowClients` is not empty, the path must be in it (case-insensitive, after normalisation).
+3. `QueryFullProcessImageNameW`. If `ipc.allowClients` is not empty, the path must be in it (case-insensitive, after normalisation). Built (bug sweep 4, decision D6): an entry pointing into any version folder of the agent's install root matches the same install-relative file in the agent's own install folder, and `bin\betterrecall.cmd` maps to the CLI. Only the agent's own files gain from this.
 4. Any failure: write `{"ok":false,"error":"Client not allowed."}` and close. Record it in the audit log.
+
+Built: both ends also read the peer's process start time from the same handle as its image and refuse a process that started after the connection (a reused PID). Start times are wall-clock stamps, so after the clock steps back (NTP correcting a clock that ran ahead at boot) a process started before the step looks "started after now". Since bug sweep 4 the bound is the later of the wall clock and the boot time (start of the System process) plus `TickCount64`, used only while a step back of more than 10 s has been detected and until the wall clock catches up; the agent, CLI and MCP log the step. If the System process start cannot be read, the wall clock alone applies, as before.
 
 The server never impersonates the client.
 
@@ -851,6 +853,7 @@ Error strings:
 - It does not reuse the general pipe. When `mcp.enabled` is true the agent creates a second pipe, `\\.\pipe\BetterRecall.mcp.<user SID>`, with the same security descriptor, framing and command processor, and a fixed read-only verb set: `ping`, `version`, `status`, `search`, `get`. No `thumb`, `pause`, `purge` or `subscribe`. The `ipc.*` limits apply.
 - Reason for a second endpoint: `mcp.enabled` and `ipc.enabled` stay independent switches, MCP can never reach a state-changing verb even when `ipc.allowControl` is on, and the audit log and tray indicator can tell an AI client from a script.
 - MCP tools: `search_history` (maps to `search`, same fields), `get_capture` (maps to `get`), `recall_status` (maps to `status`). Tool results are text.
+- Built (bug sweep 4, decision D6): MCP client configs point at `<data>\app\bin\betterrecall-mcp.exe`, a payload-less stub that relays stdio to the current install's `betterrecall-mcp.exe` and sets `BETTERRECALL_MCP_RELAY=1` for it. After an upgrade the server's trust check finds the agent running from another install folder; under the relay it exits with code 75 (`InstallLayout.McpRestartExitCode`) without answering, and the relay starts the current install's server and sends it the unanswered calls again (the server keeps no session state, so no new `initialize` is needed). An idle relay swaps on its own, which frees the old folder. When a server stops for another reason the relay answers every pending call with a JSON-RPC error; a call that throws inside the server gets `-32603 Internal error`. A server started without the relay answers "BetterRecall was updated while this MCP session ran: restart your MCP client (or its BetterRecall server) to reconnect." and exits.
 - No HTTP or SSE transport. A localhost port is reachable by every local process and by web pages, and has no DACL.
 - An MCP client sends what it reads to its model, which for a cloud model leaves the machine. BetterRecall still makes zero outbound connections, but the settings page must state that turning MCP on lets the connected assistant send search results to its provider.
 
