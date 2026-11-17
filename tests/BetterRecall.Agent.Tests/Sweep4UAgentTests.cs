@@ -3,6 +3,8 @@
 using BetterRecall.Agent.Host;
 using BetterRecall.Agent.Replay;
 using BetterRecall.Contracts;
+using BetterRecall.Core;
+using BetterRecall.Core.Store;
 
 namespace BetterRecall.Agent.Tests;
 
@@ -56,5 +58,39 @@ public sealed class Sweep4UAgentTests
             Assert.False(File.Exists(path));
         }
         finally { Directory.Delete(home, true); }
+    }
+
+    // ---- S11: no retention or thinning while settings.json is unreadable
+
+    [Fact]
+    public void S11_retention_waits_for_a_readable_settings_file_and_runs_after_reset()
+    {
+        var home = Path.Combine(Environment.GetEnvironmentVariable("BR_TEST_TMP") is { Length: > 0 } t ? t : Path.GetTempPath(), "br-s11-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(home);
+        try
+        {
+            File.WriteAllText(DataPaths.SettingsFile(home), "{\"retention\":{\"days\":3650}} x");
+            var settings = SettingsStore.Load(home);
+            Assert.NotNull(settings.LoadError);
+            var key = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+            using (var store = new EncryptedStore(home, () => (byte[])key.Clone()))
+            {
+                var id = store.AddScreenCapture(new NewScreenCapture(DateTimeOffset.UtcNow.AddDays(-400), "app", "", "old", 0, 10, 10, 0, [1, 2, 3], "image/webp", true));
+                var v = new float[768];
+                v[0] = 1;
+                store.SetEmbedding(id, v, new EmbeddingInfo("fake-gemma", "r1", 768));   // indexed: counted by Stats
+                bool logged = false;
+                store.RunMaintenance(settings.Current, AgentHost.RetentionAllowed(settings, ref logged));
+                Assert.True(logged);
+                Assert.Equal(1, store.Stats().Rows);   // the defaults in use would have deleted it
+
+                Assert.True(settings.ResetUnreadable());
+                store.RunMaintenance(settings.Current, AgentHost.RetentionAllowed(settings, ref logged));
+                Assert.False(logged);
+                Assert.Equal(0, store.Stats().Rows);
+            }
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+        }
+        finally { try { Directory.Delete(home, true); } catch (IOException) { } }
     }
 }

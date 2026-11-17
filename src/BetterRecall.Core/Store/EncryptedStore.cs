@@ -1460,10 +1460,10 @@ public sealed partial class EncryptedStore : IStore
     /// The retention notice is raised even when a step throws (a damaged month file, VACUUM out of memory or disk), so
     /// the RAM copies of rows already deleted (thumbnails, chats, approvals, jobs) are dropped (B11).
     /// </summary>
-    public void RunMaintenance(Settings settings)
+    public void RunMaintenance(Settings settings, bool retention = true)
     {
         ArgumentNullException.ThrowIfNull(settings);
-        try { RunMaintenanceSteps(settings); }
+        try { RunMaintenanceSteps(settings, retention); }
         finally
         {
             PurgeNotice? notice = null;
@@ -1473,7 +1473,7 @@ public sealed partial class EncryptedStore : IStore
         }
     }
 
-    private void RunMaintenanceSteps(Settings settings)
+    private void RunMaintenanceSteps(Settings settings, bool retention)
     {
         var sw = Stopwatch.StartNew();
         var now = DateTimeOffset.UtcNow;
@@ -1482,7 +1482,7 @@ public sealed partial class EncryptedStore : IStore
 
         // 1. Retention: rows older than retention.days, 5000 per slice.
         int expired = 0;
-        while (MaintenanceSlice(() =>
+        while (retention && MaintenanceSlice(() =>
         {
             var rids = new List<long>();
             using (var cmd = Cmd(_w, "SELECT rid FROM captures WHERE ts < $c LIMIT 5000", ("$c", cutoff)))
@@ -1492,7 +1492,7 @@ public sealed partial class EncryptedStore : IStore
             expired += DeleteRowsLocked(rids);
             return true;
         })) { }
-        MaintenanceSlice(() =>
+        if (retention) MaintenanceSlice(() =>
         {
             Exec(_w, "DELETE FROM audit WHERE ts < $c", ("$c", cutoff));
             // Searches and chats are memory too: retention.days covers them (a chat goes once its first message expires).
@@ -1525,7 +1525,7 @@ public sealed partial class EncryptedStore : IStore
         // 3. Progressive thinning (retention.progressive*), one day per slice. storage.maxGb and storage.minFreeGb are
         //    the agent's storage guard (DeleteForSpace).
         int thinned = 0;
-        if (MaintenanceSlice(() => ThinDaysLocked(settings.Retention, now, cutoff)) is { } days)
+        if (retention && MaintenanceSlice(() => ThinDaysLocked(settings.Retention, now, cutoff)) is { } days)
             for (long day = days.First; day <= days.Last; day++)
             {
                 long d = day;
