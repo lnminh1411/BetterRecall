@@ -75,9 +75,10 @@ public sealed class Sweep4PAgentTests : IDisposable
             };
             await using var sup = new WorkerSupervisor(launcher, "x", () => 600);
             int stored = 0;
-            var tr = new Transcriber(new WorkerClient(sup), () => host.Store, () => new Settings(), () => "teams", () => Interlocked.Increment(ref stored));
+            var tr = new Transcriber(new WorkerClient(sup), () => host.Store, () => new Settings(), () => Interlocked.Increment(ref stored));
             var hub = new LoopbackHub(_ => new NullCapture());
-            using var src = new TranscriptSource("system", hub, () => new Settings(), () => false);
+            using var src = new TranscriptSource("system", hub, () => new Settings(), () => false, () => Guardrails.AudioVerdict.Allowed);
+            src.NoteGuard(0, new Guardrails.AudioVerdict(Guardrails.AudioGate.Allowed, "teams"));   // R: segments queued directly, no packets
             var q = (Channel<SpeechSegment>)typeof(TranscriptSource).GetField("_queue", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(src)!;
             long nowQpc() => OutputCapture.Qpc100ns(Stopwatch.GetTimestamp());
             q.Writer.TryWrite(new SpeechSegment(Enumerable.Repeat(0.2f, 16000).ToArray(), nowQpc() - 20_000_000, 1000));   // spoken 2 s ago

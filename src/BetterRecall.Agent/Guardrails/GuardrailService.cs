@@ -9,8 +9,10 @@ namespace BetterRecall.Agent.Guardrails;
 /// <summary>What the guard says about audio heard at one moment (A-H2).</summary>
 internal enum AudioGate { Allowed, Blocked, Unknown }
 
-/// <summary>Guard verdict for audio, plus the foreground app (file name without extension) as the transcript label.</summary>
-internal readonly record struct AudioVerdict(AudioGate Gate, string App)
+/// <summary>Guard verdict for audio, plus the foreground app (file name without extension) as the transcript label.
+/// Epoch: the foreground-change count the verdict belongs to (a scan's own count; for Unknown, the current count), so a
+/// span the guard never scanned is not resolved by the next window's verdict (review M1).</summary>
+internal readonly record struct AudioVerdict(AudioGate Gate, string App, long Epoch = 0)
 {
     public static readonly AudioVerdict Allowed = new(AudioGate.Allowed, "");
 }
@@ -97,9 +99,9 @@ internal sealed class GuardrailService : IDisposable
 
     private static AudioVerdict AudioNow(GuardSnapshot s, long fgEpochNow, string app)
     {
-        if (ReferenceEquals(s, GuardSnapshot.Closed)) return new(AudioGate.Blocked, "");
-        if (s.FgEpoch != fgEpochNow) return new(AudioGate.Unknown, app);
-        return new(BlocksAudio(s.Decision.Reason) ? AudioGate.Blocked : AudioGate.Allowed, app);
+        if (ReferenceEquals(s, GuardSnapshot.Closed)) return new(AudioGate.Blocked, "", fgEpochNow);
+        if (s.FgEpoch != fgEpochNow) return new(AudioGate.Unknown, app, fgEpochNow);
+        return new(BlocksAudio(s.Decision.Reason) ? AudioGate.Blocked : AudioGate.Allowed, app, s.FgEpoch);
     }
 
     private static string AppName(string exe) => exe.Length == 0 ? "" : Path.GetFileNameWithoutExtension(exe);

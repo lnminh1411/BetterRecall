@@ -227,6 +227,9 @@ internal sealed class SpeechSegmenter
             // Keep 200 ms of trailing silence.
             int keep = _seg.Count - (_silenceRun - PreRollFrames) * FrameSamples;
             Emit(Math.Max(FrameSamples, keep), output);
+            // The rest is silence: no segment stays open on it. Its start would reach back up to 0.8 s before the next
+            // speech, and the guard lookup by segment span with it (A-H2, review S6).
+            if (_seg is not null) { Pcm.Wipe(_seg); _seg = null; }
             return;
         }
         int max = Math.Max(5, _maxSegmentS()) * Rate;

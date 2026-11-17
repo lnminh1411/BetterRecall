@@ -28,9 +28,14 @@ internal sealed class DescribeRedactor(IKeyframeReader reader, Func<Settings> se
     private const int Quality = 90;
     internal const string TimedOut = "Text recognition timed out, so the image was not checked and is not sent. Try again.";
     internal const string Busy = "Text recognition is busy with other work, so the image was not checked and is not sent. Try again in a minute.";
+    internal const string Starting = "Text recognition is starting, so the image was not checked and is not sent. Try again in a minute.";
 
     /// <summary>Shortest OCR wait (KeyframePipeline.OcrTimeout; tests shorten it).</summary>
     internal TimeSpan MinWait { get; init; } = KeyframePipeline.OcrTimeout;
+
+    /// <summary>Longest wait for the worker to start before the read (a first start benches devices for minutes): a
+    /// describe or a chat image does not hang behind it (review S9).</summary>
+    internal TimeSpan StartWait { get; init; } = TimeSpan.FromSeconds(60);
 
     /// <summary>Cloud chat may send images this redactor returned with Redacted set (it really checked them).</summary>
     public bool RedactsImages => true;
@@ -56,7 +61,8 @@ internal sealed class DescribeRedactor(IKeyframeReader reader, Func<Settings> se
             try
             {
                 // The worker starts first, outside the wait (TH2); requests it still owes say whether a timeout is "busy".
-                ahead = await reader.ReadyAsync(ct).ConfigureAwait(false);
+                try { ahead = await reader.ReadyAsync(ct).WaitAsync(StartWait, ct).ConfigureAwait(false); }
+                catch (TimeoutException) { throw new DescribeException(Starting); }
                 using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 timeout.CancelAfter(wait);
                 ocr = full is null
@@ -123,19 +129,21 @@ internal sealed class DescribeRedactor(IKeyframeReader reader, Func<Settings> se
         finally { Array.Clear(kf.Bytes); }
     }
 
-    /// <summary>Boxes on a fw x fh image onto a w x h copy of it, rounded outwards. Pure.</summary>
+    /// <summary>Boxes on a fw x fh image onto a w x h copy of it, rounded outwards and grown by the resize filter's
+    /// reach (ceil(1 / scale) px, at least 1: glyph ink spreads past the scaled box in a downscaled, lossy copy, S12),
+    /// clipped to the image. Pure.</summary>
     internal static Box[] ScaleBoxes(Box[] boxes, int fw, int fh, int w, int h)
     {
         double sx = (double)w / fw, sy = (double)h / fh;
-        var outp = new Box[boxes.Length];
-        for (int i = 0; i < boxes.Length; i++)
+        int gx = Math.Max(1, (int)Math.Ceiling(1 / sx)), gy = Math.Max(1, (int)Math.Ceiling(1 / sy));
+        var outp = new List<Box>(boxes.Length);
+        foreach (var b in boxes)
         {
-            var b = boxes[i];
-            int x0 = (int)Math.Floor(b.X * sx), y0 = (int)Math.Floor(b.Y * sy);
-            int x1 = (int)Math.Ceiling(b.Right * sx), y1 = (int)Math.Ceiling(b.Bottom * sy);
-            outp[i] = new Box(x0, y0, Math.Max(1, x1 - x0), Math.Max(1, y1 - y0));
+            int x0 = Math.Max(0, (int)Math.Floor(b.X * sx) - gx), y0 = Math.Max(0, (int)Math.Floor(b.Y * sy) - gy);
+            int x1 = Math.Min(w, (int)Math.Ceiling(b.Right * sx) + gx), y1 = Math.Min(h, (int)Math.Ceiling(b.Bottom * sy) + gy);
+            if (x1 > x0 && y1 > y0) outp.Add(new Box(x0, y0, x1 - x0, y1 - y0));
         }
-        return outp;
+        return outp.ToArray();
     }
 
     private static SKBitmap Decode(byte[] bytes)

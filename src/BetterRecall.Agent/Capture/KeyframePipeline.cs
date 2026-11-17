@@ -124,12 +124,92 @@ internal sealed class KeyframePipeline : IAsyncDisposable
     /// <summary>OCR failure streak and name/address detector state, for the log and the status (A21, C9).</summary>
     public OcrHealth OcrHealth { get; } = new();
 
-    private volatile bool _masksUnchecked = true;
-    /// <summary>C2 (D2): the replay text masks cannot be trusted: no OCR read has succeeded since start, or the last one
-    /// failed for a passing reason (worker down, restarting, busy, timeout). Cleared by the next successful read, and
-    /// when OCR is not installed (text redaction is off then, as for keyframes). The replay masks the foreground window
-    /// meanwhile.</summary>
-    public bool MasksUnchecked => _masksUnchecked;
+    // C2 (D2) replay text mask state per monitor (DXGI index, as KeyframeGrab.Monitor): Checked, or unchecked since a
+    // grab time (UTC ticks). A monitor not in the table has not been read yet: unchecked. Under _maskGate.
+    private const long Checked = long.MinValue;
+    private readonly Lock _maskGate = new();
+    private readonly Dictionary<int, long> _maskState = new();
+    private long _allUncheckedSince;            // the last MarkAllUnchecked: monitors not in the table yet need a newer grab
+    private volatile bool _noTextMasks;         // OCR not installed: no text masks to check (text redaction is off)
+    private volatile bool _anyUnchecked = true;
+    private long _anyUncheckedAtMs = Environment.TickCount64;
+
+    /// <summary>C2 (D2): some monitor's replay text masks cannot be trusted: it was not read since start (or since the
+    /// outputs changed), its last read failed for a passing reason (worker down, restarting, busy, timeout), a grab of it
+    /// was refused at the full queue, or the worker had to start before a read. Cleared per monitor only by a successful
+    /// read of a grab taken after the last such event (review M2, S1). Not while OCR is not installed (text redaction
+    /// is off then, as for keyframes). The replay masks the foreground window meanwhile.</summary>
+    public bool MasksUnchecked => _anyUnchecked;
+
+    /// <summary>How long MasksUnchecked has been true (0 while false): the status warning waits a few seconds (S11).</summary>
+    public long UncheckedForMs => _anyUnchecked ? Environment.TickCount64 - Interlocked.Read(ref _anyUncheckedAtMs) : 0;
+
+    /// <summary>This monitor's replay text masks cannot be trusted (see MasksUnchecked).</summary>
+    public bool MonitorUnchecked(int monitor)
+    {
+        if (_noTextMasks) return false;
+        lock (_maskGate) return !_maskState.TryGetValue(monitor, out var v) || v != Checked;
+    }
+
+    /// <summary>The capture outputs now (start, display change): every one starts unchecked, others are forgotten.</summary>
+    public void TrackMonitors(IEnumerable<int> monitors)
+    {
+        lock (_maskGate)
+        {
+            _maskState.Clear();
+            foreach (var m in monitors) _maskState[m] = _allUncheckedSince;
+            RecomputeMasks();
+        }
+    }
+
+    /// <summary>Every monitor unchecked from now: the worker had to start first (TH2 path), or a text detector or OCR
+    /// was turned on (S3).</summary>
+    public void MarkAllUnchecked()
+    {
+        long now = DateTimeOffset.UtcNow.UtcTicks;
+        lock (_maskGate)
+        {
+            _allUncheckedSince = now;
+            foreach (var m in _maskState.Keys.ToList()) _maskState[m] = now;
+            RecomputeMasks();
+        }
+    }
+
+    private void MarkUnchecked(int monitor, long grabTicks)
+    {
+        lock (_maskGate)
+        {
+            _maskState[monitor] = _maskState.TryGetValue(monitor, out var v) && v != Checked ? Math.Max(v, grabTicks) : grabTicks;
+            RecomputeMasks();
+        }
+    }
+
+    private void MarkChecked(int monitor, long grabTicks)
+    {
+        lock (_maskGate)
+        {
+            long since = _maskState.TryGetValue(monitor, out var v) ? v : _allUncheckedSince;
+            if (since == Checked || grabTicks >= since) _maskState[monitor] = Checked;
+            RecomputeMasks();
+        }
+    }
+
+    /// <summary>Under _maskGate.</summary>
+    private void RecomputeMasks()
+    {
+        bool any = !_noTextMasks && (_maskState.Count == 0 || _maskState.Values.Any(v => v != Checked));
+        if (any && !_anyUnchecked) Interlocked.Exchange(ref _anyUncheckedAtMs, Environment.TickCount64);
+        _anyUnchecked = any;
+    }
+
+    private void SetNoTextMasks(bool on)
+    {
+        if (_noTextMasks == on) return;
+        lock (_maskGate) { _noTextMasks = on; RecomputeMasks(); }
+    }
+
+    /// <summary>OCR reads of grabs that were not keyframes (replay samples, mask refreshes): their cost during pauses (S10).</summary>
+    public long SampleOcrReads;
 
     /// <summary>TH1: a grab of this monitor was dropped because its OCR failed. The capture side grabs that monitor again
     /// at its next keyframe tick even when the screen stayed still (a still screen sends no new desktop frame).</summary>
@@ -200,6 +280,10 @@ internal sealed class KeyframePipeline : IAsyncDisposable
         if (!_channel.Writer.TryWrite(grab))
         {
             Interlocked.Increment(ref Dropped);
+            // Refused at the full queue (OCR slow, worker starting): its gates were reset by the grab, so a still screen
+            // would never be grabbed again, and the replay masks miss what it showed (review M2).
+            MarkUnchecked(grab.Monitor, grab.Request.Ts.UtcTicks);
+            try { OcrDropped?.Invoke(grab.Monitor); } catch (Exception ex) { Log.Debug($"keyframe retry: {ex.Message}"); }
             grab.Dispose();
         }
     }
@@ -275,8 +359,8 @@ internal sealed class KeyframePipeline : IAsyncDisposable
         var store = _store();
         if (store is null) return false;
         var req = g.Request;
-        bool sample = req.ReplaySample && Sampler is not null && s.Replay.Searchable;   // else a mask refresh only (C2)
-        bool keep = req.Keyframe;
+        bool sample = req.ReplaySample && !req.MaskOnly && Sampler is not null && s.Replay.Searchable;   // else a mask refresh only (C2)
+        bool keep = req.Keyframe && !req.MaskOnly;
         DedupFilter? dedup = null;
         ChangeMap? map = null;
         ulong hash = 0;
@@ -304,7 +388,7 @@ internal sealed class KeyframePipeline : IAsyncDisposable
         }
         // A grab that is neither kept nor sampled still refreshes the replay text masks when they are unchecked (C2), or
         // when it was taken for that (a sample grab with replay.searchable off, while keyframes pause).
-        bool maskOnly = !keep && !sample && (req.ReplaySample || _masksUnchecked && s.Ocr.Enabled && _reader is not null);
+        bool maskOnly = !keep && !sample && (req.ReplaySample || req.MaskOnly || MonitorUnchecked(g.Monitor) && s.Ocr.Enabled && _reader is not null);
         if (!keep && !sample && !maskOnly) return false;
 
         // Redaction before anything is encoded: stored keyframes and replay samples get the same black boxes.
@@ -325,8 +409,10 @@ internal sealed class KeyframePipeline : IAsyncDisposable
             if (result is not null)
             {
                 ocr = result;
-                _masksUnchecked = false;
+                SetNoTextMasks(false);
+                MarkChecked(g.Monitor, req.Ts.UtcTicks);
                 Interlocked.Increment(ref OcrRead);
+                if (!req.Keyframe) Interlocked.Increment(ref SampleOcrReads);
                 // Model missing or broken (the worker returns the lines with EntitiesMissing, C9): the design's fail policy
                 // for a missing detector model applies, so the keyframe is kept with pattern redaction and a warning.
                 if (OcrHealth.Read(red.Entities, result.EntitiesMissing))
@@ -335,7 +421,7 @@ internal sealed class KeyframePipeline : IAsyncDisposable
             else if (permanent)
             {
                 OcrHealth.Reset();
-                _masksUnchecked = false;   // no OCR, no text masks: keyframes are stored without text too
+                SetNoTextMasks(true);   // no OCR, no text masks: keyframes are stored without text too
                 Interlocked.Increment(ref OcrUnavailable);
                 long now = Environment.TickCount64;
                 if (_lastMissingLog < 0 || now - _lastMissingLog > 600_000)
@@ -346,7 +432,8 @@ internal sealed class KeyframePipeline : IAsyncDisposable
             }
             else
             {
-                if (red.AnyText) _masksUnchecked = true;
+                SetNoTextMasks(false);
+                if (red.AnyText) MarkUnchecked(g.Monitor, req.Ts.UtcTicks);
                 if (OcrHealth.Failed())
                     Log.Warn($"text recognition failing ({OcrHealth.FailingAfter}+ reads in a row, last: {why}): "
                         + (red.AnyText ? "keyframes are dropped while it fails" : "keyframes are stored without text"));
@@ -407,8 +494,11 @@ internal sealed class KeyframePipeline : IAsyncDisposable
         var copy = CopyPixels(g);
         try
         {
-            // The worker starts (or restarts) first, outside the OCR wait (TH2).
-            _reader!.ReadyAsync(ct).GetAwaiter().GetResult();
+            // The worker starts (or restarts) first, outside the OCR wait (TH2). Meanwhile nothing is read, and the screen
+            // may change: the masks of every monitor count as unchecked until a grab taken after this is read (M2).
+            var ready = _reader!.ReadyAsync(ct);
+            if (!ready.IsCompleted) MarkAllUnchecked();
+            ready.GetAwaiter().GetResult();
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeout.CancelAfter(_ocrWait);
             var sw = Stopwatch.StartNew();
@@ -421,6 +511,7 @@ internal sealed class KeyframePipeline : IAsyncDisposable
             return (null, true, ex.Message);
         }
         catch (WorkerException ex) { return (null, false, ex.Message); }
+        catch (ObjectDisposedException) { return (null, false, "worker stopped"); }   // shutdown (N7)
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
             var was = _ocrWait;

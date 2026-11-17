@@ -340,8 +340,21 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
             RaiseStatus(force: true);
         });
         if (!StorageEqual(old.Storage, s.Storage)) _ = Task.Run(StorageCheck);
+        // R S3: OCR or a text detector turned on: the replay masks hold no boxes for what is on screen now. Mark them
+        // unchecked and grab every monitor again, also a still one.
+        if (TextDetectionTurnedOn(old, s)) { _pipeline?.MarkAllUnchecked(); _capture?.RetryAll(); }
         // S4: the worker reads these once at start; restart it (once no request is in flight) so they apply now.
         if (WorkerSettingsDiff.Changed(old, s) is { } key) _supervisor.RequestRestart(key);
+    }
+
+    /// <summary>ocr.enabled or a privacy.redact* text detector went from off to on. Pure.</summary>
+    internal static bool TextDetectionTurnedOn(Settings old, Settings s)
+    {
+        var a = Privacy.RedactionOptions.From(old.Privacy);
+        var b = Privacy.RedactionOptions.From(s.Privacy);
+        if (!s.Ocr.Enabled || !b.AnyText) return false;
+        return !old.Ocr.Enabled || (b.Passwords && !a.Passwords) || (b.Cards && !a.Cards) || (b.Ids && !a.Ids) || (b.BirthDates && !a.BirthDates)
+            || (b.Emails && !a.Emails) || (b.Phones && !a.Phones) || (b.Names && !a.Names) || (b.Addresses && !a.Addresses);
     }
 
     private static bool StorageEqual(StorageSettings a, StorageSettings b) =>
@@ -842,6 +855,8 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
     private void OnEndSession()
     {
         Log.Info("session ending: stopping pipes, checkpointing the store");
+        // Transcripts held for redaction across segments are text already: store them before the process ends (R M3).
+        try { _transcriber?.FlushHeld(); } catch (Exception ex) { Log.Warn("end session: held transcripts", ex); }
         // Under Windows' 5 s hung-app limit at shutdown.
         try { _core.StopPipesAsync().Wait(TimeSpan.FromSeconds(2.5)); } catch (Exception ex) { Log.Warn("end session: stop pipes", ex); }
         try { (_core as BetterRecall.Core.CoreHostImpl)?.EncryptedStore?.Checkpoint(); } catch (Exception ex) { Log.Warn("end session: checkpoint", ex); }
@@ -860,6 +875,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
     {
         _quitWait?.Unregister(null);
         _quitEvent?.Dispose();
+        try { _transcriber?.FlushHeld(); } catch (Exception ex) { Log.Warn("held transcripts", ex); }   // R M3: before the cancel
         _cts.Cancel();
         if (_statusTimer is not null) await _statusTimer.DisposeAsync().ConfigureAwait(false);
         if (_maintenanceTimer is not null) await _maintenanceTimer.DisposeAsync().ConfigureAwait(false);

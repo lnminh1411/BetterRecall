@@ -83,36 +83,94 @@ public class Sweep4RAgentTests
         GuardSnapshot Snap(GuardDecision d, long epoch = 3) =>
             new(Environment.TickCount64, fg, d, BadgeResult.NotBrowser, false, [], new Dictionary<int, MonitorTop>(), FgEpoch: epoch);
 
-        Assert.Equal(new AudioVerdict(AudioGate.Blocked, "mstsc"), GuardrailService.AudioNow(Snap(GuardDecision.Deny(GuardReason.DenyProcess)), 3));
+        Assert.Equal(new AudioVerdict(AudioGate.Blocked, "mstsc", 3), GuardrailService.AudioNow(Snap(GuardDecision.Deny(GuardReason.DenyProcess)), 3));
         Assert.Equal(AudioGate.Blocked, GuardrailService.AudioNow(Snap(GuardDecision.Deny(GuardReason.PrivateBadge)), 3).Gate);
         Assert.Equal(AudioGate.Blocked, GuardrailService.AudioNow(Snap(GuardDecision.Deny(GuardReason.DisplayAffinity)), 3).Gate);
         Assert.Equal(AudioGate.Blocked, GuardrailService.AudioNow(GuardSnapshot.Closed, 3).Gate);          // stale guard
-        Assert.Equal(new AudioVerdict(AudioGate.Allowed, "mstsc"), GuardrailService.AudioNow(Snap(GuardDecision.Allowed), 3));
+        Assert.Equal(new AudioVerdict(AudioGate.Allowed, "mstsc", 3), GuardrailService.AudioNow(Snap(GuardDecision.Allowed), 3));
         Assert.Equal(AudioGate.Allowed, GuardrailService.AudioNow(Snap(GuardDecision.Deny(GuardReason.NoForeground)), 3).Gate);
-        Assert.Equal(AudioGate.Unknown, GuardrailService.AudioNow(Snap(GuardDecision.Allowed), 4).Gate); // alt-tab not scanned yet
+        Assert.Equal(new AudioVerdict(AudioGate.Unknown, "mstsc", 4), GuardrailService.AudioNow(Snap(GuardDecision.Allowed), 4));   // alt-tab not scanned yet
+        Assert.Equal(new AudioVerdict(AudioGate.Unknown, "mstsc", 5), GuardrailService.AudioNow(Snap(GuardDecision.Allowed), 5));   // two switches: stamped with the newest
     }
 
     [Fact]
     public void AH2_timeline_judges_a_segment_by_when_it_was_spoken()
     {
         var t = new AudioGuardTimeline();
-        var ps = new AudioVerdict(AudioGate.Allowed, "powershell");
+        var ps = new AudioVerdict(AudioGate.Allowed, "powershell", 0);
         t.Note(1_000, ps);
-        t.Note(5_000, new AudioVerdict(AudioGate.Unknown, "powershell"));   // alt-tab
-        t.Note(5_500, new AudioVerdict(AudioGate.Blocked, "mstsc"));        // scan: a denied window
-        t.Note(9_000, new AudioVerdict(AudioGate.Unknown, "mstsc"));
-        t.Note(9_200, new AudioVerdict(AudioGate.Allowed, "notepad"));
+        t.Note(5_000, new AudioVerdict(AudioGate.Unknown, "powershell", 1));   // alt-tab
+        t.Note(5_500, new AudioVerdict(AudioGate.Blocked, "mstsc", 1));        // that change's scan: a denied window
+        t.Note(9_000, new AudioVerdict(AudioGate.Unknown, "mstsc", 2));
+        t.Note(9_200, new AudioVerdict(AudioGate.Allowed, "notepad", 2));
 
         Assert.Equal(ps, t.Check(1_000, 4_900));                                        // before the switch
         Assert.Equal(AudioGate.Blocked, t.Check(4_000, 6_000).Gate);                   // runs into the denied window
         Assert.Equal(AudioGate.Blocked, t.Check(5_100, 5_400).Gate);                   // unscanned part resolves to the denied scan
-        Assert.Equal(new AudioVerdict(AudioGate.Allowed, "notepad"), t.Check(9_100, 12_000));   // resolves to the next scan's app
+        Assert.Equal((AudioGate.Allowed, "notepad"), (t.Check(9_100, 12_000).Gate, t.Check(9_100, 12_000).App));   // resolves to its own scan's app
         Assert.Equal(AudioGate.Blocked, t.Check(-10_000_000, 2_000).Gate);             // older than anything noted
 
         var open = new AudioGuardTimeline();
         open.Note(0, ps);
-        open.Note(100, new AudioVerdict(AudioGate.Unknown, "powershell"));
+        open.Note(100, new AudioVerdict(AudioGate.Unknown, "powershell", 1));
         Assert.Equal(AudioGate.Unknown, open.Check(50, 200).Gate);                     // the scan has not landed yet
+    }
+
+    [Fact]
+    public void AH2_M1_an_unscanned_window_is_not_vouched_for_by_the_next_window()
+    {
+        // A allowed, then D (denied or private) in front for less than one scan, then B: D's scan never became current.
+        var t = new AudioGuardTimeline();
+        t.Note(0, new AudioVerdict(AudioGate.Allowed, "a", 1));
+        t.Note(1_000, new AudioVerdict(AudioGate.Unknown, "a", 2));   // D came up
+        t.Note(2_000, new AudioVerdict(AudioGate.Unknown, "a", 3));   // B came up before D was scanned
+        t.Note(3_000, new AudioVerdict(AudioGate.Allowed, "b", 3));   // B's scan
+        Assert.Equal(AudioGate.Blocked, t.Check(1_100, 1_900).Gate);  // the D span
+        Assert.Equal(AudioGate.Allowed, t.Check(2_100, 5_000).Gate);  // the B span resolves to B's own scan
+    }
+
+    [Fact]
+    public void AH2_S6_segment_span_is_padded_against_the_segmenter_clock()
+    {
+        var spk = new Speaker();
+        using var src = new TranscriptSource("system", spk.Hub, () => new Settings(), () => false, () => AudioVerdict.Allowed);
+        src.NoteGuard(0, new AudioVerdict(AudioGate.Allowed, "a"));
+        src.NoteGuard(10_000_000, new AudioVerdict(AudioGate.Blocked, "d"));
+        src.NoteGuard(12_000_000, new AudioVerdict(AudioGate.Allowed, "a"));
+        // Ends 0.1 s before the denied span by the segmenter's clock: blocked all the same.
+        Assert.Equal(AudioGate.Blocked, src.GuardFor(new SpeechSegment([], 5_000_000, 490)).Gate);
+        Assert.Equal(AudioGate.Allowed, src.GuardFor(new SpeechSegment([], 1_000_000, 400)).Gate);
+    }
+
+    [Fact]
+    public void AH2_S8_replay_audio_packets_are_quiet_while_muted()
+    {
+        var loud = new short[960];
+        for (int i = 0; i < loud.Length; i++) loud[i] = (short)(i % 2 == 0 ? 12000 : -12000);
+        var bytes = System.Runtime.InteropServices.MemoryMarshal.AsBytes(loud.AsSpan());
+        Assert.True(AudioReplayEncoder.Quiet(silent: false, muted: true, bytes));     // the sound never reaches the AAC encoder
+        Assert.False(AudioReplayEncoder.Quiet(silent: false, muted: false, bytes));
+        Assert.True(AudioReplayEncoder.Quiet(silent: true, muted: false, bytes));
+    }
+
+    [Fact]
+    public void AH2_S8_replay_audio_mute_follows_the_guard()
+    {
+        // The function CaptureService hands to AudioReplayEncoder: muted while a denied window is in front, or while a
+        // foreground change is not scanned yet.
+        var guard = new GuardrailService(() => new Settings(), () => false, () => [], @"C:\nowhere\");
+        var cs = new CaptureService(() => new Settings(), () => false, () => false, guard, null!, null!, false, null);
+        var fg = new WindowInfo(42, 1, @"C:\Windows\System32\mstsc.exe", "Remote Desktop", "Cls");
+        void Snap(GuardDecision d) => Set(guard, "_snapshot",
+            new GuardSnapshot(Environment.TickCount64, fg, d, BadgeResult.NotBrowser, false, [], new Dictionary<int, MonitorTop>(), FgEpoch: (long)Get(guard, "_fgEpoch")!));
+
+        Assert.True(cs.ReplayAudioMuted());                         // no scan yet: closed
+        Snap(GuardDecision.Deny(GuardReason.DenyProcess));
+        Assert.True(cs.ReplayAudioMuted());
+        Snap(GuardDecision.Allowed);
+        Assert.False(cs.ReplayAudioMuted());
+        guard.OnForegroundEvent();                                  // alt-tab, not scanned yet
+        Assert.True(cs.ReplayAudioMuted());
     }
 
     [Fact]
@@ -152,26 +210,6 @@ public class Sweep4RAgentTests
         Assert.Equal(1, transcribes);                             // the denied segment was never sent
     }
 
-    [Fact]
-    public void AH2_replay_audio_is_silence_while_muted()
-    {
-        var spk = new Speaker();
-        bool muted = true;
-        AudioReplayEncoder enc;
-        try { enc = new AudioReplayEncoder(spk.Hub, 15, false, () => muted); }
-        catch (Exception ex) when (ex is not Xunit.Sdk.XunitException) { return; }   // no AAC encoder on this machine
-        using (enc)
-        {
-            spk.Play(tone: true, 200);
-            Assert.Equal(20, enc.MutedPackets);
-            Assert.Equal(20, enc.SilentPackets);   // encoded as zeros (or no run at all), never the sound
-            muted = false;
-            spk.Play(tone: true, 200);
-            Assert.Equal(20, enc.MutedPackets);
-            Assert.Equal(20, enc.SilentPackets);
-        }
-    }
-
     // ---------------- A-M5: passing worker failures keep the segment
 
     [Fact]
@@ -184,7 +222,7 @@ public class Sweep4RAgentTests
         await new WorkerClient(sup).PrewarmAsync(CancellationToken.None);
         launcher.CrashOnNext = true;                               // the worker dies with the transcribe in flight
         var spk = new Speaker();
-        using var src = new TranscriptSource("system", spk.Hub, () => s, () => false);
+        using var src = new TranscriptSource("system", spk.Hub, () => s, () => false, () => AudioVerdict.Allowed);
         var tr = NewTranscriber(sup, store, s);
         using var cts = new CancellationTokenSource();
         var run = tr.RunAsync(src, cts.Token);
@@ -208,7 +246,7 @@ public class Sweep4RAgentTests
         launcher.CrashWhen = req => req.Op == "transcribe";       // every try fails
         await using var _sup = sup;
         var spk = new Speaker();
-        using var src = new TranscriptSource("system", spk.Hub, () => s, () => false);
+        using var src = new TranscriptSource("system", spk.Hub, () => s, () => false, () => AudioVerdict.Allowed);
         var tr = NewTranscriber(sup, store, s);
         using var cts = new CancellationTokenSource();
         var run = tr.RunAsync(src, cts.Token);
@@ -265,7 +303,7 @@ public class Sweep4RAgentTests
         var (sup, _) = Worker(req => Interlocked.Increment(ref n) == 1 ? "my card is 4111 1111" : "1111 1111 and that's it");
         await using var _sup = sup;
         var spk = new Speaker();
-        using var src = new TranscriptSource("system", spk.Hub, () => s, () => false);
+        using var src = new TranscriptSource("system", spk.Hub, () => s, () => false, () => AudioVerdict.Allowed);
         var tr = NewTranscriber(sup, store, s);
         using var cts = new CancellationTokenSource();
         var run = tr.RunAsync(src, cts.Token);
@@ -305,11 +343,11 @@ public class Sweep4RAgentTests
     }
 
     /// <summary>White frame; fill paints the top half (another screen).</summary>
-    private static unsafe KeyframeGrab Grab(int w, int h, byte fill = 255, bool keyframe = true, bool sample = false)
+    private static unsafe KeyframeGrab Grab(int w, int h, byte fill = 255, bool keyframe = true, bool sample = false, int monitor = 0)
     {
         var req = new KeyframeRequest(DateTimeOffset.UtcNow, "app", @"C:\app.exe", "Title", "ctx", false, w, 0, "",
             Keyframe: keyframe, ReplaySample: sample, Bounds: new RECT(0, 0, w, h));
-        var g = KeyframeGrab.Alloc(0, req, w, h, 0);
+        var g = KeyframeGrab.Alloc(monitor, req, w, h, 0);
         var px = new Span<byte>(g.Pixels, w * h * 4);
         px.Fill(255);
         px[..(px.Length / 2)].Fill(fill);
@@ -428,6 +466,8 @@ public class Sweep4RAgentTests
         {
             var cs = new CaptureService(() => s, () => false, () => false, guard, pipe, null!, false, new RedactionMasks());
             var unchecked_ = (RECT[])Call(cs, "Masks")!;
+            Assert.False(cs.ReplayTextUnchecked());                 // S11: the warning waits WarnAfterMs, the mask does not
+            Set(pipe, "_anyUncheckedAtMs", Environment.TickCount64 - CaptureService.WarnAfterMs);
             Assert.True(cs.ReplayTextUnchecked());
 
             pipe.Post(Grab(64, 32));
@@ -443,6 +483,8 @@ public class Sweep4RAgentTests
             reader.Answer = () => throw new WorkerException("Worker pipe closed.");
             pipe.Post(Grab(64, 32, fill: 0));
             await Until(() => pipe.MasksUnchecked);
+            Assert.False(cs.ReplayTextUnchecked());
+            Set(pipe, "_anyUncheckedAtMs", Environment.TickCount64 - CaptureService.WarnAfterMs);
             Assert.True(cs.ReplayTextUnchecked());
             s.Ocr.Enabled = false;
             Assert.False(cs.ReplayTextUnchecked());
@@ -554,6 +596,209 @@ public class Sweep4RAgentTests
     public void CAS1_boxes_scale_outwards()
     {
         var b = DescribeRedactor.ScaleBoxes([new PBox(101, 41, 191, 21)], 800, 120, 400, 60);
-        Assert.Equal(new PBox(50, 20, 96, 11), b[0]);
+        Assert.Equal(new PBox(48, 18, 100, 15), b[0]);   // grown by the resize reach: 2 px at half size (S12)
+        var edge = DescribeRedactor.ScaleBoxes([new PBox(0, 0, 10, 10), new PBox(790, 110, 10, 10)], 800, 120, 400, 60);
+        Assert.Equal(new PBox(0, 0, 7, 7), edge[0]);                // clipped to the image
+        Assert.Equal(new PBox(393, 53, 7, 7), edge[1]);
+    }
+
+    // ---------------- review follow-up
+
+    [Fact]
+    public async Task M2_worker_start_and_queue_drops_mark_masks_unchecked_until_a_newer_grab_reads()
+    {
+        var s = new Settings();
+        s.Keyframes.Format = "webp";
+        var store = new FakeStore();
+        int startNext = 0;
+        var reader = new SwitchReader { Ready = async ct => { if (Interlocked.Exchange(ref startNext, 0) == 1) await Task.Delay(600, ct); return 0; } };
+        var dropped = new ConcurrentQueue<int>();
+        var pipe = new KeyframePipeline(() => store, () => s, _ => { }, reader, new RedactionMasks()) { OcrDropped = dropped.Enqueue };
+        try
+        {
+            pipe.Post(Grab(64, 32));
+            await Until(() => !pipe.MasksUnchecked);
+            Assert.False(pipe.MasksUnchecked);
+
+            Volatile.Write(ref startNext, 1);                       // idle exit: the next read starts the worker first
+            int reads = reader.Calls;
+            pipe.Post(Grab(64, 32, fill: 10));
+            await Task.Delay(100);
+            Assert.True(pipe.MasksUnchecked);                      // nothing reads while the worker starts
+            for (int i = 0; i < 6; i++) pipe.Post(Grab(64, 32, fill: (byte)(20 + i)));   // fills the queue
+            await Task.Delay(20);
+            pipe.Post(Grab(64, 32, fill: 90));                      // refused at the full queue
+            Assert.Contains(0, dropped);                           // TH1 retry for that monitor
+            await Until(() => reader.Calls >= reads + 7);
+            await Task.Delay(100);
+            Assert.True(pipe.MasksUnchecked);                      // reads of grabs older than the drop do not clear it
+
+            pipe.Post(Grab(64, 32, fill: 120));                     // the retry grab
+            await Until(() => !pipe.MasksUnchecked);
+            Assert.False(pipe.MasksUnchecked);
+        }
+        finally { await pipe.DisposeAsync(); }
+    }
+
+    [Fact]
+    public async Task S1_text_masks_are_checked_per_monitor()
+    {
+        var s = new Settings();
+        s.Keyframes.Format = "webp";
+        var pipe = new KeyframePipeline(() => new FakeStore(), () => s, _ => { }, new SwitchReader(), new RedactionMasks());
+        try
+        {
+            pipe.TrackMonitors([0, 1]);
+            pipe.Post(Grab(64, 32, monitor: 0));
+            await Until(() => !pipe.MonitorUnchecked(0));
+            Assert.False(pipe.MonitorUnchecked(0));
+            Assert.True(pipe.MonitorUnchecked(1));                 // its masks were never read
+            Assert.True(pipe.MasksUnchecked);
+            pipe.Post(Grab(64, 32, monitor: 1));
+            await Until(() => !pipe.MasksUnchecked);
+            Assert.False(pipe.MasksUnchecked);
+            pipe.MarkAllUnchecked();                               // S3: a detector was turned on
+            Assert.True(pipe.MonitorUnchecked(0) && pipe.MonitorUnchecked(1));
+        }
+        finally { await pipe.DisposeAsync(); }
+    }
+
+    [Fact]
+    public void S3_turning_text_detection_on_is_noticed()
+    {
+        var off = new Settings();
+        off.Privacy.RedactEmails = false;
+        var on = new Settings();
+        on.Privacy.RedactEmails = true;
+        Assert.True(AgentHost.TextDetectionTurnedOn(off, on));
+        Assert.False(AgentHost.TextDetectionTurnedOn(on, off));
+        var ocrOff = new Settings();
+        ocrOff.Ocr.Enabled = false;
+        Assert.True(AgentHost.TextDetectionTurnedOn(ocrOff, new Settings()));
+        Assert.False(AgentHost.TextDetectionTurnedOn(new Settings(), new Settings()));
+    }
+
+    [Fact]
+    public void S2_denied_foreground_still_refreshes_the_masks_of_other_monitors()
+    {
+        Assert.True(CaptureService.RefreshMasksWhileDenied(GuardReason.DenyProcess));
+        Assert.True(CaptureService.RefreshMasksWhileDenied(GuardReason.PrivateBadge));
+        Assert.False(CaptureService.RefreshMasksWhileDenied(GuardReason.SessionLocked));
+        Assert.False(CaptureService.RefreshMasksWhileDenied(GuardReason.ForegroundChanged));
+
+        var guard = new GuardrailService(() => new Settings(), () => false, () => [], @"C:\nowhere\");
+        var pipe = new KeyframePipeline(() => null, () => new Settings(), _ => { });
+        var cs = new CaptureService(() => new Settings(), () => false, () => false, guard, pipe, null!, false, null);
+        var a = new OutputCapture(new OutputInfo(0, @"\\.\DISPLAY1", 1, 0x8086, "gpu", 0, 0, 1920, 1080, 0), cs.Devices, _ => { });
+        var b = new OutputCapture(new OutputInfo(1, @"\\.\DISPLAY2", 1, 0x8086, "gpu", 1920, 0, 1920, 1080, 0), cs.Devices, _ => { });
+        try
+        {
+            lock (Get(cs, "_gate")!) Set(cs, "_outputs", new List<OutputCapture> { a, b });
+            var per = new Dictionary<int, MonitorTop> { [0] = new MonitorTop(0, null, true), [1] = new MonitorTop(1, null, false) };
+            Set(guard, "_snapshot", new GuardSnapshot(Environment.TickCount64, WindowInspector.Describe(WindowInspector.ForegroundRoot()),
+                GuardDecision.Deny(GuardReason.DenyProcess), BadgeResult.NotBrowser, false, [], per, "", null, 0));
+            cs.RequestKeyframes(force: false, keyframe: true);
+            Assert.Null(a.PendingKeyframe);                         // the denied window is on this one
+            var req = Assert.IsType<KeyframeRequest>(b.PendingKeyframe);
+            Assert.True(req.MaskOnly);
+            Assert.False(req.Keyframe);
+            Assert.Equal("", req.App);
+            Assert.Equal("", req.Title);
+        }
+        finally { a.Dispose(); b.Dispose(); _ = pipe.DisposeAsync(); }
+    }
+
+    [Fact]
+    public async Task M3_held_transcript_is_stored_on_cancel_and_on_flush()
+    {
+        var store = new FakeStore();
+        var s = new Settings();
+        int done = 0;
+        var (sup, launcher) = Worker();
+        launcher.Handler = (req, _) => req.Op == "transcribe"
+            ? (new WorkerResponse(req.Id, true, Transcript: new TranscribeResult(true, $"card 4111 1111 1111 1111 number {Interlocked.Increment(ref done)}", "en", [], 3)), [])
+            : null;
+        await using var _sup = sup;
+        var spk = new Speaker();
+        using var src = new TranscriptSource("system", spk.Hub, () => s, () => false, () => AudioVerdict.Allowed);
+        var tr = new Transcriber(new WorkerClient(sup), () => store, () => s, () => { }) { HoldFor = 60_000, GuardWait = TimeSpan.FromMilliseconds(300) };
+        using var cts = new CancellationTokenSource();
+        var run = tr.RunAsync(src, cts.Token);
+
+        spk.Play(true, 1000);
+        spk.Play(false, 800);
+        await Until(() => Volatile.Read(ref done) == 1);
+        await Task.Delay(300);
+        Assert.Empty(store.Audio);                                  // held for redaction across segments
+        tr.FlushHeld();                                             // session end
+        var first = Assert.Single(store.Audio.Values);
+        Assert.DoesNotContain("4111", first.Text);
+        Assert.Contains("number 1", first.Text);
+
+        spk.Play(true, 1000);
+        spk.Play(false, 800);
+        await Until(() => Volatile.Read(ref done) == 2);
+        await Task.Delay(300);
+        cts.Cancel();                                               // quit
+        await run;
+        Assert.Equal(2, store.Audio.Count);
+        Assert.Contains(store.Audio.Values, a => a.Text.Contains("number 2") && !a.Text.Contains("4111"));
+        tr.FlushHeld();
+        Assert.Equal(2, store.Audio.Count);                         // stored once
+    }
+
+    [Fact]
+    public async Task S4_panic_ends_a_retry_wait_at_once()
+    {
+        var store = new FakeStore();
+        var s = new Settings();
+        var (sup, launcher) = Worker();
+        launcher.CrashWhen = req => req.Op == "transcribe";
+        await using var _sup = sup;
+        var hub = new LoopbackHub(_ => new FakeCapture());
+        using var src = new TranscriptSource("system", hub, () => s, () => false, () => AudioVerdict.Allowed);
+        src.NoteGuard(0, new AudioVerdict(AudioGate.Allowed, "a"));
+        var tr = new Transcriber(new WorkerClient(sup), () => store, () => s, () => { }) { RetryDelay = _ => TimeSpan.FromSeconds(60) };
+        var q = (System.Threading.Channels.Channel<SpeechSegment>)typeof(TranscriptSource).GetField("_queue", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(src)!;
+        var pcm = Enumerable.Repeat(0.25f, 16000).ToArray();
+        q.Writer.TryWrite(new SpeechSegment(pcm, OutputCapture.Qpc100ns(System.Diagnostics.Stopwatch.GetTimestamp()), 1000));
+        using var cts = new CancellationTokenSource();
+        var run = tr.RunAsync(src, cts.Token);
+        await Until(() => tr.Retried >= 1);
+        src.Clear();                                                // panic, 60 s before the next try
+        await Until(() => pcm.All(x => x == 0), 3000);
+        Assert.All(pcm, x => Assert.Equal(0f, x));                  // the PCM left RAM at once
+        cts.Cancel();
+        await run;
+        Assert.Empty(store.Audio);
+    }
+
+    [Fact]
+    public async Task S9_describe_does_not_hang_behind_a_worker_start()
+    {
+        var reader = new SwitchReader { Answer = () => Card(10, 10), Ready = async ct => { await Task.Delay(3000, ct); return 0; } };
+        var r = new DescribeRedactor(reader, () => new Settings()) { StartWait = TimeSpan.FromMilliseconds(200) };
+        var ex = await Assert.ThrowsAsync<DescribeException>(() => r.RedactAsync("s_1", WhiteWebp(300, 60), CancellationToken.None));
+        Assert.Equal(DescribeRedactor.Starting, ex.Message);
+    }
+
+    [Fact]
+    public async Task S12_avif_keyframe_is_decoded_for_the_check()
+    {
+        var store = new FakeStore();
+        byte[] avif;
+        unsafe
+        {
+            var px = new byte[800 * 120 * 4];
+            Array.Fill(px, (byte)255);
+            fixed (byte* p = px) avif = ImageCodec.EncodeBgra(p, 800, 120, 800 * 4, "avif", 80);
+        }
+        string id = store.AddScreenCapture(new NewScreenCapture(DateTimeOffset.UtcNow, "app", "", "t", 0, 800, 120, 0, avif, "image/avif", true));
+        var reader = new SwitchReader { Answer = () => Card(40, 40) };
+        var outp = await new DescribeRedactor(reader, () => new Settings(), () => store).RedactAsync(id, WhiteWebp(400, 60), CancellationToken.None);
+        Assert.Equal((800, 120), (reader.LastW, reader.LastH));
+        Assert.True(outp.Redacted);
+        using var bmp = SKBitmap.Decode(outp.Bytes);
+        Assert.True(bmp.GetPixel(100, 25).Red < 40);
     }
 }
