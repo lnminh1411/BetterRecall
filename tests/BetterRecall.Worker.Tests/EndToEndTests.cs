@@ -188,4 +188,51 @@ public class EndToEndTests(ITestOutputHelper output)
         Assert.True(bad.WaitForExit(30_000));
         Assert.Equal(2, bad.ExitCode);
     }
+
+    /// <summary>C8 seam: real BetterRecall.Worker.exe launched by FakeAgent prunes old worker logs beyond 14 files and
+    /// rotates an oversized today log at startup.</summary>
+    [Fact]
+    public void Worker_exe_prunes_old_logs_and_rotates_oversized_daily_log()
+    {
+        using var scratch = TestEnv.Scoped("e2e-c8");
+        var root = scratch.Path;
+        var install = Path.Combine(root, "install");
+        CopyTree(BuildDir("BetterRecall.Worker"), Path.Combine(install, "worker"));
+        CopyTree(BuildDir("FakeAgent"), install);
+        File.Move(Path.Combine(install, "FakeAgent.exe"), Path.Combine(install, InstallLayout.AgentExe));
+
+        var home = Path.Combine(root, "home");
+        TestEnv.Settings(home, s => { s.Inference.Fake = true; s.Log.Level = "debug"; });
+        var before = DateTime.Now;
+        var logsDir = DataPaths.LogsDir(home);
+        Directory.CreateDirectory(logsDir);
+        string? oldest = null;
+        for (int i = 1; i <= 16; i++)
+        {
+            var oldDate = before.AddDays(-30 + i);
+            var old = Path.Combine(logsDir, $"worker-{oldDate:yyyyMMdd}.log");
+            oldest ??= old;
+            File.WriteAllText(old, "old\n");
+            File.SetLastWriteTimeUtc(old, oldDate.ToUniversalTime());
+        }
+        var oversized = Path.Combine(logsDir, $"worker-{before:yyyyMMdd}.log");
+        using (var fs = File.Create(oversized)) fs.SetLength(10L * 1024 * 1024);
+        File.SetLastWriteTimeUtc(oversized, before.ToUniversalTime());
+
+        var outFile = Path.Combine(root, "out.txt");
+        var psi = new ProcessStartInfo(Path.Combine(install, InstallLayout.AgentExe),
+            [InstallLayout.Full(install, InstallLayout.WorkerExe), home, outFile, "--space"]) { UseShellExecute = false };
+        using var agent = Process.Start(psi)!;
+        Assert.True(agent.WaitForExit(90_000), "fake agent timed out");
+        Assert.Equal("exit=0", File.ReadAllLines(outFile).Last());
+
+        var files = Directory.GetFiles(logsDir, "worker-*.log");
+        Assert.Equal(14, files.Length);
+        Assert.False(File.Exists(oldest!));
+        if (DateTime.Now.Date == before.Date)
+        {
+            var rotated = files.Single(f => Path.GetFileName(f).StartsWith($"worker-{before:yyyyMMdd}-", StringComparison.Ordinal));
+            Assert.Contains("start settings=", File.ReadAllText(rotated));
+        }
+    }
 }
