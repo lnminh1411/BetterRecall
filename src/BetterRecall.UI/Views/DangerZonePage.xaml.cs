@@ -13,6 +13,11 @@ namespace BetterRecall.UI.Views;
 /// <summary>Panic flush, purge by range or app (preview count, then confirm), purge everything (typed phrase, Hello, then confirm).</summary>
 public sealed partial class DangerZonePage : Page, IDataPage
 {
+    private bool _wipeOnly;
+    private CancellationTokenSource? _exportCts;
+
+    public event Action? WipeCancelled;
+
     public DangerZonePage()
     {
         InitializeComponent();
@@ -29,9 +34,61 @@ public sealed partial class DangerZonePage : Page, IDataPage
         ExportToTime.Time = new TimeSpan(now.Hour, now.Minute, 0);
         AllPrompt.Text = Loc.Format("Danger_AllPrompt", Loc.Get("Danger_AllPhrase"));
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(AllPhrase, AllPrompt.Text);
+        Loaded += (_, _) =>
+        {
+            Services.Current.LockedChanged -= OnLockedChanged;
+            Services.Current.LockedChanged += OnLockedChanged;
+            ApplyWipeOnly();
+        };
+        Unloaded += (_, _) =>
+        {
+            Services.Current.LockedChanged -= OnLockedChanged;
+            CancelExport();
+        };
     }
 
-    public void Reload() => ResultBar.IsOpen = false;
+    protected override void OnNavigatedTo(Microsoft.UI.Xaml.Navigation.NavigationEventArgs e)
+    {
+        _wipeOnly = string.Equals(e.Parameter as string, "wipe", StringComparison.OrdinalIgnoreCase) && Services.Current.Locked;
+        ApplyWipeOnly();
+    }
+
+    private void OnLockedChanged()
+    {
+        if (Services.Current.Locked) CancelExport();
+        else if (_wipeOnly) { _wipeOnly = false; ApplyWipeOnly(); }
+    }
+
+    private void CancelExport()
+    {
+        try { _exportCts?.Cancel(); } catch (ObjectDisposedException) { }
+    }
+
+    private void ApplyWipeOnly()
+    {
+        bool wipe = _wipeOnly && Services.Current.Locked;
+        var vis = wipe ? Visibility.Collapsed : Visibility.Visible;
+        PanicCard.Visibility = vis;
+        ExportCard.Visibility = vis;
+        RangeCard.Visibility = vis;
+        AppCard.Visibility = vis;
+        if (wipe)
+        {
+            AllStart.Visibility = Visibility.Collapsed;
+            AllConfirm.Visibility = Visibility.Visible;
+            AllPass.Visibility = Visibility.Collapsed;
+            AllPass.Password = "";
+            AllPhrase.Text = "";
+            AllGo.IsEnabled = false;
+            AllPhrase.Focus(FocusState.Programmatic);
+        }
+    }
+
+    public void Reload()
+    {
+        ResultBar.IsOpen = false;
+        ApplyWipeOnly();
+    }
 
     /// <summary>Narrow windows: the date and time pickers (242 px each) stack instead of overflowing the card.</summary>
     private void Root_SizeChanged(object sender, SizeChangedEventArgs e)
@@ -79,7 +136,7 @@ public sealed partial class DangerZonePage : Page, IDataPage
             var warn = WindowHelpers.Dialog(XamlRoot, Loc.Get("Danger_ExportWarnTitle"),
                 new TextBlock { Text = Loc.Format("Danger_ExportWarnBody", count.Value.Count, count.Value.Images), TextWrapping = TextWrapping.Wrap },
                 Loc.Get("Danger_ExportContinue"));
-            if (await warn.ShowAsync() != ContentDialogResult.Primary) return;
+            if (await warn.ShowAsync() != ContentDialogResult.Primary || Services.Current.Locked) return;
 
             var picker = new FileSavePicker(XamlRoot.ContentIslandEnvironment.AppWindowId)
             {
@@ -88,12 +145,13 @@ public sealed partial class DangerZonePage : Page, IDataPage
             };
             picker.FileTypeChoices.Add(Loc.Get("Danger_ExportFileType"), [".zip"]);
             var picked = await picker.PickSaveFileAsync();
-            if (picked is null || string.IsNullOrEmpty(picked.Path)) return;
+            if (picked is null || string.IsNullOrEmpty(picked.Path) || Services.Current.Locked) return;
             var path = picked.Path;
 
-            // Own connection: other pages keep working during a long export, and Cancel stops it on the agent.
+            // Own connection: other pages keep working during a long export, and Cancel (or lock) stops it on the agent.
             ExportBusy.IsActive = true;
             using var cancel = new CancellationTokenSource();
+            _exportCts = cancel;
             Show(InfoBarSeverity.Informational, Loc.Get("Danger_Exporting"));
             var stop = new Button { Content = Loc.Get("Common_Cancel") };
             stop.Click += (_, _) => { try { cancel.Cancel(); } catch (ObjectDisposedException) { } };
@@ -109,17 +167,22 @@ public sealed partial class DangerZonePage : Page, IDataPage
                 Show(InfoBarSeverity.Informational, Loc.Get("Danger_ExportCancelled"));
                 return;
             }
+            finally
+            {
+                if (ReferenceEquals(_exportCts, cancel)) _exportCts = null;
+            }
             ExportBusy.IsActive = false;
             if (!r.Ok)
             {
                 Show(InfoBarSeverity.Error, Loc.Error(r.Kind, r.Error));
                 return;
             }
+            if (Services.Current.Locked) return;
             Show(InfoBarSeverity.Success, Loc.Format("Danger_Exported", r.Value!.Count, path));
             if (File.Exists(path))
             {
                 var open = new Button { Content = Loc.Get("Danger_ExportOpen") };
-                open.Click += (_, _) => Process.Start(new ProcessStartInfo("explorer.exe", "/select,\"" + path + "\"") { UseShellExecute = true });
+                open.Click += (_, _) => { if (!Services.Current.Locked) Process.Start(new ProcessStartInfo("explorer.exe", "/select,\"" + path + "\"") { UseShellExecute = true }); };
                 ResultBar.ActionButton = open;
             }
         }
@@ -190,6 +253,12 @@ public sealed partial class DangerZonePage : Page, IDataPage
         AllStart.Visibility = Visibility.Visible;
         AllPhrase.Text = "";
         AllPass.Password = "";
+        if (_wipeOnly)
+        {
+            _wipeOnly = false;
+            ApplyWipeOnly();
+            WipeCancelled?.Invoke();
+        }
     }
 
     private void AllPhrase_TextChanged(object sender, TextChangedEventArgs e) =>
@@ -199,7 +268,7 @@ public sealed partial class DangerZonePage : Page, IDataPage
     {
         if (!PurgeFlow.PhraseMatches(AllPhrase.Text, Loc.Get("Danger_AllPhrase"))) return;
         var s = Services.Current;
-        string? pass = AllPass.Visibility == Visibility.Visible && AllPass.Password.Length > 0 ? AllPass.Password : null;
+        string? pass = !_wipeOnly && AllPass.Visibility == Visibility.Visible && AllPass.Password.Length > 0 ? AllPass.Password : null;
         AllPass.Password = "";
         AllGo.IsEnabled = false;
         AllBusy.IsActive = true;
@@ -207,9 +276,23 @@ public sealed partial class DangerZonePage : Page, IDataPage
         var r = await PurgeFlow.PurgeAllAsync(s.Api, pass);
         pass = null;
         AllBusy.IsActive = false;
+        if (!r.Ok)
+        {
+            Show(InfoBarSeverity.Error, Loc.Error(r.Kind, r.Error));
+            if (_wipeOnly)
+            {
+                AllGo.IsEnabled = PurgeFlow.PhraseMatches(AllPhrase.Text, Loc.Get("Danger_AllPhrase"));
+                return;
+            }
+            AllCancel_Click(sender, e);
+            await s.RefreshStatusAsync();
+            return;
+        }
+        _wipeOnly = false;
+        ApplyWipeOnly();
         AllCancel_Click(sender, e);
-        if (r.Ok) Show(r.Value!.Undeleted is > 0 ? InfoBarSeverity.Warning : InfoBarSeverity.Success, string.Join(" ", PurgeFlow.AllDoneText(r.Value).Select(Loc.Text)));
-        else Show(InfoBarSeverity.Error, Loc.Error(r.Kind, r.Error));
+        Show(r.Value!.Undeleted is > 0 ? InfoBarSeverity.Warning : InfoBarSeverity.Success, string.Join(" ", PurgeFlow.AllDoneText(r.Value).Select(Loc.Text)));
         await s.RefreshStatusAsync();
+        s.NotifyPurgeAll(r.Value);
     }
 }

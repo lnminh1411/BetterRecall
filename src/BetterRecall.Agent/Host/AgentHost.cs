@@ -115,6 +115,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         _replays = new ReplayLibrary(_opt.Home, () => S, _core.Blobs);
         _replays.DeletePartials();   // saves that failed or were cut off by a crash (A20)
         _replays.PurgingAll = () => _core is BetterRecall.Core.CoreHostImpl c && c.PurgingAll;   // C1: no save or export starts inside purge all
+        _replays.Locked = () => !IsUnlocked;
         var encLuid = GpuDevices.Adapters().FirstOrDefault(a => a.VendorId == GpuDevices.VendorIntel)?.Luid;
         _probe = new SystemProbe(encLuid is null ? null : GpuDevices.PdhLuidToken(encLuid.Value));
         _scheduler = new EmbeddingScheduler(() => Store, () => S, _worker, ProbeLoad, () => _pause.Has("consent") || _pause.Has("keylocked") || _pause.Has("keylost") || _pause.Has("storeerror"),
@@ -241,7 +242,10 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         _pause.KeyframesPaused || Store is null || !S.Capture.Enabled || !S.Capture.Consented;
 
     private bool ReplayPaused() =>
-        _pause.ContinuousPaused(S.Replay.DuringFullscreen) || !S.Capture.Consented;
+        ShouldPauseReplay(_pause, S.Replay.DuringFullscreen, Store is not null, S.Capture.Consented);
+
+    internal static bool ShouldPauseReplay(PauseController pause, bool duringFullscreen, bool storeOpen, bool consented) =>
+        pause.ContinuousPaused(duringFullscreen) || !storeOpen || !consented;
 
     // A14: a failed open is retried from the status tick with backoff (1 s doubling to 60 s), not only after a loss.
     private readonly RetryBackoff _micRetry = new(1000, 60_000), _systemRetry = new(1000, 60_000);
@@ -512,7 +516,16 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
     private void OnPurged(PurgeNotice n)
     {
         _thumbs.ClearCache();
-        if (n.Reason == "all") { _scheduler?.Clear(); _replays?.OnPurgeAll(); }   // C1: running replay exports and saves stop
+        if (n.Reason == "all")
+        {
+            _scheduler?.Clear();
+            _replays?.OnPurgeAll();   // C1: running replay exports and saves stop
+            if (S.Security.KeyProtection == BetterRecall.Core.Crypto.KeyVault.ModePassphrase)
+            {
+                _pause.Set("keylocked");
+                RaiseStatus(force: true);
+            }
+        }
         else _scheduler?.Remove(n.Ids.ToHashSet(StringComparer.Ordinal));
         _statsCache = default;
         if (ReachesRing(n, DateTimeOffset.UtcNow, S.Replay.Seconds))
@@ -556,6 +569,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
                 finally { Monitor.Exit(_audioGate); }
             }
             _loopback.CheckHealth(Environment.TickCount64);   // A13: restarts a loopback stream whose thread ended
+            SyncKeyLockPause(_pause, Store is not null, _core.Keys.NeedsPassphrase);
             if ((_pause.Has("keylost") || _pause.Has("storeerror") || _pause.Has("keylocked")) && Store != null)
             {
                 // Purge all made a new key and store (B1: also while the first open still waited for a passphrase).
@@ -570,6 +584,11 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
             _window?.Invoke(() => _window.UpdateTip("BetterRecall: " + StatusLine()));
         }
         catch (Exception ex) { Log.Debug($"status tick {ex.Message}"); }
+    }
+
+    internal static void SyncKeyLockPause(PauseController pause, bool storeOpen, bool needsPassphrase)
+    {
+        if (!storeOpen && needsPassphrase) pause.Set("keylocked");
     }
 
     private string StatusLine()
@@ -738,7 +757,7 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         bool ok;
         try { ok = await _core.Keys.VerifyUserAsync(_window?.Handle ?? 0, "Unlock BetterRecall to view your history", ct).ConfigureAwait(false); }
         catch (Exception ex) { Log.Warn("Windows Hello", ex); ok = false; }
-        if (ok) _gate.Open(S.Security.UnlockTimeoutMin);
+        if (ok && !_core.Keys.NeedsPassphrase) _gate.Open(S.Security.UnlockTimeoutMin);
         RaiseStatus(force: true);
         return ok;
     }
@@ -876,17 +895,46 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
 
     internal void RequestQuit() => _window?.Quit();
 
+    private readonly Lock _stopWritersLock = new();
+    private Task? _stopWriters;
+
+    /// <summary>Stops pipes and capture/pipeline/scheduler writers concurrently once; shared by OnEndSession and DisposeAsync (C4).</summary>
+    internal Task StopSessionWritersAsync()
+    {
+        lock (_stopWritersLock)
+        {
+            if (_stopWriters is not null) return _stopWriters;
+            var stops = new List<Task> { _core.StopPipesAsync() };
+            if (_capture is { } cap) stops.Add(cap.DisposeAsync().AsTask());
+            if (_pipeline is { } pipe) stops.Add(Task.Run(() => pipe.DisposeAsync().AsTask()));
+            if (_scheduler is { } sched) stops.Add(sched.DisposeAsync().AsTask());
+            return _stopWriters = Task.WhenAll(stops);
+        }
+    }
+
+    internal void EndSessionShutdown()
+    {
+        _cts.Cancel();
+        _statusTimer?.Change(Timeout.Infinite, Timeout.Infinite);
+        _maintenanceTimer?.Change(Timeout.Infinite, Timeout.Infinite);
+        _storageTimer?.Change(Timeout.Infinite, Timeout.Infinite);
+        var store = (_core as BetterRecall.Core.CoreHostImpl)?.EncryptedStore;
+        store?.CancelMaintenance();
+        // Under Windows' 5 s hung-app limit at shutdown: cancel and stop pipes + writers concurrently first.
+        try { StopSessionWritersAsync().Wait(TimeSpan.FromSeconds(2.5)); } catch (Exception ex) { Log.Warn("end session: stop writers", ex); }
+        // Transcripts held for redaction across segments are text already: store them before checkpointing (R M3).
+        if (_transcriber is { } tr)
+            try { Task.Run(tr.FlushHeld).Wait(TimeSpan.FromMilliseconds(500)); } catch (Exception ex) { Log.Warn("end session: held transcripts", ex); }
+        try { store?.Checkpoint(TimeSpan.FromSeconds(1.5)); } catch (Exception ex) { Log.Warn("end session: checkpoint", ex); }
+    }
+
     /// <summary>WM_ENDSESSION (logoff, shutdown, update restart; C3): Windows ends the process once this returns, so
-    /// DisposeAsync never runs. Stop the pipes (running exports are cancelled and delete their partial file), then
-    /// checkpoint the store. Export partials that still survive are deleted at the next start (ExportJournal).</summary>
+    /// DisposeAsync never runs. Stop pipes and background writers first, then flush held transcripts and checkpoint
+    /// the store. Export partials that still survive are deleted at the next start (ExportJournal).</summary>
     private void OnEndSession()
     {
-        Log.Info("session ending: stopping pipes, checkpointing the store");
-        // Transcripts held for redaction across segments are text already: store them before the process ends (R M3).
-        try { _transcriber?.FlushHeld(); } catch (Exception ex) { Log.Warn("end session: held transcripts", ex); }
-        // Under Windows' 5 s hung-app limit at shutdown.
-        try { _core.StopPipesAsync().Wait(TimeSpan.FromSeconds(2.5)); } catch (Exception ex) { Log.Warn("end session: stop pipes", ex); }
-        try { (_core as BetterRecall.Core.CoreHostImpl)?.EncryptedStore?.Checkpoint(); } catch (Exception ex) { Log.Warn("end session: checkpoint", ex); }
+        Log.Info("session ending: stopping pipes and writers, checkpointing the store");
+        EndSessionShutdown();
         Log.Flush();
         // ENDSESSION_CLOSEAPP (Restart Manager) does not always end the process: never stay running without pipes.
         RequestQuit();
@@ -907,13 +955,10 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
         if (_statusTimer is not null) await _statusTimer.DisposeAsync().ConfigureAwait(false);
         if (_maintenanceTimer is not null) await _maintenanceTimer.DisposeAsync().ConfigureAwait(false);
         if (_storageTimer is not null) await _storageTimer.DisposeAsync().ConfigureAwait(false);
-        try { await _core.StopPipesAsync().ConfigureAwait(false); } catch (Exception ex) { Log.Warn("stop pipes", ex); }
-        if (_capture is not null) await _capture.DisposeAsync().ConfigureAwait(false);
+        try { await StopSessionWritersAsync().ConfigureAwait(false); } catch (Exception ex) { Log.Warn("stop writers", ex); }
         _systemAudio?.Dispose();
         _micAudio?.Dispose();
         _loopback.Dispose();
-        if (_pipeline is not null) await _pipeline.DisposeAsync().ConfigureAwait(false);
-        if (_scheduler is not null) await _scheduler.DisposeAsync().ConfigureAwait(false);
         await _supervisor.DisposeAsync().ConfigureAwait(false);
         _guard?.Dispose();
         _probe?.Dispose();

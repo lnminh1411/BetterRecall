@@ -106,6 +106,7 @@ public sealed class Sweep3JCoreTests : IAsyncDisposable
         using var h = new TempHome("dpapi");
         var st = SettingsStore.Load(h.Path);
         using var vault = new KeyVault(h.Path, () => st.Current, probeHello: false);
+        vault.SetHelloAvailableForTest(true);   // test models "passphrase with Hello" (D2 refuses passphrase+hello without Hello)
         Assert.True(vault.TryLoadSilent());
         var agent = new FakeAgent();
         var p = Processor(st, vault, agent, _t.Store, h.Path);

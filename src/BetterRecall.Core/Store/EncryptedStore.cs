@@ -979,9 +979,21 @@ public sealed partial class EncryptedStore : IStore
     }
 
     /// <summary>wal_checkpoint(TRUNCATE) on store.db and every open keyframe file (panic flush).</summary>
-    public void Checkpoint()
+    public void Checkpoint() => Checkpoint(Timeout.InfiniteTimeSpan);
+
+    /// <summary>Priority wal_checkpoint(TRUNCATE) with an optional lock-acquisition budget (WM_ENDSESSION, C4).
+    /// Returns false if _wl was still held when timeout expired.</summary>
+    public bool Checkpoint(TimeSpan timeout)
     {
-        lock (_wl) { ThrowIfDisposed(); CheckpointLocked(); }
+        Interlocked.Increment(ref _priorityWaiters);
+        try
+        {
+            if (timeout == Timeout.InfiniteTimeSpan) _wl.Enter();
+            else if (!_wl.TryEnter(timeout)) return false;
+            try { ThrowIfDisposed(); CheckpointLocked(); return true; }
+            finally { _wl.Exit(); }
+        }
+        finally { Interlocked.Decrement(ref _priorityWaiters); }
     }
 
     private void CheckpointLocked()
@@ -1460,20 +1472,24 @@ public sealed partial class EncryptedStore : IStore
     /// The retention notice is raised even when a step throws (a damaged month file, VACUUM out of memory or disk), so
     /// the RAM copies of rows already deleted (thumbnails, chats, approvals, jobs) are dropped (B11).
     /// </summary>
-    public void RunMaintenance(Settings settings, bool retention = true)
+    public void RunMaintenance(Settings settings, bool retention = true) =>
+        RunMaintenance(settings, retention, CancellationToken.None);
+
+    public void RunMaintenance(Settings settings, bool retention, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(settings);
-        try { RunMaintenanceSteps(settings, retention); }
+        try { RunMaintenanceSteps(settings, retention, ct); }
+        catch (OperationCanceledException) when (_maintenanceCancelled || ct.IsCancellationRequested) { }
         finally
         {
             PurgeNotice? notice = null;
-            try { notice = MaintenanceSlice(() => TakeNoticeLocked("retention")); }
+            try { lock (_wl) { if (!_disposed) notice = TakeNoticeLocked("retention"); } }
             catch (Exception ex) { Log.Warn("maintenance notice", ex); }
             Raise(notice);
         }
     }
 
-    private void RunMaintenanceSteps(Settings settings, bool retention)
+    private void RunMaintenanceSteps(Settings settings, bool retention, CancellationToken ct)
     {
         var sw = Stopwatch.StartNew();
         var now = DateTimeOffset.UtcNow;
@@ -1491,7 +1507,7 @@ public sealed partial class EncryptedStore : IStore
             if (rids.Count == 0) return false;
             expired += DeleteRowsLocked(rids);
             return true;
-        })) { }
+        }, ct)) { }
         if (retention) MaintenanceSlice(() =>
         {
             Exec(_w, "DELETE FROM audit WHERE ts < $c", ("$c", cutoff));
@@ -1499,25 +1515,25 @@ public sealed partial class EncryptedStore : IStore
             Exec(_w, "DELETE FROM search_history WHERE ts < $c", ("$c", cutoff));
             DeleteChatsOlderLocked(cutoff);
             return true;
-        });
+        }, ct);
 
         // 2. Whole keyframe files from months before the cutoff month are empty now: delete the files.
-        var months = MaintenanceSlice(KfMonths);
+        var months = MaintenanceSlice(KfMonths, ct);
         foreach (var m in months.Where(m => string.CompareOrdinal(m, cutoffMonth) < 0))
             MaintenanceSlice(() =>
             {
                 if ((long)(Scalar(_w, "SELECT count(*) FROM captures WHERE kf_month=$m AND has_keyframe=1", ("$m", m)) ?? 0L) == 0)
                     DeleteKfFile(m);
                 return true;
-            });
+            }, ct);
 
         // 2b. Once per open: keyframe images whose row is gone. A crash between the store.db commit and the month-file
         //     delete of a row delete leaves them behind (B13); nothing else would remove them before their month expires.
         if (!_orphansSwept)
         {
             int orphans = 0;
-            foreach (var m in MaintenanceSlice(KfMonths))
-                MaintenanceSlice(() => { orphans += DeleteOrphanKeyframesLocked(m); return true; });
+            foreach (var m in MaintenanceSlice(KfMonths, ct))
+                MaintenanceSlice(() => { orphans += DeleteOrphanKeyframesLocked(m); return true; }, ct);
             _orphansSwept = true;
             if (orphans > 0) Log.Info($"maintenance: {orphans} orphan keyframes deleted");
         }
@@ -1525,16 +1541,16 @@ public sealed partial class EncryptedStore : IStore
         // 3. Progressive thinning (retention.progressive*), one day per slice. storage.maxGb and storage.minFreeGb are
         //    the agent's storage guard (DeleteForSpace).
         int thinned = 0;
-        if (retention && MaintenanceSlice(() => ThinDaysLocked(settings.Retention, now, cutoff)) is { } days)
+        if (retention && MaintenanceSlice(() => ThinDaysLocked(settings.Retention, now, cutoff), ct) is { } days)
             for (long day = days.First; day <= days.Last; day++)
             {
                 long d = day;
-                MaintenanceSlice(() => { thinned += ThinDayLocked(settings.Retention, now, cutoff, d); return true; });
+                MaintenanceSlice(() => { thinned += ThinDayLocked(settings.Retention, now, cutoff, d); return true; }, ct);
             }
         if (thinned > 0) Log.Info($"maintenance: {thinned} rows thinned");
-        foreach (var m in MaintenanceSlice(KfMonths))
+        foreach (var m in MaintenanceSlice(KfMonths, ct))
             // A legacy rebuild pauses for priority callers (S3) and goes on in the next slice.
-            while (MaintenanceSlice(() => ReleaseFreePagesLocked(m, vacuumLegacy: true))) { }
+            while (MaintenanceSlice(() => ReleaseFreePagesLocked(m, vacuumLegacy: true), ct)) { }
 
         MaintenanceSlice(() =>
         {
@@ -1559,7 +1575,7 @@ public sealed partial class EncryptedStore : IStore
             }
             try { Exec(_w, "PRAGMA optimize"); } catch { }
             return true;
-        });
+        }, ct);
         Log.Info($"maintenance: {expired} rows expired in {sw.ElapsedMilliseconds} ms");
     }
 
@@ -1569,15 +1585,22 @@ public sealed partial class EncryptedStore : IStore
     /// <summary>Count of callers waiting for _wl with priority (purge, keyframe reads).</summary>
     private int _priorityWaiters;
     private bool _orphansSwept;
+    private volatile bool _maintenanceCancelled;
+
+    /// <summary>Aborts running maintenance between slices so WM_ENDSESSION Checkpoint does not wait behind it (C4).</summary>
+    public void CancelMaintenance() => _maintenanceCancelled = true;
 
     /// <summary>Takes _wl for one maintenance step, after any priority caller that is waiting got its turn.</summary>
-    private T MaintenanceSlice<T>(Func<T> step)
+    private T MaintenanceSlice<T>(Func<T> step, CancellationToken ct = default)
     {
         var wait = Stopwatch.StartNew();
-        while (Volatile.Read(ref _priorityWaiters) > 0 && wait.ElapsedMilliseconds < 30_000) Thread.Sleep(2);
+        while (Volatile.Read(ref _priorityWaiters) > 0 && !_maintenanceCancelled && !ct.IsCancellationRequested && wait.ElapsedMilliseconds < 30_000)
+            Thread.Sleep(2);
+        if (_maintenanceCancelled || ct.IsCancellationRequested) throw new OperationCanceledException();
         lock (_wl)
         {
             ThrowIfDisposed();
+            if (_maintenanceCancelled || ct.IsCancellationRequested) throw new OperationCanceledException();
             return step();
         }
     }

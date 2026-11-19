@@ -116,6 +116,37 @@ internal static class SecretCards
         return new Border { Style = (Style)Application.Current.Resources["CardStyle"], Child = panel };
     }
 
+    /// <summary>Inline passphrase prompt when changing security.keyProtection off passphrase while unlocked with a password (D3).</summary>
+    public static async Task<bool> PromptPassphraseAsync(XamlRoot root, Func<string, Task<AgentResult>> verify)
+    {
+        var pass = new PasswordBox { Header = Loc.Get("Unlock_PassphraseHint") };
+        var error = new TextBlock { TextWrapping = TextWrapping.Wrap, Visibility = Visibility.Collapsed, Style = (Style)Application.Current.Resources["CaptionCriticalTextStyle"] };
+        var body = new StackPanel { Spacing = 8, MinWidth = 320 };
+        body.Children.Add(new TextBlock { Text = Loc.Get("Sec_PassphrasePromptBody"), TextWrapping = TextWrapping.Wrap });
+        body.Children.Add(pass);
+        body.Children.Add(error);
+        var dialog = WindowHelpers.Dialog(root, Loc.Get("Sec_PassphrasePromptTitle"), body, Loc.Get("Sec_PassphraseContinue"));
+        bool verified = false;
+        dialog.PrimaryButtonClick += async (_, args) =>
+        {
+            var deferral = args.GetDeferral();
+            try
+            {
+                if (string.IsNullOrEmpty(pass.Password)) { args.Cancel = true; return; }
+                var r = await verify(pass.Password);
+                if (!r.Ok) { args.Cancel = true; Show(error, Loc.Error(r.Kind, r.Error)); return; }
+                verified = true;
+            }
+            finally
+            {
+                pass.Password = "";
+                deferral.Complete();
+            }
+        };
+        await dialog.ShowAsync();
+        return verified;
+    }
+
     public static Border ApiKeyCard(FrameworkElement owner)
     {
         var panel = new StackPanel { Spacing = 8 };

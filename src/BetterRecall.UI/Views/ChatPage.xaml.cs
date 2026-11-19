@@ -86,16 +86,19 @@ public sealed partial class ChatPage : Page, IDataPage
         _ = ReloadListAsync();
     }
 
-    private async Task ReloadListAsync()
+    private async Task ReloadListAsync(bool dropMissingActive = false)
     {
         var r = await Services.Current.Api.ChatListAsync();
-        if (r.Ok && r.Value is not null)
+        if (!r.Ok || r.Value is null) return;
+        if (dropMissingActive && ChatControl.ViewModel.ChatId is { } active && !ChatControl.ViewModel.Busy && r.Value.All(c => c.Id != active))
         {
-            _selecting = true;
-            SavedList.ItemsSource = r.Value;
-            SavedList.SelectedItem = r.Value.FirstOrDefault(c => c.Id == ChatControl.ViewModel.ChatId);
-            _selecting = false;
+            bool gone = r.Value.Count < 200 || (await Services.Current.Api.ChatGetAsync(active)) is { Ok: false, Error: AgentErrors.NotFound };
+            if (gone) ChatControl.ViewModel.Reset();
         }
+        _selecting = true;
+        SavedList.ItemsSource = r.Value;
+        SavedList.SelectedItem = r.Value.FirstOrDefault(c => c.Id == ChatControl.ViewModel.ChatId);
+        _selecting = false;
     }
 
     private async void SavedList_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -109,6 +112,11 @@ public sealed partial class ChatPage : Page, IDataPage
             {
                 ChatControl.ViewModel.LoadIfCurrent(ticket, r.Value);   // New chat or another chat opened meanwhile wins
             }
+            else if (!r.Ok && r.Error == AgentErrors.NotFound)
+            {
+                if (ChatControl.ViewModel.ChatId == summary.Id) ChatControl.ViewModel.Reset();
+                await ReloadListAsync();
+            }
         }
     }
 
@@ -118,15 +126,16 @@ public sealed partial class ChatPage : Page, IDataPage
         ChatControl.ViewModel.Reset();
     }
 
-    /// <summary>A capture shown in the detail pane left the store (another client's purge, NSFW drop): its keyframe
-    /// leaves the pane (sweep 4 review S8).</summary>
+    /// <summary>Captures left the store (another client's purge, retention, NSFW drop): drop matching detail, chat/approval state, and reload saved chats (B6).</summary>
     private void OnRemoved(RemovedEvent e)
     {
-        if (_detail.Item is { } shown && (e.Truncated || RemovedMatch.For(e)(shown.Id, shown.Ts)))
+        if (_detail.Item is { } shown && (e.Truncated || string.Equals(e.Reason, "all", StringComparison.Ordinal) || RemovedMatch.For(e)(shown.Id, shown.Ts)))
         {
             _detail.Clear();
             DetailHost.Visibility = Visibility.Collapsed;
         }
+        if (ChatControl.ViewModel.ApplyRemoved(e)) ChatControl.Stop();
+        _ = ReloadListAsync(dropMissingActive: true);
     }
 
     private void OnSourceInvoked(ChatSource source)

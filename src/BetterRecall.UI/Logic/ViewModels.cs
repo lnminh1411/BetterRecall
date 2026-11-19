@@ -390,6 +390,10 @@ public sealed class SearchViewModel : ObservableObject
         AgentErrors.PurgedDuring => new LocalizedText("Err_PurgedDuring"),
         AgentErrors.PasswordRule => new LocalizedText("Err_PasswordRule"),
         AgentErrors.PasswordInUse => new LocalizedText("Err_PasswordInUse"),
+        AgentErrors.PassphraseRule => new LocalizedText("Err_PassphraseRule"),
+        AgentErrors.PassphraseFirst => new LocalizedText("Err_PassphraseFirst"),
+        AgentErrors.PassphraseNeeded => new LocalizedText("Err_PassphraseNeeded"),
+        AgentErrors.PassphraseNeedsHello => new LocalizedText("Err_PassphraseNeedsHello"),
         AgentErrors.AiOff => new LocalizedText("Err_AiOff"),
         AgentErrors.NoApiKey => new LocalizedText("Err_NoApiKey"),
         AgentErrors.ApiKeyRule => new LocalizedText("Err_ApiKeyRule"),
@@ -714,6 +718,12 @@ public static class UnlockLogic
     public static bool UsesPassphrase(string? keyProtection) => string.Equals(keyProtection, "passphrase", StringComparison.OrdinalIgnoreCase);
     public static bool UsesPassword(string? unlockMethod) => string.Equals(unlockMethod, "password", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>Show the "Forgot passphrase? Wipe all data" recovery link only when the panel asks for the passphrase (D1).</summary>
+    public static bool ShowForgotPassphrase(UnlockMode mode) => mode == UnlockMode.Passphrase;
+
+    /// <summary>Cannot switch keyProtection to passphrase while Hello is unavailable and unlockMethod is hello (D2).</summary>
+    public static bool BlocksPassphraseChoice(bool helloAvailable, string? unlockMethod) => !helloAvailable && !UsesPassword(unlockMethod);
+
     /// <summary>Which box the unlock screen shows. A passphrase-wrapped key that is not loaded yet always asks for the
     /// passphrase first; otherwise the unlock method decides.</summary>
     public static UnlockMode Mode(string? keyProtection, string? unlockMethod, bool keyNeedsPassphrase) =>
@@ -788,7 +798,8 @@ public static class PurgeFlow
     public static async Task<AgentResult<PurgeResult>> PurgeAllAsync(AgentApi api, string? passphrase, CancellationToken ct = default)
     {
         var u = await api.UnlockAsync(passphrase, ct);
-        if (!u.Ok) return new AgentResult<PurgeResult>(false, null, u.Kind, u.Error);
+        if (!u.Ok && !(passphrase is null && u.Error is AgentErrors.NoPassword or AgentErrors.HelloMissing))
+            return new AgentResult<PurgeResult>(false, null, u.Kind, u.Error);
         var p = await api.PurgeAllAsync(ct);
         if (!p.Ok) return new AgentResult<PurgeResult>(false, null, p.Kind, p.Error);
         return await api.PurgeConfirmResultAsync(p.Value!.Confirm, ct);

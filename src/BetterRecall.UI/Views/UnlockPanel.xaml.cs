@@ -26,6 +26,7 @@ public sealed partial class UnlockPanel : UserControl
     }
 
     public event Action? UnlockedOk;
+    public event Action? WipeRequested;
 
     /// <summary>Picks Hello, passphrase (security.keyProtection) or password (security.unlockMethod) and focuses the right control.</summary>
     public void Refresh()
@@ -41,6 +42,7 @@ public sealed partial class UnlockPanel : UserControl
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(Pass, hint);
         LessSecureText.Text = Loc.Get("Unlock_PasswordLessSecure");
         LessSecureText.Visibility = mode == UnlockMode.Password ? Visibility.Visible : Visibility.Collapsed;
+        ForgotPassphraseLink.Visibility = UnlockLogic.ShowForgotPassphrase(mode) ? Visibility.Visible : Visibility.Collapsed;
         ErrorBar.IsOpen = false;
         Pass.Password = "";
         if (pass) Pass.Focus(FocusState.Programmatic);
@@ -91,11 +93,14 @@ public sealed partial class UnlockPanel : UserControl
         if (PassPanel.Visibility == Visibility.Visible) Pass.Focus(FocusState.Programmatic);
     }
 
+    private void Forgot_Click(object sender, RoutedEventArgs e) => WipeRequested?.Invoke();
+
     private void SetBusy(bool busy)
     {
         Busy.IsActive = busy;
         HelloButton.IsEnabled = !busy;
         PassButton.IsEnabled = !busy;
         Pass.IsEnabled = !busy;
+        ForgotPassphraseLink.IsEnabled = !busy;
     }
 }

@@ -105,6 +105,7 @@ public sealed partial class LauncherWindow : Window
             _ = LoadSideDataAsync();
             if (_vm.Query.Trim().Length > 0) _ = _vm.SearchNowAsync();
         };
+        Unlock.WipeRequested += () => App.Current.ShowMain("danger:wipe");
     }
 
     public bool IsShown => AppWindow.IsVisible;
@@ -142,6 +143,7 @@ public sealed partial class LauncherWindow : Window
         AppWindow.Hide();
         _vm.CancelPending();
         DropData();
+        App.Current.OnWindowHidden();
     }
 
     /// <summary>Everything decrypted leaves memory: results, previews, history, facets, the detail image, the Ask chat
@@ -156,10 +158,11 @@ public sealed partial class LauncherWindow : Window
         Services.Current.Thumbs.Clear();
     }
 
-    /// <summary>Captures purged by another client, retention or the NSFW gate leave the results and the preview (B10).</summary>
+    /// <summary>Captures purged by another client, retention or the NSFW gate leave the results, preview and Ask chat (B10, B6).</summary>
     private void OnRemoved(RemovedEvent e)
     {
         if (!IsShown) return;   // hidden: nothing is held (DropData)
+        if (AskView.ViewModel.ApplyRemoved(e)) AskView.Stop();
         if (e.Truncated)
         {
             if (_vm.Query.Trim().Length > 0) _ = _vm.SearchNowAsync();

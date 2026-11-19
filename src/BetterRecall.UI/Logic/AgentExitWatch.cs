@@ -15,10 +15,12 @@ public sealed class AgentExitWatch : IDisposable
     private Process? _proc;
     private int _pid;
     private bool _disposed;
+    private bool _watchFailed;
 
     public event Action? Exited;
 
     public int Pid { get { lock (_gate) return _pid; } }
+    public bool HasExited { get { lock (_gate) return _pid > 0 && _raised == _pid; } }
 
     public void Watch(int pid)
     {
@@ -30,12 +32,14 @@ public sealed class AgentExitWatch : IDisposable
             old = _proc;
             _proc = null;
             _pid = pid;
+            _raised = 0;
+            _watchFailed = false;
         }
         old?.Dispose();
         Process p;
         try { p = Process.GetProcessById(pid); }
         catch (ArgumentException) { Raise(pid); return; }   // already gone
-        catch (InvalidOperationException) { return; }
+        catch (InvalidOperationException) { lock (_gate) if (_pid == pid) _watchFailed = true; return; }
         try
         {
             p.EnableRaisingEvents = true;
@@ -44,6 +48,7 @@ public sealed class AgentExitWatch : IDisposable
         catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException)
         {
             p.Dispose();   // cannot wait on it: no watch, the offline banner still shows
+            lock (_gate) if (_pid == pid) _watchFailed = true;
             return;
         }
         lock (_gate)
@@ -54,6 +59,30 @@ public sealed class AgentExitWatch : IDisposable
         bool exited;
         try { exited = p.HasExited; } catch (InvalidOperationException) { exited = true; }
         if (exited) Raise(pid);
+    }
+
+    /// <summary>Re-checks the watched agent process synchronously (used when dismissing a window after Exited fired earlier, C6).</summary>
+    public bool IsAlive()
+    {
+        Process? p;
+        int pid;
+        lock (_gate)
+        {
+            if (_disposed) return false;
+            if (_pid <= 0) return true;
+            if (_raised == _pid) return false;
+            if (_watchFailed) return true;
+            p = _proc;
+            pid = _pid;
+        }
+        if (p is null) return false;
+        try
+        {
+            if (!p.HasExited) return true;
+        }
+        catch (InvalidOperationException) { }
+        Raise(pid);
+        return false;
     }
 
     private int _raised;
@@ -79,4 +108,11 @@ public sealed class AgentExitWatch : IDisposable
         }
         p?.Dispose();
     }
+}
+
+/// <summary>UI exit decision when the agent has exited or a window hides (C6).</summary>
+public static class UiExitPolicy
+{
+    public static bool ShouldExit(bool agentExited, bool launcherVisible, bool mainVisible) =>
+        agentExited && !launcherVisible && !mainVisible;
 }

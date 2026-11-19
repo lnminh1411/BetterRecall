@@ -889,4 +889,12 @@
   <data name="Warn_VcMessage" xml:space="preserve"><value>Search and text recognition need the Microsoft Visual C++ 2015-2022 x64 runtime. Install it, then restart BetterRecall.</value></data>
   <data name="Warn_OtherTitle" xml:space="preserve"><value>BetterRecall reported a problem</value></data>
   <data name="Warn_OtherMessage" xml:space="preserve"><value>Warning code: {0}. The log has details.</value></data>
+  <data name="Unlock_ForgotPassphrase.Content" xml:space="preserve"><value>Forgot passphrase? Wipe all data</value></data>
+  <data name="Err_PassphraseRule" xml:space="preserve"><value>A new passphrase must be 8 to 1024 characters.</value></data>
+  <data name="Err_PassphraseFirst" xml:space="preserve"><value>Set the passphrase first: with Windows Hello unlock, unlock with a new passphrase, then switch to Password.</value></data>
+  <data name="Err_PassphraseNeeded" xml:space="preserve"><value>Enter your data-key passphrase to change key protection.</value></data>
+  <data name="Err_PassphraseNeedsHello" xml:space="preserve"><value>Passphrase key protection with Windows Hello unlock requires Windows Hello on this PC.</value></data>
+  <data name="Sec_PassphrasePromptTitle" xml:space="preserve"><value>Enter data-key passphrase</value></data>
+  <data name="Sec_PassphrasePromptBody" xml:space="preserve"><value>Your encryption key is protected by a passphrase. Enter the passphrase to change key protection.</value></data>
+  <data name="Sec_PassphraseContinue" xml:space="preserve"><value>Continue</value></data>
 </root>

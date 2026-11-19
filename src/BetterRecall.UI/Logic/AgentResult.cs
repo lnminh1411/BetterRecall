@@ -46,6 +46,10 @@ public static class AgentErrors
     public const string SettingsUnreadable = "settings.json could not be read. Reset the settings or fix the file first.";
     public const string PasswordRule = "Password must be 6 to 256 characters.";
     public const string PasswordInUse = "Password in use (config security.unlockMethod).";
+    public const string PassphraseRule = "A new passphrase must be 8 to 1024 characters.";
+    public const string PassphraseFirst = "Set the passphrase first: with security.unlockMethod hello, unlock with the new passphrase, then switch to password.";
+    public const string PassphraseNeeded = "Unlock with the data-key passphrase to change security.keyProtection.";
+    public const string PassphraseNeedsHello = "Passphrase key protection with security.unlockMethod hello requires Windows Hello.";
     public const string AiOff = "Cloud describe is off (config ai.enabled).";
     public const string NoApiKey = "API key not set.";
     public const string ApiKeyRule = "Invalid API key.";

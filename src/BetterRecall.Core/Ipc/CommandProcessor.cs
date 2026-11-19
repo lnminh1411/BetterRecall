@@ -148,6 +148,8 @@ public sealed partial class CommandProcessor
     internal const string ErrPassphraseRule = "A new passphrase must be 8 to 1024 characters.";
     internal const string ErrPassphraseFirst = "Set the passphrase first: with security.unlockMethod hello, unlock with the new passphrase, then switch to password.";
     internal const string ErrPassphraseNeeded = "Unlock with the data-key passphrase to change security.keyProtection.";
+    internal const string ErrPassphraseNeedsHello = "Passphrase key protection with security.unlockMethod hello requires Windows Hello.";
+    internal const string UsagePassphrase = "Usage: passphrase verify <json>";
     internal const string ErrTooManyPrefix = "Too many attempts. Try again in ";
     internal const string ErrAiOff = "Cloud describe is off (config ai.enabled).";
     internal const string ErrNoApiKey = "API key not set.";
@@ -160,11 +162,12 @@ public sealed partial class CommandProcessor
 
     private static readonly string[] PublicVerbs = ["ping", "version", "help", "status", "search", "get", "thumb", "subscribe", "pause", "resume", "purge"];
     private static readonly string[] McpVerbs = ["ping", "version", "status", "search", "get"];
-    private static readonly string[] UiOnlyVerbs = ["unlock", "lock", "consent", "settings", "timeline", "keyframe", "replay", "panic", "audit", "bench", "facets", "history", "password", "ai", "describe", "export", "chat"];
+    private static readonly string[] UiOnlyVerbs = ["unlock", "lock", "consent", "settings", "timeline", "keyframe", "replay", "panic", "audit", "bench", "facets", "history", "password", "passphrase", "ai", "describe", "export", "chat"];
 
     private readonly CommandDeps _d;
     private readonly AuditThrottle _connectAudit = new(TimeSpan.FromMinutes(1));
     private DateTimeOffset _lastUnlock = DateTimeOffset.MinValue;
+    private DateTimeOffset _lastNoHelloPurge = DateTimeOffset.MinValue;
 
     internal Func<DateTimeOffset> Now { get; set; } = () => DateTimeOffset.UtcNow;
 
@@ -220,9 +223,31 @@ public sealed partial class CommandProcessor
         try { _d.Store()?.DeleteChats(null); } catch (Exception ex) { Log.Warn("panic chat delete", ex); }
     }
 
+    private readonly Lock _exportLock = new();
+    private CancellationTokenSource _lockCts = new();
+
+    private void CancelExportsOnLock()
+    {
+        CancellationTokenSource old;
+        lock (_exportLock)
+        {
+            old = _lockCts;
+            _lockCts = new CancellationTokenSource();
+        }
+        try { old.Cancel(); } catch (ObjectDisposedException) { }
+    }
+
+    private CancellationToken LockToken(PipeKind kind)
+    {
+        if (IsLocked(kind)) return new CancellationToken(canceled: true);
+        lock (_exportLock) return IsLocked(kind) ? new CancellationToken(canceled: true) : _lockCts.Token;
+    }
+
     public CommandProcessor(CommandDeps deps)
     {
         _d = deps;
+        deps.Agent.StatusChanged += st => { if (st.Locked) CancelExportsOnLock(); };
+        deps.Agent.Panicked += CancelExportsOnLock;
         if (deps.AiKey is { } keys)
         {
             _chat = new Ai.ChatService(new Ai.ChatDeps
@@ -526,6 +551,7 @@ public sealed partial class CommandProcessor
             case "lock":
                 _d.Agent.Lock();
                 _unlockedWithPassphrase = false;
+                CancelExportsOnLock();
                 return Ok("null");
             case "consent":
                 // settings.json did not load: consent would write defaults over every other choice (B3, D4).
@@ -553,6 +579,8 @@ public sealed partial class CommandProcessor
                 return History(s, rest);
             case "password":
                 return PasswordVerb(s, RawRest(line));
+            case "passphrase":
+                return PassphraseVerb(s, RawRest(line));
             case "ai":
                 return AiVerb(s, RawRest(line));
             case "describe":
@@ -620,7 +648,8 @@ public sealed partial class CommandProcessor
         if (_d.Agent.IsUnlocked) return "none";
         bool pwSet = _d.Password?.IsSet == true;
         if (UsesPassword) return pwSet ? "password" : "hello";   // no password file: Hello stands in (B15)
-        if (S.Security.KeyProtection == Crypto.KeyVault.ModePassphrase) return "passphrase";
+        if (S.Security.RequireUnlock && HelloMissing && pwSet && _d.Keys.Protection != Crypto.KeyVault.ModePassphrase) return "password";
+        if (_d.Keys.KeyLoaded && S.Security.KeyProtection == Crypto.KeyVault.ModePassphrase) return "passphrase";
         if (S.Security.RequireUnlock && HelloMissing && pwSet) return "password";
         return "hello";
     }
@@ -928,12 +957,20 @@ public sealed partial class CommandProcessor
         if (LockError(s.Kind) is { } locked) return Err(locked);
         var store = _d.Store()!;
         if (r.DryRun) return Ok(JsonSerializer.Serialize(Store.CaptureExporter.Count(store, r), CoreJson.Default.ExportResult));
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, LockToken(s.Kind));
         try
         {
-            var result = await Task.Run(() => Store.CaptureExporter.Write(store, r, _d.Thumbnailer.Transcode, ct), ct).ConfigureAwait(false);
+            var result = await Task.Run(() => Store.CaptureExporter.Write(store, r, _d.Thumbnailer.Transcode, () => IsLocked(s.Kind), linked.Token), linked.Token).ConfigureAwait(false);
+            if (IsLocked(s.Kind))
+            {
+                try { File.Delete(r.Path); } catch { }
+                return Err(ErrLocked);
+            }
             Audit(s, "export", result.Count, "");
             return Ok(JsonSerializer.Serialize(result, CoreJson.Default.ExportResult));
         }
+        catch (Store.ExportLockedException) { return Err(ErrLocked); }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested) { return Err(ErrLocked); }
         catch (Store.ExportPurgedException ex) { Log.Info("export aborted: a purge ran during it"); return Err(ex.Message); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -1100,7 +1137,8 @@ public sealed partial class CommandProcessor
             case "all" when ui:
             {
                 if (args.Length != 1) return Err(usage);
-                if (Now() - _lastUnlock > TimeSpan.FromSeconds(60)) return Err(ErrUnlockRequired);
+                bool noHelloPurge = HelloMissing && _d.Store() == null && (!_d.Keys.KeyLoaded || KeyNeedsPassphrase) && Now() - _lastNoHelloPurge <= TimeSpan.FromSeconds(60);
+                if (!noHelloPurge && Now() - _lastUnlock > TimeSpan.FromSeconds(60)) return Err(ErrUnlockRequired);
                 return Ok(JsonSerializer.Serialize(new PurgeConfirmReply(NewToken(s, null, 0), null), CoreJson.Default.PurgeConfirmReply));
             }
             case "last":
@@ -1165,13 +1203,16 @@ public sealed partial class CommandProcessor
     private async Task<Reply> UnlockAsync(ClientSession s, string rest, CancellationToken ct)
     {
         var keys = _d.Keys;
+        bool wasUnlocked = _d.Agent.IsUnlocked;
         bool rewrap = false, helloFallback = false, passphraseChecked = false;
+        bool requirePassphrase = !UsesPassword && (KeyNeedsPassphrase
+            || (keys.KeyLoaded && (keys.Protection == Crypto.KeyVault.ModePassphrase || S.Security.KeyProtection == Crypto.KeyVault.ModePassphrase)));
         // Passphrase guesses are rate-limited like the unlock password (each one is a 64 MiB Argon2id run).
         bool passphraseTry = rest.Length > 0 && (KeyNeedsPassphrase || !UsesPassword && keys.KeyLoaded && keys.Protection == Crypto.KeyVault.ModePassphrase);
         if (passphraseTry && keys.PassphraseRetryAfterSeconds is > 0 and var passWait) return Err(ErrTooMany(passWait));
         // A passphrase that would create the key or re-wrap it must meet the rule (B14); say so instead of "Wrong passphrase.".
-        // Only where the text is a passphrase: with the password method and a loaded key it is the unlock password (6+).
-        if (rest.Length > 0 && (KeyNeedsPassphrase || !UsesPassword) && keys is Crypto.KeyVault { WouldSetPassphrase: true }
+        // Only where the text is a passphrase: with the password method (or when Hello is missing on a DPAPI/TPM key) it is the unlock password (6+).
+        if (rest.Length > 0 && (KeyNeedsPassphrase || (!UsesPassword && !HelloMissing)) && keys is Crypto.KeyVault { WouldSetPassphrase: true }
             && !Crypto.KeyVault.ValidNewPassphrase(rest)) return Err(ErrPassphraseRule);
         if (KeyNeedsPassphrase)
         {
@@ -1215,25 +1256,35 @@ public sealed partial class CommandProcessor
             if (helloFallback) return Err(ErrNoPassword);
             // T5: hello configured on a PC without Windows Hello. The prompt cannot work, so the passphrase just checked or
             // the unlock password stands in for it; otherwise say what is missing instead of "cancelled".
-            if (S.Security.RequireUnlock && HelloMissing) return HelloMissingUnlock(s, rest, passphraseChecked, rewrap);
+            if ((S.Security.RequireUnlock || KeyNeedsPassphrase || (rest.Length == 0 && !_d.Keys.KeyLoaded)) && HelloMissing)
+                return HelloMissingUnlock(s, rest, passphraseChecked);
             return Err(ErrUnlockCancelled);
         }
         if (rewrap && !keys.UnlockWithPassphrase(rest)) return Err(ErrWrongPassphrase);
         if (helloFallback) Audit(s, "unlock hello (no password file)", 1, "");
         _unlockedWithPassphrase = passphraseChecked || rewrap;
         _lastUnlock = Now();
+        // Empty unlock when a passphrase is required (forgot-passphrase wipe flow, D1) verifies Hello for purge all only.
+        if ((KeyNeedsPassphrase || requirePassphrase) && rest.Length == 0)
+        {
+            if (!wasUnlocked && _d.Agent.IsUnlocked) _d.Agent.Lock();
+            return Ok(JsonSerializer.Serialize(new UnlockReply(false, null), CoreJson.Default.UnlockReply));
+        }
         var until = _d.Agent.GetStatus().UnlockedUntil;
         return Ok(JsonSerializer.Serialize(new UnlockReply(true, until), CoreJson.Default.UnlockReply));
     }
 
     /// <summary>T5: unlock with security.unlockMethod hello after the Hello prompt failed on a PC without Windows Hello.</summary>
-    private Reply HelloMissingUnlock(ClientSession s, string rest, bool passphraseChecked, bool rewrap)
+    private Reply HelloMissingUnlock(ClientSession s, string rest, bool passphraseChecked)
     {
         if (passphraseChecked) { _unlockedWithPassphrase = true; return OpenVerified(s, "unlock passphrase"); }
         var pw = _d.Password;
+        if (rest.Length == 0)
+        {
+            if (_d.Store() == null && (!_d.Keys.KeyLoaded || KeyNeedsPassphrase)) _lastNoHelloPurge = Now();
+            return Err(pw?.IsSet == true ? ErrHelloMissing : ErrNoPassword);
+        }
         if (pw?.IsSet != true) return Err(ErrNoPassword);
-        // A re-wrap needs a proof of the user before it runs, and an empty secret is no password.
-        if (rest.Length == 0 || rewrap) return Err(ErrHelloMissing);
         switch (pw.Verify(rest))
         {
             case Crypto.PasswordCheck.NotSet: return Err(ErrNoPassword);
@@ -1278,6 +1329,8 @@ public sealed partial class CommandProcessor
         string nextProtection = protection ?? S.Security.KeyProtection, nextMethod = method ?? S.Security.UnlockMethod;
         if (nextProtection == Crypto.KeyVault.ModePassphrase && nextMethod == "password" && fileMode != Crypto.KeyVault.ModePassphrase)
             return ErrPassphraseFirst;
+        if (nextProtection == Crypto.KeyVault.ModePassphrase && nextMethod == "hello" && HelloMissing && fileMode != Crypto.KeyVault.ModePassphrase)
+            return ErrPassphraseNeedsHello;
         if (protection is not null && protection != Crypto.KeyVault.ModePassphrase && fileMode == Crypto.KeyVault.ModePassphrase
             && _d.Keys.KeyLoaded && !_unlockedWithPassphrase)
             return ErrPassphraseNeeded;
@@ -1356,6 +1409,37 @@ public sealed partial class CommandProcessor
             }
         }
         return Err(UsagePassword);
+    }
+
+    /// <summary>Verifies the data-key passphrase inline while unlocked (sweep 5 D3: changing keyProtection off passphrase under password unlock).</summary>
+    private Reply PassphraseVerb(ClientSession s, string rest)
+    {
+        var (sub, json) = SplitVerb(rest);
+        if (!sub.Equals("verify", StringComparison.OrdinalIgnoreCase) || json.Length == 0) return Err(UsagePassphrase);
+        if (LockError(s.Kind) is { } locked) return Err(locked);
+        JsonDocument doc;
+        try { doc = JsonDocument.Parse(json); }
+        catch (JsonException) { return Err(ErrJson); }
+        using (doc)
+        {
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object) return Err(ErrJson);
+            var pass = JsonString(root, "passphrase");
+            if (pass is null) return Err(UsagePassphrase);
+            var keys = _d.Keys;
+            if (keys.PassphraseRetryAfterSeconds is > 0 and var wait) return Err(ErrTooMany(wait));
+            if (!keys.KeyLoaded) return Err(ErrNotOpen);
+            if (keys.Protection != Crypto.KeyVault.ModePassphrase) return Ok("null");
+            if (!keys.UnlockWithPassphrase(pass))
+            {
+                Audit(s, "unlock passphrase", 0, "");
+                int after = keys.PassphraseRetryAfterSeconds;
+                return Err(after > 0 ? ErrTooMany(after) : ErrWrongPassphrase);
+            }
+            _unlockedWithPassphrase = true;
+            Audit(s, "unlock passphrase", 1, "");
+            return Ok("null");
+        }
     }
 
     // ------------------------------------------------------------ cloud describe
@@ -1552,6 +1636,7 @@ public sealed partial class CommandProcessor
             switch (sub.ToLowerInvariant())
             {
                 case "save" when args.Length == 0:
+                    if (KeyNeedsPassphrase) return Err(ErrLocked);
                     return Ok(JsonSerializer.Serialize(await _d.Agent.SaveReplayAsync(ct).ConfigureAwait(false), CoreJson.Default.ReplayClip));
                 case "list" when args.Length == 0:
                     if (LockError(s.Kind) is { } locked) return Err(locked);
@@ -1564,7 +1649,13 @@ public sealed partial class CommandProcessor
                     path = path.Trim(); // rest of the line, spaces included, no quoting
                     if (!Path.IsPathFullyQualified(path)) return Err(UsageReplay);
                     if (LockError(s.Kind) is { } exportLocked) return Err(exportLocked);
-                    await _d.Agent.ExportReplayAsync(id, path, ct).ConfigureAwait(false);
+                    using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, LockToken(s.Kind));
+                    await _d.Agent.ExportReplayAsync(id, path, linked.Token).ConfigureAwait(false);
+                    if (IsLocked(s.Kind))
+                    {
+                        try { File.Delete(path); } catch { }
+                        return Err(ErrLocked);
+                    }
                     Audit(s, "replay export", 1, "");
                     return Ok("null");
                 }
@@ -1579,6 +1670,14 @@ public sealed partial class CommandProcessor
             // Purge all discarded the clip being saved, or cancelled the export and deleted its copy.
             Log.Info("replay " + sub.ToLowerInvariant() + ": purge all ran during it");
             return Err(ErrPurgedDuring);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            return Err(ErrLocked);
+        }
+        catch (InvalidOperationException ex) when (ex.Message == ErrLocked)
+        {
+            return Err(ErrLocked);
         }
         catch (Exception ex) when (ex is KeyNotFoundException or FileNotFoundException)
         {

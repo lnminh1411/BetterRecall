@@ -43,6 +43,10 @@ internal sealed class Services
     public event Action? SettingsLoaded;
     /// <summary>The agent process this UI talked to exited (tray Quit, quit event, crash). Raised on the UI thread.</summary>
     public event Action? AgentExited;
+    /// <summary>Danger zone finished purge all (used to keep the result/undeleted banner visible over UnlockPanel in passphrase mode, B5).</summary>
+    public event Action<PurgeResult>? PurgeAllCompleted;
+
+    public bool IsAgentExited { get; private set; }
 
     private readonly AgentExitWatch _agentWatch = new();
 
@@ -85,15 +89,25 @@ internal sealed class Services
             // started before the agent never got them from InitAsync: the first connection loads them then (B8).
             if (SettingsReload.OnConnect(++_subscriptionConnects, Settings.Loaded)) _ = ReloadSettingsAsync();
         });
-        _agentWatch.Exited += () => ui.TryEnqueue(() => AgentExited?.Invoke());
-        Reconnected += () => PasswordFallback = false;   // a restarted agent says again what it needs (review N2)
+        _agentWatch.Exited += () => ui.TryEnqueue(() => { IsAgentExited = true; AgentExited?.Invoke(); });
+        Reconnected += () => { IsAgentExited = false; PasswordFallback = false; };   // a restarted agent says again what it needs (review N2)
     }
 
     /// <summary>Watches the agent behind the main connection (mock mode: none, the server is this process).</summary>
     private void WatchAgent()
     {
-        if (_mock is null) _agentWatch.Watch(MainClient.ServerPid);
+        if (_mock is null)
+        {
+            int pid = MainClient.ServerPid;
+            if (pid > 0 && pid != _agentWatch.Pid) IsAgentExited = false;
+            _agentWatch.Watch(pid);
+        }
     }
+
+    /// <summary>True when the watched agent has exited (or died before UI connected, C6).</summary>
+    public bool IsAgentDead() => _mock is null && (IsAgentExited || !_agentWatch.IsAlive() || (_agentWatch.Pid == 0 && Connection is AgentErrorKind.NotRunning or AgentErrorKind.NotTrusted));
+
+    public void NotifyPurgeAll(PurgeResult result) => PurgeAllCompleted?.Invoke(result);
 
     /// <summary>A fresh connection for one long request (bench full). The caller disposes it; disposing closes the pipe.</summary>
     public AgentClient CreateRunClient() => new(_pipe, _trust);

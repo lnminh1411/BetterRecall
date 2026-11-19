@@ -120,3 +120,23 @@ public sealed class SettingsEditor
         return (SaveOutcome.Saved, r);
     }
 }
+
+/// <summary>Settings save flow with inline passphrase verification when changing keyProtection off passphrase under password unlock (D3).</summary>
+public static class SettingsSaveFlow
+{
+    public static async Task<(SaveOutcome Outcome, AgentResult<JsonObject>? Last)> SaveWithPassphraseAsync(
+        SettingsEditor editor,
+        AgentApi api,
+        Func<Func<string, Task<AgentResult>>, Task<bool>> promptPassphrase,
+        CancellationToken ct = default)
+    {
+        var result = await editor.SaveAsync(api, ct);
+        if (result.Outcome == SaveOutcome.Failed && result.Last?.Error == AgentErrors.PassphraseNeeded)
+        {
+            if (!await promptPassphrase(pass => api.VerifyPassphraseAsync(pass, ct)))
+                return result;
+            result = await editor.SaveAsync(api, ct);
+        }
+        return result;
+    }
+}

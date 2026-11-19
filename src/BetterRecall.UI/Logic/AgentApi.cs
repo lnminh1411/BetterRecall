@@ -236,6 +236,10 @@ public sealed class AgentApi(IAgentClient client)
     public Task<AgentResult> PasswordClearAsync(string current, CancellationToken ct = default) =>
         client.SendAsync("password clear " + PasswordJson(current, null), ct);
 
+    /// <summary>Verifies the data-key passphrase while already unlocked (D3: changing keyProtection off passphrase under password unlock).</summary>
+    public Task<AgentResult> VerifyPassphraseAsync(string passphrase, CancellationToken ct = default) =>
+        client.SendAsync("passphrase verify " + Json(w => w.WriteString("passphrase", passphrase)), ct);
+
     public static string PasswordJson(string? current, string? next)
     {
         using var ms = new MemoryStream();

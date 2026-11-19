@@ -51,6 +51,7 @@ public sealed record ExportEntry(string Id, DateTimeOffset Ts, CaptureKind Kind,
 [JsonSerializable(typeof(RemovedEvent))]
 [JsonSerializable(typeof(ExportRequest))]
 [JsonSerializable(typeof(ExportResult))]
+[JsonSerializable(typeof(ExportEntry))]
 [JsonSerializable(typeof(List<ExportEntry>))]
 [JsonSerializable(typeof(ItemsReply<CaptureMeta>))]
 [JsonSerializable(typeof(ItemsReply<AuditEntry>))]

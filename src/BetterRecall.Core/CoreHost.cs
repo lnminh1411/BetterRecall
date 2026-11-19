@@ -28,7 +28,9 @@ public sealed class CoreHostImpl : ICoreHost
     private readonly BlobCipher _blobs;
     private readonly SemaphoreSlim _storeGate = new(1, 1);
     private volatile EncryptedStore? _store;
+    private readonly Lock _pipesLock = new();
     private PipeManager? _pipes;
+    private Task? _stopPipes;
     private CommandProcessor? _processor;
     private IThumbnailer? _thumbs;
 
@@ -173,11 +175,22 @@ public sealed class CoreHostImpl : ICoreHost
         _pipes.StartAsync().GetAwaiter().GetResult();
     }
 
-    public async Task StopPipesAsync()
+    public Task StopPipesAsync()
     {
-        var p = _pipes;
-        _pipes = null;
-        if (p != null) await p.DisposeAsync().ConfigureAwait(false);
+        lock (_pipesLock)
+        {
+            if (_stopPipes != null) return _stopPipes;
+            var p = _pipes;
+            if (p == null) return Task.CompletedTask;
+            _stopPipes = StopPipesCoreAsync(p);
+            return _stopPipes;
+        }
+    }
+
+    private async Task StopPipesCoreAsync(PipeManager p)
+    {
+        try { await p.DisposeAsync().ConfigureAwait(false); }
+        finally { lock (_pipesLock) { _pipes = null; _stopPipes = null; } }
     }
 
     /// <summary>purge all: destroys the data key and deletes every store, keyframe and replay file, then starts empty.</summary>
