@@ -3,6 +3,7 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
+using BetterRecall.Contracts;
 using BetterRecall.Core.Native;
 using Microsoft.Win32.SafeHandles;
 
@@ -116,7 +117,7 @@ internal static class ProcessInfo
 
     public static string Normalize(string path)
     {
-        try { return Path.GetFullPath(path).TrimEnd('\\'); }
+        try { return InstallLayout.RealPath(path).TrimEnd('\\'); }
         catch { return path; }
     }
 
@@ -153,10 +154,15 @@ internal sealed class StepClock(Action<TimeSpan>? onStep = null)
             if (gap > _gap + ProcessInfo.StepTolerance)
             {
                 step = gap - _gap;
-                _until = wallNowUtc + step.Value;
+                var next = wallNowUtc + step.Value;
+                _until = _until is { } u && u > next ? u : next;
+                _gap = gap;
             }
-            _gap = gap;   // follow drift and steps forward: only a jump since the last look is a step back
-            bound = _until is { } u && wallNowUtc < u ? u : wallNowUtc;
+            else if (gap < _gap)
+            {
+                _gap = gap;   // follow forward steps and wall ahead of boot; never creep up across sub-tolerance steps back
+            }
+            bound = _until is { } until && wallNowUtc < until ? until : wallNowUtc;
         }
         if (step is { } s) onStep?.Invoke(s);
         return bound;

@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) BetterRecall contributors
+using System.Runtime.InteropServices;
 using System.Security.Principal;
+using System.Text;
 using System.Text.Json.Serialization;
 
 namespace BetterRecall.Contracts;
 
 /// <summary>Exe paths relative to the install dir. Trust checks compare full image paths against these.</summary>
-public static class InstallLayout
+public static partial class InstallLayout
 {
     public const string AgentExe = "BetterRecall.Agent.exe";
     public const string CliExe = "betterrecall.exe";
@@ -51,9 +53,8 @@ public static class InstallLayout
     /// with links resolved, which the caller supplies) and it is not a UNC path; otherwise only its folder name counts.</summary>
     public static string? CurrentInstall(string root, string? realRoot = null)
     {
-        string text;
-        try { text = File.ReadAllText(Path.Combine(root, BinDir, CurrentFile)).Trim().TrimEnd('\\', '/'); }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { return null; }
+        if (ReadSharedText(Path.Combine(root, BinDir, CurrentFile)) is not { } raw) return null;
+        var text = raw.Trim().TrimEnd('\\', '/');
         var name = Path.GetFileName(text);
         if (name.Length == 0 || !IsVersionFolder(name)) return null;
         if (Path.IsPathFullyQualified(text) && !text.StartsWith(@"\\", StringComparison.Ordinal) && !text.StartsWith("//", StringComparison.Ordinal))
@@ -68,8 +69,86 @@ public static class InstallLayout
         return Path.Combine(root, name);
     }
 
+    private static string? ReadSharedText(string path)
+    {
+        for (int attempt = 0; ; attempt++)
+        {
+            try
+            {
+                using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                using var r = new StreamReader(fs, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+                return r.ReadToEnd();
+            }
+            catch (Exception e) when (e is DirectoryNotFoundException or FileNotFoundException) { return null; }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException && attempt < 3)
+            {
+                Thread.Sleep(15);
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+            {
+                return null;
+            }
+        }
+    }
+
     private static bool SameDir(string? a, string b) => a is not null && string.Equals(
         Path.GetFullPath(a).TrimEnd('\\'), Path.GetFullPath(b).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The path with SUBST drives, junctions and symbolic links resolved (GetFinalPathNameByHandle); for a
+    /// path not created yet, its nearest existing ancestor resolved plus the rest. The input when nothing resolves.</summary>
+    public static string RealPath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return path;
+        string full;
+        try { full = Path.GetFullPath(path); }
+        catch (Exception e) when (e is ArgumentException or NotSupportedException or PathTooLongException) { return path; }
+        if (full.Length > 3) full = full.TrimEnd('\\');
+        var rest = new Stack<string>();
+        for (string? cur = full; cur is not null; cur = Path.GetDirectoryName(cur))
+        {
+            if ((Directory.Exists(cur) || File.Exists(cur)) && FinalPath(cur) is { } real)
+            {
+                foreach (var part in rest) real = Path.Combine(real, part);
+                return real;
+            }
+            var leaf = Path.GetFileName(cur);
+            if (leaf.Length > 0) rest.Push(leaf);
+            else break;
+        }
+        return full;
+    }
+
+    private static string? FinalPath(string path)
+    {
+        nint h = CreateFileW(path, 0, 7 /* share read, write, delete */, 0, 3 /* OPEN_EXISTING */, 0x02000000 /* FILE_FLAG_BACKUP_SEMANTICS */, 0);
+        if (h == -1) return null;
+        try
+        {
+            var buf = new char[1024];
+            uint n = GetFinalPathNameByHandleW(h, buf, (uint)buf.Length, 0);
+            if (n == 0) return null;
+            if (n >= buf.Length)
+            {
+                buf = new char[n + 1];
+                n = GetFinalPathNameByHandleW(h, buf, (uint)buf.Length, 0);
+                if (n == 0 || n >= buf.Length) return null;
+            }
+            var s = new string(buf, 0, (int)n);
+            if (s.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase)) return @"\\" + s[8..];
+            if (s.StartsWith(@"\\?\", StringComparison.Ordinal)) s = s[4..];
+            return s.Length > 3 ? s.TrimEnd('\\') : s;
+        }
+        finally { CloseHandle(h); }
+    }
+
+    [LibraryImport("kernel32.dll", StringMarshalling = StringMarshalling.Utf16, SetLastError = true)]
+    private static partial nint CreateFileW(string name, uint access, uint share, nint security, uint disposition, uint flags, nint template);
+
+    [LibraryImport("kernel32.dll", StringMarshalling = StringMarshalling.Utf16)]
+    private static partial uint GetFinalPathNameByHandleW(nint file, [Out] char[] buffer, uint size, uint flags);
+
+    [LibraryImport("kernel32.dll")]
+    private static partial int CloseHandle(nint handle);
 
     /// <summary>Marker file Scripts/dev_build.py writes into its output folder: this install dir is a dev build.</summary>
     public const string DevBuildMarker = ".devbuild";

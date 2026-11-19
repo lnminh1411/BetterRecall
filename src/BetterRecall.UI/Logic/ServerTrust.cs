@@ -77,7 +77,7 @@ public sealed class ServerTrustVerifier : IServerTrust
 
     private static string Normalize(string path)
     {
-        try { return Path.GetFullPath(path); } catch { return path; }
+        try { return InstallLayout.RealPath(path); } catch { return path; }
     }
 }
 
@@ -176,10 +176,15 @@ public sealed class StepClock(Action<TimeSpan>? onStep = null)
             if (gap > _gap + ServerTrustVerifier.StepTolerance)
             {
                 step = gap - _gap;
-                _until = wallNowUtc + step.Value;
+                var next = wallNowUtc + step.Value;
+                _until = _until is { } u && u > next ? u : next;
+                _gap = gap;
             }
-            _gap = gap;   // follow drift and steps forward: only a jump since the last look is a step back
-            bound = _until is { } u && wallNowUtc < u ? u : wallNowUtc;
+            else if (gap < _gap)
+            {
+                _gap = gap;   // follow forward steps and wall ahead of boot; never creep up across sub-tolerance steps back
+            }
+            bound = _until is { } until && wallNowUtc < until ? until : wallNowUtc;
         }
         if (step is { } s) onStep?.Invoke(s);
         return bound;

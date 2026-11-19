@@ -82,9 +82,9 @@ public sealed class PipeManager : IAsyncDisposable
         string install, img, ent;
         try
         {
-            install = Path.GetFullPath(installDir).TrimEnd('\\');
-            img = Path.GetFullPath(image);
-            ent = Path.GetFullPath(entry);
+            install = InstallLayout.RealPath(installDir).TrimEnd('\\');
+            img = InstallLayout.RealPath(image);
+            ent = InstallLayout.RealPath(entry);
         }
         catch (Exception e) when (e is ArgumentException or NotSupportedException or PathTooLongException) { return false; }
         if (!img.StartsWith(install + "\\", StringComparison.OrdinalIgnoreCase) || Path.GetDirectoryName(install) is not { } root) return false;

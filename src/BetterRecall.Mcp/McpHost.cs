@@ -12,10 +12,13 @@ namespace BetterRecall.Mcp;
 /// the bin\betterrecall-mcp.exe relay it exits with McpRestartExitCode without answering, and the relay restarts it
 /// from the current install and sends the call again; started any other way it says to restart the MCP client.
 /// </summary>
-public sealed class McpPipe(string pipeName, string agentExe, string installDir, bool relayed)
+public sealed class McpPipe(string pipeName, string agentExe, string installDir, bool relayed, TimeSpan? staleGrace = null)
 {
     public const string NotTrusted = "BetterRecall not trusted.";
     public const string Updated = "BetterRecall was updated while this MCP session ran: restart your MCP client (or its BetterRecall server) to reconnect.";
+    private const string LauncherMutex = @"Local\BetterRecall.Launcher";
+
+    private readonly TimeSpan _staleGrace = staleGrace ?? TimeSpan.FromSeconds(2);
 
     /// <summary>Set once a call found this server stale; the host loop then exits.</summary>
     public bool Stale { get; private set; }
@@ -24,9 +27,21 @@ public sealed class McpPipe(string pipeName, string agentExe, string installDir,
 
     public async Task<PipeAnswer> CallAsync(string line, CancellationToken ct)
     {
-        var (result, client) = await PipeClient.ConnectAsync(pipeName, agentExe, 1000, ct).ConfigureAwait(false);
+        if (IsStale(installDir))
+        {
+            Stale = true;
+            return new PipeAnswer(false, Updated);
+        }
+        var (result, client) = await ConnectWithUpgradeGraceAsync(ct).ConfigureAwait(false);
         if (result == PipeConnectResult.NotRunning)
+        {
+            if (await WaitForStaleAsync(allowWait: IsLauncherActive(), ct).ConfigureAwait(false))
+            {
+                Stale = true;
+                return new PipeAnswer(false, Updated);
+            }
             return new PipeAnswer(false, "BetterRecall not running, or MCP is off (setting mcp.enabled).");
+        }
         if (result != PipeConnectResult.Ok || client == null)
         {
             if (!IsStale(installDir)) return new PipeAnswer(false, NotTrusted);
@@ -38,21 +53,75 @@ public sealed class McpPipe(string pipeName, string agentExe, string installDir,
             string? response;
             try { response = await client.RequestAsync(line, ct).ConfigureAwait(false); }
             catch (IOException) { response = null; }
-            if (response == null) return new PipeAnswer(false, "No response from BetterRecall.");
+            if (response == null)
+            {
+                if (await WaitForStaleAsync(allowWait: true, ct).ConfigureAwait(false))
+                {
+                    Stale = true;
+                    return new PipeAnswer(false, Updated);
+                }
+                return new PipeAnswer(false, "No response from BetterRecall.");
+            }
             var (ok, data, error) = Envelope.Parse(response);
             return ok ? new PipeAnswer(true, data.ValueKind == System.Text.Json.JsonValueKind.Undefined ? "null" : data.GetRawText())
                       : new PipeAnswer(false, error ?? "Internal error.");
         }
     }
 
+    private async Task<(PipeConnectResult Result, PipeClient? Client)> ConnectWithUpgradeGraceAsync(CancellationToken ct)
+    {
+        var first = await PipeClient.ConnectAsync(pipeName, agentExe, 1000, ct).ConfigureAwait(false);
+        if (first.Result != PipeConnectResult.NotRunning || !IsLauncherActive() || IsStale(installDir)) return first;
+        for (int i = 0; i < 2; i++)
+        {
+            await Task.Delay(250, ct).ConfigureAwait(false);
+            if (IsStale(installDir)) return first;
+            var next = await PipeClient.ConnectAsync(pipeName, agentExe, 1000, ct).ConfigureAwait(false);
+            if (next.Result != PipeConnectResult.NotRunning || !IsLauncherActive() || IsStale(installDir)) return next;
+        }
+        return first;
+    }
+
+    private async Task<bool> WaitForStaleAsync(bool allowWait, CancellationToken ct)
+    {
+        if (IsStale(installDir)) return true;
+        if (!allowWait || !CanBeStale(installDir)) return false;
+        var deadline = DateTime.UtcNow + (IsLauncherActive() && _staleGrace < TimeSpan.FromSeconds(6) ? TimeSpan.FromSeconds(6) : _staleGrace);
+        while (DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(50, ct).ConfigureAwait(false);
+            if (IsStale(installDir)) return true;
+        }
+        return IsStale(installDir);
+    }
+
+    private static bool CanBeStale(string installDir)
+    {
+        var dir = Path.GetFullPath(installDir).TrimEnd(Path.DirectorySeparatorChar);
+        return IsVersionFolderName(dir) && Path.GetDirectoryName(dir) is not null;
+    }
+
+    private static bool IsVersionFolderName(string dir) => InstallLayout.IsVersionFolder(Path.GetFileName(dir));
+
+    private static bool IsLauncherActive()
+    {
+        try
+        {
+            if (!Mutex.TryOpenExisting(LauncherMutex, out var m)) return false;
+            m.Dispose();
+            return true;
+        }
+        catch (UnauthorizedAccessException) { return true; }
+    }
+
     /// <summary>True when installDir is a launcher install (&lt;root&gt;\&lt;version&gt;-&lt;hash12&gt;) and root's bin\current
     /// names another one: the launcher has moved on, and the agent this server trusts is gone.</summary>
     public static bool IsStale(string installDir)
     {
-        var dir = Path.GetFullPath(installDir).TrimEnd(Path.DirectorySeparatorChar);
+        var dir = InstallLayout.RealPath(installDir).TrimEnd(Path.DirectorySeparatorChar);
         var name = Path.GetFileName(dir);
         if (!InstallLayout.IsVersionFolder(name) || Path.GetDirectoryName(dir) is not { } root) return false;
-        var current = InstallLayout.CurrentInstall(root);
+        var current = InstallLayout.CurrentInstall(root, InstallLayout.RealPath(root));
         return current is not null && !string.Equals(Path.GetFileName(current), name, StringComparison.OrdinalIgnoreCase)
             && File.Exists(Path.Combine(current, InstallLayout.AgentExe));
     }
