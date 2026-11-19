@@ -71,6 +71,8 @@ public sealed partial class MainWindow : Window
         };
         s.Reconnected += () => { if (!s.Locked) (ContentFrame.Content as IDataPage)?.Reload(); };
         Unlock.UnlockedOk += UpdateLock;
+        Unlock.WipeRequested += () => Navigate("danger:wipe");
+        s.PurgeAllCompleted += OnPurgeAllCompleted;
         StatusBar.SizeChanged += (_, _) => UpdateStatus();   // fewer status parts on narrow windows (D16)
         UpdateStatus();
         UpdateOffline();
@@ -93,10 +95,12 @@ public sealed partial class MainWindow : Window
         _page = "";
         _pageType = null;
         _dropped = false;
+        App.Current.OnWindowHidden();
     }
 
     private void DropContent()
     {
+        if (ContentFrame.Content is DangerZonePage dz) dz.WipeCancelled -= OnWipeCancelled;
         ContentFrame.Content = null;
         ContentFrame.BackStack.Clear();
     }
@@ -107,8 +111,26 @@ public sealed partial class MainWindow : Window
         type is not null && typeof(IDataPage).IsAssignableFrom(type)
         && !(type == typeof(BenchPage) || type == typeof(DangerZonePage));
 
-    private void NavigateFrame(Type type, string page) =>
+    private void NavigateFrame(Type type, string page)
+    {
+        if (ContentFrame.Content is DangerZonePage prev) prev.WipeCancelled -= OnWipeCancelled;
         ContentFrame.Navigate(type, page.Contains(':') ? page.Split(':', 2)[1] : null, new SuppressNavigationTransitionInfo());
+        if (ContentFrame.Content is DangerZonePage dz) dz.WipeCancelled += OnWipeCancelled;
+    }
+
+    private void OnWipeCancelled()
+    {
+        if (_page == "danger:wipe") Navigate("danger");
+    }
+
+    private void OnPurgeAllCompleted(PurgeResult r)
+    {
+        if (_page == "danger:wipe") { _page = "danger"; UpdateLock(); }
+        if (!Services.Current.Locked) return;
+        ActionBar.Severity = r.Undeleted is > 0 ? InfoBarSeverity.Warning : InfoBarSeverity.Success;
+        ActionBar.Message = string.Join(" ", PurgeFlow.AllDoneText(r).Select(Loc.Text));
+        ActionBar.IsOpen = true;
+    }
 
     private void Navigate(string page)
     {
@@ -195,7 +217,8 @@ public sealed partial class MainWindow : Window
     {
         var s = Services.Current;
         bool dataPage = _pageType is not null && typeof(IDataPage).IsAssignableFrom(_pageType);
-        bool show = s.Locked && dataPage;
+        bool wipeWhileLocked = s.Locked && _page == "danger:wipe";
+        bool show = s.Locked && dataPage && !wipeWhileLocked;
         bool was = Unlock.Visibility == Visibility.Visible;
         if (s.Locked) _skipReload = false;
         if (show && DropsOnLock(_pageType) && ContentFrame.Content is not null)
@@ -368,6 +391,8 @@ public sealed partial class MainWindow : Window
     /// <summary>Shows the unlock panel over the current page (lock buttons here and on the home page).</summary>
     public void ShowUnlock()
     {
+        if (_page == "danger:wipe") _page = "danger";
+        ContentFrame.Visibility = Visibility.Collapsed;
         Unlock.Visibility = Visibility.Visible;
         Unlock.Refresh();
     }

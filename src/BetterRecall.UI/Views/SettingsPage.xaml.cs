@@ -20,6 +20,7 @@ public sealed partial class SettingsPage : Page
     private string _group = SettingsSchema.Groups[0];
     private readonly Dictionary<string, TextBlock> _errors = [];
     private readonly Dictionary<string, FrameworkElement> _controls = [];
+    private bool? _helloAvailable;
 
     public SettingsPage()
     {
@@ -77,7 +78,11 @@ public sealed partial class SettingsPage : Page
         }
 
         if (_group == "inference") Cards.Children.Add(BenchCard());
-        if (_group == "security") Cards.Children.Add(SecretCards.PasswordCard(this));
+        if (_group == "security")
+        {
+            Cards.Children.Add(SecretCards.PasswordCard(this));
+            _ = LoadSecurityAvailabilityAsync();
+        }
         if (_group == "ai")
         {
             Cards.Children.Insert(1, new InfoBar { IsOpen = true, IsClosable = false, Severity = InfoBarSeverity.Informational, Title = Loc.Get("Ai_NoteTitle"), Message = Loc.Get("Ai_Note") });
@@ -364,6 +369,38 @@ public sealed partial class SettingsPage : Page
         DiscardButton.IsEnabled = keys.Count > 0;
         Footer.Visibility = keys.Count > 0 || SaveBar.IsOpen ? Visibility.Visible : Visibility.Collapsed;
         foreach (var (key, c) in _controls) if (SettingsSchema.Find(key) is { } dd) SetEnabled(c, dd.IsEnabled(Editor.Working));
+        UpdateSecurityChoices();
+    }
+
+    private async Task LoadSecurityAvailabilityAsync()
+    {
+        var r = await Services.Current.Api.PasswordStatusAsync();
+        if (!IsLoaded) return;
+        if (r.Ok && r.Value is not null)
+        {
+            _helloAvailable = r.Value.HelloAvailable;
+            UpdateSecurityChoices();
+        }
+    }
+
+    /// <summary>D2: prevents picking keyProtection=passphrase when Windows Hello is missing and unlockMethod is hello.</summary>
+    private void UpdateSecurityChoices()
+    {
+        if (_group != "security" || _helloAvailable is not false) return;
+        if (!_controls.TryGetValue("security.keyProtection", out var kpEl) || kpEl is not ComboBox kpCb) return;
+        var method = (Editor.Get("security.unlockMethod") as JsonValue)?.TryGetValue<string>(out var m) == true ? m : "hello";
+        bool blocked = UnlockLogic.BlocksPassphraseChoice(false, method);
+        foreach (var item in kpCb.Items.OfType<ComboBoxItem>())
+        {
+            if (item.Tag as string == "passphrase")
+                item.IsEnabled = !blocked || ReferenceEquals(kpCb.SelectedItem, item);
+        }
+        if (_errors.TryGetValue("security.keyProtection", out var errBlock) && !Editor.Errors.ContainsKey("security.keyProtection"))
+        {
+            bool warn = blocked && kpCb.SelectedItem is ComboBoxItem { Tag: "passphrase" };
+            errBlock.Text = warn ? Loc.Get("Err_PassphraseNeedsHello") : "";
+            errBlock.Visibility = warn ? Visibility.Visible : Visibility.Collapsed;
+        }
     }
 
     /// <summary>Panels (list editor, hotkey recorder, path row) have no IsEnabled; gate the controls inside.</summary>
@@ -435,7 +472,7 @@ public sealed partial class SettingsPage : Page
     {
         SaveButton.IsEnabled = false;
         var s = Services.Current;
-        var (outcome, last) = await Editor.SaveAsync(s.Api);
+        var (outcome, last) = await SettingsSaveFlow.SaveWithPassphraseAsync(Editor, s.Api, verify => SecretCards.PromptPassphraseAsync(XamlRoot, verify));
         switch (outcome)
         {
             case SaveOutcome.Saved:

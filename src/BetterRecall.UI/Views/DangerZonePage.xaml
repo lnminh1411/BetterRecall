@@ -7,7 +7,7 @@
             <TextBlock x:Uid="Danger_Title" Style="{StaticResource PageTitleStyle}" AutomationProperties.HeadingLevel="Level1" />
             <InfoBar x:Name="ResultBar" IsOpen="False" IsClosable="True" />
 
-            <Border Style="{StaticResource CardStyle}">
+            <Border x:Name="PanicCard" Style="{StaticResource CardStyle}">
                 <Grid ColumnSpacing="16">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*" />
@@ -21,7 +21,7 @@
                 </Grid>
             </Border>
 
-            <Border Style="{StaticResource CardStyle}">
+            <Border x:Name="ExportCard" Style="{StaticResource CardStyle}">
                 <StackPanel Spacing="8">
                     <TextBlock x:Uid="Danger_ExportTitle" Style="{StaticResource BodyStrongTextBlockStyle}" AutomationProperties.HeadingLevel="Level2" />
                     <TextBlock x:Uid="Danger_ExportBody" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
@@ -44,7 +44,7 @@
                 </StackPanel>
             </Border>
 
-            <Border Style="{StaticResource CardStyle}">
+            <Border x:Name="RangeCard" Style="{StaticResource CardStyle}">
                 <StackPanel Spacing="8">
                     <TextBlock x:Uid="Danger_RangeTitle" Style="{StaticResource BodyStrongTextBlockStyle}" AutomationProperties.HeadingLevel="Level2" />
                     <TextBlock x:Uid="Danger_RangeBody" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
@@ -62,7 +62,7 @@
                 </StackPanel>
             </Border>
 
-            <Border Style="{StaticResource CardStyle}">
+            <Border x:Name="AppCard" Style="{StaticResource CardStyle}">
                 <StackPanel Spacing="8">
                     <TextBlock x:Uid="Danger_AppTitle" Style="{StaticResource BodyStrongTextBlockStyle}" AutomationProperties.HeadingLevel="Level2" />
                     <TextBlock x:Uid="Danger_AppBody" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
@@ -73,7 +73,7 @@
                 </StackPanel>
             </Border>
 
-            <Border Style="{StaticResource CardStyle}" BorderBrush="{ThemeResource SystemFillColorCriticalBrush}">
+            <Border x:Name="AllCard" Style="{StaticResource CardStyle}" BorderBrush="{ThemeResource SystemFillColorCriticalBrush}">
                 <StackPanel Spacing="8">
                     <TextBlock x:Uid="Danger_AllTitle" Style="{StaticResource BodyStrongTextBlockStyle}" AutomationProperties.HeadingLevel="Level2" />
                     <TextBlock x:Uid="Danger_AllBody" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />

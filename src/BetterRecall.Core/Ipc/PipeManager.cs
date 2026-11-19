@@ -190,8 +190,8 @@ public sealed class PipeManager : IAsyncDisposable
         try
         {
             _stopped = true;
-            foreach (var p in new[] { _ui, _public, _mcp })
-                if (p != null) await p.DisposeAsync().ConfigureAwait(false);
+            var tasks = new[] { _ui, _public, _mcp }.Where(p => p != null).Select(p => p!.DisposeAsync().AsTask()).ToArray();
+            if (tasks.Length > 0) await Task.WhenAll(tasks).ConfigureAwait(false);
             _ui = _public = _mcp = null;
         }
         finally { _gate.Release(); }

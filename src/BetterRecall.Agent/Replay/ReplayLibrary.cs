@@ -33,7 +33,11 @@ internal sealed class ReplayLibrary(string home, Func<Settings> settings, IBlobC
     /// export that would start inside it is refused: it could open a clip, or write one, under the old key.</summary>
     public Func<bool>? PurgingAll { get; set; }
 
+    /// <summary>Agent's read gate is closed: decrypted replay exports abort and delete their partial file (sweep 5 B1).</summary>
+    public Func<bool>? Locked { get; set; }
+
     private bool Purging => PurgingAll?.Invoke() == true;
+    private bool IsLocked => Locked?.Invoke() == true;
 
     /// <summary>Purge all: running decrypted exports stop and delete their output; saves in flight see a new epoch.</summary>
     public void OnPurgeAll()
@@ -243,6 +247,7 @@ internal sealed class ReplayLibrary(string home, Func<Settings> settings, IBlobC
         CancellationToken purge;
         lock (_purgeLock) purge = _purgeCts.Token;
         if (Purging) throw new FileNotFoundException("Replay not found.");   // the clip is being deleted
+        if (IsLocked) throw new InvalidOperationException("Store is locked.");
         var clip = Find(id) ?? throw new FileNotFoundException("Replay not found.");
         var full = Path.GetFullPath(target);
         Directory.CreateDirectory(Path.GetDirectoryName(full)!);
@@ -259,6 +264,7 @@ internal sealed class ReplayLibrary(string home, Func<Settings> settings, IBlobC
             {
                 // Purge all may have started while the source opened (an open encrypted clip keeps the old key).
                 if (Purging) throw new FileNotFoundException("Replay not found.");
+                if (IsLocked) throw new InvalidOperationException("Store is locked.");
                 BetterRecall.Core.Store.ExportJournal.Add(home, partial);
                 FileStream dst;
                 try { dst = new FileStream(partial, FileMode.Create, FileAccess.Write, FileShare.None); }
@@ -269,9 +275,15 @@ internal sealed class ReplayLibrary(string home, Func<Settings> settings, IBlobC
             lock (_purgeLock)
             {
                 linked.Token.ThrowIfCancellationRequested();
+                if (IsLocked) throw new InvalidOperationException("Store is locked.");
                 File.Move(partial, full, overwrite: true);
             }
             BetterRecall.Core.Store.ExportJournal.Remove(home, partial);
+            if (IsLocked)
+            {
+                try { File.Delete(full); } catch { }
+                throw new InvalidOperationException("Store is locked.");
+            }
         }
         catch (Exception ex)
         {

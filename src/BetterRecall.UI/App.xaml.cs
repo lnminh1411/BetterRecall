@@ -16,6 +16,8 @@ public partial class App : Application
     private LauncherWindow? _launcher;
     private MainWindow? _main;
     private LauncherSignal? _signal;
+    private bool _agentExited;
+    private bool _exiting;
 
     public App(AppArgs args)
     {
@@ -57,22 +59,46 @@ public partial class App : Application
         try
         {
             _ = new LauncherSignal(BetterRecall.Contracts.PipeNames.UiQuitEventFor(BetterRecall.Contracts.DataPaths.Home()) + (_args.Mock ? ".mock" : ""),
-                () => services.Ui.TryEnqueue(DispatcherQueuePriority.High, () => { _signal?.Dispose(); _signal = null; Exit(); }));
+                () => services.Ui.TryEnqueue(DispatcherQueuePriority.High, ShutdownAndExit));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or WaitHandleCannotBeOpenedException) { }
         Handle(_args, firstLaunch: true);
         services.AgentExited += OnAgentExited;
+        services.Reconnected += () => _agentExited = false;
         services.ConsentNeeded += () => ShowMain("consent");   // a restarted agent reset capture.consented (D2)
         _ = InitAsync(services);
     }
 
     /// <summary>The agent quit (tray Quit, quit event) or died: a hidden UI has nothing left to serve, so it exits too. A
-    /// window the user has open stays, with the offline banner.</summary>
+    /// window the user has open stays, with the offline banner, and exits once that window is dismissed (C6).</summary>
     private void OnAgentExited()
     {
-        if (_launcher?.IsShown == true || _main?.AppWindow.IsVisible == true) return;
+        _agentExited = true;
+        ExitIfIdleAndAgentDead();
+    }
+
+    public void OnWindowHidden() => ExitIfIdleAndAgentDead();
+
+    private void ExitIfIdleAndAgentDead()
+    {
+        if (_exiting) return;
+        var services = Services.Current;
+        bool agentDead = _agentExited || (services?.IsAgentDead() == true);
+        if (!UiExitPolicy.ShouldExit(agentDead, _launcher?.IsShown == true, _main?.AppWindow.IsVisible == true)) return;
+        ShutdownAndExit();
+    }
+
+    private async void ShutdownAndExit()
+    {
+        if (_exiting) return;
+        _exiting = true;
         _signal?.Dispose();
         _signal = null;
+        if (Services.Current is { } s)
+        {
+            try { await s.ShutdownAsync(); }
+            catch { }
+        }
         Exit();
     }
 

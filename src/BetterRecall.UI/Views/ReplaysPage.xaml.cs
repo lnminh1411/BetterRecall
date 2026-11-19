@@ -32,11 +32,32 @@ public sealed partial class ReplaysPage : Page, IDataPage
     private readonly List<ReplayRow> _rows = [];
 
     private (string Id, int OffsetMs)? _openAt;   // replay match: "replays:<id>@<ms>"
+    private CancellationTokenSource? _exportCts;
 
     public ReplaysPage()
     {
         InitializeComponent();
-        Loaded += (_, _) => Reload();
+        Loaded += (_, _) =>
+        {
+            Services.Current.LockedChanged -= OnLockedChanged;
+            Services.Current.LockedChanged += OnLockedChanged;
+            Reload();
+        };
+        Unloaded += (_, _) =>
+        {
+            Services.Current.LockedChanged -= OnLockedChanged;
+            CancelExport();
+        };
+    }
+
+    private void OnLockedChanged()
+    {
+        if (Services.Current.Locked) CancelExport();
+    }
+
+    private void CancelExport()
+    {
+        try { _exportCts?.Cancel(); } catch (ObjectDisposedException) { }
     }
 
     protected override void OnNavigatedTo(Microsoft.UI.Xaml.Navigation.NavigationEventArgs e) => _openAt = ReplayLink.Parse(e.Parameter as string);
@@ -115,7 +136,7 @@ public sealed partial class ReplaysPage : Page, IDataPage
         var id = row.Id;
         var warn = WindowHelpers.Dialog(XamlRoot, Loc.Get("Replays_WarnTitle"),
             new TextBlock { Text = Loc.Get("Replays_WarnBody"), TextWrapping = TextWrapping.Wrap }, Loc.Get("Replays_WarnContinue"));
-        if (await warn.ShowAsync() != ContentDialogResult.Primary) return;
+        if (await warn.ShowAsync() != ContentDialogResult.Primary || Services.Current.Locked) return;
 
         var picker = new FileSavePicker(XamlRoot.ContentIslandEnvironment.AppWindowId)
         {
@@ -124,11 +145,12 @@ public sealed partial class ReplaysPage : Page, IDataPage
         };
         picker.FileTypeChoices.Add(Loc.Get("Replays_FileType"), [".mp4"]);
         var picked = await picker.PickSaveFileAsync();
-        if (picked is null || string.IsNullOrEmpty(picked.Path)) return;
+        if (picked is null || string.IsNullOrEmpty(picked.Path) || Services.Current.Locked) return;
 
-        // Own connection: the list and other pages keep working while a long clip is written, and Cancel stops it.
+        // Own connection: the list and other pages keep working while a long clip is written, and Cancel (or lock) stops it.
         Busy.IsActive = true;
         using var cancel = new CancellationTokenSource();
+        _exportCts = cancel;
         Show(InfoBarSeverity.Informational, Loc.Get("Replays_Exporting"), "");
         var stop = new Button { Content = Loc.Get("Common_Cancel") };
         stop.Click += (_, _) => { try { cancel.Cancel(); } catch (ObjectDisposedException) { } };
@@ -144,21 +166,26 @@ public sealed partial class ReplaysPage : Page, IDataPage
             Show(InfoBarSeverity.Informational, Loc.Get("Replays_ExportCancelled"), "");
             return;
         }
+        finally
+        {
+            if (ReferenceEquals(_exportCts, cancel)) _exportCts = null;
+        }
         Busy.IsActive = false;
         if (!r.Ok)
         {
             Show(InfoBarSeverity.Error, Loc.Error(r.Kind, r.Error));
             return;
         }
+        if (Services.Current.Locked) return;
         var path = picked.Path;
         Show(InfoBarSeverity.Success, Loc.Format("Replays_Exported", path), Loc.Get("Replays_ExportedTitle"));
         if (File.Exists(path))
         {
             var open = new Button { Content = Loc.Get("Replays_Open") };
-            open.Click += (_, _) => Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
+            open.Click += (_, _) => { if (!Services.Current.Locked) Process.Start(new ProcessStartInfo(path) { UseShellExecute = true }); };
             ResultBar.ActionButton = open;
             if (offsetMs is { } at) await PlayInAppAsync(path, at, row.When);
-            else Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
+            else if (!Services.Current.Locked) Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
         }
     }
 
@@ -181,7 +208,7 @@ public sealed partial class ReplaysPage : Page, IDataPage
         mp.Pause();
         player.SetMediaPlayer(null);
         mp.Dispose();
-        if (choice == ContentDialogResult.Primary) Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
+        if (choice == ContentDialogResult.Primary && !Services.Current.Locked) Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
     }
 
     private async void Delete_Click(object sender, RoutedEventArgs e)

@@ -14,6 +14,7 @@
                 <Button x:Name="PassButton" x:Uid="Unlock_PassButton" Style="{StaticResource AccentButtonStyle}" HorizontalAlignment="Stretch" Click="Pass_Click" />
                 <TextBlock x:Name="LessSecureText" TextWrapping="Wrap" Visibility="Collapsed" Style="{StaticResource CaptionTextBlockStyle}"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                <HyperlinkButton x:Name="ForgotPassphraseLink" x:Uid="Unlock_ForgotPassphrase" HorizontalAlignment="Center" Visibility="Collapsed" Click="Forgot_Click" />
             </StackPanel>
             <ProgressRing x:Name="Busy" IsActive="False" Width="24" Height="24" />
             <InfoBar x:Name="ErrorBar" IsClosable="False" Severity="Error" IsOpen="False" />

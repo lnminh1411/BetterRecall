@@ -272,6 +272,34 @@ public sealed class ChatViewModel : ObservableObject
         LastQuestion = null;
     }
 
+    /// <summary>Applies a "removed" stream event (B6): resets the chat when a cited capture or the whole store was
+    /// deleted, or clears an invalidated pending approval card so no stale capture or dead token stays on screen.</summary>
+    public bool ApplyRemoved(RemovedEvent e)
+    {
+        if (e.Truncated || string.Equals(e.Reason, "all", StringComparison.Ordinal))
+        {
+            bool had = Messages.Count > 0 || HasApproval || ChatId is not null || Busy;
+            Reset();
+            return had;
+        }
+        var match = RemovedMatch.For(e);
+        if (Messages.Any(m => m.Sources.Any(s => match(s.Id, s.Ts))))
+        {
+            Reset();
+            return true;
+        }
+        if (!Approval.Any(a => match(a.Id, a.Ts))) return false;
+        ClearApproval();
+        if (_turnOpen && Messages.Count >= 2 && Messages[^1].IsAssistant && Messages[^2].IsUser)
+        {
+            Messages.RemoveAt(Messages.Count - 1);
+            Messages.RemoveAt(Messages.Count - 1);
+        }
+        _turnOpen = false;
+        Busy = false;
+        return true;
+    }
+
     /// <summary>A source card as a capture the detail pane can load.</summary>
     public static CaptureItem ToCaptureItem(ChatSource s) => new()
     {

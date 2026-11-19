@@ -16,6 +16,9 @@ namespace BetterRecall.Core.Store;
 /// <summary>A user purge or panic reached the rows of a running export: the partial file is deleted (B12).</summary>
 public sealed class ExportPurgedException() : IOException("A purge ran during the export; nothing was written.");
 
+/// <summary>The read gate locked while an export was running: the partial file is deleted (sweep 5 B1).</summary>
+public sealed class ExportLockedException() : IOException("Store is locked.");
+
 public static class CaptureExporter
 {
     private const int Page = 2000;
@@ -71,10 +74,15 @@ public static class CaptureExporter
     };
 
     /// <summary>transcode(keyframe, "jpeg") converts when r.Jpeg is set (the agent's IThumbnailer.Transcode).</summary>
-    public static ExportResult Write(IStore store, ExportRequest r, Func<ThumbData, string, ThumbData> transcode, CancellationToken ct)
+    public static ExportResult Write(IStore store, ExportRequest r, Func<ThumbData, string, ThumbData> transcode, CancellationToken ct) =>
+        Write(store, r, transcode, isLocked: null, ct);
+
+    /// <summary>transcode(keyframe, "jpeg") converts when r.Jpeg is set; isLocked aborts and deletes .partial if the read gate closes mid-export.</summary>
+    public static ExportResult Write(IStore store, ExportRequest r, Func<ThumbData, string, ThumbData> transcode, Func<bool>? isLocked, CancellationToken ct)
     {
         var dir = Path.GetDirectoryName(r.Path);
         if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) throw new DirectoryNotFoundException("Export folder not found.");
+        if (isLocked?.Invoke() == true) throw new ExportLockedException();
         var partial = r.Path + ".partial";
         var entries = new List<ExportEntry>();
         int images = 0;
@@ -108,6 +116,7 @@ public static class CaptureExporter
                 {
                     ct.ThrowIfCancellationRequested();
                     if (Volatile.Read(ref purged)) throw new ExportPurgedException();
+                    if (isLocked?.Invoke() == true) throw new ExportLockedException();
                     lock (written) written.Add(m.Id);
                     var detail = store.Get(m.Id);
                     if (detail is null) continue; // deleted meanwhile
@@ -134,16 +143,31 @@ public static class CaptureExporter
                 }
                 var json = zip.CreateEntry("captures.json", CompressionLevel.Optimal);
                 using (var js = json.Open())
-                    JsonSerializer.Serialize(js, entries, CoreJson.Default.ListExportEntry);
+                using (var writer = new Utf8JsonWriter(js))
+                {
+                    writer.WriteStartArray();
+                    foreach (var entry in entries)
+                    {
+                        ct.ThrowIfCancellationRequested();
+                        if (Volatile.Read(ref purged)) throw new ExportPurgedException();
+                        if (isLocked?.Invoke() == true) throw new ExportLockedException();
+                        JsonSerializer.Serialize(writer, entry, CoreJson.Default.ExportEntry);
+                    }
+                    writer.WriteEndArray();
+                }
             }
+            ct.ThrowIfCancellationRequested();
             if (Volatile.Read(ref purged)) throw new ExportPurgedException();
+            if (isLocked?.Invoke() == true) throw new ExportLockedException();
             File.Move(partial, r.Path, overwrite: true);
             ExportJournal.Remove(home, partial);
-            // A purge that landed during the move: the finished zip goes too.
-            if (Volatile.Read(ref purged))
+            // A purge or lock that landed during the move: the finished zip goes too.
+            bool lockedAfter = isLocked?.Invoke() == true;
+            if (Volatile.Read(ref purged) || lockedAfter)
             {
-                try { File.Delete(r.Path); } catch (Exception ex) { Log.Warn("export delete after purge", ex); }
-                throw new ExportPurgedException();
+                try { File.Delete(r.Path); } catch (Exception ex) { Log.Warn("export delete after abort", ex); }
+                if (Volatile.Read(ref purged)) throw new ExportPurgedException();
+                throw new ExportLockedException();
             }
         }
         catch (Exception ex)
@@ -155,7 +179,8 @@ public static class CaptureExporter
             }
             // Purge all disposes the store under the export: its next read fails (also when the export subscribed after
             // the store's notice), but the user is owed the purge message (BC-S2).
-            if ((Volatile.Read(ref purged) || ex is ObjectDisposedException) && ex is not ExportPurgedException) throw new ExportPurgedException();
+            if ((Volatile.Read(ref purged) || ex is ObjectDisposedException) && ex is not ExportPurgedException && ex is not ExportLockedException)
+                throw new ExportPurgedException();
             throw;
         }
         finally { if (notices is not null) notices.Purged -= OnPurged; }
