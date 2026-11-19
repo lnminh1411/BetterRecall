@@ -125,10 +125,15 @@ internal sealed class KeyframePipeline : IAsyncDisposable
     public OcrHealth OcrHealth { get; } = new();
 
     // C2 (D2) replay text mask state per monitor (DXGI index, as KeyframeGrab.Monitor): Checked, or unchecked since a
-    // grab time (UTC ticks). A monitor not in the table has not been read yet: unchecked. Under _maskGate.
+    // monotonic grab stamp (NextStamp). A monitor not in the table has not been read yet: unchecked. Under _maskGate.
+    private static long _stampSeq;
+    internal static long NextStamp() => Interlocked.Increment(ref _stampSeq);
+
     private const long Checked = long.MinValue;
     private readonly Lock _maskGate = new();
     private readonly Dictionary<int, long> _maskState = new();
+    private readonly Dictionary<int, (int Count, long MaxStamp)> _queued = new();
+    private bool _workerStarting;
     private long _allUncheckedSince;            // the last MarkAllUnchecked: monitors not in the table yet need a newer grab
     private volatile bool _noTextMasks;         // OCR not installed: no text masks to check (text redaction is off)
     private volatile bool _anyUnchecked = true;
@@ -162,34 +167,36 @@ internal sealed class KeyframePipeline : IAsyncDisposable
         }
     }
 
-    /// <summary>Every monitor unchecked from now: the worker had to start first (TH2 path), or a text detector or OCR
-    /// was turned on (S3).</summary>
+    /// <summary>Every monitor unchecked from now: a text detector or OCR was turned on (S3).</summary>
     public void MarkAllUnchecked()
     {
-        long now = DateTimeOffset.UtcNow.UtcTicks;
+        long stamp = NextStamp();
         lock (_maskGate)
         {
-            _allUncheckedSince = now;
-            foreach (var m in _maskState.Keys.ToList()) _maskState[m] = now;
+            _allUncheckedSince = stamp;
+            foreach (var m in _maskState.Keys.ToList()) _maskState[m] = stamp;
             RecomputeMasks();
         }
     }
 
-    private void MarkUnchecked(int monitor, long grabTicks)
+    private void MarkUnchecked(int monitor, long grabStamp)
     {
-        lock (_maskGate)
-        {
-            _maskState[monitor] = _maskState.TryGetValue(monitor, out var v) && v != Checked ? Math.Max(v, grabTicks) : grabTicks;
-            RecomputeMasks();
-        }
+        lock (_maskGate) MarkUncheckedLocked(monitor, grabStamp);
     }
 
-    private void MarkChecked(int monitor, long grabTicks)
+    /// <summary>Under _maskGate.</summary>
+    private void MarkUncheckedLocked(int monitor, long grabStamp)
+    {
+        _maskState[monitor] = _maskState.TryGetValue(monitor, out var v) && v != Checked ? Math.Max(v, grabStamp) : grabStamp;
+        RecomputeMasks();
+    }
+
+    private void MarkChecked(int monitor, long grabStamp)
     {
         lock (_maskGate)
         {
             long since = _maskState.TryGetValue(monitor, out var v) ? v : _allUncheckedSince;
-            if (since == Checked || grabTicks >= since) _maskState[monitor] = Checked;
+            if (since == Checked || grabStamp >= since) _maskState[monitor] = Checked;
             RecomputeMasks();
         }
     }
@@ -277,12 +284,26 @@ internal sealed class KeyframePipeline : IAsyncDisposable
 
     public void Post(KeyframeGrab grab)
     {
-        if (!_channel.Writer.TryWrite(grab))
+        bool queued;
+        lock (_maskGate)
+        {
+            queued = _channel.Writer.TryWrite(grab);
+            if (queued)
+            {
+                var cur = _queued.GetValueOrDefault(grab.Monitor);
+                _queued[grab.Monitor] = (cur.Count + 1, Math.Max(cur.MaxStamp, grab.GrabTicks));
+                if (_workerStarting) MarkUncheckedLocked(grab.Monitor, grab.GrabTicks);
+            }
+            else
+            {
+                // Refused at the full queue (OCR slow, worker starting): its gates were reset by the grab, so a still screen
+                // would never be grabbed again, and the replay masks miss what it showed (review M2).
+                MarkUncheckedLocked(grab.Monitor, grab.GrabTicks);
+            }
+        }
+        if (!queued)
         {
             Interlocked.Increment(ref Dropped);
-            // Refused at the full queue (OCR slow, worker starting): its gates were reset by the grab, so a still screen
-            // would never be grabbed again, and the replay masks miss what it showed (review M2).
-            MarkUnchecked(grab.Monitor, grab.Request.Ts.UtcTicks);
             try { OcrDropped?.Invoke(grab.Monitor); } catch (Exception ex) { Log.Debug($"keyframe retry: {ex.Message}"); }
             grab.Dispose();
         }
@@ -306,6 +327,7 @@ internal sealed class KeyframePipeline : IAsyncDisposable
         _flush = false;
         int n = 0;
         while (_channel.Reader.TryRead(out var g)) { g.Dispose(); n++; }
+        lock (_maskGate) _queued.Clear();
         lock (_governor) _governor.Clear();
         Log.Info($"keyframes flushed ({n} queued grabs)");
     }
@@ -324,6 +346,14 @@ internal sealed class KeyframePipeline : IAsyncDisposable
             if (_flush) FlushQueued();
             if (_channel.Reader.TryRead(out var grab))
             {
+                lock (_maskGate)
+                {
+                    if (_queued.TryGetValue(grab.Monitor, out var cur))
+                    {
+                        if (cur.Count <= 1) _queued.Remove(grab.Monitor);
+                        else _queued[grab.Monitor] = (cur.Count - 1, cur.MaxStamp);
+                    }
+                }
                 bool owned = false;
                 try { owned = Process(grab, ct); }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
@@ -410,7 +440,7 @@ internal sealed class KeyframePipeline : IAsyncDisposable
             {
                 ocr = result;
                 SetNoTextMasks(false);
-                MarkChecked(g.Monitor, req.Ts.UtcTicks);
+                MarkChecked(g.Monitor, g.GrabTicks);
                 Interlocked.Increment(ref OcrRead);
                 if (!req.Keyframe) Interlocked.Increment(ref SampleOcrReads);
                 // Model missing or broken (the worker returns the lines with EntitiesMissing, C9): the design's fail policy
@@ -433,7 +463,7 @@ internal sealed class KeyframePipeline : IAsyncDisposable
             else
             {
                 SetNoTextMasks(false);
-                if (red.AnyText) MarkUnchecked(g.Monitor, req.Ts.UtcTicks);
+                if (red.AnyText) MarkUnchecked(g.Monitor, g.GrabTicks);
                 if (OcrHealth.Failed())
                     Log.Warn($"text recognition failing ({OcrHealth.FailingAfter}+ reads in a row, last: {why}): "
                         + (red.AnyText ? "keyframes are dropped while it fails" : "keyframes are stored without text"));
@@ -495,10 +525,21 @@ internal sealed class KeyframePipeline : IAsyncDisposable
         try
         {
             // The worker starts (or restarts) first, outside the OCR wait (TH2). Meanwhile nothing is read, and the screen
-            // may change: the masks of every monitor count as unchecked until a grab taken after this is read (M2).
+            // may change: this grab's monitor and any monitor with grabs queued or arriving while starting count as
+            // unchecked until that grab's read finishes (A1/M2).
             var ready = _reader!.ReadyAsync(ct);
-            if (!ready.IsCompleted) MarkAllUnchecked();
-            ready.GetAwaiter().GetResult();
+            if (!ready.IsCompleted)
+            {
+                lock (_maskGate)
+                {
+                    _workerStarting = true;
+                    MarkUncheckedLocked(g.Monitor, g.GrabTicks);
+                    foreach (var (m, q) in _queued)
+                        if (q.Count > 0) MarkUncheckedLocked(m, q.MaxStamp);
+                }
+            }
+            try { ready.GetAwaiter().GetResult(); }
+            finally { lock (_maskGate) _workerStarting = false; }
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeout.CancelAfter(_ocrWait);
             var sw = Stopwatch.StartNew();
@@ -598,6 +639,7 @@ internal sealed class KeyframePipeline : IAsyncDisposable
         _cts.Cancel();
         _thread.Join(5000);
         while (_channel.Reader.TryRead(out var g)) g.Dispose();
+        lock (_maskGate) _queued.Clear();
         lock (_governor) _governor.Clear();
         return ValueTask.CompletedTask;
     }

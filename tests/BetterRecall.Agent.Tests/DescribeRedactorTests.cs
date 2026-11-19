@@ -62,7 +62,8 @@ public class DescribeRedactorTests
         var r = new DescribeRedactor(new Reader(() => new OcrResult([new OcrLine("Meeting notes", 10, 10, 78, 20, 0.99f, [.. Enumerable.Range(0, 14).Select(i => 10 + i * 6)])], "fake", 1)), Defaults);
         var outp = await r.RedactAsync("s_1", input, CancellationToken.None);
         Assert.True(outp.Redacted);
-        Assert.Same(input.Bytes, outp.Bytes);
+        Assert.Equal(input.Bytes, outp.Bytes);
+        Assert.NotSame(input.Bytes, outp.Bytes);
     }
 
     [Fact]
@@ -72,7 +73,8 @@ public class DescribeRedactorTests
         var missing = new DescribeRedactor(new Reader(() => throw new WorkerException("Model not installed: ocr.")), Defaults);
         var a = await missing.RedactAsync("s_1", input, CancellationToken.None);
         Assert.False(a.Redacted);
-        Assert.Same(input.Bytes, a.Bytes);
+        Assert.Equal(input.Bytes, a.Bytes);
+        Assert.NotSame(input.Bytes, a.Bytes);
 
         var off = new Settings();
         off.Ocr.Enabled = false;

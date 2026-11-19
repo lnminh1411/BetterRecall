@@ -471,8 +471,10 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
             case Win32.WTS_SESSION_LOCK:
             case Win32.WTS_CONSOLE_DISCONNECT:
             case Win32.WTS_REMOTE_DISCONNECT:
-                _sessionLocked = true;
                 if (S.Privacy.PauseOnLock) _pause.Set("lock");
+                _systemAudio?.Flush();
+                _micAudio?.Flush();
+                _sessionLocked = true;
                 if (S.Security.LockOnSessionLock) _gate.Close();
                 _sampler.Clear();   // search frames of a saved replay never reach back past a lock
                 break;
@@ -701,6 +703,8 @@ internal sealed class AgentHost : IAgentControl, IAsyncDisposable
     {
         var r = reason == "ipc" ? "ipc" : "user";
         _pause.Set(r, duration is { } d ? DateTimeOffset.UtcNow + d : null);
+        _systemAudio?.Flush();
+        _micAudio?.Flush();
         Log.Info($"paused ({r}) {(duration is null ? "until resume" : $"for {duration.Value.TotalMinutes:F0} min")}");
         RaiseStatus(force: true);
     }
