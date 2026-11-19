@@ -244,6 +244,7 @@ internal sealed class TranscriptSource : IDisposable
     private readonly AudioGuardTimeline _guardTimeline = new();
     private int _clearGen;
     private CancellationTokenSource _clearCts = new();
+    private volatile bool _hasBuffered;
     /// <summary>A segment's guard span is widened by this on both sides: the segmenter's clock may be off by a few
     /// packets (review S6). Fail closed: a denied span just outside the speech also blocks it.</summary>
     public const long GuardPad100ns = 2_500_000;
@@ -285,14 +286,24 @@ internal sealed class TranscriptSource : IDisposable
 
     private void OnPcm(ReadOnlySpan<byte> data, int frames, long qpc, bool silent)
     {
-        if (_paused()) return;
+        if (_paused())
+        {
+            if (_hasBuffered) Flush();
+            return;
+        }
         var verdict = _guard();
         bool quiet = silent || AudioReplayEncoder.IsAllZero(data);
         lock (_gate)
         {
+            if (_paused())
+            {
+                FlushLocked();
+                return;
+            }
             _guardTimeline.Note(qpc, verdict);
             // Digital silence with no segment open: nothing to do (keeps an idle desktop cheap).
             if (quiet && !_segmenter.Active) { _resampler!.Reset(); _segmenter.Reanchor(); return; }
+            _hasBuffered = true;
             Pcm.Wipe(_buf);
             _resampler!.Process(data, frames, quiet, _buf);
             _out.Clear();
@@ -300,6 +311,26 @@ internal sealed class TranscriptSource : IDisposable
             foreach (var s in _out) { Segments++; _queue.Writer.TryWrite(s); }
             Pcm.Wipe(_buf);
         }
+    }
+
+    /// <summary>Capture paused or session locked (D4): flush buffered speech through the guard and wipe raw PCM from RAM.</summary>
+    public void Flush()
+    {
+        lock (_gate) FlushLocked();
+    }
+
+    private void FlushLocked()
+    {
+        if (!_hasBuffered) return;
+        _out.Clear();
+        _segmenter.Flush(_out);
+        _segmenter.Clear();
+        _segmenter.Reanchor();
+        Pcm.Wipe(_buf);
+        _resampler?.Reset();
+        foreach (var s in _out) { Segments++; _queue.Writer.TryWrite(s); }
+        _out.Clear();
+        _hasBuffered = false;
     }
 
     public string Source => _source;
@@ -355,6 +386,7 @@ internal sealed class TranscriptSource : IDisposable
             Pcm.Wipe(_buf);
             _resampler?.Reset();
             while (_queue.Reader.TryRead(out var s)) Array.Clear(s.Samples);
+            _hasBuffered = false;
         }
     }
 

@@ -64,6 +64,10 @@ internal sealed unsafe class WasapiCapture : ICaptureStream
     private readonly WAVEFORMATEX _requested;
     private readonly Thread _thread;
     private readonly ManualResetEventSlim _ready = new();
+    private readonly Action? _startupForTest;
+    private readonly int _joinTimeoutMs;
+    private int _readyOwners = 2;
+    private int _disposed;
     private volatile bool _stop;
 
     /// <summary>The device went away (unplugged, default device changed, AUDCLNT_E_DEVICE_INVALIDATED): the capture
@@ -78,93 +82,137 @@ internal sealed unsafe class WasapiCapture : ICaptureStream
     public long Packets { get; private set; }
     public string Source => _source;
 
-    private WasapiCapture(string source, WAVEFORMATEX requested, PcmHandler handler)
+    private WasapiCapture(string source, WAVEFORMATEX requested, PcmHandler handler, Action? startupForTest = null, int joinTimeoutMs = 2000)
     {
         _source = source;
         _requested = requested;
         _handler = handler;
+        _startupForTest = startupForTest;
+        _joinTimeoutMs = joinTimeoutMs;
         _thread = new Thread(Run) { IsBackground = true, Name = $"wasapi-{source}", Priority = ThreadPriority.Highest };
     }
 
     /// <summary>Starts capture. Throws when the stream cannot be opened.</summary>
     public static WasapiCapture Start(string source, WAVEFORMATEX requested, PcmHandler handler)
+        => StartCore(source, requested, handler, startupForTest: null, readyTimeoutMs: 5000, joinTimeoutMs: 2000);
+
+    internal static WasapiCapture StartForTest(string source, PcmHandler handler, Action startup, int readyTimeoutMs, int joinTimeoutMs)
+        => StartCore(source, WAVEFORMATEX.Pcm16(48000, 2), handler, startup, readyTimeoutMs, joinTimeoutMs);
+
+    private static WasapiCapture StartCore(string source, WAVEFORMATEX requested, PcmHandler handler, Action? startupForTest, int readyTimeoutMs, int joinTimeoutMs)
     {
-        var c = new WasapiCapture(source, requested, handler);
+        var c = new WasapiCapture(source, requested, handler, startupForTest, joinTimeoutMs);
         c._thread.Start();
-        if (!c._ready.Wait(5000)) { c.Dispose(); throw new TimeoutException("Audio start timed out."); }
+        if (!c._ready.Wait(readyTimeoutMs)) { c.Dispose(); throw new TimeoutException("Audio start timed out."); }
         if (c._startError is not null) { var e = c._startError; c.Dispose(); throw e; }
         return c;
     }
 
+    private void ReleaseReady()
+    {
+        if (Interlocked.Decrement(ref _readyOwners) == 0) _ready.Dispose();
+    }
+
     private void Run()
     {
+        bool readyReleased = false;
+        void SignalReady()
+        {
+            if (readyReleased) return;
+            readyReleased = true;
+            try { _ready.Set(); }
+            finally { ReleaseReady(); }
+        }
+
+        if (_startupForTest is not null)
+        {
+            try
+            {
+                _startupForTest();
+                SignalReady();
+            }
+            catch (Exception ex)
+            {
+                _startError = ex;
+                SignalReady();
+            }
+            finally
+            {
+                if (!readyReleased) ReleaseReady();
+                Ended = true;
+            }
+            return;
+        }
+
         Ole.CoInitializeEx(0, Ole.COINIT_MULTITHREADED);
         nint client = 0, capture = 0, evt = 0;
         try
         {
-            client = _source == "loopback" ? ActivateProcessLoopback() : ActivateDefaultMic();
-            var fmt = _requested;
-            // Polling, not event mode: an event fires every device period (10 ms); a 40 ms poll costs far less CPU.
-            uint flags = AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
-            if (_source == "loopback") flags |= AUDCLNT_STREAMFLAGS_LOOPBACK;
-            var init = (delegate* unmanaged[Stdcall]<nint, int, uint, long, long, WAVEFORMATEX*, Guid*, int>)Ole.Slot(client, 3);
-            Check(init(client, 0, flags, 2_000_000, 0, &fmt, null), "IAudioClient.Initialize");
-            Format = new PcmFormat((int)fmt.nSamplesPerSec, fmt.nChannels, fmt.wFormatTag == WAVEFORMATEX.WAVE_FORMAT_IEEE_FLOAT, fmt.wBitsPerSample);
-            var getService = (delegate* unmanaged[Stdcall]<nint, Guid*, nint*, int>)Ole.Slot(client, 14);
-            var iid = IID_IAudioCaptureClient;
-            Check(getService(client, &iid, &capture), "GetService");
-            var start = (delegate* unmanaged[Stdcall]<nint, int>)Ole.Slot(client, 10);
-            Check(start(client), "Start");
-        }
-        catch (Exception ex)
-        {
-            _startError = ex;
-            _ready.Set();
-            Cleanup(client, capture, evt);
-            Ole.CoUninitialize();
-            return;
-        }
-        _ready.Set();
-        Log.Info($"audio {_source} started {Format.SampleRate} Hz {Format.Channels} ch");
-
-        var getBuffer = (delegate* unmanaged[Stdcall]<nint, byte**, uint*, uint*, ulong*, ulong*, int>)Ole.Slot(capture, 3);
-        var release = (delegate* unmanaged[Stdcall]<nint, uint, int>)Ole.Slot(capture, 4);
-        var nextSize = (delegate* unmanaged[Stdcall]<nint, uint*, int>)Ole.Slot(capture, 5);
-        int block = Format.BlockAlign;
-        using var timer = new HighResTimer();
-        try
-        {
-            while (!_stop)
+            try
             {
-                timer.Sleep(400_000); // 40 ms; the 200 ms buffer leaves plenty of headroom
+                client = _source == "loopback" ? ActivateProcessLoopback() : ActivateDefaultMic();
+                var fmt = _requested;
+                // Polling, not event mode: an event fires every device period (10 ms); a 40 ms poll costs far less CPU.
+                uint flags = AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
+                if (_source == "loopback") flags |= AUDCLNT_STREAMFLAGS_LOOPBACK;
+                var init = (delegate* unmanaged[Stdcall]<nint, int, uint, long, long, WAVEFORMATEX*, Guid*, int>)Ole.Slot(client, 3);
+                Check(init(client, 0, flags, 2_000_000, 0, &fmt, null), "IAudioClient.Initialize");
+                Format = new PcmFormat((int)fmt.nSamplesPerSec, fmt.nChannels, fmt.wFormatTag == WAVEFORMATEX.WAVE_FORMAT_IEEE_FLOAT, fmt.wBitsPerSample);
+                var getService = (delegate* unmanaged[Stdcall]<nint, Guid*, nint*, int>)Ole.Slot(client, 14);
+                var iid = IID_IAudioCaptureClient;
+                Check(getService(client, &iid, &capture), "GetService");
+                var start = (delegate* unmanaged[Stdcall]<nint, int>)Ole.Slot(client, 10);
+                Check(start(client), "Start");
+            }
+            catch (Exception ex)
+            {
+                _startError = ex;
+                SignalReady();
+                return;
+            }
+            SignalReady();
+            if (!_stop) Log.Info($"audio {_source} started {Format.SampleRate} Hz {Format.Channels} ch");
+
+            var getBuffer = (delegate* unmanaged[Stdcall]<nint, byte**, uint*, uint*, ulong*, ulong*, int>)Ole.Slot(capture, 3);
+            var release = (delegate* unmanaged[Stdcall]<nint, uint, int>)Ole.Slot(capture, 4);
+            var nextSize = (delegate* unmanaged[Stdcall]<nint, uint*, int>)Ole.Slot(capture, 5);
+            int block = Format.BlockAlign;
+            using var timer = new HighResTimer();
+            try
+            {
                 while (!_stop)
                 {
-                    uint pending;
-                    int nhr = nextSize(capture, &pending);
-                    if (nhr < 0) { Log.Warn($"audio {_source} device lost 0x{nhr:X8}"); Lost = true; _stop = true; break; }
-                    if (pending == 0) break;
-                    byte* data;
-                    uint frames, bflags;
-                    ulong devPos, qpcPos;
-                    int hr = getBuffer(capture, &data, &frames, &bflags, &devPos, &qpcPos);
-                    if (hr < 0) { Log.Warn($"audio {_source} GetBuffer 0x{hr:X8}"); Lost = true; _stop = true; break; }
-                    try
+                    timer.Sleep(400_000); // 40 ms; the 200 ms buffer leaves plenty of headroom
+                    while (!_stop)
                     {
-                        long now100 = (long)(Stopwatch.GetTimestamp() * (10_000_000.0 / Stopwatch.Frequency));
-                        // qpcPos is already in 100 ns units; process loopback may report 0.
-                        long t = qpcPos != 0 ? (long)qpcPos : now100 - frames * 10_000_000L / Format.SampleRate;
-                        Packets++;
-                        _handler(new ReadOnlySpan<byte>(data, (int)frames * block), (int)frames, t, (bflags & AUDCLNT_BUFFERFLAGS_SILENT) != 0);
+                        uint pending;
+                        int nhr = nextSize(capture, &pending);
+                        if (nhr < 0) { Log.Warn($"audio {_source} device lost 0x{nhr:X8}"); Lost = true; _stop = true; break; }
+                        if (pending == 0) break;
+                        byte* data;
+                        uint frames, bflags;
+                        ulong devPos, qpcPos;
+                        int hr = getBuffer(capture, &data, &frames, &bflags, &devPos, &qpcPos);
+                        if (hr < 0) { Log.Warn($"audio {_source} GetBuffer 0x{hr:X8}"); Lost = true; _stop = true; break; }
+                        try
+                        {
+                            long now100 = (long)(Stopwatch.GetTimestamp() * (10_000_000.0 / Stopwatch.Frequency));
+                            // qpcPos is already in 100 ns units; process loopback may report 0.
+                            long t = qpcPos != 0 ? (long)qpcPos : now100 - frames * 10_000_000L / Format.SampleRate;
+                            Packets++;
+                            _handler(new ReadOnlySpan<byte>(data, (int)frames * block), (int)frames, t, (bflags & AUDCLNT_BUFFERFLAGS_SILENT) != 0);
+                        }
+                        finally { release(capture, frames); }
                     }
-                    finally { release(capture, frames); }
                 }
             }
+            catch (Exception ex) { Log.Error($"audio {_source} loop", ex); Lost = true; }   // the thread ends: as good as lost (A13)
         }
-        catch (Exception ex) { Log.Error($"audio {_source} loop", ex); Lost = true; }   // the thread ends: as good as lost (A13)
         finally
         {
+            if (!readyReleased) ReleaseReady();
             Ended = true;
-            try { ((delegate* unmanaged[Stdcall]<nint, int>)Ole.Slot(client, 11))(client); } catch { }
+            if (client != 0) try { ((delegate* unmanaged[Stdcall]<nint, int>)Ole.Slot(client, 11))(client); } catch { }
             Cleanup(client, capture, evt);
             Ole.CoUninitialize();
         }
@@ -242,9 +290,10 @@ internal sealed unsafe class WasapiCapture : ICaptureStream
 
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         _stop = true;
-        if (_thread.IsAlive) _thread.Join(2000);
-        _ready.Dispose();
+        if (_thread.IsAlive) _thread.Join(_joinTimeoutMs);
+        ReleaseReady();
     }
 
     [DllImport("mmdevapi.dll", ExactSpelling = true)]

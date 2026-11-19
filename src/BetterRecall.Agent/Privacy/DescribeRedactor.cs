@@ -44,66 +44,78 @@ internal sealed class DescribeRedactor(IKeyframeReader reader, Func<Settings> se
     {
         var s = settings();
         var red = RedactionOptions.From(s.Privacy);
-        if (!red.AnyText) return image with { Redacted = true };
-        if (!s.Ocr.Enabled) return image with { Redacted = false };
-
-        using var bmp = Decode(image.Bytes);
-        int w = bmp.Width, h = bmp.Height, stride = bmp.RowBytes;
-        var pixels = new byte[stride * h];
-        byte[]? full = null;
+        // Own the outgoing buffer before any await or early return: an unrelated purge zeroes Thumbnailer's cache
+        // array in place while callers may retain OutgoingImage for minutes (A2).
+        var owned = (byte[])image.Bytes.Clone();
+        bool transferred = false;
         try
         {
-            bmp.GetPixelSpan().CopyTo(pixels);
-            (full, int fw, int fh, bool fullRead) = FullSize(captureId, w, h);
-            OcrResult ocr;
-            var wait = ocrWait?.Invoke() is { } aw && aw > MinWait ? aw : MinWait;
-            int ahead = 0;
+            if (!red.AnyText) { transferred = true; return image with { Bytes = owned, Redacted = true }; }
+            if (!s.Ocr.Enabled) { transferred = true; return image with { Bytes = owned, Redacted = false }; }
+
+            using var bmp = Decode(owned);
+            int w = bmp.Width, h = bmp.Height, stride = bmp.RowBytes;
+            var pixels = new byte[stride * h];
+            byte[]? full = null;
             try
             {
-                // The worker starts first, outside the wait (TH2); requests it still owes say whether a timeout is "busy".
-                try { ahead = await reader.ReadyAsync(ct).WaitAsync(StartWait, ct).ConfigureAwait(false); }
-                catch (TimeoutException) { throw new DescribeException(Starting); }
-                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                timeout.CancelAfter(wait);
-                ocr = full is null
-                    ? await reader.ReadAsync(pixels, w, h, stride, red.Entities, timeout.Token).ConfigureAwait(false)
-                    : await reader.ReadAsync(full, fw, fh, fw * 4, red.Entities, timeout.Token).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
-            {
-                Log.Info($"describe redaction: ocr took over {wait.TotalSeconds:0} s ({ahead} worker requests ahead of it)");
-                throw new DescribeException(ahead > 0 ? Busy : TimedOut);
-            }
-            catch (WorkerException ex) when (ex.Message.StartsWith("Model not installed", StringComparison.Ordinal))
-            {
-                return image with { Redacted = false };
-            }
-            catch (WorkerException ex)
-            {
-                Log.Warn($"describe redaction: ocr failed ({ex.Message})");
-                throw new DescribeException("Text recognition failed, so the image was not checked and is not sent. Try again.");
-            }
-            // Names or addresses asked for but the detector model is missing or broken: the patterns are still painted,
-            // yet the image was not fully checked, so it is not Redacted (chat sends text only, the preview says so) (N1).
-            bool checkedAll = !(red.Entities && ocr.EntitiesMissing) && fullRead;
-            if (!checkedAll) Log.Warn("describe redaction: " + (fullRead ? "name and address detector unavailable" : "stored keyframe unreadable, small text unchecked") + ", image marked not checked");
-            var r = Redactor.Apply(ocr.Lines, [], red);
-            if (r.Boxes.Length == 0) return image with { Redacted = checkedAll };
-            var boxes = full is null ? r.Boxes : ScaleBoxes(r.Boxes, fw, fh, w, h);
-            unsafe
-            {
-                fixed (byte* p = pixels)
+                bmp.GetPixelSpan().CopyTo(pixels);
+                (full, int fw, int fh, bool fullRead) = FullSize(captureId, w, h);
+                OcrResult ocr;
+                var wait = ocrWait?.Invoke() is { } aw && aw > MinWait ? aw : MinWait;
+                int ahead = 0;
+                try
                 {
-                    RedactionMasks.Fill(p, w, h, stride, boxes);
-                    return new OutgoingImage(ImageCodec.EncodeBgra(p, w, h, stride, "webp", Quality), ImageCodec.Mime("webp"), w, h, checkedAll);
+                    // The worker starts first, outside the wait (TH2); requests it still owes say whether a timeout is "busy".
+                    try { ahead = await reader.ReadyAsync(ct).WaitAsync(StartWait, ct).ConfigureAwait(false); }
+                    catch (TimeoutException) { throw new DescribeException(Starting); }
+                    using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    timeout.CancelAfter(wait);
+                    ocr = full is null
+                        ? await reader.ReadAsync(pixels, w, h, stride, red.Entities, timeout.Token).ConfigureAwait(false)
+                        : await reader.ReadAsync(full, fw, fh, fw * 4, red.Entities, timeout.Token).ConfigureAwait(false);
                 }
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                {
+                    Log.Info($"describe redaction: ocr took over {wait.TotalSeconds:0} s ({ahead} worker requests ahead of it)");
+                    throw new DescribeException(ahead > 0 ? Busy : TimedOut);
+                }
+                catch (WorkerException ex) when (ex.Message.StartsWith("Model not installed", StringComparison.Ordinal))
+                {
+                    transferred = true;
+                    return image with { Bytes = owned, Redacted = false };
+                }
+                catch (WorkerException ex)
+                {
+                    Log.Warn($"describe redaction: ocr failed ({ex.Message})");
+                    throw new DescribeException("Text recognition failed, so the image was not checked and is not sent. Try again.");
+                }
+                // Names or addresses asked for but the detector model is missing or broken: the patterns are still painted,
+                // yet the image was not fully checked, so it is not Redacted (chat sends text only, the preview says so) (N1).
+                bool checkedAll = !(red.Entities && ocr.EntitiesMissing) && fullRead;
+                if (!checkedAll) Log.Warn("describe redaction: " + (fullRead ? "name and address detector unavailable" : "stored keyframe unreadable, small text unchecked") + ", image marked not checked");
+                var r = Redactor.Apply(ocr.Lines, [], red);
+                if (r.Boxes.Length == 0) { transferred = true; return image with { Bytes = owned, Redacted = checkedAll }; }
+                var boxes = full is null ? r.Boxes : ScaleBoxes(r.Boxes, fw, fh, w, h);
+                unsafe
+                {
+                    fixed (byte* p = pixels)
+                    {
+                        RedactionMasks.Fill(p, w, h, stride, boxes);
+                        return new OutgoingImage(ImageCodec.EncodeBgra(p, w, h, stride, "webp", Quality), ImageCodec.Mime("webp"), w, h, checkedAll);
+                    }
+                }
+            }
+            finally
+            {
+                Array.Clear(pixels);
+                if (full is not null) Array.Clear(full);
+                ClearPixels(bmp);
             }
         }
         finally
         {
-            Array.Clear(pixels);
-            if (full is not null) Array.Clear(full);
-            ClearPixels(bmp);
+            if (!transferred) Array.Clear(owned);
         }
     }
 

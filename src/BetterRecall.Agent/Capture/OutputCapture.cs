@@ -33,6 +33,7 @@ internal sealed unsafe class KeyframeGrab : IDisposable
 
     public static KeyframeGrab Alloc(int monitor, KeyframeRequest req, int w, int h, long grabTicks)
     {
+        if (grabTicks <= 0) grabTicks = KeyframePipeline.NextStamp();
         var g = new KeyframeGrab { Monitor = monitor, Request = req, Width = w, Height = h, Stride = w * 4, GrabTicks = grabTicks };
         g.Pixels = (byte*)NativeMemory.Alloc((nuint)(w * h * 4));
         return g;
@@ -485,7 +486,7 @@ internal sealed unsafe class OutputCapture : IDisposable
         _feedDirty = new RECT(0, 0, _srcW, _srcH);
     }
 
-    private (KeyframeRequest Req, int W, int H)? _pendingGrab;
+    private (KeyframeRequest Req, int W, int H, long Stamp)? _pendingGrab;
 
     /// <summary>
     /// Scales the latest frame on the GPU and queues the copy to a staging texture. The map happens on the
@@ -495,6 +496,7 @@ internal sealed unsafe class OutputCapture : IDisposable
     {
         if (_latest is null || _dev is null || _rotationBlocked) return;
         if (_pendingGrab is not null) FinishGrab();
+        long stamp = KeyframePipeline.NextStamp();
         if (_retryKeyframe) { _retryKeyframe = false; _keyframeGate.Invalidate(); _sampleGate.Invalidate(); }
         bool changed = (req.Keyframe && _keyframeGate.Changed(req.DirtyMinPercent))
                        || (req.ReplaySample && _sampleGate.Changed(req.DirtyMinPercent));
@@ -522,17 +524,17 @@ internal sealed unsafe class OutputCapture : IDisposable
         // Only the gates of what this grab serves: a sample-only grab leaves the keyframe gate armed.
         if (req.Keyframe || req.Force) _keyframeGate.Reset();
         if (req.ReplaySample || req.Force) _sampleGate.Reset();
-        _pendingGrab = (req, w, h);
+        _pendingGrab = (req, w, h, stamp);
         GrabTicks += Stopwatch.GetTimestamp() - t0;
     }
 
     private void FinishGrab()
     {
-        var (req, w, h) = _pendingGrab!.Value;
+        var (req, w, h, stamp) = _pendingGrab!.Value;
         _pendingGrab = null;
         if (_kfScaler?.Staging is null || _dev is null || !ReferenceEquals(_kfScalerDev, _dev)) return;
         long t0 = Stopwatch.GetTimestamp();
-        var grab = KeyframeGrab.Alloc(Info.Index, req, w, h, 0);
+        var grab = KeyframeGrab.Alloc(Info.Index, req, w, h, stamp);
         try
         {
             lock (_dev!.Gate)
