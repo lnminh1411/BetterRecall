@@ -21,7 +21,11 @@ internal sealed class EmbeddingScheduler : IAsyncDisposable
     private readonly Func<int>? _indexDim;
     private readonly Queue<PendingJob> _queue = new();
     private readonly object _qlock = new();
-    private readonly SemaphoreSlim _wake = new(0, int.MaxValue);
+    private readonly SemaphoreSlim _wake = new(0, 1);
+    private readonly Lock _wakeLock = new();
+    private long _helloSeq;
+    private long _stepHelloSeq;
+    private bool _backingOff;
     private readonly CancellationTokenSource _cts = new();
     private Task? _loop;
     private EmbeddingInfo? _space;
@@ -97,7 +101,12 @@ internal sealed class EmbeddingScheduler : IAsyncDisposable
         // change queues the whole history and reloads the vector index, which must not run on the thread that brought
         // the hello: a search's query reply or the UI bench's IPC call.
         _spaceRefusedLogged = false;
-        _wake.Release();
+        lock (_wakeLock)
+        {
+            _helloSeq++;
+            _backingOff = false;
+            ReleaseWakeLocked();
+        }
     }
 
     /// <summary>Tells store the current embedding space unless it already has it. Only a success is remembered: a hello
@@ -136,7 +145,7 @@ internal sealed class EmbeddingScheduler : IAsyncDisposable
         }
     }
 
-    private int Attempts(string id)
+    internal int Attempts(string id)
     {
         lock (_attempts) return _attempts.GetValueOrDefault(id);
     }
@@ -146,10 +155,28 @@ internal sealed class EmbeddingScheduler : IAsyncDisposable
         lock (_attempts) _attempts.Remove(id);
     }
 
+    private bool HasAcceptedSpace { get { lock (_spaceLock) return _space is not null; } }
+
+    private void ReleaseWakeLocked()
+    {
+        if (_wake.CurrentCount == 0)
+            _wake.Release();
+    }
+
+    private static bool IsBackoffDecision(string decision) =>
+        decision is "battery" or "fullscreen" or "cpu" or "gpu" or "model-missing" or "space-refused"
+            or "worker-error" or "poison-job" or "worker-unavailable";
+
     public void Start() => _loop = Task.Run(() => RunAsync(_cts.Token));
 
-    /// <summary>New capture stored: check soon.</summary>
-    public void Signal() => _wake.Release();
+    /// <summary>New capture stored: check soon (ignored while sleeping on a defer or backoff).</summary>
+    public void Signal()
+    {
+        lock (_wakeLock)
+        {
+            if (!_backingOff) ReleaseWakeLocked();
+        }
+    }
 
     public void Clear()
     {
@@ -193,17 +220,41 @@ internal sealed class EmbeddingScheduler : IAsyncDisposable
     {
         while (!ct.IsCancellationRequested)
         {
+            lock (_wakeLock)
+            {
+                _stepHelloSeq = _helloSeq;
+                _backingOff = false;
+                while (_wake.Wait(0)) { }
+            }
             TimeSpan wait = TimeSpan.FromSeconds(10);
+            bool threw = false;
             try
             {
                 wait = await StepAsync(ct).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
-            catch (Exception ex) { Log.Warn("scheduler step", ex); }
+            catch (Exception ex) { threw = true; Log.Warn("scheduler step", ex); }
             if (wait > TimeSpan.Zero)
             {
-                try { await _wake.WaitAsync(wait, ct).ConfigureAwait(false); }
-                catch (OperationCanceledException) { break; }
+                bool wakeNow = false;
+                lock (_wakeLock)
+                {
+                    if (!threw && IsBackoffDecision(LastDecision))
+                    {
+                        if (_helloSeq != _stepHelloSeq)
+                            wakeNow = true;
+                        else
+                        {
+                            _backingOff = true;
+                            while (_wake.Wait(0)) { }
+                        }
+                    }
+                }
+                if (!wakeNow)
+                {
+                    try { await _wake.WaitAsync(wait, ct).ConfigureAwait(false); }
+                    catch (OperationCanceledException) { break; }
+                }
             }
         }
     }
@@ -225,6 +276,28 @@ internal sealed class EmbeddingScheduler : IAsyncDisposable
         var decision = Governance.Decide(_probe(), s.Governance, s.Capture);
         LastDecision = decision.Reason;
         if (!decision.Run) return decision.NextCheck;
+        if (!HasAcceptedSpace)
+        {
+            try { await _worker.PrewarmAsync(ct).ConfigureAwait(false); }
+            catch (Exception ex) when (ex is WorkerException || (ex is OperationCanceledException && !ct.IsCancellationRequested))
+            {
+                Log.Debug($"scheduler deferred: {ex.Message}");
+                LastDecision = "worker-unavailable";
+                return TimeSpan.FromSeconds(15);
+            }
+            EnsureSpace(store);
+            long seq;
+            lock (_wakeLock) seq = _helloSeq;
+            bool hasSpace = HasAcceptedSpace;
+            lock (_wakeLock) _stepHelloSeq = seq;
+            if (!hasSpace)
+            {
+                if (!_spaceRefusedLogged) { _spaceRefusedLogged = true; Log.Warn("indexing waits: no embedding space accepted yet"); }
+                LastDecision = "space-refused";
+                return TimeSpan.FromSeconds(60);
+            }
+        }
+        else lock (_wakeLock) _stepHelloSeq = _helloSeq;
 
         for (int i = 0; i < decision.BatchSize; i++)
         {

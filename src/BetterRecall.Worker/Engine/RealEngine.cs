@@ -255,7 +255,9 @@ public sealed class RealEngine : IWorkerEngine
         var keep = new Dictionary<BenchOutcome, Embedder>();
         // Per-budget image timings only for the bench op (they compile every budget: slow on a first NPU run).
         var tokens = force ? new List<TokenRow>() : null;
-        var allowed = WithoutFailed(DevicePolicy.Allowed(_s.Device, Main.Devices, gpu));
+        var allowed = force
+            ? DevicePolicy.Allowed(_s.Device, Main.Devices, gpu)
+            : WithoutFailed(DevicePolicy.Allowed(_s.Device, Main.Devices, gpu));
         // ONNX Runtime main backend: its DirectML device takes the adapter's name from the GPU list.
         if (allowed.Any(d => d.Ep == "DirectML")) allowed = allowed.Select(d => Gpus.FirstOrDefault(g => g.Id == d.Id) ?? d).ToList();
         var allowedIds = allowed.Select(d => d.Id).ToHashSet(StringComparer.Ordinal);
@@ -294,6 +296,11 @@ public sealed class RealEngine : IWorkerEngine
         }
         _embedder = keep[chosen];
         _choice = new DeviceChoice(chosen.Device.Label, chosen.Device.Id, chosen.Device.Ep, chosen.Model, chosen.Split ? chosen.TextDevice!.Id : null);
+        if (force)
+        {
+            _failedDevices.Remove(_choice.DeviceId);
+            if (_choice.TextDeviceId is { } tid) _failedDevices.Remove(tid);
+        }
         // A choice made around a device that failed at run time is for this process only: device.json keeps the normal
         // choice, so the next worker tries that device again (a TDR or driver update is usually over by then).
         // SF6 (review): unless the replan had to switch model (the kept one failed everywhere left). The agent follows
@@ -301,7 +308,7 @@ public sealed class RealEngine : IWorkerEngine
         // again, every worker cycle. Persist the switch; a benchmark chooses afresh.
         bool modelSwitched = !force && _replanModel is { } was && was != _choice.Model;
         if (modelSwitched) Log.Warn($"replan switched the embedding model {_replanModel} -> {_choice.Model}; device.json keeps it");
-        if (_failedDevices.Count == 0 || modelSwitched)
+        if (force || _failedDevices.Count == 0 || modelSwitched)
             DeviceCache.Write(cachePath, new DeviceCacheFile { Key = key, Chosen = _choice, Bench = result, WrittenUtc = DateTimeOffset.UtcNow });
         if (modelSwitched) _replanModel = _choice.Model;
         Log.Info($"device chosen: {_choice.Device} ({_choice.DeviceId} {chosen.Device.Name}) {_choice.Model}{(_choice.TextDeviceId is { } t ? " text on " + t : "")}");

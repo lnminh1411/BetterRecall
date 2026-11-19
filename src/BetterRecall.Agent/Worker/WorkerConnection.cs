@@ -32,6 +32,7 @@ internal sealed class WorkerConnection : IAsyncDisposable
     private readonly CancellationTokenSource _cts = new();
     private readonly Task _reader;
     private long _nextId;
+    private long _writeSeq;
     private long _lastActivityTicks = Environment.TickCount64;
     private long _lastReplyTicks;
     private int _consecutiveTimeouts;
@@ -41,9 +42,9 @@ internal sealed class WorkerConnection : IAsyncDisposable
     // Liveness (A5, CA-S1): when each request still waiting for its reply began, and the requests a caller gave up on
     // that the serial worker still serves, until their own late reply comes (K review N1: a cancel during the write
     // counts too, since the write goes on, A2). Keepalive frames (id 0) do not clear them.
-    private readonly ConcurrentDictionary<long, (string Op, long Ticks)> _started = new();
+    private readonly ConcurrentDictionary<long, (string Op, long Ticks, long Seq)> _started = new();
     private readonly Lock _abandonGate = new();
-    private readonly Dictionary<long, (string Op, long Ticks)> _abandoned = new();
+    private readonly Dictionary<long, (string Op, long Ticks, long Seq)> _abandoned = new();
 
     /// <summary>Error (null on clean end of stream) and the number of requests still pending at close.</summary>
     public event Action<Exception?, int>? Closed;
@@ -74,13 +75,12 @@ internal sealed class WorkerConnection : IAsyncDisposable
     {
         get
         {
-            (string Op, long Ticks)? oldest;
-            oldest = null;
+            (string Op, long Ticks, long Seq)? oldest = null;
             lock (_abandonGate)
                 foreach (var v in _abandoned.Values)
-                    if (oldest is null || v.Ticks < oldest.Value.Ticks) oldest = v;
+                    if (oldest is null || v.Seq < oldest.Value.Seq) oldest = v;
             foreach (var kv in _started)
-                if (oldest is null || kv.Value.Ticks < oldest.Value.Ticks) oldest = kv.Value;
+                if (oldest is null || kv.Value.Seq < oldest.Value.Seq) oldest = kv.Value;
             if (oldest is not { } o) return null;
             return (o.Op, Math.Min(_now() - o.Ticks, NoReplyMs));
         }
@@ -90,12 +90,12 @@ internal sealed class WorkerConnection : IAsyncDisposable
     private long? ServingId()
     {
         long? id = null;
-        long ticks = long.MaxValue;
+        long seq = long.MaxValue;
         lock (_abandonGate)
             foreach (var (k, v) in _abandoned)
-                if (v.Ticks < ticks || v.Ticks == ticks && k < id) { id = k; ticks = v.Ticks; }
+                if (v.Seq < seq) { id = k; seq = v.Seq; }
         foreach (var kv in _started)
-            if (kv.Value.Ticks < ticks || kv.Value.Ticks == ticks && kv.Key < id) { id = kv.Key; ticks = kv.Value.Ticks; }
+            if (kv.Value.Seq < seq) { id = kv.Key; seq = kv.Value.Seq; }
         return id;
     }
 
@@ -156,7 +156,7 @@ internal sealed class WorkerConnection : IAsyncDisposable
             await _writeLock.EnterAsync(urgent, ct).ConfigureAwait(false);   // a cancel here leaves nothing half sent
             // SF8 (review): owed from here. With the urgent lane, gate order is not arrival order, so a request still
             // waiting for the gate is neither the one the worker serves nor silent.
-            _started[id] = (req.Op, _now());
+            _started[id] = (req.Op, _now(), Interlocked.Increment(ref _writeSeq));
             // A2: once started, the frame is written whole, without the caller's token. On the 0-byte worker pipe a write
             // waits while the serial worker is busy (a cold transcribe takes minutes): cancelling it there closed the
             // pipe, failed the request in flight and counted a crash. A caller that gives up only abandons the reply.
