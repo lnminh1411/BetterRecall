@@ -495,10 +495,16 @@ public class Sweep4WAgentTests
     public async Task Agent_launcher_hands_its_settings_to_the_real_worker()
     {
         var root = TempDir();
-        var pivot = new DirectoryInfo(AppContext.BaseDirectory.TrimEnd('\\')).Name;
-        var artifacts = AppContext.BaseDirectory;
-        while (!Directory.Exists(Path.Combine(artifacts, "bin", "BetterRecall.Worker"))) artifacts = Path.GetDirectoryName(artifacts.TrimEnd('\\'))!;
-        var workerExe = Path.Combine(artifacts, "bin", "BetterRecall.Worker", pivot, "BetterRecall.Worker.exe");
+        var workerExe = Environment.GetEnvironmentVariable("BR_WORKER_DIR") is { } workerDir && !string.IsNullOrWhiteSpace(workerDir)
+            ? Path.Combine(workerDir, "BetterRecall.Worker.exe")
+            : ResolveWorkerExe();
+        static string ResolveWorkerExe()
+        {
+            var pivot = new DirectoryInfo(AppContext.BaseDirectory.TrimEnd('\\')).Name;
+            var artifacts = AppContext.BaseDirectory;
+            while (!Directory.Exists(Path.Combine(artifacts, "bin", "BetterRecall.Worker"))) artifacts = Path.GetDirectoryName(artifacts.TrimEnd('\\'))!;
+            return Path.Combine(artifacts, "bin", "BetterRecall.Worker", pivot, "BetterRecall.Worker.exe");
+        }
         Assert.True(File.Exists(workerExe), workerExe);
 
         var s = new Settings();

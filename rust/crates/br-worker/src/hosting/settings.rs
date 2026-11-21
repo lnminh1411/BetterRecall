@@ -251,7 +251,7 @@ where
 }
 
 /// Strips UTF-8 BOM, `//` line comments, `/* ... */` block comments, and trailing commas outside strings.
-fn strip_jsonc(input: &str) -> String {
+pub(crate) fn strip_jsonc(input: &str) -> String {
     let s = input.strip_prefix('\u{FEFF}').unwrap_or(input);
     let no_comments = strip_comments(s);
     strip_trailing_commas(&no_comments)

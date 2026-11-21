@@ -6,6 +6,8 @@
 pub mod args;
 pub mod engine;
 pub mod hosting;
+pub mod inference;
+pub mod models;
 pub mod protocol;
 pub mod vectors;
 
