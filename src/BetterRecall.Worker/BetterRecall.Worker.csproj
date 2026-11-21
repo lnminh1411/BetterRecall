@@ -2,46 +2,84 @@
   <PropertyGroup>
     <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
     <SupportedOSPlatformVersion>10.0.20348.0</SupportedOSPlatformVersion>
-    <OutputType>WinExe</OutputType>
-    <SelfContained>true</SelfContained>
-    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <RootNamespace>BetterRecall.Worker</RootNamespace>
-    <InvariantGlobalization>true</InvariantGlobalization>
-    <ServerGarbageCollection>false</ServerGarbageCollection>
-    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
-    <TieredPGO>true</TieredPGO>
-    <!-- Native DLLs of OpenVINO / ONNX Runtime / Skia land next to the exe (install\worker\). -->
+    <OutputType>Library</OutputType>
+    <SelfContained>false</SelfContained>
+    <UseAppHost>false</UseAppHost>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
+    <GenerateDependencyFile>false</GenerateDependencyFile>
+    <GenerateRuntimeConfigurationFiles>false</GenerateRuntimeConfigurationFiles>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <DebugType>none</DebugType>
+    <CopyBuildOutputToPublishDirectory>false</CopyBuildOutputToPublishDirectory>
+    <CopyOutputSymbolsToPublishDirectory>false</CopyOutputSymbolsToPublishDirectory>
+    <IsPackable>false</IsPackable>
   </PropertyGroup>
-  <ItemGroup>
-    <ProjectReference Include="..\BetterRecall.Contracts\BetterRecall.Contracts.csproj" />
-  </ItemGroup>
   <ItemGroup>
     <!-- ONNX Runtime with CPU + DirectML EPs (MIT). QNN is picked up when its provider is present. -->
     <PackageReference Include="Microsoft.ML.OnnxRuntime.DirectML" Version="1.24.4" />
-    <!-- Intel OpenVINO 2026.4.1 native runtime (Apache-2.0), repackaged from the Intel archive. Used through openvino_c.dll P/Invoke. -->
+    <!-- Intel OpenVINO 2026.4.1 native runtime (Apache-2.0), repackaged from the Intel archive. Loaded by br-worker. -->
     <PackageReference Include="OpenVINO.runtime.win" Version="2026.4.1" />
-    <!-- SentencePiece (Gemma) tokenizer, managed (MIT). -->
-    <PackageReference Include="Microsoft.ML.Tokenizers" Version="2.0.1" />
-    <!-- WebP / JPEG / PNG decode (MIT). -->
-    <PackageReference Include="SkiaSharp" Version="3.119.4" />
-  </ItemGroup>
-  <ItemGroup>
-    <InternalsVisibleTo Include="BetterRecall.Worker.Tests" />
   </ItemGroup>
   <!-- OpenVINO GenAI C runtime (openvino_genai_c.dll and friends) for Whisper. Staged by Scripts\models\stage_genai_runtime.py
        into artifacts\native\openvino-genai\. Optional: without it transcribe answers "Device failed: OpenVINO GenAI runtime not found." -->
   <PropertyGroup>
     <GenAiNativeDir>$(MSBuildThisFileDirectory)..\..\artifacts\native\openvino-genai\</GenAiNativeDir>
   </PropertyGroup>
-  <!-- Publish trim: native symbols, the DirectML debug layer and OpenVINO frontends the worker never reads
-       (models are ONNX or OpenVINO IR). -->
-  <Target Name="TrimWorkerNatives" AfterTargets="Publish">
-    <ItemGroup>
-      <_TrimNative Include="$(PublishDir)libSkiaSharp.pdb;$(PublishDir)DirectML.pdb;$(PublishDir)DirectML.Debug.dll;$(PublishDir)DirectML.Debug.pdb;$(PublishDir)openvino_tensorflow_frontend.dll;$(PublishDir)openvino_tensorflow_lite_frontend.dll;$(PublishDir)openvino_paddle_frontend.dll;$(PublishDir)openvino_pytorch_frontend.dll;$(PublishDir)openvino_jax_frontend.dll;$(PublishDir)openvino_gguf_frontend.dll" />
-    </ItemGroup>
-    <Delete Files="@(_TrimNative)" />
-  </Target>
   <ItemGroup Condition="Exists('$(GenAiNativeDir)')">
     <None Include="$(GenAiNativeDir)*.dll" Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
+  <ItemGroup>
+    <_WorkerTrimFile Include="BetterRecall.Worker.dll;BetterRecall.Worker.pdb;BetterRecall.Worker.deps.json;BetterRecall.Worker.runtimeconfig.json" />
+    <_WorkerTrimFile Include="BetterRecall.Contracts.dll;BetterRecall.Contracts.pdb" />
+    <_WorkerTrimFile Include="Microsoft.ML.OnnxRuntime.dll;Microsoft.ML.OnnxRuntime.pdb" />
+    <_WorkerTrimFile Include="libSkiaSharp.dll;libSkiaSharp.pdb;SkiaSharp.dll;WinRT.Runtime.dll" />
+    <_WorkerTrimFile Include="coreclr.dll;clrjit.dll;clretwrc.dll;clrgc.dll;clrgcexp.dll;hostfxr.dll;hostpolicy.dll;mscordbi.dll;mscorlib.dll;mscorrc.dll;createdump.exe" />
+    <_WorkerTrimFile Include="DirectML.pdb;DirectML.Debug.dll;DirectML.Debug.pdb" />
+    <_WorkerTrimFile Include="openvino_tensorflow_frontend.dll;openvino_tensorflow_lite_frontend.dll;openvino_paddle_frontend.dll;openvino_pytorch_frontend.dll;openvino_jax_frontend.dll;openvino_gguf_frontend.dll" />
+  </ItemGroup>
+  <Target Name="BuildRustWorker" AfterTargets="Build" BeforeTargets="ComputeFilesToPublish">
+    <PropertyGroup>
+      <_RustDir>$(MSBuildThisFileDirectory)..\..\rust</_RustDir>
+      <_CargoProfile Condition="'$(Configuration)' == 'Release'">release</_CargoProfile>
+      <_CargoProfile Condition="'$(Configuration)' != 'Release'">debug</_CargoProfile>
+      <_CargoProfileFlag Condition="'$(Configuration)' == 'Release'">--release</_CargoProfileFlag>
+      <_CargoTargetDirRaw Condition="'$(CARGO_TARGET_DIR)' != ''">$(CARGO_TARGET_DIR)</_CargoTargetDirRaw>
+      <_CargoTargetDirRaw Condition="'$(CARGO_TARGET_DIR)' == ''">$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\..\artifacts\cargo'))</_CargoTargetDirRaw>
+      <_CargoTargetDir>$(_CargoTargetDirRaw.TrimEnd('\').TrimEnd('/'))</_CargoTargetDir>
+      <_RustWorkerExe>$(_CargoTargetDir)\$(_CargoProfile)\br-worker.exe</_RustWorkerExe>
+    </PropertyGroup>
+    <Exec Command="where cargo &gt;nul 2&gt;nul" IgnoreExitCode="true" EchoOff="true" StandardOutputImportance="Low" StandardErrorImportance="Low">
+      <Output TaskParameter="ExitCode" PropertyName="_CargoCheckExit" />
+    </Exec>
+    <Error Condition="'$(_CargoCheckExit)' != '0'"
+           Text="cargo was not found on PATH. Install the Rust toolchain with rustup (https://rustup.rs) using the stable x86_64-pc-windows-msvc target." />
+    <Exec WorkingDirectory="$(_RustDir)"
+          Command="cargo build -p br-worker $(_CargoProfileFlag) -j 4 --target-dir &quot;$(_CargoTargetDir)&quot;" />
+    <Copy SourceFiles="$(_RustWorkerExe)"
+          DestinationFiles="$(TargetDir)BetterRecall.Worker.exe"
+          OverwriteReadOnlyFiles="true"
+          SkipUnchangedFiles="false" />
+    <ItemGroup>
+      <ResolvedFileToPublish Include="$(TargetDir)BetterRecall.Worker.exe">
+        <RelativePath>BetterRecall.Worker.exe</RelativePath>
+        <CopyToPublishDirectory>Always</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+  </Target>
+  <!-- Trim managed wrapper files, SkiaSharp leftovers, native symbols, DirectML debug layer and unused OpenVINO frontends. -->
+  <Target Name="TrimWorkerBuild" AfterTargets="BuildRustWorker">
+    <ItemGroup>
+      <_TrimBuild Include="@(_WorkerTrimFile->'$(TargetDir)%(Identity)')" />
+      <_TrimBuild Include="$(TargetDir)System.*.dll;$(TargetDir)Microsoft.*.dll;$(TargetDir)mscordaccore*.dll;$(TargetDir)api-ms-win-*.dll" />
+    </ItemGroup>
+    <Delete Files="@(_TrimBuild)" />
+  </Target>
+  <Target Name="TrimWorkerNatives" AfterTargets="Publish">
+    <ItemGroup>
+      <_TrimNative Include="@(_WorkerTrimFile->'$(PublishDir)%(Identity)')" />
+      <_TrimNative Include="$(PublishDir)System.*.dll;$(PublishDir)Microsoft.*.dll;$(PublishDir)mscordaccore*.dll;$(PublishDir)api-ms-win-*.dll" />
+    </ItemGroup>
+    <Delete Files="@(_TrimNative)" />
+  </Target>
 </Project>

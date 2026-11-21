@@ -53,9 +53,9 @@ def start_agent(out: Path) -> None:
     print(f"started {exe} with BETTERRECALL_HOME={home}")
 
 
-def run(cmd: list[str], env: dict) -> None:
+def run(cmd: list[str], env: dict, cwd: Path = ROOT) -> None:
     print(">", " ".join(cmd), flush=True)
-    r = subprocess.run(cmd, cwd=ROOT, env=env)
+    r = subprocess.run(cmd, cwd=cwd, env=env)
     if r.returncode != 0:
         sys.exit(f"failed ({r.returncode}): {' '.join(cmd)}")
 
@@ -86,6 +86,12 @@ def main() -> None:
             sys.exit(f"unknown project {p}")
 
     if a.test:
+        if not shutil.which("cargo"):
+            sys.exit("cargo not found on PATH; install Rust via rustup (https://rustup.rs)")
+        rust_env = env.copy()
+        if not rust_env.get("CARGO_TARGET_DIR"):
+            rust_env["CARGO_TARGET_DIR"] = str(ROOT / "artifacts" / "cargo")
+        run(["cargo", "test", "--workspace", "-j", "4"], rust_env, cwd=ROOT / "rust")
         for t in TESTS:
             run(["dotnet", "test", f"tests/BetterRecall.{t}.Tests", "-c", a.config], env)
 

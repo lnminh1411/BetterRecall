@@ -6,8 +6,6 @@
     <IsTestProject>true</IsTestProject>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <RootNamespace>BetterRecall.Worker.Tests</RootNamespace>
-    <!-- The worker is a self-contained exe; the tests only use its classes. -->
-    <ValidateExecutableReferencesMatchSelfContained>false</ValidateExecutableReferencesMatchSelfContained>
   </PropertyGroup>
   <ItemGroup>
     <Compile Remove="FakeAgent\**" />
@@ -21,7 +19,8 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\BetterRecall.Contracts\BetterRecall.Contracts.csproj" />
-    <ProjectReference Include="..\..\src\BetterRecall.Worker\BetterRecall.Worker.csproj" />
+    <!-- Built first, not referenced: conformance tests run the Rust BetterRecall.Worker.exe from artifacts\bin. -->
+    <ProjectReference Include="..\..\src\BetterRecall.Worker\BetterRecall.Worker.csproj" ReferenceOutputAssembly="false" Private="false" />
     <!-- Built first, not referenced: the end-to-end test copies it to <install>\BetterRecall.Agent.exe. -->
     <ProjectReference Include="FakeAgent\FakeAgent.csproj" ReferenceOutputAssembly="false" Private="false" />
   </ItemGroup>

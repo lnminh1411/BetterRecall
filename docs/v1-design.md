@@ -40,7 +40,7 @@ Written 2026-11-10. `docs\design.md` is the user's design. This file turns it in
 | `src/BetterRecall.Cli` | backend | `betterrecall.exe ipc <words...>` |
 | `src/BetterRecall.Mcp` | backend | `betterrecall-mcp.exe`, MCP over stdio, client of the MCP pipe |
 | `src/BetterRecall.Agent` | agent | Always-on process: capture, replay buffer and encoder, guardrails, audio capture, scheduler, worker supervisor, thumbnailer, tray, hotkeys, panic flush |
-| `src/BetterRecall.Worker` | worker | Inference: EmbeddingGemma 2, SigLIP 2 fallback, Whisper, Silero VAD, NSFW classifier and detector, device selection |
+| `src/BetterRecall.Worker` (`rust/crates/br-worker`) | worker | Rust inference worker (`BetterRecall.Worker.exe`, built through the `.csproj` wrapper): EmbeddingGemma 2, SigLIP 2 fallback, Whisper, Silero VAD, PaddleOCR/Windows OCR, NER, NSFW classifier and detector, device selection |
 | `src/BetterRecall.UI` | ui | WinUI 3: launcher, results, home page, timeline, replay list, settings, audit, first-run consent |
 | `tests/BetterRecall.<Project>.Tests` | owner of the project | xUnit tests |
 | `Scripts/` | lead; worker owns `Scripts/models/` | Python build and model-prep scripts, listed in `Scripts/Scripts.md` |
@@ -444,8 +444,8 @@ Vector search needs no ANN library at v1 sizes: 30 days of 2 s keyframes after d
 
 ## 9. Build
 
-- .NET SDK 10.0.403, `BetterRecall.slnx`, `Directory.Build.props` (nullable on, artifacts output under `artifacts\`, `win-x64`).
-- Agent, CLI and MCP publish Native AOT. Worker publishes self-contained. UI publishes unpackaged and self-contained (`WindowsPackageType=None`, `WindowsAppSDKSelfContained=true`).
+- .NET SDK 10.0.403, Rust toolchain via `rustup` (stable, `x86_64-pc-windows-msvc` target), `BetterRecall.slnx`, `Directory.Build.props` (nullable on, artifacts output under `artifacts\`, `win-x64`).
+- Agent, CLI and MCP publish Native AOT. Worker builds the Rust binary (`rust\crates\br-worker`) via `cargo build -p br-worker` from `BetterRecall.Worker.csproj` and ships `BetterRecall.Worker.exe` next to the OpenVINO and ONNX Runtime native DLLs. UI publishes unpackaged and self-contained (`WindowsPackageType=None`, `WindowsAppSDKSelfContained=true`).
 - Contracts and Core are AOT and trim compatible: System.Text.Json source generation only.
 - Build one project without rebuilding Contracts: `dotnet build src/<Project> -p:BuildProjectReferences=false`.
 - Model files are never committed. Model download needs the user's go-ahead; until then use `inference.fake`.
