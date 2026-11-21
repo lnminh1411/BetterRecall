@@ -21,7 +21,7 @@ Screenshots show the real app running on demo data (`--mock`).
 
 ## System requirements
 
-Estimates for 0.2.4-dev, from the code's defaults and the dev PC's measurements. The first run's benchmark adjusts settings to the machine; the reasons below say what it changes.
+Estimates for 0.3.0-dev, from the code's defaults and the dev PC's measurements. The first run's benchmark adjusts settings to the machine; the reasons below say what it changes.
 
 **Minimum**
 
