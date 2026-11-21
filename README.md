@@ -45,3 +45,13 @@ Estimates for 0.3.0-dev, from the code's defaults and the dev PC's measurements.
 | GPU | GPU with an AV1 encoder (Intel Arc or Xe, NVIDIA RTX 40, AMD RX 7000) | Smallest replay clips, with encoding off the CPU |
 | Disk | NVMe SSD with 64 GB or more free | Room for the default 20 GB history cap, the 25 GB free-space reserve, models and replay clips |
 | Security | TPM 2.0 plus Windows Hello (face or fingerprint) | Silent key unlock and a quick read gate |
+
+## Build
+
+Requirements on Windows x64:
+
+- .NET 10 SDK (`10.0.403` or later) and Visual Studio Build Tools with the C++ workload (for Native AOT linking and the MSVC linker).
+- Rust toolchain via [`rustup`](https://rustup.rs): `stable` toolchain with the `x86_64-pc-windows-msvc` target. The inference worker (`BetterRecall.Worker.exe`) is written in Rust (`rust\crates\br-worker`) and built automatically through `src\BetterRecall.Worker\BetterRecall.Worker.csproj`.
+
+Build the solution with `dotnet build BetterRecall.slnx`, or build a full layout into `artifacts\dev\` with `python Scripts/dev_build.py` (add `--test` to run `cargo test` and the `.NET` test suites first). See `Scripts/models/prepare_all.py` or download the exported models from [Hugging Face](https://huggingface.co/lnminh1411/BetterRecall-models).
+

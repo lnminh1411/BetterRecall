@@ -4,9 +4,10 @@
 
 - Never shipped: .pdb, .lib (import libraries such as worker/onnxruntime.lib), createdump.exe (can write full memory
   dumps of processes holding decrypted data) and the .devbuild marker (the agent would refuse the real data folder).
-- Third-party notices: every NuGet package a published project resolved (obj/project.assets.json) contributes its
-  licence and notice files to LICENSES/third-party/<id>-<version>/, and LICENSES/third-party/README.txt lists each
-  package with the licence its .nuspec declares. Native pieces in the repo (src/**/Native/*LICENSE*) are copied too.
+- Third-party notices: every NuGet package a published project resolved (obj/project.assets.json) and every Rust
+  crate the worker links (normal dependencies of br-worker from cargo metadata) contributes its licence and notice
+  files to LICENSES/third-party/<id>-<version>/, and LICENSES/third-party/README.txt lists each package and crate
+  with the licence its metadata declares. Native pieces in the repo (src/**/Native/*LICENSE*) are copied too.
   So do the runtime packs a self-contained or AOT publish downloads (project.frameworks.*.downloadDependencies) when
   the build ships them: the .NET runtime (NETCore.App, NativeAOT, ILCompiler) and the Windows SDK projection
   (Windows.SDK.NET.Ref). AspNetCore and WindowsDesktop packs are downloaded but not framework-referenced, so not shipped.
@@ -20,6 +21,7 @@ Self-test: python Scripts/release_layout.py --self-test
 import json
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -114,8 +116,80 @@ def _shipped_pack(pack: str, framework_refs: list[str]) -> bool:
     return any(pack.startswith(ref + ".Runtime.") or ref.startswith(pack) for ref in framework_refs)
 
 
-def write_notices(layout: Path, assets_files: list[Path], native_notices: list[Path]) -> int:
-    """Fills LICENSES/third-party in the layout. Returns the number of packages listed."""
+def _is_crate_notice(name: str) -> bool:
+    """Top-level LICENSE, COPYING or NOTICE file of a crate."""
+    p = Path(name)
+    if p.suffix.lower() in {".rs", ".toml", ".lock", ".json", ".xml", ".dll", ".exe", ".lib"}:
+        return False
+    return any(w in p.name.lower() for w in NOTICE_WORDS)
+
+
+def parse_cargo_metadata(data: dict, root_name: str = "br-worker") -> dict[tuple[str, str], tuple[str, Path, list[str], str]]:
+    """(name, version) -> (licence, crate_dir, notice_files, url) for root_name's normal (non-dev, non-build) graph."""
+    by_id = {p["id"]: p for p in data.get("packages", [])}
+    nodes = {n["id"]: n for n in data.get("resolve", {}).get("nodes", [])}
+    root_id = next((p["id"] for p in data.get("packages", []) if p.get("name") == root_name and p.get("source") is None), None)
+    if root_id is None:
+        raise SystemExit(f"release layout: crate {root_name} not found in cargo metadata")
+
+    seen: set[str] = set()
+    stack = [root_id]
+    while stack:
+        cur = stack.pop()
+        if cur in seen:
+            continue
+        seen.add(cur)
+        node = nodes.get(cur)
+        if not node:
+            continue
+        for dep in node.get("deps", []):
+            kinds = dep.get("dep_kinds", [])
+            if not kinds or any(k.get("kind") is None for k in kinds):
+                stack.append(dep["pkg"])
+
+    found: dict[tuple[str, str], tuple[str, Path, list[str], str]] = {}
+    for pid in seen:
+        pkg = by_id.get(pid)
+        if not pkg or pkg.get("source") is None:
+            continue
+        key = (pkg["name"], pkg["version"])
+        if key in found:
+            continue
+        crate_dir = Path(pkg["manifest_path"]).parent
+        files: list[str] = []
+        if crate_dir.is_dir():
+            files = sorted(p.name for p in crate_dir.iterdir() if p.is_file() and _is_crate_notice(p.name))
+            lic_file = pkg.get("license_file")
+            if lic_file and (crate_dir / lic_file).is_file() and lic_file not in files:
+                files.append(lic_file)
+        licence = pkg.get("license") or pkg.get("license_file") or "see crate"
+        url = pkg.get("repository") or pkg.get("homepage") or ""
+        found[key] = (licence, crate_dir, files, url)
+    return found
+
+
+def rust_crates(root_name: str = "br-worker") -> dict[tuple[str, str], tuple[str, Path, list[str], str]]:
+    """Collects normal dependencies of br-worker from cargo metadata for x86_64-pc-windows-msvc."""
+    if not shutil.which("cargo"):
+        raise SystemExit("release layout: cargo not found on PATH (install Rust via rustup)")
+    r = subprocess.run(
+        ["cargo", "metadata", "--format-version", "1", "--filter-platform", "x86_64-pc-windows-msvc"],
+        cwd=ROOT / "rust",
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        raise SystemExit(f"release layout: cargo metadata failed ({r.returncode}): {r.stderr.strip()}")
+    return parse_cargo_metadata(json.loads(r.stdout), root_name)
+
+
+def write_notices(
+    layout: Path,
+    assets_files: list[Path],
+    native_notices: list[Path],
+    crates: dict[tuple[str, str], tuple[str, Path, list[str], str]] | None = None,
+) -> int:
+    """Fills LICENSES/third-party in the layout. Returns the number of packages and crates listed."""
     dest = layout / THIRD_PARTY
     if dest.exists():
         shutil.rmtree(dest)
@@ -123,9 +197,9 @@ def write_notices(layout: Path, assets_files: list[Path], native_notices: list[P
     lines = [
         "Third-party components in this build",
         "",
-        "Each NuGet package below is listed with the licence its package metadata declares. Licence and notice files",
-        "shipped inside a package are copied into the folder named after it. Native components built from source",
-        "have their licence files in native/.",
+        "Each NuGet package and Rust crate below is listed with the licence its package metadata declares. Licence and notice",
+        "files shipped inside a package or crate are copied into the folder named after it. Native components built from",
+        "source have their licence files in native/.",
         "",
     ]
     pkgs = packages(assets_files)
@@ -141,6 +215,17 @@ def write_notices(layout: Path, assets_files: list[Path], native_notices: list[P
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, target)
                 lines.append(f"    {target.relative_to(dest).as_posix()}")
+    if crates:
+        lines += ["", "Rust crates (worker):"]
+        for (cname, ver), (licence, crate_dir, files, url) in sorted(crates.items(), key=lambda kv: (kv[0][0].lower(), kv[0][1])):
+            lines.append(f"{cname} {ver}: {licence}" + (f"; {url}" if url else ""))
+            for f in files:
+                src = crate_dir / f
+                if src.is_file():
+                    target = dest / f"{cname}-{ver}" / Path(f).name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src, target)
+                    lines.append(f"    {target.relative_to(dest).as_posix()}")
     if native_notices:
         lines += ["", "Native components:"]
         (dest / "native").mkdir(exist_ok=True)
@@ -148,7 +233,7 @@ def write_notices(layout: Path, assets_files: list[Path], native_notices: list[P
             shutil.copy2(src, dest / "native" / src.name)
             lines.append(f"    native/{src.name}")
     (dest / "README.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return len(pkgs)
+    return len(pkgs) + len(crates or {})
 
 
 def assets_for(projects: list[str]) -> list[Path]:
@@ -209,7 +294,7 @@ def finish(layout: Path, projects: list[str]) -> None:
     if lic.exists():
         shutil.rmtree(lic)
     shutil.copytree(ROOT / "LICENSES", lic)
-    n = write_notices(layout, assets_for(projects), native_notice_files())
+    n = write_notices(layout, assets_for(projects), native_notice_files(), rust_crates())
     vc = vc_runtime_dir()
     copied = copy_vc_runtime(layout, vc)
     with open(layout / THIRD_PARTY / "README.txt", "a", encoding="utf-8") as f:
@@ -276,6 +361,41 @@ def _self_test() -> None:
         assert len(copied) == 2 * len(VC_RUNTIME_DLLS), copied
         assert (layout / "worker" / "vcruntime140.dll").is_file() and (layout / "msvcp140.dll").is_file()
         assert is_shipped(Path("worker/msvcp140.dll"))
+        # Rust crate notices: normal deps via workspace crates included, dev/build deps excluded
+        crate_dir = t / "crates" / "demo-crate-1.2.3"
+        crate_dir.mkdir(parents=True)
+        (crate_dir / "LICENSE-MIT").write_text("MIT crate", encoding="utf-8")
+        (crate_dir / "NOTICE").write_text("Notice text", encoding="utf-8")
+        (crate_dir / "lib.rs").write_text("// license", encoding="utf-8")
+        meta = {
+            "packages": [
+                {"id": "br-worker", "name": "br-worker", "version": "0.3.0", "source": None, "manifest_path": str(t / "w" / "Cargo.toml")},
+                {"id": "br-contracts", "name": "br-contracts", "version": "0.3.0", "source": None, "manifest_path": str(t / "c" / "Cargo.toml")},
+                {"id": "demo-crate", "name": "demo-crate", "version": "1.2.3", "source": "registry+crates", "license": "MIT",
+                 "repository": "https://example.test/demo", "manifest_path": str(crate_dir / "Cargo.toml")},
+                {"id": "dev-only", "name": "dev-only", "version": "0.1.0", "source": "registry+crates", "license": "MIT", "manifest_path": str(crate_dir / "Cargo.toml")},
+                {"id": "build-only", "name": "build-only", "version": "0.1.0", "source": "registry+crates", "license": "MIT", "manifest_path": str(crate_dir / "Cargo.toml")},
+            ],
+            "resolve": {"nodes": [
+                {"id": "br-worker", "deps": [
+                    {"pkg": "br-contracts", "dep_kinds": [{"kind": None}]},
+                    {"pkg": "dev-only", "dep_kinds": [{"kind": "dev"}]},
+                ]},
+                {"id": "br-contracts", "deps": [
+                    {"pkg": "demo-crate", "dep_kinds": [{"kind": None}]},
+                    {"pkg": "build-only", "dep_kinds": [{"kind": "build"}]},
+                ]},
+                {"id": "demo-crate", "deps": []},
+            ]},
+        }
+        crates = parse_cargo_metadata(meta)
+        assert list(crates) == [("demo-crate", "1.2.3")], crates
+        assert write_notices(layout, [assets], [], crates) == 4
+        readme = (layout / THIRD_PARTY / "README.txt").read_text(encoding="utf-8")
+        assert "demo-crate 1.2.3: MIT; https://example.test/demo" in readme, readme
+        assert (layout / THIRD_PARTY / "demo-crate-1.2.3" / "LICENSE-MIT").read_text(encoding="utf-8") == "MIT crate"
+        assert (layout / THIRD_PARTY / "demo-crate-1.2.3" / "NOTICE").is_file()
+        assert not (layout / THIRD_PARTY / "demo-crate-1.2.3" / "lib.rs").exists()
     print("release_layout self-test ok")
 
 

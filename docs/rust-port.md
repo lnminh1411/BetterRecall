@@ -35,7 +35,7 @@ Written 2026-11-21. The plan for moving everything except the WinUI UI from C#/.
 | W3 | OCR (PaddleOCR, Windows OCR, box math), NER (BPE tokenizer, PII model, gate), audio (Silero VAD, Whisper through GenAI) | every Worker test has a cargo or conformance equivalent; real-model tests pass where models are installed |
 | W4 | Measure against the C# worker: start time, embed and OCR latency, memory, CPU at idle, install size | numbers written into this file; user review (R5) |
 
-After the review the C# worker project is removed and the build places the Rust exe at `worker\BetterRecall.Worker.exe`.
+After the review, the C# worker source and its ported unit tests were removed; `BetterRecall.Worker.csproj` builds and ships the Rust `br-worker` exe at `worker\BetterRecall.Worker.exe`, while `EndToEndTests` and `RealModelTests` remain as C# conformance tests.
 
 ## Status
 
@@ -44,6 +44,7 @@ After the review the C# worker project is removed and the build places the Rust 
 - 2026-11-21: W2 implemented — real inference backends (`OnnxBackend` via dynamic `ort` `api-24` + DirectML/QNN, hand-written `OpenVinoBackend` FFI), DXGI adapter / GPU / device / NSFW selection & cache, PIL-compatible `ImagePipeline` (`decode`/`resize`/`to_patches`), mmap `EmbeddingTable`, `Embedder`, pure-Rust SentencePiece `GemmaTokenizer` (BPE + Unigram), `NsfwClassifier`/`NsfwDetector`/`NsfwGate`, `ModelManifest`/`ModelCatalog`, `RealEngine` (embed, NSFW, bench, replanning, `device.json`), W2 cargo tests, `Scripts\stage_rust_worker.py`, and `BR_WORKER_DIR` in `BetterRecall.Agent.Tests`; OCR/NER/audio deferred to W3.
 - 2026-11-21: W3 implemented — OCR (`OcrMath`, `PaddleOcr`, WinRT `WindowsOcr`), NER (`BpeTokenizer`, `PiiNer`, `NerGate`), Audio (`SileroVad`, dynamic `WhisperGenAi` FFI), full `RealEngine` wiring (OCR/NER/`hello` preload/VAD/`Whisper`, zeroed image buffers), ported W3 test suites plus end-to-end silence check in `w2_tests`, and updated `Scripts\stage_rust_worker.py` (GenAI DLLs included when built, `libSkiaSharp.dll` excluded); all C# worker behaviour reproduced (`RealModelTests` stay C#-only per R3).
 - 2026-11-21: W4 measured (below). Pilot awaits the user's review (R5).
+- 2026-11-21: Worker swap done — C# worker source and unit tests removed; `BetterRecall.Worker.csproj` wraps `cargo build -p br-worker` and ships `BetterRecall.Worker.exe` with the native DLLs, `Scripts\stage_rust_worker.py` removed, and `Scripts\release_layout.py` collects Rust crate notices.
 
 ## W4: Rust worker against the C# worker
 
