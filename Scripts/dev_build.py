@@ -33,7 +33,13 @@ LAYOUT = {
     "Worker": "worker",
     "UI": "ui",
 }
-TESTS = ["Core", "Agent", "Worker", "UI"]
+TESTS = [
+    "tests/BetterRecall.Core.Tests",
+    "tests/BetterRecall.Agent.Tests",
+    "tests/BetterRecall.Worker.Tests",
+    "tests/BetterRecall.UI.Tests",
+    "tests/BetterRecall.Agent.Conformance",
+]
 DEV_MARKER = release_layout.DEV_MARKER  # InstallLayout.DevBuildMarker
 
 
@@ -93,7 +99,7 @@ def main() -> None:
             rust_env["CARGO_TARGET_DIR"] = str(ROOT / "artifacts" / "cargo")
         run(["cargo", "test", "--workspace", "-j", "4"], rust_env, cwd=ROOT / "rust")
         for t in TESTS:
-            run(["dotnet", "test", f"tests/BetterRecall.{t}.Tests", "-c", a.config], env)
+            run(["dotnet", "test", t, "-c", a.config], env)
 
     for p in only:
         dest = out / LAYOUT[p] if LAYOUT[p] else out

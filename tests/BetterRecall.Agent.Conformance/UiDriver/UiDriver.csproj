@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Test helper staged as ui\BetterRecall.UI.exe so the UI pipe's image-path trust check passes using the real UI client code. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.20348.0</SupportedOSPlatformVersion>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>BetterRecall.UI</AssemblyName>
+    <SelfContained>false</SelfContained>
+    <IsPackable>false</IsPackable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\..\..\src\BetterRecall.UI\Logic\AgentClient.cs" Link="UiLogic\AgentClient.cs" />
+    <Compile Include="..\..\..\src\BetterRecall.UI\Logic\AgentResult.cs" Link="UiLogic\AgentResult.cs" />
+    <Compile Include="..\..\..\src\BetterRecall.UI\Logic\ServerTrust.cs" Link="UiLogic\ServerTrust.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\src\BetterRecall.Contracts\BetterRecall.Contracts.csproj" />
+  </ItemGroup>
+</Project>

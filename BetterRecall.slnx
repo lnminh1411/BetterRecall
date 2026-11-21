@@ -24,6 +24,9 @@
     </Project>
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/BetterRecall.Agent.Conformance/BetterRecall.Agent.Conformance.csproj">
+      <Platform Project="x64" />
+    </Project>
     <Project Path="tests/BetterRecall.Agent.Tests/BetterRecall.Agent.Tests.csproj">
       <Platform Project="x64" />
     </Project>

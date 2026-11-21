@@ -66,6 +66,7 @@ Rules for every stage:
 - 2026-11-21: W3 implemented — OCR (`OcrMath`, `PaddleOcr`, WinRT `WindowsOcr`), NER (`BpeTokenizer`, `PiiNer`, `NerGate`), Audio (`SileroVad`, dynamic `WhisperGenAi` FFI), full `RealEngine` wiring (OCR/NER/`hello` preload/VAD/`Whisper`, zeroed image buffers), ported W3 test suites plus end-to-end silence check in `w2_tests`, and updated `Scripts\stage_rust_worker.py` (GenAI DLLs included when built, `libSkiaSharp.dll` excluded); all C# worker behaviour reproduced (`RealModelTests` stay C#-only per R3).
 - 2026-11-21: W4 measured (below). Pilot awaits the user's review (R5).
 - 2026-11-21: Worker swap done — C# worker source and unit tests removed; `BetterRecall.Worker.csproj` wraps `cargo build -p br-worker` and ships `BetterRecall.Worker.exe` with the native DLLs, `Scripts\stage_rust_worker.py` removed, and `Scripts\release_layout.py` collects Rust crate notices.
+- 2026-11-21: A0 implemented — C# agent conformance suite in `tests\BetterRecall.Agent.Conformance` (38 process-level tests over the UI, public IPC, CLI and MCP pipes with `BR_AGENT_DIR` override and scratch `BETTERRECALL_HOME`); passes against the C# agent, 38 of 38 in 55 s, repeatably.
 
 ## W4: Rust worker against the C# worker
 
