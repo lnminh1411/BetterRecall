@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.20348.0</SupportedOSPlatformVersion>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>BetterRecall.Agent.Conformance</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Remove="UiDriver\**" />
+    <None Remove="UiDriver\**" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\BetterRecall.Contracts\BetterRecall.Contracts.csproj" />
+    <!-- Referenced only for PipeClient and PipeConnectResult (the C# IPC client). -->
+    <ProjectReference Include="..\..\src\BetterRecall.Core\BetterRecall.Core.csproj" />
+    <!-- Build-order references only: the conformance suite launches these executables as separate processes. -->
+    <ProjectReference Include="..\..\src\BetterRecall.Agent\BetterRecall.Agent.csproj" ReferenceOutputAssembly="false" Private="false" />
+    <ProjectReference Include="..\..\src\BetterRecall.Worker\BetterRecall.Worker.csproj" ReferenceOutputAssembly="false" Private="false" />
+    <ProjectReference Include="..\..\src\BetterRecall.Cli\BetterRecall.Cli.csproj" ReferenceOutputAssembly="false" Private="false" />
+    <ProjectReference Include="..\..\src\BetterRecall.Mcp\BetterRecall.Mcp.csproj" ReferenceOutputAssembly="false" Private="false" />
+    <ProjectReference Include="UiDriver\UiDriver.csproj" ReferenceOutputAssembly="false" Private="false" />
+  </ItemGroup>
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+</Project>
