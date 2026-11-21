@@ -37,6 +37,27 @@ Written 2026-11-21. The plan for moving everything except the WinUI UI from C#/.
 
 After the review, the C# worker source and its ported unit tests were removed; `BetterRecall.Worker.csproj` builds and ships the Rust `br-worker` exe at `worker\BetterRecall.Worker.exe`, while `EndToEndTests` and `RealModelTests` remain as C# conformance tests.
 
+## Agent and Core milestones
+
+Started 2026-11-21. `BetterRecall.Core` is a library hosted inside the agent process, so both move together into one exe: `rust\crates\br-core` (library) and `rust\crates\br-agent` (bin, staged as `BetterRecall.Agent.exe`). The C# Core library stays in the tree until phase 3, because the C# Cli and Mcp still reference it.
+
+Rules for every stage:
+- Threads and blocking Win32 I/O, no async runtime, as in `br-worker`.
+- Natives come from the files the C# agent already ships: `avif.dll` (libavif with libaom, AVIF stays on the CPU), `jxl*.dll`, `libvpl.dll`, and the SQLite3MC library from its NuGet package. No new native downloads.
+- Clean break (R2): file formats may stay as they are, and nothing reads 0.2.x data.
+- Each stage ports the C# unit tests for the code it moves into cargo tests, and is merged to `main` after its audit.
+
+| Stage | Scope | Done when |
+|---|---|---|
+| A0 | C# conformance suite `tests\BetterRecall.Agent.Conformance`: starts an agent exe (the C# build by default, `BR_AGENT_DIR` override) on a scratch `BETTERRECALL_HOME`, with capture, replay and audio off and the passphrase key method, and drives it over the UI, public IPC and MCP pipes through the Contracts types and the C# Cli and Mcp clients | the suite passes against the C# agent |
+| A1 | `br-contracts` additions (full settings, layout, pipe names, UI, IPC and MCP message types) and `br-core` foundation: settings store, logging, crypto (blob cipher, secure key, key vault with TPM, Hello, Argon2id and DPAPI, unlock password) | ported settings and crypto tests pass |
+| A2 | `br-core` store: SQLite3MC through `rusqlite`, encrypted store with chats and storage, vector index, export journal and exporter, recommender | ported store and storage tests pass |
+| A3 | `br-core` pipes and AI: pipe server, manager and client, process trust checks, command processor, core host, cloud chat and describe providers over HTTP, API key store | ported command, pipe, MCP and provider tests pass |
+| A4 | `br-agent` host: arguments, single instance, tray and message window, hotkeys, hardware probe, governance, memory isolation, worker supervisor and client, embedding scheduler, guardrails; capture, replay and audio not yet wired | A0 passes against the Rust agent |
+| A5 | Capture and keyframes: output capture, change map, dHash, monitor and GPU selection, image codec, AVIF and JPEG XL writers, keyframe pipeline, encode governor, thumbnails, redaction | ported capture tests pass; keyframes land in the store |
+| A6 | Replay and audio: oneVPL AV1 and Media Foundation encoders, bitstream, fMP4 writer, packet ring, replay engine and library, cursor overlay, WASAPI, AAC, speech segmenter | ported replay and audio tests pass; a saved replay plays |
+| A7 | Bench, self tests and the keyframe budget run; measure against the C# agent (start, idle CPU, capture CPU with AVIF under 1%, memory, size) | numbers written here; user review before the swap |
+
 ## Status
 
 - 2026-11-21: version 0.3.0-dev, plan written. W1 next.
