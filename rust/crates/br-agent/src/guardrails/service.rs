@@ -155,6 +155,10 @@ impl GuardrailService {
         }
     }
 
+    pub fn set_snapshot_for_test(&self, snap: GuardSnapshot) {
+        *self.inner.snapshot.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(snap);
+    }
+
     pub fn current_for_keyframe(&self, max_age_ms: i64) -> GuardSnapshot {
         let s = self.current(max_age_ms);
         Self::fresh_for_grab(

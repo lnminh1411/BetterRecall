@@ -155,6 +155,8 @@ dependencies = [
  "br-contracts",
  "br-core",
  "chrono",
+ "fancy-regex",
+ "libloading",
  "serde",
  "serde_json",
  "thiserror",

@@ -26,6 +26,10 @@ use windows::Win32::System::Threading::{
 };
 use windows::core::PCWSTR;
 
+use crate::capture::{
+    CaptureService, CaptureServiceOptions, ImageCodec, ImageCodecDecoder, KeyframePipeline,
+    KeyframeStore, MonitorSelection, WorkerKeyframeReader,
+};
 use crate::guardrails::GuardrailService;
 use crate::host::agent_state::{PauseController, ReadGate};
 use crate::host::diagnostics::Diagnostics;
@@ -38,14 +42,16 @@ use crate::native::{
     WTS_CONSOLE_CONNECT, WTS_CONSOLE_DISCONNECT, WTS_REMOTE_CONNECT, WTS_REMOTE_DISCONNECT,
     WTS_SESSION_LOCK, WTS_SESSION_UNLOCK, session_locked_now, tick_count64, to_wide_z,
 };
+use crate::privacy::{AgentDescribeRedactor, RedactionMasks};
 use crate::scheduling::{
     EmbeddingScheduler, EmbeddingStore, Governance, GovernanceInputs, SystemProbe,
 };
 use crate::seams::{
     AudioSubsystem, CaptureSubsystem, KeyframeSubsystem, ReplaySubsystem, UnavailableAudio,
-    UnavailableCapture, UnavailableKeyframes, UnavailableReplay, UnavailableThumbnailer,
+    UnavailableReplay,
 };
 use crate::security::MemoryIsolation;
+use crate::thumbs::{AgentThumbnailer, KeyframeBlobStore};
 use crate::util::AgentLog;
 use crate::worker::{
     ProcessWorkerLauncher, QueryEmbedderImpl, VcRuntime, WorkerClient, WorkerError,
@@ -145,9 +151,10 @@ pub struct AgentHost {
     pause: Arc<PauseController>,
     supervisor: Arc<WorkerSupervisor>,
     worker: Arc<WorkerClient>,
-    thumbs: Arc<dyn Thumbnailer>,
-    capture: Arc<dyn CaptureSubsystem>,
-    keyframes: Arc<dyn KeyframeSubsystem>,
+    redactions: Arc<RedactionMasks>,
+    thumbs: Arc<AgentThumbnailer>,
+    capture: Mutex<Option<Arc<CaptureService>>>,
+    keyframes: Mutex<Option<Arc<KeyframePipeline>>>,
     replays: Arc<dyn ReplaySubsystem>,
     audio: Arc<dyn AudioSubsystem>,
     cts: CancelSource,
@@ -202,6 +209,16 @@ impl AgentHost {
             settings_for_idle.current().inference.idle_exit_s
         });
         let worker = Arc::new(WorkerClient::new(supervisor.clone()));
+        let core_for_thumbs = core.clone();
+        let settings_for_thumbs = settings_store.clone();
+        let thumbs = Arc::new(AgentThumbnailer::new(
+            Arc::new(move || {
+                core_for_thumbs
+                    .store()
+                    .map(|st| st as Arc<dyn KeyframeBlobStore>)
+            }),
+            Arc::new(move || settings_for_thumbs.current()),
+        ));
 
         Arc::new(Self {
             core,
@@ -210,9 +227,10 @@ impl AgentHost {
             pause: Arc::new(PauseController::new()),
             supervisor,
             worker,
-            thumbs: Arc::new(UnavailableThumbnailer),
-            capture: Arc::new(UnavailableCapture),
-            keyframes: Arc::new(UnavailableKeyframes),
+            redactions: Arc::new(RedactionMasks::new()),
+            thumbs,
+            capture: Mutex::new(None),
+            keyframes: Mutex::new(None),
             replays: Arc::new(UnavailableReplay),
             audio: Arc::new(UnavailableAudio),
             cts: CancelSource::new(),
@@ -276,12 +294,49 @@ impl AgentHost {
             .clone()
     }
 
+    pub fn thumbs(&self) -> &Arc<AgentThumbnailer> {
+        &self.thumbs
+    }
+
+    pub fn capture(&self) -> Option<Arc<CaptureService>> {
+        self.capture
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub fn keyframes(&self) -> Option<Arc<KeyframePipeline>> {
+        self.keyframes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     pub fn capture_diagnostics(&self) -> Option<String> {
-        self.capture.diagnostics()
+        self.capture().and_then(|c| c.diagnostics())
     }
 
     pub fn keyframe_diagnostics(&self) -> Option<String> {
-        self.keyframes.diagnostics()
+        self.keyframes().and_then(|k| k.diagnostics())
+    }
+
+    fn on_capture_stored(&self, meta: CaptureMeta) {
+        *self.stats_cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        if let Some(sc) = self.scheduler() {
+            sc.signal();
+        }
+        let listeners: Vec<CaptureListener> = self
+            .capture_listeners
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|(_, cb)| cb.clone())
+            .collect();
+        for cb in listeners {
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cb(&meta))).is_err() {
+                AgentLog::warn("CaptureStored handler panicked");
+            }
+        }
     }
 
     pub fn request_quit(&self) {
@@ -356,8 +411,14 @@ impl AgentHost {
             }));
         }
         {
-            let cap = self.capture.clone();
-            window.set_on_display_changed(Arc::new(move || cap.rebuild()));
+            let me = Arc::downgrade(self);
+            window.set_on_display_changed(Arc::new(move || {
+                if let Some(h) = me.upgrade()
+                    && let Some(c) = h.capture()
+                {
+                    c.rebuild();
+                }
+            }));
         }
         {
             let me = Arc::downgrade(self);
@@ -375,7 +436,7 @@ impl AgentHost {
                     MenuStateSnapshot {
                         status: h.status_line(),
                         paused: matches!(reason.as_deref(), Some("user" | "ipc")),
-                        replay_on: h.capture.replay_active(),
+                        replay_on: h.capture().is_some_and(|c| c.replay_active()),
                     }
                 } else {
                     MenuStateSnapshot {
@@ -415,7 +476,7 @@ impl AgentHost {
         let pause_for_sched = self.pause.clone();
         let me_for_dim = Arc::downgrade(self);
         let probe_for_sched = probe.clone();
-        let scheduler = EmbeddingScheduler::new(
+        let scheduler = EmbeddingScheduler::with_decoder(
             Arc::new(move || {
                 core_for_sched
                     .store()
@@ -450,12 +511,64 @@ impl AgentHost {
                     .map(|h| h.settings().index.dim)
                     .unwrap_or(768)
             })),
+            Arc::new(ImageCodecDecoder),
         );
         *self.scheduler.lock().unwrap_or_else(|e| e.into_inner()) = Some(scheduler.clone());
 
+        let core_for_kf = self.core.clone();
+        let me_for_kf_s = Arc::downgrade(self);
+        let me_for_kf_stored = Arc::downgrade(self);
+        let pipeline = KeyframePipeline::new(
+            Arc::new(move || {
+                core_for_kf
+                    .store()
+                    .map(|st| st as Arc<dyn KeyframeStore>)
+            }),
+            Arc::new(move || {
+                me_for_kf_s
+                    .upgrade()
+                    .map(|h| h.settings())
+                    .unwrap_or_default()
+            }),
+            Arc::new(move |meta| {
+                if let Some(h) = me_for_kf_stored.upgrade() {
+                    h.on_capture_stored(meta);
+                }
+            }),
+            Some(Arc::new(WorkerKeyframeReader::new(self.worker.clone()))),
+            Some(self.redactions.clone()),
+            None,
+        );
+        *self.keyframes.lock().unwrap_or_else(|e| e.into_inner()) = Some(pipeline.clone());
+
+        let me_for_desc_s = Arc::downgrade(self);
+        let core_for_desc = self.core.clone();
+        let pipe_for_desc = Arc::downgrade(&pipeline);
+        let describe_redactor = Arc::new(AgentDescribeRedactor::new(
+            Arc::new(WorkerKeyframeReader::new(self.worker.clone())),
+            Arc::new(move || {
+                me_for_desc_s
+                    .upgrade()
+                    .map(|h| h.settings())
+                    .unwrap_or_default()
+            }),
+            Some(Arc::new(move || {
+                core_for_desc
+                    .store()
+                    .map(|st| st as Arc<dyn KeyframeBlobStore>)
+            })),
+            Some(Arc::new(move || {
+                pipe_for_desc
+                    .upgrade()
+                    .map(|p| p.ocr_wait())
+                    .unwrap_or(KeyframePipeline::OCR_TIMEOUT)
+            })),
+        ));
+        self.core.set_describe_redactor(Some(describe_redactor));
+
         let me_for_guard_s = Arc::downgrade(self);
         let me_for_guard_lock = Arc::downgrade(self);
-        let cap_for_guard = self.capture.clone();
+        let me_for_guard_bounds = Arc::downgrade(self);
         let guard = GuardrailService::new(
             move || {
                 me_for_guard_s
@@ -468,12 +581,24 @@ impl AgentHost {
                     .upgrade()
                     .is_some_and(|h| h.session_locked.load(Ordering::Acquire))
             },
-            move || cap_for_guard.monitor_bounds(),
+            move || {
+                me_for_guard_bounds
+                    .upgrade()
+                    .and_then(|h| h.capture())
+                    .map(|c| c.monitor_bounds())
+                    .unwrap_or_default()
+            },
             &self.opt.install_dir,
         );
         {
-            let cap = self.capture.clone();
-            guard.on_foreground_changed(Arc::new(move |_| cap.on_foreground_changed()));
+            let me = Arc::downgrade(self);
+            guard.on_foreground_changed(Arc::new(move |_| {
+                if let Some(h) = me.upgrade()
+                    && let Some(c) = h.capture()
+                {
+                    c.on_foreground_changed();
+                }
+            }));
         }
         {
             let g_weak = Arc::downgrade(&guard);
@@ -512,8 +637,14 @@ impl AgentHost {
         }
 
         {
-            let cap = self.capture.clone();
-            self.pause.on_changed(move || cap.apply_settings());
+            let me = Arc::downgrade(self);
+            self.pause.on_changed(move || {
+                if let Some(h) = me.upgrade()
+                    && let Some(c) = h.capture()
+                {
+                    c.apply_settings();
+                }
+            });
         }
         self.pause.on_expired(|r| {
             if r == "user" || r == "ipc" {
@@ -708,14 +839,54 @@ impl AgentHost {
             return;
         }
         let s = self.settings();
-        if s.security.memory_isolation {
+        let lock_mem = s.security.memory_isolation;
+        if lock_mem {
             let ring = (s.replay.bitrate_kbps as i64) * 1000 / 8
                 * (s.replay.seconds as i64 + 2)
                 * 3
                 + 4 * 1024 * 1024;
             MemoryIsolation::reserve_working_set(ring);
         }
-        self.capture.start();
+        if let Some(guard) = self.guard() {
+            let me_s = Arc::downgrade(self);
+            let me_kf = Arc::downgrade(self);
+            let me_rp = Arc::downgrade(self);
+            let pause_samples = self.pause.clone();
+            let cap = CaptureService::with_options(
+                Arc::new(move || me_s.upgrade().map(|h| h.settings()).unwrap_or_default()),
+                Arc::new(move || {
+                    me_kf.upgrade().is_none_or(|h| {
+                        let st = h.settings();
+                        h.pause.keyframes_paused()
+                            || h.store().is_none()
+                            || !st.capture.enabled
+                            || !st.capture.consented
+                    })
+                }),
+                Arc::new(move || {
+                    me_rp.upgrade().is_none_or(|h| {
+                        let st = h.settings();
+                        Self::should_pause_replay(
+                            &h.pause,
+                            st.replay.during_fullscreen,
+                            h.store().is_some(),
+                            st.capture.consented,
+                        )
+                    })
+                }),
+                guard,
+                self.keyframes(),
+                Some(self.redactions.clone()),
+                CaptureServiceOptions {
+                    lock_memory: lock_mem,
+                    samples_paused: Some(Arc::new(move || pause_samples.continuous_paused(true))),
+                    monitor_selection_file: Some(self.opt.home.join(MonitorSelection::FILE_NAME)),
+                },
+            );
+            *self.capture.lock().unwrap_or_else(|e| e.into_inner()) = Some(cap.clone());
+            cap.start();
+        }
+        ImageCodec::preload();
         self.audio.sync_sources(&s, true);
 
         let me = Arc::downgrade(self);
@@ -876,9 +1047,11 @@ impl AgentHost {
                     me.start_capture();
                 }
                 if old_monitors != next.capture.monitors {
-                    me.capture.rebuild();
-                } else {
-                    me.capture.apply_settings();
+                    if let Some(c) = me.capture() {
+                        c.rebuild();
+                    }
+                } else if let Some(c) = me.capture() {
+                    c.apply_settings();
                 }
                 me.audio
                     .sync_sources(&next, me.capture_started.load(Ordering::Acquire));
@@ -893,8 +1066,12 @@ impl AgentHost {
                 .spawn(move || me.storage_check());
         }
         if Self::text_detection_turned_on(&old, &s) {
-            self.keyframes.mark_all_unchecked();
-            self.capture.retry_all();
+            if let Some(kf) = self.keyframes() {
+                kf.mark_all_unchecked();
+            }
+            if let Some(c) = self.capture() {
+                c.retry_all();
+            }
         }
         if let Some(key) = WorkerSettingsDiff::changed(&old, &s) {
             self.supervisor.request_restart(key);
@@ -1081,7 +1258,9 @@ impl AgentHost {
         }
         *self.stats_cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
         if Self::reaches_ring(n, Utc::now(), self.settings().replay.seconds) {
-            self.capture.forget_recent();
+            if let Some(c) = self.capture() {
+                c.forget_recent();
+            }
             self.replays.clear_sampler();
             self.audio.clear();
             self.replays.discard_saves_in_flight();
@@ -1157,7 +1336,7 @@ impl AgentHost {
             if !VcRuntime::present() {
                 return "Capturing (search off: install the Microsoft Visual C++ 2015-2022 Redistributable, x64)".to_string();
             }
-            if s.ocr.enabled && self.keyframes.ocr_failing() {
+            if s.ocr.enabled && self.keyframes().is_some_and(|k| k.ocr_failing()) {
                 let any_text = s.privacy.redact_passwords
                     || s.privacy.redact_cards
                     || s.privacy.redact_ids
@@ -1173,12 +1352,12 @@ impl AgentHost {
                 };
             }
             if s.replay.enabled
-                && let Some(err) = self.capture.replay_last_error()
+                && let Some(err) = self.capture().and_then(|c| c.replay_last_error())
                 && err.starts_with("encoder failed")
             {
                 return format!("Capturing (replay {err})");
             }
-            if let Some(budget) = self.keyframes.budget_status() {
+            if let Some(budget) = self.keyframes().and_then(|k| k.budget_status()) {
                 return budget;
             }
             return "Capturing".to_string();
@@ -1292,14 +1471,14 @@ impl AgentHost {
         if !VcRuntime::present() {
             list.push("vc-runtime-missing".to_string());
         }
-        if self.capture.replay_text_unchecked() {
+        if self.capture().is_some_and(|c| c.replay_text_unchecked()) {
             list.push("replay-text-unchecked".to_string());
         }
         if self.settings().ocr.enabled {
-            if self.keyframes.ocr_failing() {
+            if self.keyframes().is_some_and(|k| k.ocr_failing()) {
                 list.push("ocr-failing".to_string());
             }
-            if self.keyframes.entities_missing() {
+            if self.keyframes().is_some_and(|k| k.entities_missing()) {
                 list.push("ner-unavailable".to_string());
             }
         }
@@ -1351,13 +1530,21 @@ impl AgentHost {
         };
         if should_run {
             let core = self.core.clone();
-            let cap = self.capture.clone();
-            let kf = self.keyframes.clone();
+            let cap = self.capture();
+            let kf = self.keyframes();
             let sched = self.scheduler();
 
             let t1 = thread::spawn(move || core.stop_pipes());
-            let t2 = thread::spawn(move || cap.stop());
-            let t3 = thread::spawn(move || kf.stop());
+            let t2 = thread::spawn(move || {
+                if let Some(c) = cap {
+                    c.stop();
+                }
+            });
+            let t3 = thread::spawn(move || {
+                if let Some(k) = kf {
+                    k.stop();
+                }
+            });
             let t4 = thread::spawn(move || {
                 if let Some(s) = sched {
                     s.stop();
@@ -1599,7 +1786,9 @@ impl AgentControl for AgentHost {
 
     fn panic(&self) {
         let sw = Instant::now();
-        self.capture.panic();
+        if let Some(c) = self.capture() {
+            c.panic();
+        }
         self.replays.clear_sampler();
         self.replays.discard_saves_in_flight();
         if let Some(sc) = self.scheduler() {

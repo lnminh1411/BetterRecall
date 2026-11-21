@@ -1062,3 +1062,299 @@ pub fn resolve_worker_exe() -> Option<PathBuf> {
     }
     None
 }
+
+// ---------------- A5 test helpers ----------------
+
+use br_agent::capture::{
+    ImageCodec, KeyframeReader, KeyframeStore, KeyframeStoreError, ReplaySample, ReplaySampleSink,
+};
+use br_agent::thumbs::KeyframeBlobStore;
+use br_contracts::{OcrEntity, OcrLine, ThumbData};
+
+impl KeyframeStore for FakeStore {
+    fn add_screen_capture(&self, cap: &NewScreenCapture) -> Result<String, KeyframeStoreError> {
+        Ok(self.add_screen(cap.clone()))
+    }
+}
+
+impl KeyframeBlobStore for FakeStore {
+    fn get_keyframe(&self, id: &str) -> Result<Option<ThumbData>, String> {
+        let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(g.screens.get(id).map(|c| ThumbData {
+            id: id.to_string(),
+            mime: c.image_mime.clone(),
+            width: c.width,
+            height: c.height,
+            bytes: c.image.clone(),
+        }))
+    }
+}
+
+pub struct FakeSampleSink {
+    pub samples: Mutex<Vec<ReplaySample>>,
+}
+
+impl FakeSampleSink {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            samples: Mutex::new(Vec::new()),
+        })
+    }
+
+    pub fn count(&self) -> usize {
+        self.samples
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
+    }
+
+    pub fn snapshot(&self) -> Vec<ReplaySample> {
+        self.samples
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+}
+
+impl ReplaySampleSink for FakeSampleSink {
+    fn add(&self, sample: ReplaySample, _keep_seconds: i32) {
+        self.samples
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(sample);
+    }
+}
+
+type AnswerFn = Arc<dyn Fn() -> Result<OcrResult, WorkerError> + Send + Sync>;
+type ReadyFn = Arc<dyn Fn(&CancelToken) -> Result<i32, WorkerError> + Send + Sync>;
+
+pub struct SwitchReader {
+    answer: Mutex<AnswerFn>,
+    ready_fn: Mutex<Option<ReadyFn>>,
+    is_ready_flag: AtomicBool,
+    delay_ms: AtomicU64,
+    pub calls: AtomicUsize,
+    pub last_w: Mutex<i32>,
+    pub last_h: Mutex<i32>,
+    pub last_entities: Mutex<Option<bool>>,
+}
+
+impl SwitchReader {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            answer: Mutex::new(Arc::new(|| {
+                Ok(OcrResult {
+                    lines: Vec::new(),
+                    engine: "fake".to_string(),
+                    ms: 1.0,
+                    entities_missing: false,
+                })
+            })),
+            ready_fn: Mutex::new(None),
+            is_ready_flag: AtomicBool::new(true),
+            delay_ms: AtomicU64::new(0),
+            calls: AtomicUsize::new(0),
+            last_w: Mutex::new(0),
+            last_h: Mutex::new(0),
+            last_entities: Mutex::new(None),
+        })
+    }
+
+    pub fn with_answer(
+        f: impl Fn() -> Result<OcrResult, WorkerError> + Send + Sync + 'static,
+    ) -> Arc<Self> {
+        let r = Self::new();
+        r.set_answer(f);
+        r
+    }
+
+    pub fn set_answer(
+        &self,
+        f: impl Fn() -> Result<OcrResult, WorkerError> + Send + Sync + 'static,
+    ) {
+        *self.answer.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(f);
+    }
+
+    pub fn set_ready(
+        &self,
+        is_ready: bool,
+        f: impl Fn(&CancelToken) -> Result<i32, WorkerError> + Send + Sync + 'static,
+    ) {
+        self.is_ready_flag.store(is_ready, Ordering::Release);
+        *self.ready_fn.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(f));
+    }
+
+    pub fn set_is_ready(&self, ready: bool) {
+        self.is_ready_flag.store(ready, Ordering::Release);
+    }
+
+    pub fn set_delay(&self, d: Duration) {
+        self.delay_ms.store(d.as_millis() as u64, Ordering::Release);
+    }
+}
+
+impl KeyframeReader for SwitchReader {
+    fn read(
+        &self,
+        _bgra: &[u8],
+        width: i32,
+        height: i32,
+        _stride: i32,
+        entities: bool,
+        ct: &CancelToken,
+    ) -> Result<OcrResult, WorkerError> {
+        self.calls.fetch_add(1, Ordering::AcqRel);
+        *self.last_w.lock().unwrap_or_else(|e| e.into_inner()) = width;
+        *self.last_h.lock().unwrap_or_else(|e| e.into_inner()) = height;
+        *self.last_entities.lock().unwrap_or_else(|e| e.into_inner()) = Some(entities);
+        let d = self.delay_ms.load(Ordering::Acquire);
+        if d > 0 && ct.wait_timeout(Duration::from_millis(d)) {
+            return Err(WorkerError::Cancelled);
+        }
+        if ct.is_cancelled() {
+            return Err(WorkerError::Cancelled);
+        }
+        let f = self.answer.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        f()
+    }
+
+    fn is_ready(&self) -> bool {
+        self.is_ready_flag.load(Ordering::Acquire)
+    }
+
+    fn ready(&self, ct: &CancelToken) -> Result<i32, WorkerError> {
+        let f = self
+            .ready_fn
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        match f {
+            Some(cb) => cb(ct),
+            None => Ok(0),
+        }
+    }
+}
+
+/// Deterministic LCG so synthetic screen generators match C# tests without extra crates.
+struct Lcg(u64);
+
+impl Lcg {
+    fn new(seed: u64) -> Self {
+        Self(seed.wrapping_add(0x9E37_79B9_7F4A_7C15))
+    }
+
+    fn next_u32(&mut self) -> u32 {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (self.0 >> 32) as u32
+    }
+
+    fn range(&mut self, lo: i32, hi: i32) -> i32 {
+        lo + (self.next_u32() as i32).rem_euclid(hi - lo)
+    }
+}
+
+pub fn screen_flat(w: i32, h: i32, v: u8) -> Vec<u8> {
+    let mut px = vec![0u8; (w as usize) * (h as usize) * 4];
+    for c in px.chunks_exact_mut(4) {
+        c[0] = v;
+        c[1] = v;
+        c[2] = v;
+        c[3] = 255;
+    }
+    px
+}
+
+pub fn screen_rect(
+    px: &mut [u8],
+    w: i32,
+    x0: i32,
+    y0: i32,
+    rw: i32,
+    rh: i32,
+    bgr: (u8, u8, u8),
+) {
+    for y in y0..(y0 + rh) {
+        for x in x0..(x0 + rw) {
+            let i = ((y * w + x) as usize) * 4;
+            px[i] = bgr.0;
+            px[i + 1] = bgr.1;
+            px[i + 2] = bgr.2;
+        }
+    }
+}
+
+pub fn screen_text(px: &mut [u8], w: i32, x0: i32, y0: i32, rw: i32, rh: i32, seed: u64) {
+    let mut rnd = Lcg::new(seed);
+    let mut line = y0;
+    while line + 10 <= y0 + rh {
+        let mut x = x0;
+        while x < x0 + rw - 2 {
+            let width = rnd.range(1, 3);
+            let top = line + rnd.range(0, 3);
+            for y in top..(line + 10) {
+                for dx in 0..width {
+                    let i = ((y * w + x + dx) as usize) * 4;
+                    px[i] = 20;
+                    px[i + 1] = 20;
+                    px[i + 2] = 20;
+                }
+            }
+            x += rnd.range(4, 7);
+        }
+        line += 16;
+    }
+}
+
+pub fn screen_gradient(px: &mut [u8], w: i32, x0: i32, y0: i32, rw: i32, rh: i32) {
+    for y in y0..(y0 + rh) {
+        for x in x0..(x0 + rw) {
+            let i = ((y * w + x) as usize) * 4;
+            px[i] = (x * 255 / w) as u8;
+            px[i + 1] = (y * 255 / (y0 + rh)) as u8;
+            px[i + 2] = 128;
+        }
+    }
+}
+
+pub fn screen_ui(w: i32, h: i32) -> Vec<u8> {
+    let mut px = screen_flat(w, h, 250);
+    screen_rect(&mut px, w, 0, 0, w, 40, (60, 40, 30));
+    screen_text(&mut px, w, 40, 80, w - 80, h - 200, 5);
+    screen_gradient(&mut px, w, w / 2, h - 110, w / 2 - 10, 100);
+    px
+}
+
+pub fn mean_abs_diff(a: &[u8], b: &[u8]) -> f64 {
+    let mut sum = 0u64;
+    let mut n = 0u64;
+    for (ca, cb) in a.chunks_exact(4).zip(b.chunks_exact(4)) {
+        for c in 0..3 {
+            sum += ca[c].abs_diff(cb[c]) as u64;
+            n += 1;
+        }
+    }
+    sum as f64 / n.max(1) as f64
+}
+
+pub fn white_webp(w: i32, h: i32) -> Vec<u8> {
+    let px = screen_flat(w, h, 255);
+    unsafe { ImageCodec::encode_bgra(px.as_ptr(), w, h, w * 4, "webp", 100) }.expect("encode webp")
+}
+
+pub fn ocr_line(text: &str, x: i32, y: i32, h: i32, entities: Option<Vec<OcrEntity>>) -> OcrLine {
+    let len = text.chars().count();
+    let cuts: Vec<i32> = (0..=len).map(|i| x + (i as i32) * 10).collect();
+    OcrLine {
+        text: text.to_string(),
+        x,
+        y,
+        w: (len as i32) * 10,
+        h,
+        confidence: 0.95,
+        cuts,
+        entities,
+    }
+}
