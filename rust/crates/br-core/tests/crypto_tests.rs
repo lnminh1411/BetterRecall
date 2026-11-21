@@ -662,3 +662,20 @@ fn b14_short_passphrase_neither_creates_nor_rewraps_the_key() {
     assert!(KeyVault::valid_new_passphrase("12345678"));
     assert!(!KeyVault::valid_new_passphrase("        "));
 }
+
+/// RFC 4231 test cases 2 and 6 (short key, key longer than the block).
+#[test]
+fn hmac_sha256_matches_rfc_4231() {
+    let hex = |b: [u8; 32]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+    assert_eq!(
+        "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843",
+        hex(br_core::win32::hmac_sha256(b"Jefe", b"what do ya want for nothing?"))
+    );
+    assert_eq!(
+        "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54",
+        hex(br_core::win32::hmac_sha256(
+            &[0xaa; 131],
+            b"Test Using Larger Than Block-Size Key - Hash Key First"
+        ))
+    );
+}

@@ -3,6 +3,8 @@
 
 #![allow(dead_code)]
 
+pub mod a3;
+
 use std::fs::{self, OpenOptions};
 use std::io::Read;
 use std::os::windows::fs::OpenOptionsExt;
