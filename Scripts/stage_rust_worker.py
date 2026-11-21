@@ -39,6 +39,13 @@ MANAGED_OR_CLR_EXACT = {
     "hostfxr.dll",
     "hostpolicy.dll",
     "libskiasharp.dll",
+    # Trimmed from the C# worker publish too (TrimWorkerNatives in BetterRecall.Worker.csproj): unused frontends.
+    "openvino_tensorflow_frontend.dll",
+    "openvino_tensorflow_lite_frontend.dll",
+    "openvino_paddle_frontend.dll",
+    "openvino_pytorch_frontend.dll",
+    "openvino_jax_frontend.dll",
+    "openvino_gguf_frontend.dll",
     "mscordbi.dll",
     "mscorlib.dll",
     "mscorrc.dll",

@@ -25,7 +25,11 @@ for (int i = 3; i < args.Length; i++)
     else if (args[i] == "--space") space = true;
     else if (args[i] == "--measure") measure = true;
     else if (args[i] == "--wav" && i + 1 < args.Length) wavPath = args[++i];
-    else if (args[i] == "--settings" && i + 1 < args.Length) workerSettings = args[++i];
+    else if (args[i] == "--settings" && i + 1 < args.Length)
+    {
+        workerSettings = args[++i];
+        if (workerSettings.StartsWith('@')) workerSettings = File.ReadAllText(workerSettings[1..]);   // @file: JSON that a shell would mangle
+    }
 }
 
 var name = PipeNames.NewWorker();
