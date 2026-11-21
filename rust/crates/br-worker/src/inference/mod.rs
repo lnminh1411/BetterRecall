@@ -199,8 +199,31 @@ pub fn find_native_dll(file_name: &str) -> Option<PathBuf> {
         }
     }
 
-    // NuGet package cache fallback for cargo test only: a release worker loads natives from its own folder and
-    // never from a user-writable package cache.
+    // NuGet package cache / dev native fallback for cargo test only: a release worker loads natives
+    // from its own folder and never from a user-writable package cache or repo native staging dir.
+    #[cfg(debug_assertions)]
+    {
+        for anchor in [
+            Some(PathBuf::from(env!("CARGO_MANIFEST_DIR"))),
+            Some(exe_dir.to_path_buf()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let mut cur: Option<&Path> = Some(anchor.as_path());
+            while let Some(d) = cur {
+                let cand = d
+                    .join("artifacts")
+                    .join("native")
+                    .join("openvino-genai")
+                    .join(file_name);
+                if cand.is_file() {
+                    return Some(cand);
+                }
+                cur = d.parent();
+            }
+        }
+    }
     #[cfg(debug_assertions)]
     if let Some(profile) = std::env::var_os("USERPROFILE") {
         let pkgs = PathBuf::from(profile).join(".nuget").join("packages");

@@ -38,6 +38,7 @@ MANAGED_OR_CLR_EXACT = {
     "google.protobuf.dll",
     "hostfxr.dll",
     "hostpolicy.dll",
+    "libskiasharp.dll",
     "mscordbi.dll",
     "mscorlib.dll",
     "mscorrc.dll",
@@ -133,6 +134,10 @@ def main() -> None:
 
     staging = Path(args.staging_dir).resolve()
     staging.mkdir(parents=True, exist_ok=True)
+    wanted = {dll.name.lower() for dll in native_dlls}
+    for existing in staging.iterdir():
+        if existing.is_file() and existing.suffix.lower() == ".dll" and existing.name.lower() not in wanted:
+            existing.unlink()
     shutil.copy2(built_exe, staging / "BetterRecall.Worker.exe")
     for dll in native_dlls:
         shutil.copy2(dll, staging / dll.name)

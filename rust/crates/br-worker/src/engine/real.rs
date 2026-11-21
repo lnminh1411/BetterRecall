@@ -6,9 +6,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use br_contracts::{BenchDevice, BenchResult, DataPaths, OcrResult, TokenBench, TranscribeResult, WorkerHello};
+use br_contracts::{
+    BenchDevice, BenchResult, DataPaths, OcrEntity, OcrLine, OcrResult, TokenBench,
+    TranscribeResult, WorkerHello,
+};
 use chrono::{SecondsFormat, Utc};
 
+use crate::audio::{SileroVad, WhisperGenAi};
 use crate::engine::{EmbedderIdentity, IWorkerEngine, ImageEmbedding, ImageInput, TextKind};
 use crate::hosting::{Log, WorkerSettings};
 use crate::inference::device_selection::{
@@ -24,7 +28,10 @@ use crate::models::catalog::ModelCatalog;
 use crate::models::embedder::Embedder;
 use crate::models::image_pipeline::{ImagePipeline, RgbImage};
 use crate::models::manifest::ModelManifest;
+use crate::models::ner::{NerGate, PiiNer};
 use crate::models::nsfw_gate::{NsfwCandidate, NsfwGate};
+use crate::models::ocr::windows_ocr::user_profile_languages;
+use crate::models::ocr::{OcrMath, PaddleOcr, WindowsOcr};
 use crate::protocol::{WorkerError, WorkerErrors};
 use crate::vectors::VectorMath;
 
@@ -59,7 +66,12 @@ struct RealState {
     embedder: Option<Embedder>,
     choice: Option<DeviceChoice>,
     nsfw: Option<NsfwGate>,
-    /// False in the test seam: NSFW gate sees only injected backends (no DirectML adapter).
+    vad: Option<SileroVad>,
+    whisper: Option<WhisperGenAi>,
+    ocr: Option<PaddleOcr>,
+    win_ocr: Option<WindowsOcr>,
+    ner: Option<PiiNer>,
+    /// False in the test seam: NSFW/OCR/NER candidates see only injected backends (no DirectML adapter).
     probe_dml: bool,
     failed_devices: HashSet<String>,
     run_failures: HashMap<String, usize>,
@@ -71,6 +83,7 @@ struct RealState {
 /// job at a time.
 pub struct RealEngine {
     state: Mutex<RealState>,
+    ner_gate: Mutex<NerGate>,
 }
 
 impl RealEngine {
@@ -88,11 +101,17 @@ impl RealEngine {
                 embedder: None,
                 choice: None,
                 nsfw: None,
+                vad: None,
+                whisper: None,
+                ocr: None,
+                win_ocr: None,
+                ner: None,
                 probe_dml: true,
                 failed_devices: HashSet::new(),
                 run_failures: HashMap::new(),
                 replan_model: None,
             }),
+            ner_gate: Mutex::new(NerGate::new()),
         }
     }
 
@@ -116,11 +135,17 @@ impl RealEngine {
                 embedder: None,
                 choice: None,
                 nsfw: None,
+                vad: None,
+                whisper: None,
+                ocr: None,
+                win_ocr: None,
+                ner: None,
                 probe_dml: false,
                 failed_devices: HashSet::new(),
                 run_failures: HashMap::new(),
                 replan_model: None,
             }),
+            ner_gate: Mutex::new(NerGate::new()),
         }
     }
 
@@ -133,6 +158,17 @@ impl RealEngine {
             .iter()
             .cloned()
             .collect()
+    }
+
+    /// Snapshot of compiled embedder session keys (for C13 budget drop test).
+    pub fn embedder_session_keys(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .expect("real engine lock")
+            .embedder
+            .as_ref()
+            .map(|e| e.session_keys().into_iter().collect())
+            .unwrap_or_default()
     }
 
     /// Deterministic 1280x720 test frame: gradients, a grid and blocks, like a busy desktop.
@@ -913,24 +949,55 @@ impl RealState {
             .as_ref()
             .cloned()
             .or_else(|| ModelCatalog::load(&self.s.model_dir, ModelCatalog::NSFW_DETECTOR));
+        let combined_hash = format!(
+            "{}+{}",
+            cls.hash,
+            det_for_key.as_ref().map(|d| d.hash.as_str()).unwrap_or("none")
+        );
+        let setting = self.s.nsfw_device.clone();
+        let gpu_adapter = self.s.nsfw_gpu_adapter.clone();
+        let cands = self.candidates(&setting, &gpu_adapter, "nsfw", &combined_hash, true, true)?;
+        let nsfw_cands: Vec<NsfwCandidate<'_>> = cands
+            .iter()
+            .map(|c| NsfwCandidate {
+                device: c.device.clone(),
+                backend: c.backend.as_ref(),
+                cache_dir: c.cache_dir.clone(),
+            })
+            .collect();
+        let gate = NsfwGate::load(&nsfw_cands, &cls, det.as_ref())?;
+        self.nsfw = Some(gate);
+        Ok(())
+    }
 
-        // Build candidate list mirroring `NsfwCandidates` while holding backend Arcs outside `NsfwGate`.
+    fn candidates(
+        &mut self,
+        setting: &str,
+        gpu_adapter: &str,
+        tag: &str,
+        model_hash: &str,
+        allow_npu: bool,
+        auto_discrete: bool,
+    ) -> Result<Vec<BackendCandidate>, WorkerError> {
         let mut available: Vec<DeviceInfo> = Vec::new();
         let mut backend_map: HashMap<String, Arc<dyn IInferenceBackend>> = HashMap::new();
-        let setting = self.s.nsfw_device.clone();
-        if matches!(setting.as_str(), "auto" | "npu" | "igpu")
+        if matches!(setting, "auto" | "npu" | "igpu")
             && let Ok(main) = self.main_backend()
             && main.is_openvino_backend()
         {
-            for d in main.devices().iter().filter(|d| d.kind != DeviceKind::Cpu) {
+            for d in main
+                .devices()
+                .iter()
+                .filter(|d| d.kind != DeviceKind::Cpu && (allow_npu || d.kind != DeviceKind::Npu))
+            {
                 backend_map.insert(d.id.clone(), Arc::clone(&main));
                 available.push(d.clone());
             }
         }
         let cpu_ort = self.cpu_ort_backend()?;
         if self.probe_dml
-            && matches!(setting.as_str(), "auto" | "gpu")
-            && let Some(dml) = self.nsfw_dml_device()
+            && (setting == "gpu" || (setting == "auto" && auto_discrete))
+            && let Some(dml) = dml_device(gpu_adapter, tag)
         {
             backend_map.insert(dml.id.clone(), Arc::clone(&cpu_ort));
             available.push(dml);
@@ -945,26 +1012,21 @@ impl RealState {
             available.push(cpu);
         }
 
-        let order = self.without_failed(&NsfwDevicePlan::order(&setting, &available));
+        let order = self.without_failed(&NsfwDevicePlan::order(setting, &available));
         let ov_cache = if order.iter().any(|d| d.ep == "OpenVINO") {
             let main = self.main_backend()?;
-            let combined_hash = format!(
-                "{}+{}",
-                cls.hash,
-                det_for_key.as_ref().map(|d| d.hash.as_str()).unwrap_or("none")
-            );
             let cache_id = DeviceCacheKey {
                 runtime: main.name().to_string(),
                 runtime_version: main.version().to_string(),
                 npu_driver: main.npu_driver_version().to_string(),
-                model_hash: combined_hash,
+                model_hash: model_hash.to_string(),
                 setting: String::new(),
                 image_tokens: 0,
             }
             .compiled_id();
             Some(DeviceCache::compiled_dir(
                 &DataPaths::compiled_cache(&self.home),
-                "nsfw",
+                tag,
                 &cache_id,
             ))
         } else {
@@ -976,29 +1038,296 @@ impl RealState {
             .map(|d| format!("{} {} {}", NsfwDevicePlan::label(d), d.ep, d.id))
             .collect();
         Log::info(&format!(
-            "nsfw device order ({setting}): {}",
+            "{tag} device order ({setting}): {}",
             order_log.join(", ")
         ));
 
-        let candidates: Vec<NsfwCandidate<'_>> = order
-            .iter()
-            .map(|d| NsfwCandidate {
-                device: d.clone(),
-                backend: backend_map[&d.id].as_ref(),
-                cache_dir: if d.ep == "OpenVINO" {
+        Ok(order
+            .into_iter()
+            .map(|d| {
+                let cache_dir = if d.ep == "OpenVINO" {
                     ov_cache.clone()
                 } else {
                     None
-                },
+                };
+                let backend = Arc::clone(&backend_map[&d.id]);
+                BackendCandidate {
+                    device: d,
+                    backend,
+                    cache_dir,
+                }
             })
-            .collect();
-        let gate = NsfwGate::load(&candidates, &cls, det.as_ref())?;
-        self.nsfw = Some(gate);
+            .collect())
+    }
+
+    fn ocr_language_codes(&self) -> Vec<String> {
+        if !self.s.ocr_languages.eq_ignore_ascii_case("auto") && !self.s.ocr_languages.trim().is_empty() {
+            return self
+                .s
+                .ocr_languages
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(ToString::to_string)
+                .collect();
+        }
+        let mut list = match user_profile_languages() {
+            Ok(v) => v,
+            Err(e) => {
+                Log::warn(&format!("user profile languages: {e}"));
+                Vec::new()
+            }
+        };
+        if !list
+            .iter()
+            .any(|l| l.len() >= 2 && l[..2].eq_ignore_ascii_case("en"))
+        {
+            list.push("en-US".to_string());
+        }
+        list
+    }
+
+    fn ensure_windows_ocr(&mut self) -> Result<(), WorkerError> {
+        if self.win_ocr.is_some() {
+            return Ok(());
+        }
+        let codes = self.ocr_language_codes();
+        let ocr = WindowsOcr::try_create(&codes)
+            .ok_or_else(|| WorkerError::ModelNotInstalled(ModelCatalog::WINDOWS_OCR.to_string()))?;
+        Log::info(&format!("windows ocr ready ({})", ocr.language));
+        self.win_ocr = Some(ocr);
         Ok(())
     }
 
-    fn nsfw_dml_device(&self) -> Option<DeviceInfo> {
-        dml_device(&self.s.nsfw_gpu_adapter, "nsfw")
+    fn ensure_ocr(&mut self) -> Result<(), WorkerError> {
+        if self.ocr.is_some() {
+            return Ok(());
+        }
+        let m = ModelCatalog::load(&self.s.model_dir, ModelCatalog::OCR)
+            .ok_or_else(|| WorkerError::ModelNotInstalled(ModelCatalog::OCR.to_string()))?;
+        let spec = m
+            .ocr
+            .as_ref()
+            .ok_or_else(|| WorkerError::Internal("ocr manifest lacks ocr".into()))?;
+        let codes = self.ocr_language_codes();
+        let recs = OcrMath::pick_recognisers(&spec.rec, &codes);
+        let rec_names: Vec<&str> = recs.iter().map(|r| r.name.as_str()).collect();
+        Log::info(&format!(
+            "ocr languages [{}] -> recognisers [{}]",
+            codes.join(", "),
+            rec_names.join(", ")
+        ));
+        let setting = self.s.ocr_device.clone();
+        let cands = self.candidates(&setting, "auto", "ocr", &m.hash, true, false)?;
+        let mut last: Option<String> = None;
+        for c in cands {
+            let started = Instant::now();
+            match PaddleOcr::new(
+                Arc::clone(&c.backend),
+                c.device.clone(),
+                &m,
+                &recs,
+                c.cache_dir.as_deref(),
+                None,
+            )
+            .and_then(|mut o| {
+                o.warm_up()?;
+                Ok(o)
+            }) {
+                Ok(o) => {
+                    let label = NsfwDevicePlan::label(&c.device);
+                    let loaded_recs = o.recognisers().join(", ");
+                    Log::info(&format!(
+                        "ocr on {label} ({} {}): [{loaded_recs}], load {} ms",
+                        c.device.ep,
+                        c.device.id,
+                        started.elapsed().as_millis()
+                    ));
+                    self.ocr = Some(o);
+                    return Ok(());
+                }
+                Err(WorkerError::DeviceFailed(detail)) => {
+                    let msg = WorkerErrors::clean(&detail);
+                    Log::warn(&format!(
+                        "ocr on {} ({} {}) failed: {msg}",
+                        NsfwDevicePlan::label(&c.device),
+                        c.device.ep,
+                        c.device.id
+                    ));
+                    last = Some(msg);
+                }
+                Err(e) => {
+                    // C14: non-device/config failures abort immediately so hello stays isolated.
+                    return Err(e);
+                }
+            }
+        }
+        Err(WorkerError::DeviceFailed(match last {
+            None => "ocr has no device".to_string(),
+            Some(l) => format!("ocr failed on every device ({l})"),
+        }))
+    }
+
+    fn preload_ocr(&mut self, missing: &[String]) -> Option<String> {
+        if !self.s.ocr_enabled {
+            return None;
+        }
+        let attempt = (|| -> Result<Option<String>, WorkerError> {
+            if self.s.ocr_engine == "windows" {
+                self.ensure_windows_ocr()?;
+                return Ok(self
+                    .win_ocr
+                    .as_ref()
+                    .map(|w| format!("windows {}", w.language)));
+            }
+            if missing.iter().any(|m| m == ModelCatalog::OCR) {
+                return Ok(None);
+            }
+            self.ensure_ocr()?;
+            Ok(self
+                .ocr
+                .as_ref()
+                .map(|o| format!("onnx {}", NsfwDevicePlan::label(&o.device))))
+        })();
+        match attempt {
+            Ok(v) => v,
+            Err(e) => {
+                Log::warn(&format!("hello: ocr not loaded: {}", e.wire_message()));
+                None
+            }
+        }
+    }
+
+    fn ocr_onnx(&mut self, rgb: &RgbImage) -> Result<Vec<OcrLine>, WorkerError> {
+        self.ensure_ocr()?;
+        let dev = self.ocr.as_ref().expect("ocr").device.clone();
+        let res = self.ocr.as_mut().expect("ocr").read(rgb);
+        match res {
+            Ok(lines) => {
+                self.run_failures.remove("ocr");
+                Ok(lines)
+            }
+            Err(e) => Err(self.record_failure("ocr", e, &[dev])),
+        }
+    }
+
+    fn ensure_ner(&mut self) -> Result<(), WorkerError> {
+        if self.ner.is_some() {
+            return Ok(());
+        }
+        let m = ModelCatalog::load(&self.s.model_dir, ModelCatalog::NER)
+            .ok_or_else(|| WorkerError::ModelNotInstalled(ModelCatalog::NER.to_string()))?;
+        let cands = self.candidates("auto", "auto", "ner", &m.hash, false, false)?;
+        let mut last: Option<String> = None;
+        for c in cands {
+            let started = Instant::now();
+            match PiiNer::new(c.backend.as_ref(), &c.device, &m, c.cache_dir.as_deref()) {
+                Ok(n) => {
+                    let label = NsfwDevicePlan::label(&c.device);
+                    Log::info(&format!(
+                        "ner on {label} ({} {}), load {} ms",
+                        c.device.ep,
+                        c.device.id,
+                        started.elapsed().as_millis()
+                    ));
+                    self.ner = Some(n);
+                    return Ok(());
+                }
+                Err(e) => {
+                    let msg = match &e {
+                        WorkerError::DeviceFailed(detail) => WorkerErrors::clean(detail),
+                        other => other.wire_message(),
+                    };
+                    Log::warn(&format!(
+                        "ner on {} ({} {}) failed: {msg}",
+                        NsfwDevicePlan::label(&c.device),
+                        c.device.ep,
+                        c.device.id
+                    ));
+                    last = Some(msg);
+                }
+            }
+        }
+        Err(WorkerError::DeviceFailed(match last {
+            None => "ner has no device".to_string(),
+            Some(l) => format!("ner failed on every device ({l})"),
+        }))
+    }
+
+    fn run_ner(&mut self, texts: &[String]) -> Result<Vec<Option<Vec<OcrEntity>>>, WorkerError> {
+        self.ensure_ner()?;
+        let dev = self.ner.as_ref().expect("ner").device().clone();
+        let res = self.ner.as_ref().expect("ner").find(texts);
+        match res {
+            Ok(ents) => {
+                self.run_failures.remove("ner");
+                Ok(ents)
+            }
+            Err(e) => Err(self.record_failure("ner", e, &[dev])),
+        }
+    }
+
+    fn load_whisper(&mut self) -> Result<(), WorkerError> {
+        if self.whisper.is_some() {
+            return Ok(());
+        }
+        if !ModelCatalog::whisper_present(&self.s.model_dir) {
+            return Err(WorkerError::ModelNotInstalled(
+                ModelCatalog::WHISPER.to_string(),
+            ));
+        }
+        if !WhisperGenAi::runtime_present() {
+            return Err(WorkerError::DeviceFailed(
+                "OpenVINO GenAI runtime not found".to_string(),
+            ));
+        }
+        let main = self.main_backend()?;
+        let ov_devs = if main.is_openvino_backend() {
+            main.devices().to_vec()
+        } else {
+            vec![DeviceInfo::new(
+                DeviceKind::Cpu,
+                "CPU",
+                "CPU",
+                "OpenVINO",
+                None,
+            )]
+        };
+        let devices = self.without_failed(&DevicePolicy::whisper_allowed(&self.s.device, &ov_devs));
+        let model_dir = ModelCatalog::dir(&self.s.model_dir, ModelCatalog::WHISPER);
+        let key = DeviceCacheKey {
+            runtime: main.name().to_string(),
+            runtime_version: main.version().to_string(),
+            npu_driver: main.npu_driver_version().to_string(),
+            model_hash: folder_hash(&model_dir),
+            setting: String::new(),
+            image_tokens: 0,
+        }
+        .compiled_id();
+        let cache_root = DataPaths::compiled_cache(&self.home);
+        let mut last: Option<WorkerError> = None;
+        for dev in devices {
+            let cache_dir = DeviceCache::compiled_dir(&cache_root, ModelCatalog::WHISPER, &key);
+            match WhisperGenAi::new(&model_dir, &dev.id, Some(&cache_dir)) {
+                Ok(w) => {
+                    Log::info(&format!("whisper on {} ({})", dev.label(), dev.id));
+                    self.whisper = Some(w);
+                    return Ok(());
+                }
+                Err(e) => {
+                    Log::warn(&format!(
+                        "whisper on {} ({}) failed: {}",
+                        dev.label(),
+                        dev.id,
+                        e.wire_message()
+                    ));
+                    last = Some(e);
+                }
+            }
+        }
+        Err(last.unwrap_or_else(|| {
+            WorkerError::DeviceFailed("Whisper failed on every device".to_string())
+        }))
     }
 
     fn record_failure(&mut self, component: &str, err: WorkerError, devices: &[DeviceInfo]) -> WorkerError {
@@ -1026,6 +1355,8 @@ impl RealState {
             match component {
                 "embedder" => self.drop_embedder(),
                 "nsfw" => self.nsfw = None,
+                "ocr" => self.ocr = None,
+                "ner" => self.ner = None,
                 _ => {}
             }
         }
@@ -1082,7 +1413,8 @@ impl IWorkerEngine for RealEngine {
             None
         };
         let vad = ModelCatalog::vad_path(&st.s.model_dir).is_some();
-        // TODO(W3): preload OCR engine and check WhisperGenAi runtime when W3 lands.
+        let asr = ModelCatalog::whisper_present(&st.s.model_dir) && WhisperGenAi::runtime_present();
+        let ocr_device = st.preload_ocr(&missing);
         Ok(WorkerHello {
             protocol: 1,
             device,
@@ -1090,11 +1422,11 @@ impl IWorkerEngine for RealEngine {
             model,
             revision: rev,
             dim,
-            asr: false,
+            asr,
             vad,
             missing,
             nsfw_device,
-            ocr_device: None,
+            ocr_device,
         })
     }
 
@@ -1194,18 +1526,37 @@ impl IWorkerEngine for RealEngine {
 
     fn transcribe(
         &self,
-        _pcm_16k_mono: &[f32],
+        pcm_16k_mono: &[f32],
         _source: &str,
-        _language: &str,
+        language: &str,
     ) -> Result<TranscribeResult, WorkerError> {
-        let st = self.state.lock().expect("real engine lock");
-        // TODO(W3): run SileroVad + WhisperGenAi; until W3, check VAD presence first so E2E sees whisper missing when VAD is installed.
-        if ModelCatalog::vad_path(&st.s.model_dir).is_none() {
-            return Err(WorkerError::ModelNotInstalled(ModelCatalog::VAD.to_string()));
+        let started = Instant::now();
+        let mut st = self.state.lock().expect("real engine lock");
+        if st.vad.is_none() {
+            let vad_path = ModelCatalog::vad_path(&st.s.model_dir)
+                .ok_or_else(|| WorkerError::ModelNotInstalled(ModelCatalog::VAD.to_string()))?;
+            let cpu = st.cpu_ort_backend()?;
+            st.vad = Some(SileroVad::new(cpu.as_ref(), &vad_path)?);
         }
-        Err(WorkerError::ModelNotInstalled(
-            ModelCatalog::WHISPER.to_string(),
-        ))
+        let segs = st.vad.as_ref().expect("vad").segments(pcm_16k_mono)?;
+        if segs.is_empty() {
+            return Ok(TranscribeResult {
+                speech: false,
+                text: String::new(),
+                language: if language == "auto" {
+                    "und".to_string()
+                } else {
+                    language.to_string()
+                },
+                segments: Vec::new(),
+                ms: started.elapsed().as_millis() as i64,
+            });
+        }
+        st.load_whisper()?;
+        st.whisper
+            .as_ref()
+            .expect("whisper")
+            .transcribe(pcm_16k_mono, language, started)
     }
 
     fn bench(&self) -> Result<BenchResult, WorkerError> {
@@ -1217,16 +1568,39 @@ impl IWorkerEngine for RealEngine {
         st.select_device(true)
     }
 
-    fn ocr(&self, _image: &ImageInput<'_>, _entities: bool) -> Result<OcrResult, WorkerError> {
-        let st = self.state.lock().expect("real engine lock");
-        // TODO(W3): run WindowsOcr / PaddleOcr + PiiNer.
-        if st.s.ocr_engine == "windows" {
-            Err(WorkerError::ModelNotInstalled(
-                ModelCatalog::WINDOWS_OCR.to_string(),
-            ))
+    fn ocr(&self, image: &ImageInput<'_>, entities: bool) -> Result<OcrResult, WorkerError> {
+        let started = Instant::now();
+        let (lines, engine) = {
+            let mut st = self.state.lock().expect("real engine lock");
+            let mut rgb = ImagePipeline::decode(image)?;
+            let res = if st.s.ocr_engine == "windows" {
+                st.ensure_windows_ocr()?;
+                st.win_ocr
+                    .as_ref()
+                    .expect("win_ocr")
+                    .read(&rgb)
+                    .map(|l| (l, "windows"))
+            } else {
+                st.ocr_onnx(&rgb).map(|l| (l, "onnx"))
+            };
+            rgb.rgb.fill(0);
+            res?
+        };
+        let (lines, entities_missing) = if entities && !lines.is_empty() {
+            let mut gate = self.ner_gate.lock().expect("ner gate lock");
+            gate.apply(lines, |texts| {
+                let mut st = self.state.lock().expect("real engine lock");
+                st.run_ner(texts)
+            })
         } else {
-            Err(WorkerError::ModelNotInstalled(ModelCatalog::OCR.to_string()))
-        }
+            (lines, false)
+        };
+        Ok(OcrResult {
+            lines,
+            engine: engine.to_string(),
+            ms: round_dp(started.elapsed().as_secs_f64() * 1000.0, 2),
+            entities_missing,
+        })
     }
 
     fn embedder(&self) -> Option<EmbedderIdentity> {
@@ -1356,6 +1730,36 @@ where
     }
     times.sort_by(f64::total_cmp);
     Ok((v, times[times.len() / 2]))
+}
+
+struct BackendCandidate {
+    device: DeviceInfo,
+    backend: Arc<dyn IInferenceBackend>,
+    cache_dir: Option<PathBuf>,
+}
+
+fn folder_hash(dir: &Path) -> String {
+    let mut entries: Vec<(String, u64)> = match std::fs::read_dir(dir) {
+        Ok(rd) => rd
+            .flatten()
+            .filter_map(|e| {
+                let meta = e.metadata().ok()?;
+                if !meta.is_file() {
+                    return None;
+                }
+                let name = e.file_name().to_string_lossy().into_owned();
+                Some((name, meta.len()))
+            })
+            .collect(),
+        Err(_) => return String::new(),
+    };
+    entries.sort_by(|a, b| a.0.to_ascii_lowercase().cmp(&b.0.to_ascii_lowercase()));
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    for (name, len) in entries {
+        h.update(format!("{name}:{len}|").as_bytes());
+    }
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn round_dp(v: f64, digits: i32) -> f64 {

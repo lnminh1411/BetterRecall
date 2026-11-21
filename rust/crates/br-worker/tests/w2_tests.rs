@@ -2340,7 +2340,21 @@ fn real_engine_on_cpu_end_to_end_over_the_pipe() {
         .is_none()
     );
 
-    // Note: W3 implements SileroVad; W2 verifies transcribe reports missing whisper once VAD is on disk.
+    let (silence, _) = h.call(
+        WorkerRequest {
+            op: "transcribe".into(),
+            format: Some("f32".into()),
+            sample_rate: Some(16000),
+            channels: Some(1),
+            source: Some("mic".into()),
+            language: Some("auto".into()),
+            ..Default::default()
+        },
+        &pcm_sine(0.0, 16000),
+    );
+    assert!(silence.ok, "{:?}", silence.error);
+    assert!(!silence.transcript.unwrap().speech);
+
     let (speech, _) = h.call(
         WorkerRequest {
             op: "transcribe".into(),

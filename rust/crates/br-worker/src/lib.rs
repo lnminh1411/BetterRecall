@@ -4,6 +4,7 @@
 //! BetterRecall worker process (stage W1: host, pipe protocol, and fake engine).
 
 pub mod args;
+pub mod audio;
 pub mod engine;
 pub mod hosting;
 pub mod inference;
