@@ -10,12 +10,14 @@ aes-gcm = "0.10"
 argon2 = "0.5"
 br-contracts = { path = "../br-contracts" }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+libloading = "0.9"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.11"
 thiserror = "2.0"
 windows-future = "0.3"
 zeroize = { version = "1", features = ["derive"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [dependencies.windows]
 version = "0.62"
@@ -25,6 +27,7 @@ features = [
   "Win32_Foundation",
   "Win32_Security_Cryptography",
   "Win32_Storage_FileSystem",
+  "Win32_System_LibraryLoader",
   "Win32_System_Memory",
   "Win32_System_WinRT",
 ]
