@@ -1,8 +1,20 @@
 [workspace]
-members = ["crates/br-contracts", "crates/br-core", "crates/br-worker"]
+members = ["crates/br-contracts", "crates/br-core", "crates/br-worker", "crates/br-agent"]
 resolver = "3"
 
 [workspace.package]
 version = "0.3.0-dev"
 edition = "2024"
 authors = ["BetterRecall contributors"]
+
+# Argon2id (64 MiB, 3 passes) and AES-GCM are unusably slow unoptimised; keep debug builds and tests quick.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
+[profile.dev.package.aes]
+opt-level = 3
+[profile.dev.package.aes-gcm]
+opt-level = 3
+[profile.dev.package.ghash]
+opt-level = 3

@@ -149,6 +149,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "br-agent"
+version = "0.3.0-dev"
+dependencies = [
+ "br-contracts",
+ "br-core",
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "windows",
+ "zeroize",
+]
+
+[[package]]
 name = "br-contracts"
 version = "0.3.0-dev"
 dependencies = [
