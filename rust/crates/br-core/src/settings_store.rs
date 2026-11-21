@@ -5,6 +5,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -16,11 +17,13 @@ use br_contracts::{
 use serde_json::{Map, Value};
 use windows::Win32::Storage::FileSystem::{FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE};
 
+use crate::cancel::ListenerGuard;
 use crate::core_json::CoreJson;
 use crate::log::Log;
 use crate::win32;
 
 type ChangedHandler = Arc<dyn Fn(&Settings) + Send + Sync>;
+static NEXT_LISTENER_ID: AtomicU64 = AtomicU64::new(1);
 
 /// `settings.json` with validation, lenient load, unreadable-file guard (D3/D4/D5), and atomic save. Thread-safe.
 pub struct SettingsStore {
@@ -28,7 +31,7 @@ pub struct SettingsStore {
     gate: Mutex<State>,
     /// Serialises saves (merge, write, swap). Readers of `current()` never wait on it.
     write_gate: Mutex<()>,
-    changed: Mutex<Vec<ChangedHandler>>,
+    changed: Arc<Mutex<Vec<(u64, ChangedHandler)>>>,
 }
 
 struct State {
@@ -97,7 +100,7 @@ impl SettingsStore {
                 load_error,
             }),
             write_gate: Mutex::new(()),
-            changed: Mutex::new(Vec::new()),
+            changed: Arc::new(Mutex::new(Vec::new())),
         };
         if write
             && let Err(e) = store.save()
@@ -144,10 +147,29 @@ impl SettingsStore {
 
     /// Registers a listener invoked whenever settings are updated, replaced, or reset.
     pub fn on_changed(&self, handler: impl Fn(&Settings) + Send + Sync + 'static) {
+        let id = NEXT_LISTENER_ID.fetch_add(1, Ordering::Relaxed);
         self.changed
             .lock()
             .expect("changed lock")
-            .push(Arc::new(handler));
+            .push((id, Arc::new(handler)));
+    }
+
+    /// Registers a listener that unsubscribes automatically when the returned [`ListenerGuard`] drops.
+    pub fn on_changed_guarded(
+        &self,
+        handler: impl Fn(&Settings) + Send + Sync + 'static,
+    ) -> ListenerGuard {
+        let id = NEXT_LISTENER_ID.fetch_add(1, Ordering::Relaxed);
+        self.changed
+            .lock()
+            .expect("changed lock")
+            .push((id, Arc::new(handler)));
+        let list = self.changed.clone();
+        ListenerGuard::new(move || {
+            list.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .retain(|(lid, _)| *lid != id);
+        })
     }
 
     /// Merges a partial settings JSON value. Returns `None` on success, else `"Invalid section.key."` / error message.
@@ -344,7 +366,13 @@ impl SettingsStore {
     }
 
     fn raise_changed(&self, s: &Settings) {
-        let handlers: Vec<ChangedHandler> = self.changed.lock().expect("changed lock").clone();
+        let handlers: Vec<ChangedHandler> = self
+            .changed
+            .lock()
+            .expect("changed lock")
+            .iter()
+            .map(|(_, h)| h.clone())
+            .collect();
         for h in handlers {
             if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| h(s))).is_err() {
                 Log::error("settings Changed handler failed");

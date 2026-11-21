@@ -500,3 +500,161 @@ pub fn tpm_delete_key(name: &str) -> Result<(), i32> {
     key.freed = true;
     Ok(())
 }
+
+// ---- HMAC-SHA256 (pure Rust over sha2::Sha256, RFC 2104) ----
+
+/// Computes HMAC-SHA256(key, data).
+pub fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+
+    const BLOCK: usize = 64;
+    let mut k_block = [0u8; BLOCK];
+    if key.len() > BLOCK {
+        let hashed = Sha256::digest(key);
+        k_block[..32].copy_from_slice(&hashed);
+    } else {
+        k_block[..key.len()].copy_from_slice(key);
+    }
+
+    let mut ipad = [0x36u8; BLOCK];
+    let mut opad = [0x5cu8; BLOCK];
+    for i in 0..BLOCK {
+        ipad[i] ^= k_block[i];
+        opad[i] ^= k_block[i];
+    }
+
+    let mut inner = Sha256::new();
+    inner.update(ipad);
+    inner.update(data);
+    let inner_hash = inner.finalize();
+
+    let mut outer = Sha256::new();
+    outer.update(opad);
+    outer.update(inner_hash);
+    let out = outer.finalize();
+
+    k_block.zeroize();
+    ipad.zeroize();
+    opad.zeroize();
+
+    let mut res = [0u8; 32];
+    res.copy_from_slice(&out);
+    res
+}
+
+// ---- Pipes, Security Descriptors, Process & Token Inspection, Mutex, TickCount64 ----
+
+pub const SECURITY_MANDATORY_MEDIUM_RID: i32 = 0x2000;
+
+/// Returns milliseconds elapsed since system boot (`GetTickCount64`).
+pub fn tick_count64() -> i64 {
+    unsafe { windows::Win32::System::SystemInformation::GetTickCount64() as i64 }
+}
+
+/// Returns current process ID (`GetCurrentProcessId`).
+pub fn current_process_id() -> u32 {
+    unsafe { windows::Win32::System::Threading::GetCurrentProcessId() }
+}
+
+/// Returns the Terminal Services session ID for `pid`, or `None` on failure.
+pub fn process_id_to_session_id(pid: u32) -> Option<u32> {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn ProcessIdToSessionId(dwProcessId: u32, pSessionId: *mut u32) -> i32;
+    }
+    let mut session = 0u32;
+    let ok = unsafe { ProcessIdToSessionId(pid, &mut session) };
+    if ok != 0 { Some(session) } else { None }
+}
+
+/// Checks if a named Win32 mutex currently exists (returns `true` even on `ERROR_ACCESS_DENIED`).
+pub fn mutex_exists(name: &str) -> bool {
+    use windows::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED};
+    use windows::Win32::System::Threading::{OpenMutexW, SYNCHRONIZATION_ACCESS_RIGHTS};
+
+    const SYNCHRONIZE_ACCESS: SYNCHRONIZATION_ACCESS_RIGHTS =
+        SYNCHRONIZATION_ACCESS_RIGHTS(0x0010_0000);
+    let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+    match unsafe { OpenMutexW(SYNCHRONIZE_ACCESS, false, PCWSTR(wide.as_ptr())) } {
+        Ok(h) => {
+            unsafe {
+                let _ = CloseHandle(h);
+            }
+            true
+        }
+        Err(e) => e.code() == ERROR_ACCESS_DENIED.to_hresult(),
+    }
+}
+
+/// Converts a `windows::core::Error` into `std::io::Error`, preserving Win32 OS error codes.
+pub fn win32_to_io(e: windows::core::Error) -> io::Error {
+    let raw = e.code().0 as u32;
+    if (raw & 0xFFFF_0000) == 0x8007_0000 {
+        io::Error::from_raw_os_error((raw & 0xFFFF) as i32)
+    } else {
+        io::Error::other(e.to_string())
+    }
+}
+
+/// Reads the owner, DACL, and mandatory label of a kernel object handle as SDDL.
+///
+/// # Safety
+/// `handle` must be a valid kernel object handle (such as a named pipe handle).
+pub unsafe fn read_kernel_sddl(handle: windows::Win32::Foundation::HANDLE) -> Option<String> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+    use windows::Win32::Security::Authorization::{
+        ConvertSecurityDescriptorToStringSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
+        SE_KERNEL_OBJECT,
+    };
+    use windows::Win32::Security::{
+        DACL_SECURITY_INFORMATION, LABEL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+        PSECURITY_DESCRIPTOR,
+    };
+    use windows::core::PWSTR;
+
+    let info = OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION;
+    let mut sd = PSECURITY_DESCRIPTOR::default();
+    let status = unsafe {
+        GetSecurityInfo(
+            handle,
+            SE_KERNEL_OBJECT,
+            info,
+            None,
+            None,
+            None,
+            None,
+            Some(&mut sd),
+        )
+    };
+    if status.0 != 0 || sd.0.is_null() {
+        return None;
+    }
+    let mut out_str = PWSTR::null();
+    let ok = unsafe {
+        ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            sd,
+            SDDL_REVISION_1,
+            info,
+            &mut out_str,
+            None,
+        )
+    };
+    unsafe {
+        let _ = LocalFree(Some(HLOCAL(sd.0)));
+    }
+    if ok.is_err() || out_str.0.is_null() {
+        return None;
+    }
+    let result = unsafe {
+        let mut len = 0usize;
+        while *out_str.0.add(len) != 0 {
+            len += 1;
+        }
+        let slice = std::slice::from_raw_parts(out_str.0, len);
+        let s = OsString::from_wide(slice).to_string_lossy().into_owned();
+        let _ = LocalFree(Some(HLOCAL(out_str.0.cast::<c_void>())));
+        s
+    };
+    Some(result)
+}
