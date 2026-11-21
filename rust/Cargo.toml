@@ -1,0 +1,8 @@
+[workspace]
+members = ["crates/br-contracts", "crates/br-worker"]
+resolver = "3"
+
+[workspace.package]
+version = "0.3.0-dev"
+edition = "2024"
+authors = ["BetterRecall contributors"]

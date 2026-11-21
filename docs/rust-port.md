@@ -40,3 +40,4 @@ After the review the C# worker project is removed and the build places the Rust 
 ## Status
 
 - 2026-11-21: version 0.3.0-dev, plan written. W1 next.
+- 2026-11-21: W1 implemented — Cargo workspace, `br-contracts` (worker protocol types, `BinaryFrame`, worker settings/layout/paths, 11 contract fixtures), `br-worker` (host, JSONC settings, log rotation, process hardening, overlapped Win32 named-pipe client, serial loop with keepalives/idle-exit, `FakeEngine`, ported W1 tests, `BR_WORKER_DIR` conformance hook); binary target named `br-worker` (Cargo forbids `.` in crate/bin names, so stage as `BetterRecall.Worker.exe`); real inference deferred to W2/W3.

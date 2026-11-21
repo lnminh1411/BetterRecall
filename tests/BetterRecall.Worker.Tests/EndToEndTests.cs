@@ -19,9 +19,13 @@ public class EndToEndTests(ITestOutputHelper output)
         return d?.FullName ?? throw new InvalidOperationException("repo root not found");
     }
 
-    /// <summary>artifacts\bin\&lt;project&gt;\&lt;same pivot as the test build&gt;\</summary>
+    /// <summary>artifacts\bin\&lt;project&gt;\&lt;same pivot as the test build&gt;\, or BR_WORKER_DIR for the worker.</summary>
     private static string BuildDir(string project)
     {
+        if (project == "BetterRecall.Worker"
+            && Environment.GetEnvironmentVariable("BR_WORKER_DIR") is { } workerDir
+            && !string.IsNullOrWhiteSpace(workerDir))
+            return workerDir;
         var pivot = new DirectoryInfo(AppContext.BaseDirectory.TrimEnd('\\')).Name;
         var dir = Path.Combine(RepoRoot(), "artifacts", "bin", project, pivot);
         if (!Directory.Exists(dir)) dir = Directory.GetDirectories(Path.Combine(RepoRoot(), "artifacts", "bin", project)).First();

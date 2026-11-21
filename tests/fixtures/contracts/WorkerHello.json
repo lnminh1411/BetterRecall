@@ -1,0 +1,1 @@
+{"protocol":1,"device":"NPU","ep":"OpenVINO","model":"google/embeddinggemma-2","revision":"rev1","dim":768,"asr":false,"vad":true,"missing":["whisper-large-v3-turbo"],"nsfwDevice":"NPU","ocrDevice":"onnx iGPU"}
