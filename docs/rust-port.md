@@ -67,6 +67,7 @@ Rules for every stage:
 - 2026-11-21: W4 measured (below). Pilot awaits the user's review (R5).
 - 2026-11-21: Worker swap done — C# worker source and unit tests removed; `BetterRecall.Worker.csproj` wraps `cargo build -p br-worker` and ships `BetterRecall.Worker.exe` with the native DLLs, `Scripts\stage_rust_worker.py` removed, and `Scripts\release_layout.py` collects Rust crate notices.
 - 2026-11-21: A0 implemented — C# agent conformance suite in `tests\BetterRecall.Agent.Conformance` (38 process-level tests over the UI, public IPC, CLI and MCP pipes with `BR_AGENT_DIR` override and scratch `BETTERRECALL_HOME`); passes against the C# agent, 38 of 38 in 55 s, repeatably.
+- 2026-11-21: A1 implemented — `br-contracts` expanded to full `Settings` (18 sections + validation), full `Layout`/`DataPaths`/`PipeNames`, UI/IPC/MCP message types, `LineProtocol`/`LineReader`/`Envelope`, `.NET`-exact JSON formatting and shared JSONC parser (reused by `br-worker`), plus 5 new golden fixtures (`Settings`, `AgentStatus`, `SearchResponse`, `ErrorReply`, `McpToolList`); new `br-core` crate (`SettingsStore`, `Log`, `CoreJson`, `BlobCipher`, `SecureKey`, `KeyVault` with TPM/DPAPI/Argon2id, `HelloInterop`, `UnlockPassword`, `win32`) with 72 ported settings, crypto, framing, layout and log tests; cargo test (216) and clippy pass, fixtures match the C# serializer byte for byte.
 
 ## W4: Rust worker against the C# worker
 

@@ -18,6 +18,27 @@ public class ContractFixtureTests
     private static string Serialize<T>(T value)
         => JsonSerializer.Serialize(value, typeof(T), ContractsJson.Default);
 
+    private static string ExtractMcpToolList()
+    {
+        var mcpSource = File.ReadAllText(Path.Combine(RepoRoot(), "src", "BetterRecall.Mcp", "McpServer.cs"), Encoding.UTF8);
+        const string startMarker = "private const string ToolsJson = \"\"\"";
+        int start = mcpSource.IndexOf(startMarker, StringComparison.Ordinal);
+        Assert.True(start >= 0, "ToolsJson start marker not found in McpServer.cs");
+        start += startMarker.Length;
+        int end = mcpSource.IndexOf("\"\"\";", start, StringComparison.Ordinal);
+        Assert.True(end > start, "ToolsJson end marker not found in McpServer.cs");
+        using var toolsDoc = JsonDocument.Parse(mcpSource[start..end]);
+        var buf = new System.Buffers.ArrayBufferWriter<byte>();
+        using (var w = new Utf8JsonWriter(buf))
+        {
+            w.WriteStartObject();
+            w.WritePropertyName("tools");
+            toolsDoc.RootElement.WriteTo(w);
+            w.WriteEndObject();
+        }
+        return Encoding.UTF8.GetString(buf.WrittenSpan);
+    }
+
     [Fact]
     public void Worker_contract_fixtures_match_contracts_json()
     {
@@ -120,6 +141,70 @@ public class ContractFixtureTests
                 Engine: "onnx",
                 Ms: 18.25,
                 EntitiesMissing: false))),
+            ("Settings", Serialize(new Settings())),
+            ("AgentStatus", Serialize(new AgentStatus(
+                Capturing: true,
+                Paused: false,
+                PausedUntil: null,
+                PauseReason: null,
+                Locked: false,
+                UnlockedUntil: new DateTimeOffset(2026, 11, 21, 10, 15, 0, TimeSpan.Zero),
+                Audio: new AudioState(false, true),
+                Queue: new QueueState(3),
+                Device: "NPU",
+                Store: new StoreStats(
+                    Rows: 120,
+                    Bytes: 65536,
+                    ThumbBytes: 4096,
+                    Oldest: new DateTimeOffset(2026, 11, 1, 8, 30, 0, TimeSpan.Zero),
+                    Newest: new DateTimeOffset(2026, 11, 21, 9, 59, 30, 500, TimeSpan.Zero),
+                    PendingEmbeddings: 2,
+                    Vectors: 118),
+                RetentionDays: 30,
+                HotkeysFailed: null,
+                Warnings: ["ocr-failing"],
+                UserPaused: false,
+                UnlockNeeds: "none"))),
+            ("SearchResponse", Serialize(new SearchResponse(
+                Count: 2,
+                Truncated: false,
+                TookMs: 14,
+                Results:
+                [
+                    new SearchHit(
+                        Id: "s_01ABC",
+                        Ts: new DateTimeOffset(2026, 11, 21, 9, 30, 0, TimeSpan.Zero),
+                        Kind: CaptureKind.Screen,
+                        App: "chrome.exe",
+                        Title: "Quarterly report",
+                        Score: 0.875f,
+                        Snippet: "...quarterly revenue...",
+                        HasThumb: true,
+                        DurationS: null,
+                        Cosine: 0.9f,
+                        TextMatch: true,
+                        Weak: false,
+                        Site: "docs.example.com"),
+                    new SearchHit(
+                        Id: "r_01DEF",
+                        Ts: new DateTimeOffset(2026, 11, 21, 9, 45, 12, 250, TimeSpan.Zero),
+                        Kind: CaptureKind.Replay,
+                        App: "code.exe",
+                        Title: "main.rs",
+                        Score: 0.5f,
+                        Snippet: "fn main()",
+                        HasThumb: true,
+                        DurationS: null,
+                        Cosine: 0.5f,
+                        TextMatch: false,
+                        Weak: true,
+                        Site: "",
+                        ReplayId: "20261121T094500Z",
+                        ReplayOffsetMs: 12250),
+                ],
+                Degraded: null))),
+            ("ErrorReply", Envelope.Error("Store is locked.")),
+            ("McpToolList", ExtractMcpToolList()),
         };
 
         bool update = Environment.GetEnvironmentVariable("BR_UPDATE_FIXTURES") == "1";
