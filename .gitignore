@@ -19,3 +19,6 @@ Scripts/package_single.py
 
 # graphify knowledge graph (local only)
 graphify-out/
+
+# Rust build artifacts (real builds use CARGO_TARGET_DIR outside the repo)
+rust/target/

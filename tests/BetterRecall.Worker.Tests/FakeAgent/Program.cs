@@ -11,22 +11,30 @@ using BetterRecall.Contracts;
 // Creates the private pipe, starts the worker, sends hello, embed_text (query + document), embed_image (bgra8),
 // transcribe, shutdown; writes every response header plus the worker exit code to out.json.
 // --settings is handed to the worker on stdin (--settings-stdin) as the agent's worker keys (sweep 4 C5). --space sends hello, bench, embed_text
-// and shutdown only, to see which embedder each reply names (sweep 4 A-M3).
+// and shutdown only, to see which embedder each reply names (sweep 4 A-M3). --measure (Rust port W4) times start-up,
+// hello, five text and three 1280x720 image embeds and one OCR read, then reads the worker's memory and its CPU time over
+// a 30 s idle window; no bench, so it stays light on a PC in use.
 var workerExe = args[0];
 var home = args[1];
 var outFile = args[2];
-bool real = false, space = false;
+bool real = false, space = false, measure = false;
 string? wavPath = null, workerSettings = null;
 for (int i = 3; i < args.Length; i++)
 {
     if (args[i] == "--real") real = true;
     else if (args[i] == "--space") space = true;
+    else if (args[i] == "--measure") measure = true;
     else if (args[i] == "--wav" && i + 1 < args.Length) wavPath = args[++i];
-    else if (args[i] == "--settings" && i + 1 < args.Length) workerSettings = args[++i];
+    else if (args[i] == "--settings" && i + 1 < args.Length)
+    {
+        workerSettings = args[++i];
+        if (workerSettings.StartsWith('@')) workerSettings = File.ReadAllText(workerSettings[1..]);   // @file: JSON that a shell would mangle
+    }
 }
 
 var name = PipeNames.NewWorker();
 await using var server = new NamedPipeServerStream(name, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+var started = Stopwatch.StartNew();
 var psi = new ProcessStartInfo(workerExe, ["--pipe", name, "--home", home]) { UseShellExecute = false };
 if (workerSettings is not null) { psi.ArgumentList.Add("--settings-stdin"); psi.RedirectStandardInput = true; }
 using var worker = Process.Start(psi)!;
@@ -38,7 +46,7 @@ if (workerSettings is not null)
 var lines = new List<string>();
 try
 {
-    using var cts = new CancellationTokenSource(real ? TimeSpan.FromMinutes(30) : TimeSpan.FromSeconds(60));
+    using var cts = new CancellationTokenSource(real || measure ? TimeSpan.FromMinutes(30) : TimeSpan.FromSeconds(60));
     await server.WaitForConnectionAsync(cts.Token);
     long id = 0;
     async Task Send(WorkerRequest r, byte[] payload)
@@ -49,10 +57,33 @@ try
         var f = await BinaryFrame.ReadAsync(server, cts.Token) ?? throw new EndOfStreamException();
         sw.Stop();
         var resp = JsonSerializer.Deserialize(f.Header, ContractsJson.Default.WorkerResponse)!;
-        var suffix = real ? $" payload={f.Payload.Length} ms={sw.ElapsedMilliseconds}" : $" payload={f.Payload.Length}";
+        var suffix = real || measure ? $" payload={f.Payload.Length} ms={sw.ElapsedMilliseconds}" : $" payload={f.Payload.Length}";
         lines.Add(JsonSerializer.Serialize(resp, ContractsJson.Default.WorkerResponse) + suffix);
     }
-    if (space)
+    if (measure)
+    {
+        lines.Add($"measure connect_ms={started.ElapsedMilliseconds}");
+        await Send(new WorkerRequest(++id, "hello"), []);
+        lines.Add($"measure hello_done_ms={started.ElapsedMilliseconds}");
+        string[] texts = ["quarterly sales figures", "meeting notes from monday", "invoice 2026 total", "holiday photos beach", "rust port plan"];
+        foreach (var text in texts) await Send(new WorkerRequest(++id, "embed_text", Text: text, Kind: "query"), []);
+        const int mw = 1280, mh = 720;
+        var img = new byte[mw * mh * 4];
+        for (int i = 0; i < img.Length; i++) img[i] = (byte)((i * 31) ^ (i >> 9));
+        for (int k = 0; k < 3; k++)
+            await Send(new WorkerRequest(++id, "embed_image", Format: "bgra8", Width: mw, Height: mh, Stride: mw * 4, Nsfw: 0.8), img);
+        await Send(new WorkerRequest(++id, "ocr", Format: "bgra8", Width: mw, Height: mh, Stride: mw * 4), img);
+        worker.Refresh();
+        lines.Add($"measure ws_mb={worker.WorkingSet64 / 1048576.0:F1} peak_ws_mb={worker.PeakWorkingSet64 / 1048576.0:F1} private_mb={worker.PrivateMemorySize64 / 1048576.0:F1} cpu_s={worker.TotalProcessorTime.TotalSeconds:F2}");
+        var cpu0 = worker.TotalProcessorTime;
+        var idle = Stopwatch.StartNew();
+        await Task.Delay(TimeSpan.FromSeconds(30), cts.Token);
+        worker.Refresh();
+        var idlePct = (worker.TotalProcessorTime - cpu0).TotalMilliseconds / idle.Elapsed.TotalMilliseconds / Environment.ProcessorCount * 100;
+        lines.Add($"measure idle_cpu_pct={idlePct:F3} idle_cpu_ms={(worker.TotalProcessorTime - cpu0).TotalMilliseconds:F0} ws_after_idle_mb={worker.WorkingSet64 / 1048576.0:F1}");
+        await Send(new WorkerRequest(++id, "shutdown"), []);
+    }
+    else if (space)
     {
         await Send(new WorkerRequest(++id, "hello"), []);
         await Send(new WorkerRequest(++id, "bench"), []);
@@ -108,7 +139,7 @@ try
     }
 }
 catch (Exception e) { lines.Add("agent error: " + e.GetType().Name + ": " + e.Message); }
-if (!worker.WaitForExit(real ? 60000 : 15000)) { worker.Kill(); lines.Add("worker killed"); }
+if (!worker.WaitForExit(real || measure ? 60000 : 15000)) { worker.Kill(); lines.Add("worker killed"); }
 lines.Add("exit=" + worker.ExitCode);
 File.WriteAllLines(outFile, lines);
 

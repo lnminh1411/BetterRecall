@@ -1,0 +1,1 @@
+{"device":"GPU","ep":"OpenVINO","ok":true,"imageMs":0,"textMs":3.5,"cosine":1,"model":"embeddinggemma-2","textDevice":"CPU","compileMs":420,"adapter":"Intel(R) Arc(TM) Graphics","adapterAuto":true}

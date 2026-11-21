@@ -1,0 +1,1 @@
+{"lines":[{"text":"Jane Doe","x":8,"y":12,"w":80,"h":16,"confidence":1,"cuts":[8,18,28,38,48,58,68,78,88],"entities":[{"start":0,"length":8,"label":"person","score":0.95}]},{"text":"ok","x":8,"y":36,"w":20,"h":16,"confidence":0.98,"cuts":[8,18,28]}],"engine":"onnx","ms":18.25,"entitiesMissing":false}

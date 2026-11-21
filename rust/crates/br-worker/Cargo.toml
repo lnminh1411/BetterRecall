@@ -1,0 +1,51 @@
+[package]
+name = "br-worker"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license = "AGPL-3.0-only"
+
+[[bin]]
+name = "br-worker"
+path = "src/main.rs"
+
+[dependencies]
+br-contracts = { path = "../br-contracts" }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+half = "2"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+libloading = "0.9"
+ort = { version = "2.0.0-rc.15", default-features = false, features = ["std", "api-24", "load-dynamic", "directml", "qnn", "half"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.11"
+thiserror = "2.0"
+unicode-normalization = "0.1"
+
+[dependencies.windows]
+version = "0.62"
+features = [
+  "Foundation_Collections",
+  "Globalization",
+  "Graphics_Imaging",
+  "Media_Ocr",
+  "Storage_Streams",
+  "System_UserProfile",
+  "Win32_Foundation",
+  "Win32_Globalization",
+  "Win32_Graphics_Dxgi",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Storage_FileSystem",
+  "Win32_System_ErrorReporting",
+  "Win32_System_IO",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Memory",
+  "Win32_System_Pipes",
+  "Win32_System_Threading",
+  "Win32_System_WinRT",
+]
+
+[dev-dependencies.windows]
+version = "0.62"
+features = ["Win32_Graphics_Gdi"]
