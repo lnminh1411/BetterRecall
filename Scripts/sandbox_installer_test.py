@@ -32,7 +32,10 @@ New-Item -ItemType Directory -Force -Path $resultsDir | Out-Null
 $steps = [System.Collections.Generic.List[object]]::new()
 function Log([string]$msg) {
     $line = "[$(Get-Date -Format 'HH:mm:ss')] $msg"
-    Add-Content -LiteralPath $logFile -Value $line -Encoding UTF8
+    # The host may be reading log.txt through the mapped folder: retry on a sharing error, never throw.
+    for ($i = 0; $i -lt 20; $i++) {
+        try { Add-Content -LiteralPath $logFile -Value $line -Encoding UTF8 -ErrorAction Stop; return } catch { Start-Sleep -Milliseconds 100 }
+    }
 }
 function Record([string]$name, [bool]$ok, [string]$detail = '') {
     Log ("{0}: {1} {2}" -f $name, $(if ($ok) { 'PASS' } else { 'FAIL' }), $detail)
@@ -69,6 +72,19 @@ function Wait-UiPipe([int]$timeoutSec = 30) {
     return $false
 }
 
+function Invoke-Setup([string]$exe, [string[]]$argList, [int]$timeoutSec = 180) {
+    # Start-Process -Wait waits for the whole process tree; an upgrade starts the agent as the
+    # installer's child, so wait for the installer process alone.
+    Log ("run: {0} {1}" -f $exe, ($argList -join ' '))
+    $p = Start-Process -FilePath $exe -ArgumentList $argList -PassThru -NoNewWindow
+    $null = $p.Handle  # cache the handle so ExitCode is readable after exit (PowerShell 5.1)
+    if (-not $p.WaitForExit($timeoutSec * 1000)) {
+        Log "run: still running after $timeoutSec s"
+        return -999
+    }
+    return $p.ExitCode
+}
+
 function Read-RelayLine($proc, [int]$timeoutMs = 60000) {
     # A relay that stops answering must fail the step, not hang the script (results.json is written in finally).
     $task = $proc.StandardOutput.ReadLineAsync()
@@ -90,8 +106,8 @@ try {
     Record 'preseed_launcher_era' $true 'seeded 0.1.0-0123456789ab, bin\BetterRecall.exe, bin\current, settings.json'
 
     # Step 1: silent install of .1
-    $p1 = Start-Process -FilePath $v1Exe -ArgumentList '/S', '/models=later', '/norun' -Wait -PassThru -NoNewWindow
-    Record 'install_v1_exit' ($p1.ExitCode -eq 0) "exit=$($p1.ExitCode)"
+    $c1 = Invoke-Setup $v1Exe @('/S', '/models=later', '/norun')
+    Record 'install_v1_exit' ($c1 -eq 0) "exit=$c1"
 
     $expectedFiles = @(
         'BetterRecall.Agent.exe',
@@ -156,8 +172,8 @@ try {
     Record 'mcp_relay_tools_list' ($null -ne $listReply -and $listReply.Contains('"id":2') -and $listReply.Contains('"tools"')) "len=$($listReply.Length)"
 
     # Step 3: silent upgrade to .2 while relay stays open
-    $p2 = Start-Process -FilePath $v2Exe -ArgumentList '/S' -Wait -PassThru -NoNewWindow
-    Record 'upgrade_v2_exit' ($p2.ExitCode -eq 0) "exit=$($p2.ExitCode)"
+    $c2 = Invoke-Setup $v2Exe @('/S')
+    Record 'upgrade_v2_exit' ($c2 -eq 0) "exit=$c2"
     $pipeReady2 = Wait-UiPipe 30
     Record 'upgrade_v2_agent_restarted' $pipeReady2 'agent restarted after upgrade'
 
@@ -175,14 +191,14 @@ try {
     $relayProc = $null
 
     # Step 4: downgrade .1 over .2 without /allowdowngrade -> exit 4, nothing changed
-    $pDown = Start-Process -FilePath $v1Exe -ArgumentList '/S', '/norun' -Wait -PassThru -NoNewWindow
+    $cDown = Invoke-Setup $v1Exe @('/S', '/norun')
     $dispVerAfterDown = (Get-ItemProperty -LiteralPath $uninstallKey).DisplayVersion
-    Record 'downgrade_refused' (($pDown.ExitCode -eq 4) -and ($dispVerAfterDown -eq '0.3.0-dev.2')) "exit=$($pDown.ExitCode) ver=$dispVerAfterDown"
+    Record 'downgrade_refused' (($cDown -eq 4) -and ($dispVerAfterDown -eq '0.3.0-dev.2')) "exit=$cDown ver=$dispVerAfterDown"
 
     # Step 6: silent uninstall (relaunches from temp, so wait for install folder removal)
     $setupInstalled = Join-Path $installDir 'BetterRecall-Setup.exe'
-    $pUn = Start-Process -FilePath $setupInstalled -ArgumentList '/uninstall', '/S' -Wait -PassThru -NoNewWindow
-    Record 'uninstall_start' ($pUn.ExitCode -eq 0) "exit=$($pUn.ExitCode)"
+    $cUn = Invoke-Setup $setupInstalled @('/uninstall', '/S')
+    Record 'uninstall_start' ($cUn -eq 0) "exit=$cUn"
 
     $deadline = (Get-Date).AddSeconds(30)
     while ((Test-Path -LiteralPath $installDir) -and ((Get-Date) -lt $deadline)) {
@@ -207,6 +223,7 @@ try {
         try { if (-not $relayProc.HasExited) { $relayProc.Kill() } } catch {}
         $relayProc.Dispose()
     }
+    try { Copy-Item -LiteralPath (Join-Path $homeDir 'logs\setup.log') -Destination (Join-Path $resultsDir 'setup.log') -Force } catch {}
     $summary = [pscustomobject]@{
         ok = $overallOk
         error = $errorMsg
