@@ -269,9 +269,12 @@ pub fn run_with_args(args: &[String]) -> i32 {
         let _ = h.join();
     }
 
+    // Bounded like the C# agent (10 s each), so a stuck stop cannot keep the process alive after quit.
     let sw = Instant::now();
-    host.shutdown();
-    core.shutdown();
+    let host_bg = host.clone();
+    crate::host::agent_host::run_bounded("shutdown", Duration::from_secs(10), move || host_bg.shutdown());
+    let core_bg = core.clone();
+    crate::host::agent_host::run_bounded("core shutdown", Duration::from_secs(10), move || core_bg.shutdown());
     AgentLog::info(&format!("agent stopped in {} ms", sw.elapsed().as_millis()));
     AgentLog::flush();
 
