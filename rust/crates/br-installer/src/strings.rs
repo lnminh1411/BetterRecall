@@ -1,46 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) BetterRecall contributors
 
-//! Centralized English UI strings and model size descriptions for the installer wizard.
+//! Centralized English UI strings and catalog-backed model size labels for the installer wizard.
 
 use std::path::Path;
+use std::time::Duration;
+
+use br_fetch::{Catalog, ModelSet};
 
 use crate::install::ModelMode;
 use crate::progress::Step;
 
 pub const WINDOW_TITLE: &str = "BetterRecall Setup";
-
-/// Display metadata for one [`ModelMode`] choice on the Models wizard page.
-/// I3 will replace the static size text with values from the model manifest.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ModelModeInfo {
-    pub mode: ModelMode,
-    pub size_label: &'static str,
-    pub radio_label: &'static str,
-    pub description: &'static str,
-}
-
-/// Ordered model mode choices shown on the Models page.
-pub const MODEL_MODES: [ModelModeInfo; 3] = [
-    ModelModeInfo {
-        mode: ModelMode::Full,
-        size_label: "about 3.9 GB",
-        radio_label: "Full (about 3.9 GB)",
-        description: "Search, OCR, privacy filters, audio transcription and the NPU image model.",
-    },
-    ModelModeInfo {
-        mode: ModelMode::Minimal,
-        size_label: "about 2 GB",
-        radio_label: "Minimal (about 2 GB)",
-        description: "Search, OCR and privacy filters; no audio transcription.",
-    },
-    ModelModeInfo {
-        mode: ModelMode::Later,
-        size_label: "",
-        radio_label: "Install models later",
-        description: "Nothing is downloaded now; add models later from the app's Models page or by running Setup again from Apps > Installed apps.",
-    },
-];
 
 pub const LICENCE_HEADER: &str = "Licence Agreement";
 pub const LICENCE_WELCOME: &str =
@@ -56,6 +27,7 @@ pub const MODELS_NOTE: &str = "Models are downloaded from Hugging Face after the
 pub const READY_HEADER: &str = "Ready to Install";
 pub const READY_INSTALL_LABEL: &str = "Install folder:";
 pub const READY_DATA_LABEL: &str = "Data folder:";
+pub const READY_MODELS_LABEL: &str = "Models folder:";
 pub const READY_START_CHECK: &str = "Start BetterRecall when Setup finishes";
 
 pub const UNINSTALL_HEADER: &str = "Uninstall BetterRecall";
@@ -85,11 +57,94 @@ pub const FINISH_UNINSTALLED_REBOOT: &str =
 pub const FINISH_CANCELLED: &str = "Setup was cancelled. Nothing was changed.";
 pub const FINISH_NOTHING_TO_DO: &str = "Nothing to modify.";
 
+pub const FINISH_MODELS_OFFLINE: &str = "Models were not downloaded because there is no internet connection. Add them later from the Models page or by running Setup again.";
+pub const FINISH_MODELS_CANCELLED: &str = "Model download was cancelled. BetterRecall is installed, and your model selection was saved. Run Setup again (Apps > Installed apps > Modify) or open the Models page in the app to finish downloading.";
+
 pub const HINT_IN_USE: &str = "Quit BetterRecall from the tray and run Setup again.";
 pub const HINT_ALREADY_RUNNING: &str =
     "Another BetterRecall Setup window is already open. Close it and try again.";
 pub const HINT_PAYLOAD: &str =
     "The installer file may be incomplete or damaged. Download BetterRecall Setup again.";
+pub const HINT_MODELS: &str = "Run Setup again (Apps > Installed apps > Modify) or open the Models page in the app to try again.";
+
+/// Formats a byte count in decimal GB (e.g. `about 6.6 GB`, `about 3.5 GB`).
+pub fn format_approx_gb(bytes: u64) -> String {
+    format!("about {:.1} GB", bytes as f64 / 1_000_000_000.0)
+}
+
+/// Radio button label for `mode` on the Models wizard page, using sizes from `catalog`.
+pub fn model_mode_radio_label(mode: ModelMode, catalog: Option<&Catalog>) -> String {
+    match mode {
+        ModelMode::Full => match catalog {
+            Some(c) => format!("Full ({})", format_approx_gb(c.bytes_for(ModelSet::Full))),
+            None => "Full".to_string(),
+        },
+        ModelMode::Minimal => match catalog {
+            Some(c) => format!(
+                "Minimal ({})",
+                format_approx_gb(c.bytes_for(ModelSet::Minimal))
+            ),
+            None => "Minimal".to_string(),
+        },
+        ModelMode::Later => "Install models later".to_string(),
+    }
+}
+
+/// Description text shown beneath each radio button on the Models wizard page.
+pub fn model_mode_description(mode: ModelMode) -> &'static str {
+    match mode {
+        ModelMode::Full => {
+            "Search, OCR, privacy filters, audio transcription and the SigLIP 2 fallback model."
+        }
+        ModelMode::Minimal => {
+            "Search, OCR and privacy filters; no audio transcription or SigLIP 2 fallback."
+        }
+        ModelMode::Later => {
+            "Nothing is downloaded now; add models later from the app's Models page or by running Setup again from Apps > Installed apps."
+        }
+    }
+}
+
+/// Summary line on the Ready page showing the selected model set and approximate download size.
+pub fn ready_models_summary(mode: ModelMode, catalog: Option<&Catalog>) -> String {
+    match mode {
+        ModelMode::Full => match catalog {
+            Some(c) => format!(
+                "Models to download: Full ({})",
+                format_approx_gb(c.bytes_for(ModelSet::Full))
+            ),
+            None => "Models to download: Full".to_string(),
+        },
+        ModelMode::Minimal => match catalog {
+            Some(c) => format!(
+                "Models to download: Minimal ({})",
+                format_approx_gb(c.bytes_for(ModelSet::Minimal))
+            ),
+            None => "Models to download: Minimal".to_string(),
+        },
+        ModelMode::Later => "Models to download: None (install later)".to_string(),
+    }
+}
+
+/// Formats live model download progress with transferred bytes and transfer rate in MB/s.
+pub fn format_download_progress(done: u64, total: u64, elapsed: Duration) -> String {
+    let base = format!("{} / {}", format_size(done), format_size(total));
+    let secs = elapsed.as_secs_f64();
+    if done > 0 && secs >= 0.2 {
+        let mb_per_sec = (done as f64 / 1_000_000.0) / secs;
+        format!("{base} ({mb_per_sec:.1} MB/s)")
+    } else {
+        base
+    }
+}
+
+fn format_size(bytes: u64) -> String {
+    if bytes >= 1_000_000_000 {
+        format!("{:.2} GB", bytes as f64 / 1_000_000_000.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / 1_000_000.0)
+    }
+}
 
 pub fn uninstall_keep_label(home: &Path) -> String {
     format!(
@@ -100,6 +155,12 @@ pub fn uninstall_keep_label(home: &Path) -> String {
 
 pub fn finish_installed(version: &str) -> String {
     format!("BetterRecall {version} is installed.")
+}
+
+pub fn finish_models_failed(reason: &str) -> String {
+    format!(
+        "Model download did not finish ({reason}). BetterRecall is installed; run Setup again (Apps > Installed apps > Modify) or open the Models page in the app to try again."
+    )
 }
 
 pub fn hint_not_enough_space(needed: u64, available: u64) -> String {
@@ -124,6 +185,7 @@ pub fn step_label(step: Step) -> &'static str {
         Step::Closing => "Closing BetterRecall...",
         Step::Swapping => "Moving files into place...",
         Step::Registering => "Registering BetterRecall...",
+        Step::DownloadingModels => "Downloading models...",
         Step::SavingSettings => "Saving model selection...",
         Step::Unregistering => "Removing registration...",
         Step::RemovingFiles => "Removing installed files...",

@@ -6,7 +6,7 @@
 
 use crate::cli::Action;
 use crate::error::InstallError;
-use crate::install::{ModelMode, Outcome};
+use crate::install::{ModelMode, ModelsResult, Outcome};
 use crate::progress::Step;
 use crate::strings;
 use crate::wizard::ids::{
@@ -150,8 +150,16 @@ impl WizardModel {
     }
 
     /// Returns whether Cancel is still permitted during the Progress page.
+    /// Cancel is disabled once the file swap starts, and re-enabled during model download
+    /// (where it cancels only the download, leaving the app installed).
     pub fn can_cancel(&self) -> bool {
-        !self.swap_started && !self.work_done
+        if self.work_done {
+            return false;
+        }
+        match self.current_step {
+            Some(Step::DownloadingModels) => true,
+            _ => !self.swap_started,
+        }
     }
 
     /// Updates state when the worker enters `step`.
@@ -263,15 +271,15 @@ pub struct FinishMessage {
 pub fn format_finish_outcome(action: Action, outcome: &Outcome) -> FinishMessage {
     let header = PageId::Finish.header_title(action);
     match outcome {
-        Outcome::Installed { version } => FinishMessage {
+        Outcome::Installed { version, models } => FinishMessage {
             header,
             summary: strings::finish_installed(version),
-            detail: String::new(),
+            detail: format_models_detail(models),
         },
-        Outcome::Modified { .. } => FinishMessage {
+        Outcome::Modified { models, .. } => FinishMessage {
             header,
             summary: strings::FINISH_MODIFIED.to_string(),
-            detail: String::new(),
+            detail: format_models_detail(models),
         },
         Outcome::Uninstalled {
             reboot_required: false,
@@ -297,6 +305,15 @@ pub fn format_finish_outcome(action: Action, outcome: &Outcome) -> FinishMessage
             summary: String::new(),
             detail: String::new(),
         },
+    }
+}
+
+fn format_models_detail(models: &ModelsResult) -> String {
+    match models {
+        ModelsResult::Complete | ModelsResult::Skipped => String::new(),
+        ModelsResult::Offline => strings::FINISH_MODELS_OFFLINE.to_string(),
+        ModelsResult::Cancelled => strings::FINISH_MODELS_CANCELLED.to_string(),
+        ModelsResult::Failed(reason) => strings::finish_models_failed(reason),
     }
 }
 
@@ -335,6 +352,11 @@ pub fn format_finish_error(err: &InstallError) -> FinishMessage {
             header: strings::FINISH_HEADER_ERROR,
             summary: err.to_string(),
             detail: strings::HINT_PAYLOAD.to_string(),
+        },
+        InstallError::Models(_) => FinishMessage {
+            header: strings::FINISH_HEADER_ERROR,
+            summary: err.to_string(),
+            detail: strings::HINT_MODELS.to_string(),
         },
         InstallError::Other(_) | InstallError::Usage(_) | InstallError::Io { .. } => {
             FinishMessage {
@@ -484,6 +506,14 @@ mod tests {
         assert!(!m.can_cancel());
         assert!(!m.buttons_for(PageId::Progress).cancel);
 
+        // Cancel is re-enabled during model download (cancels only the download).
+        m.on_step(Step::DownloadingModels);
+        assert!(m.can_cancel());
+        assert!(m.buttons_for(PageId::Progress).cancel);
+
+        m.on_step(Step::Done);
+        assert!(!m.can_cancel());
+
         let fb = m.buttons_for(PageId::Finish);
         assert!(fb.finish);
         assert!(!fb.back);
@@ -506,9 +536,38 @@ mod tests {
             Action::Install,
             &Outcome::Installed {
                 version: "0.3.0-dev".to_string(),
+                models: ModelsResult::Complete,
             },
         );
         assert_eq!(ok.summary, "BetterRecall 0.3.0-dev is installed.");
+        assert!(ok.detail.is_empty());
+
+        let offline = format_finish_outcome(
+            Action::Install,
+            &Outcome::Installed {
+                version: "0.3.0-dev".to_string(),
+                models: ModelsResult::Offline,
+            },
+        );
+        assert_eq!(offline.detail, strings::FINISH_MODELS_OFFLINE);
+
+        let dl_cancelled = format_finish_outcome(
+            Action::Install,
+            &Outcome::Installed {
+                version: "0.3.0-dev".to_string(),
+                models: ModelsResult::Cancelled,
+            },
+        );
+        assert_eq!(dl_cancelled.detail, strings::FINISH_MODELS_CANCELLED);
+
+        let dl_failed = format_finish_outcome(
+            Action::Install,
+            &Outcome::Installed {
+                version: "0.3.0-dev".to_string(),
+                models: ModelsResult::Failed("hash mismatch".to_string()),
+            },
+        );
+        assert!(dl_failed.detail.contains("hash mismatch"));
 
         let cancelled = format_finish_error(&InstallError::Cancelled);
         assert_eq!(cancelled.header, strings::FINISH_HEADER_CANCELLED);
@@ -541,5 +600,32 @@ mod tests {
         assert_eq!(scale_progress(1000, 1000), 1000);
         assert_eq!(scale_progress(1500, 1000), 1000);
         assert_eq!(scale_progress(0, 0), 1000);
+    }
+
+    #[test]
+    fn catalog_sizes_and_download_progress_formatting() {
+        use std::time::Duration;
+
+        let cat = br_fetch::Catalog::embedded().expect("embedded catalog");
+        assert_eq!(
+            strings::model_mode_radio_label(ModelMode::Full, Some(&cat)),
+            "Full (about 6.6 GB)"
+        );
+        assert_eq!(
+            strings::model_mode_radio_label(ModelMode::Minimal, Some(&cat)),
+            "Minimal (about 3.5 GB)"
+        );
+        assert_eq!(
+            strings::model_mode_radio_label(ModelMode::Later, Some(&cat)),
+            "Install models later"
+        );
+
+        let prog = strings::format_download_progress(
+            50_000_000,
+            200_000_000,
+            Duration::from_secs(2),
+        );
+        assert!(prog.contains("50.0 MB / 200.0 MB"));
+        assert!(prog.contains("25.0 MB/s"));
     }
 }

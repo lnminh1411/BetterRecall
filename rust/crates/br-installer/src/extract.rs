@@ -127,6 +127,20 @@ pub fn extract_to_staging_with_progress<F>(
 where
     F: FnOnce(&Path) -> Result<u64, InstallError>,
 {
+    extract_to_staging_with_progress_and_extra(ctx, exe, trailer, 0, free_space, progress)
+}
+
+pub(crate) fn extract_to_staging_with_progress_and_extra<F>(
+    ctx: &Ctx,
+    exe: &Path,
+    trailer: &Trailer,
+    extra_bytes: u64,
+    free_space: F,
+    progress: &dyn Progress,
+) -> Result<Staged, InstallError>
+where
+    F: FnOnce(&Path) -> Result<u64, InstallError>,
+{
     if progress.cancelled() {
         return Err(InstallError::Cancelled);
     }
@@ -147,7 +161,10 @@ where
         )
     })?;
 
-    let needed = manifest.bytes.saturating_add(manifest.bytes.div_ceil(10));
+    let needed = manifest
+        .bytes
+        .saturating_add(manifest.bytes.div_ceil(10))
+        .saturating_add(extra_bytes);
     let available = free_space(parent)?;
     if available < needed {
         return Err(InstallError::NotEnoughSpace { needed, available });

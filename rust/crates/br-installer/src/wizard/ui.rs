@@ -7,9 +7,11 @@ use std::ffi::{OsString, c_void};
 use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
+use std::time::Instant;
 
+use br_fetch::Catalog;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
@@ -30,13 +32,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::PCWSTR;
 
-use crate::cli::{Action, CliArgs};
+use crate::cli::{Action, CliArgs, load_dev_catalog};
 use crate::ctx::Ctx;
 use crate::error::{InstallError, exit_code};
 use crate::extract::available_disk_space;
 use crate::install::{
-    InstallOpts, ModifyOpts, Outcome, UninstallOpts, install_with_progress, modify_with_progress,
-    uninstall_with_progress,
+    InstallOpts, ModelMode, ModelsResult, ModifyOpts, Outcome, UninstallOpts,
+    install_with_progress, modify_with_progress, resolve_models_dir, uninstall_with_progress,
 };
 use crate::payload::read_license_text;
 use crate::progress::{Progress, Step};
@@ -46,8 +48,9 @@ use crate::wizard::ids::{
     IDC_FINISH_DETAIL, IDC_FINISH_SUMMARY, IDC_LICENCE_ACCEPT, IDC_LICENCE_EDIT,
     IDC_LICENCE_THIRD_PARTY, IDC_LICENCE_WELCOME, IDC_MODELS_FULL, IDC_MODELS_FULL_DESC,
     IDC_MODELS_LATER, IDC_MODELS_LATER_DESC, IDC_MODELS_MINIMAL, IDC_MODELS_MINIMAL_DESC,
-    IDC_MODELS_NOTE, IDC_PROGRESS_BAR, IDC_PROGRESS_STATUS, IDC_READY_DATA_LABEL,
-    IDC_READY_DATA_PATH, IDC_READY_INSTALL_LABEL, IDC_READY_INSTALL_PATH, IDC_READY_START_CHECK,
+    IDC_MODELS_NOTE, IDC_PROGRESS_BAR, IDC_PROGRESS_DETAIL, IDC_PROGRESS_STATUS,
+    IDC_READY_DATA_LABEL, IDC_READY_DATA_PATH, IDC_READY_DOWNLOAD_INFO, IDC_READY_INSTALL_LABEL,
+    IDC_READY_INSTALL_PATH, IDC_READY_MODELS_LABEL, IDC_READY_MODELS_PATH, IDC_READY_START_CHECK,
     IDC_UNINSTALL_DELETE, IDC_UNINSTALL_KEEP, IDC_UNINSTALL_UNDERSTAND, IDC_UNINSTALL_WARNING,
     IDD_FINISH, IDI_APP_ICON,
 };
@@ -71,8 +74,13 @@ struct WizardState {
     exe: PathBuf,
     allow_downgrade: bool,
     licence_text: String,
+    catalog: Option<Catalog>,
+    dev_catalog: Option<Catalog>,
     model: WizardModel,
     cancel_flag: Arc<AtomicBool>,
+    bytes_done: Arc<AtomicU64>,
+    bytes_total: Arc<AtomicU64>,
+    download_start: Option<Instant>,
     worker_started: bool,
     worker_handle: Option<JoinHandle<()>>,
     finish_message: Option<FinishMessage>,
@@ -82,6 +90,8 @@ struct WizardState {
 struct WizardProgress {
     hwnd: isize,
     cancel_flag: Arc<AtomicBool>,
+    bytes_done: Arc<AtomicU64>,
+    bytes_total: Arc<AtomicU64>,
 }
 
 impl Progress for WizardProgress {
@@ -93,6 +103,8 @@ impl Progress for WizardProgress {
     }
 
     fn bytes(&self, done: u64, total: u64) {
+        self.bytes_done.store(done, Ordering::Relaxed);
+        self.bytes_total.store(total, Ordering::Relaxed);
         let pos = scale_progress(done, total);
         let hwnd = HWND(self.hwnd as *mut c_void);
         unsafe {
@@ -140,13 +152,21 @@ pub fn run_wizard(ctx: Ctx, args: CliArgs) -> i32 {
         licence_found,
     });
 
+    let dev_catalog = load_dev_catalog(&args).ok().flatten();
+    let catalog = dev_catalog.clone().or_else(|| Catalog::embedded().ok());
+
     let mut state = Box::new(WizardState {
         ctx,
         exe,
         allow_downgrade: args.allow_downgrade,
         licence_text,
+        catalog,
+        dev_catalog,
         model,
         cancel_flag: Arc::new(AtomicBool::new(false)),
+        bytes_done: Arc::new(AtomicU64::new(0)),
+        bytes_total: Arc::new(AtomicU64::new(0)),
+        download_start: None,
         worker_started: false,
         worker_handle: None,
         finish_message: None,
@@ -284,15 +304,28 @@ unsafe extern "system" fn models_proc(
             let Some(state) = (unsafe { init_page_state(hwnd, lparam) }) else {
                 return 0;
             };
-            let full = &strings::MODEL_MODES[0];
-            let minimal = &strings::MODEL_MODES[1];
-            let later = &strings::MODEL_MODES[2];
-            set_item_text(hwnd, IDC_MODELS_FULL, full.radio_label);
-            set_item_text(hwnd, IDC_MODELS_FULL_DESC, full.description);
-            set_item_text(hwnd, IDC_MODELS_MINIMAL, minimal.radio_label);
-            set_item_text(hwnd, IDC_MODELS_MINIMAL_DESC, minimal.description);
-            set_item_text(hwnd, IDC_MODELS_LATER, later.radio_label);
-            set_item_text(hwnd, IDC_MODELS_LATER_DESC, later.description);
+            let cat = state.catalog.as_ref();
+            let full_label = strings::model_mode_radio_label(ModelMode::Full, cat);
+            let minimal_label = strings::model_mode_radio_label(ModelMode::Minimal, cat);
+            let later_label = strings::model_mode_radio_label(ModelMode::Later, cat);
+            set_item_text(hwnd, IDC_MODELS_FULL, &full_label);
+            set_item_text(
+                hwnd,
+                IDC_MODELS_FULL_DESC,
+                strings::model_mode_description(ModelMode::Full),
+            );
+            set_item_text(hwnd, IDC_MODELS_MINIMAL, &minimal_label);
+            set_item_text(
+                hwnd,
+                IDC_MODELS_MINIMAL_DESC,
+                strings::model_mode_description(ModelMode::Minimal),
+            );
+            set_item_text(hwnd, IDC_MODELS_LATER, &later_label);
+            set_item_text(
+                hwnd,
+                IDC_MODELS_LATER_DESC,
+                strings::model_mode_description(ModelMode::Later),
+            );
             set_item_text(hwnd, IDC_MODELS_NOTE, strings::MODELS_NOTE);
 
             let selected_id = radio_from_model_mode(state.model.model_mode);
@@ -343,6 +376,12 @@ unsafe extern "system" fn ready_proc(
             );
             set_item_text(hwnd, IDC_READY_DATA_LABEL, strings::READY_DATA_LABEL);
             set_item_text(hwnd, IDC_READY_DATA_PATH, &state.ctx.home.to_string_lossy());
+            set_item_text(hwnd, IDC_READY_MODELS_LABEL, strings::READY_MODELS_LABEL);
+            let models_dir = resolve_models_dir(&state.ctx.home);
+            set_item_text(hwnd, IDC_READY_MODELS_PATH, &models_dir.to_string_lossy());
+            let dl_summary =
+                strings::ready_models_summary(state.model.model_mode, state.catalog.as_ref());
+            set_item_text(hwnd, IDC_READY_DOWNLOAD_INFO, &dl_summary);
             set_item_text(hwnd, IDC_READY_START_CHECK, strings::READY_START_CHECK);
             set_checked(hwnd, IDC_READY_START_CHECK, state.model.start_after);
             1
@@ -361,6 +400,11 @@ unsafe extern "system" fn ready_proc(
         WM_NOTIFY => {
             if notify_code(lparam) == PSN_SETACTIVE {
                 if let Some(state) = unsafe { page_state(hwnd) } {
+                    let dl_summary = strings::ready_models_summary(
+                        state.model.model_mode,
+                        state.catalog.as_ref(),
+                    );
+                    set_item_text(hwnd, IDC_READY_DOWNLOAD_INFO, &dl_summary);
                     apply_buttons(hwnd, state.model.buttons_for(PageId::Ready));
                 }
                 return 1;
@@ -500,10 +544,19 @@ unsafe extern "system" fn progress_proc(
             {
                 state.model.on_step(step);
                 set_item_text(hwnd, IDC_PROGRESS_STATUS, strings::step_label(step));
-                if step == Step::Extracting {
+                if step == Step::DownloadingModels {
+                    state.download_start = Some(Instant::now());
+                    set_progress_marquee(hwnd, false);
+                } else if step == Step::Extracting {
+                    state.download_start = None;
+                    set_item_text(hwnd, IDC_PROGRESS_DETAIL, "");
                     set_progress_marquee(hwnd, false);
                 } else if step != Step::Done {
+                    state.download_start = None;
+                    set_item_text(hwnd, IDC_PROGRESS_DETAIL, "");
                     set_progress_marquee(hwnd, true);
+                } else {
+                    set_item_text(hwnd, IDC_PROGRESS_DETAIL, "");
                 }
                 apply_buttons(hwnd, state.model.buttons_for(PageId::Progress));
             }
@@ -516,6 +569,17 @@ unsafe extern "system" fn progress_proc(
                     SendMessageW(bar, PBM_SETPOS, Some(WPARAM(wparam.0)), Some(LPARAM(0)));
                 }
             }
+            if let Some(state) = unsafe { page_state(hwnd) }
+                && state.model.current_step == Some(Step::DownloadingModels)
+            {
+                let done = state.bytes_done.load(Ordering::Relaxed);
+                let total = state.bytes_total.load(Ordering::Relaxed);
+                let elapsed = state
+                    .download_start
+                    .map_or_else(std::time::Duration::default, |t| t.elapsed());
+                let detail = strings::format_download_progress(done, total, elapsed);
+                set_item_text(hwnd, IDC_PROGRESS_DETAIL, &detail);
+            }
             1
         }
         WM_APP_DONE => {
@@ -524,7 +588,17 @@ unsafe extern "system" fn progress_proc(
                 state.model.work_done = true;
                 match *boxed {
                     Ok(ref outcome) => {
-                        state.exit_code = exit_code::OK;
+                        state.exit_code = match outcome {
+                            Outcome::Installed {
+                                models: ModelsResult::Failed(_),
+                                ..
+                            }
+                            | Outcome::Modified {
+                                models: ModelsResult::Failed(_),
+                                ..
+                            } => exit_code::MODELS,
+                            _ => exit_code::OK,
+                        };
                         state.finish_message =
                             Some(format_finish_outcome(state.model.action, outcome));
                     }
@@ -590,11 +664,16 @@ fn spawn_worker(hwnd: HWND, state: &mut WizardState) {
     let delete_data = state.model.delete_data;
     let hwnd_raw = hwnd.0 as isize;
     let cancel_flag = Arc::clone(&state.cancel_flag);
+    let bytes_done = Arc::clone(&state.bytes_done);
+    let bytes_total = Arc::clone(&state.bytes_total);
+    let dev_catalog = state.dev_catalog.clone();
 
     let handle = thread::spawn(move || {
         let progress = WizardProgress {
             hwnd: hwnd_raw,
             cancel_flag,
+            bytes_done,
+            bytes_total,
         };
         let result = match action {
             Action::Install => install_with_progress(
@@ -603,13 +682,19 @@ fn spawn_worker(hwnd: HWND, state: &mut WizardState) {
                 &InstallOpts {
                     allow_downgrade,
                     model_mode,
+                    catalog: dev_catalog,
                 },
                 available_disk_space,
                 &progress,
             ),
-            Action::Modify => {
-                modify_with_progress(&ctx, &ModifyOpts { model_mode }, &progress)
-            }
+            Action::Modify => modify_with_progress(
+                &ctx,
+                &ModifyOpts {
+                    model_mode,
+                    catalog: dev_catalog,
+                },
+                &progress,
+            ),
             Action::Uninstall => {
                 uninstall_with_progress(&ctx, &UninstallOpts { delete_data }, &progress)
             }

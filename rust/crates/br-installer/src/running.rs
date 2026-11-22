@@ -97,11 +97,13 @@ pub fn pick_processes_to_end(
 
 /// Signals the agent and UI quit events for `ctx.home`, waits for them to exit,
 /// then terminates any remaining processes selected by [`pick_processes_to_end`].
-pub fn close_running(ctx: &Ctx) -> Result<(), InstallError> {
+/// Returns whether an agent was running (its quit event existed).
+pub fn close_running(ctx: &Ctx) -> Result<bool, InstallError> {
     let agent_pid = read_agent_pid(&ctx.home);
 
     let agent_quit = PipeNames::agent_quit_event_for(&ctx.home);
-    if signal_named_event(&agent_quit) {
+    let agent_was_running = signal_named_event(&agent_quit);
+    if agent_was_running {
         log_line(&ctx.home, "signaled agent quit event");
         let agent_mutex = PipeNames::agent_mutex_for(&ctx.home);
         wait_until_gone(AGENT_QUIT_WAIT, || named_mutex_exists(&agent_mutex));
@@ -125,7 +127,12 @@ pub fn close_running(ctx: &Ctx) -> Result<(), InstallError> {
         terminate_pid(pid, &ctx.home);
     }
 
-    Ok(())
+    Ok(agent_was_running)
+}
+
+/// True while an agent holds this data folder's single-instance mutex.
+pub fn agent_running(ctx: &Ctx) -> bool {
+    named_mutex_exists(&PipeNames::agent_mutex_for(&ctx.home))
 }
 
 /// Normalizes a directory path to a full Windows path ending with `\`.
