@@ -8,6 +8,8 @@ members = [
     "crates/br-integrity",
     "crates/br-installer",
     "crates/br-sign",
+    "crates/br-cli",
+    "crates/br-mcp",
 ]
 resolver = "3"
 

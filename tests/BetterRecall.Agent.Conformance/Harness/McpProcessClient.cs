@@ -14,7 +14,7 @@ internal sealed class McpProcessClient : IAsyncDisposable
     private readonly StreamReader _stdout;
     private int _nextId;
 
-    public McpProcessClient(string mcpExePath, string home)
+    public McpProcessClient(string mcpExePath, string home, params string[] extraArgs)
     {
         var utf8 = new UTF8Encoding(false);
         var psi = new ProcessStartInfo(mcpExePath)
@@ -28,6 +28,7 @@ internal sealed class McpProcessClient : IAsyncDisposable
             StandardInputEncoding = utf8,
             StandardOutputEncoding = utf8,
         };
+        foreach (var a in extraArgs) psi.ArgumentList.Add(a);
         psi.Environment[DataPaths.HomeEnv] = home;
         _proc = Process.Start(psi) ?? throw new InvalidOperationException("Failed to start betterrecall-mcp.exe.");
         _stdin = _proc.StandardInput;

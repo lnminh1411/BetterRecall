@@ -128,6 +128,11 @@ impl InstallLayout {
     pub const DEV_BUILD_MARKER: &'static str = ".devbuild";
     pub const ALLOW_DEFAULT_HOME_FLAG: &'static str = "--allow-default-home";
 
+    /// Default per-user install folder: `%LOCALAPPDATA%\Programs\BetterRecall`.
+    pub fn default_install_dir() -> PathBuf {
+        local_app_data().join("Programs").join("BetterRecall")
+    }
+
     pub fn full(install_dir: &Path, relative: &str) -> PathBuf {
         let joined = install_dir.join(relative);
         full_path(&joined).unwrap_or(joined)
@@ -406,6 +411,7 @@ pub struct PipeNames;
 
 impl PipeNames {
     pub const AGENT_MUTEX: &'static str = r"Local\BetterRecall.Agent";
+    pub const SETUP_MUTEX: &'static str = r"Local\BetterRecall.Setup";
     pub const SHOW_LAUNCHER_EVENT: &'static str = r"Local\BetterRecall.UI.ShowLauncher";
     pub const UI_INSTANCE_KEY: &'static str = "BetterRecall.UI";
     pub const AGENT_QUIT_EVENT: &'static str = r"Local\BetterRecall.Agent.Quit";
@@ -501,6 +507,10 @@ impl PipeNames {
 
     pub fn agent_mutex_for(home: &Path) -> String {
         Self::scoped(Self::AGENT_MUTEX, home)
+    }
+
+    pub fn setup_mutex_for(home: &Path) -> String {
+        Self::scoped(Self::SETUP_MUTEX, home)
     }
 
     pub fn agent_quit_event_for(home: &Path) -> String {

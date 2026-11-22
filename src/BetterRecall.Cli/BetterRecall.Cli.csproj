@@ -1,13 +1,59 @@
 <Project Sdk="Microsoft.NET.Sdk">
+  <!-- The CLI is the Rust crate rust\crates\br-cli. This project builds it with cargo and ships betterrecall.exe;
+       no managed file ships. -->
   <PropertyGroup>
     <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
     <SupportedOSPlatformVersion>10.0.20348.0</SupportedOSPlatformVersion>
-    <OutputType>Exe</OutputType>
-    <PublishAot>true</PublishAot>
-    <AssemblyName>betterrecall</AssemblyName>
+    <OutputType>Library</OutputType>
+    <SelfContained>false</SelfContained>
+    <UseAppHost>false</UseAppHost>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
+    <GenerateDependencyFile>false</GenerateDependencyFile>
+    <GenerateRuntimeConfigurationFiles>false</GenerateRuntimeConfigurationFiles>
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+    <DebugType>none</DebugType>
+    <CopyBuildOutputToPublishDirectory>false</CopyBuildOutputToPublishDirectory>
+    <CopyOutputSymbolsToPublishDirectory>false</CopyOutputSymbolsToPublishDirectory>
+    <IsPackable>false</IsPackable>
   </PropertyGroup>
   <ItemGroup>
-    <ProjectReference Include="..\BetterRecall.Contracts\BetterRecall.Contracts.csproj" />
-    <ProjectReference Include="..\BetterRecall.Core\BetterRecall.Core.csproj" />
+    <_CliTrimFile Include="BetterRecall.Cli.dll;BetterRecall.Cli.pdb;BetterRecall.Cli.deps.json;BetterRecall.Cli.runtimeconfig.json" />
+    <_CliTrimFile Include="Microsoft.Windows.SDK.NET.dll;WinRT.Runtime.dll" />
   </ItemGroup>
+  <Target Name="BuildRustCli" AfterTargets="Build" BeforeTargets="ComputeFilesToPublish">
+    <PropertyGroup>
+      <_RustDir>$(MSBuildThisFileDirectory)..\..\rust</_RustDir>
+      <_CargoProfile Condition="'$(Configuration)' == 'Release'">release</_CargoProfile>
+      <_CargoProfile Condition="'$(Configuration)' != 'Release'">debug</_CargoProfile>
+      <_CargoProfileFlag Condition="'$(Configuration)' == 'Release'">--release</_CargoProfileFlag>
+      <_CargoTargetDirRaw Condition="'$(CARGO_TARGET_DIR)' != ''">$(CARGO_TARGET_DIR)</_CargoTargetDirRaw>
+      <_CargoTargetDirRaw Condition="'$(CARGO_TARGET_DIR)' == ''">$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\..\artifacts\cargo'))</_CargoTargetDirRaw>
+      <_CargoTargetDir>$(_CargoTargetDirRaw.TrimEnd('\').TrimEnd('/'))</_CargoTargetDir>
+      <_RustCliExe>$(_CargoTargetDir)\$(_CargoProfile)\betterrecall.exe</_RustCliExe>
+    </PropertyGroup>
+    <Exec Command="where cargo &gt;nul 2&gt;nul" IgnoreExitCode="true" EchoOff="true" StandardOutputImportance="Low" StandardErrorImportance="Low">
+      <Output TaskParameter="ExitCode" PropertyName="_CargoCheckExit" />
+    </Exec>
+    <Error Condition="'$(_CargoCheckExit)' != '0'"
+           Text="cargo was not found on PATH. Install the Rust toolchain with rustup (https://rustup.rs) using the stable x86_64-pc-windows-msvc target." />
+    <Exec WorkingDirectory="$(_RustDir)"
+          Command="cargo build -p br-cli $(_CargoProfileFlag) -j 4 --target-dir &quot;$(_CargoTargetDir)&quot;" />
+    <Copy SourceFiles="$(_RustCliExe)"
+          DestinationFiles="$(TargetDir)betterrecall.exe"
+          OverwriteReadOnlyFiles="true"
+          SkipUnchangedFiles="false" />
+    <ItemGroup>
+      <ResolvedFileToPublish Include="$(TargetDir)betterrecall.exe">
+        <RelativePath>betterrecall.exe</RelativePath>
+        <CopyToPublishDirectory>Always</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+  </Target>
+  <Target Name="TrimCliBuild" AfterTargets="BuildRustCli">
+    <Delete Files="@(_CliTrimFile->'$(TargetDir)%(Identity)')" />
+  </Target>
+  <Target Name="TrimCliPublish" AfterTargets="Publish">
+    <Delete Files="@(_CliTrimFile->'$(PublishDir)%(Identity)')" />
+  </Target>
 </Project>

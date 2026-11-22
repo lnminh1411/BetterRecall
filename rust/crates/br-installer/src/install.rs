@@ -44,7 +44,7 @@ use crate::swap::{old_folder_path, rename_with_retry, swap_into_place};
 pub const SETUP_EXE: &str = "BetterRecall-Setup.exe";
 
 /// Base single-instance mutex name (scoped via `PipeNames::scoped` for non-default homes).
-pub const SETUP_MUTEX: &str = r"Local\BetterRecall.Setup";
+pub const SETUP_MUTEX: &str = PipeNames::SETUP_MUTEX;
 
 /// Which AI models the user chose to install (recorded in HKCU; downloaded in I3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

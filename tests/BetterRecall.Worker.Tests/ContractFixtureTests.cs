@@ -20,13 +20,14 @@ public class ContractFixtureTests
 
     private static string ExtractMcpToolList()
     {
-        var mcpSource = File.ReadAllText(Path.Combine(RepoRoot(), "src", "BetterRecall.Mcp", "McpServer.cs"), Encoding.UTF8);
-        const string startMarker = "private const string ToolsJson = \"\"\"";
+        // The MCP server is Rust (I6a): the tool list is TOOLS_JSON in br-mcp's server.rs.
+        var mcpSource = File.ReadAllText(Path.Combine(RepoRoot(), "rust", "crates", "br-mcp", "src", "server.rs"), Encoding.UTF8);
+        const string startMarker = "const TOOLS_JSON: &'static str = r#\"";
         int start = mcpSource.IndexOf(startMarker, StringComparison.Ordinal);
-        Assert.True(start >= 0, "ToolsJson start marker not found in McpServer.cs");
+        Assert.True(start >= 0, "TOOLS_JSON start marker not found in server.rs");
         start += startMarker.Length;
-        int end = mcpSource.IndexOf("\"\"\";", start, StringComparison.Ordinal);
-        Assert.True(end > start, "ToolsJson end marker not found in McpServer.cs");
+        int end = mcpSource.IndexOf("\"#;", start, StringComparison.Ordinal);
+        Assert.True(end > start, "TOOLS_JSON end marker not found in server.rs");
         using var toolsDoc = JsonDocument.Parse(mcpSource[start..end]);
         var buf = new System.Buffers.ArrayBufferWriter<byte>();
         using (var w = new Utf8JsonWriter(buf))

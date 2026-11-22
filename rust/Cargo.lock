@@ -177,6 +177,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "br-cli"
+version = "0.3.0-dev"
+dependencies = [
+ "br-contracts",
+ "br-core",
+ "br-integrity",
+ "windows",
+]
+
+[[package]]
 name = "br-contracts"
 version = "0.3.0-dev"
 dependencies = [
@@ -249,6 +259,18 @@ dependencies = [
  "serde_json",
  "sha2 0.11.1",
  "thiserror",
+ "windows",
+]
+
+[[package]]
+name = "br-mcp"
+version = "0.3.0-dev"
+dependencies = [
+ "br-contracts",
+ "br-core",
+ "br-integrity",
+ "serde",
+ "serde_json",
  "windows",
 ]
 
