@@ -10,6 +10,8 @@ using BetterRecall.Core.Ipc;
 // betterrecall ipc purge <scope> [--yes]: preview and confirm on one connection (tokens are per connection); without
 // --yes it asks at the console.
 
+IntegrityCheck.EnforceOrExit(AppContext.BaseDirectory, gui: false);
+
 if (args.Length < 2 || !args[0].Equals("ipc", StringComparison.OrdinalIgnoreCase))
 {
     Console.Error.WriteLine("Usage: betterrecall ipc <words...>");

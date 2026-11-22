@@ -102,6 +102,8 @@ pub struct InstallOpts {
     pub model_mode: ModelMode,
     /// Optional catalog override for tests; production always leaves this `None` (uses embedded).
     pub catalog: Option<Catalog>,
+    /// Optional public key PEM override for tests; `None` uses the compile-time release key (or skips).
+    pub integrity_key: Option<String>,
 }
 
 /// Options for [`modify_with_progress`].
@@ -110,12 +112,16 @@ pub struct ModifyOpts {
     pub model_mode: ModelMode,
     /// Optional catalog override for tests; production always leaves this `None` (uses embedded).
     pub catalog: Option<Catalog>,
+    /// Optional public key PEM override for tests; `None` uses the compile-time release key (or skips).
+    pub integrity_key: Option<String>,
 }
 
 /// Options for [`uninstall`].
 #[derive(Debug, Clone, Default)]
 pub struct UninstallOpts {
     pub delete_data: bool,
+    /// Optional public key PEM override for tests; `None` uses the compile-time release key (or skips).
+    pub integrity_key: Option<String>,
 }
 
 /// Result of an install, uninstall, or modify action.
@@ -231,6 +237,17 @@ where
     )?;
     let version = staged.manifest.version.clone();
 
+    if let Some(key_pem) = resolve_integrity_key(opts.integrity_key.as_deref())
+        && let Err(e) = br_integrity::check_dir_with_exempt(&staged.dir, key_pem, &[SETUP_EXE])
+    {
+        let _ = fs::remove_dir_all(&staged.dir);
+        log_line(
+            &ctx.home,
+            &format!("install integrity check failed on staging: {e}"),
+        );
+        return Err(InstallError::Integrity(e.to_string()));
+    }
+
     if progress.cancelled() {
         let _ = fs::remove_dir_all(&staged.dir);
         log_line(&ctx.home, "install cancelled after extraction");
@@ -249,6 +266,16 @@ where
     progress.step(Step::Swapping);
     swap_into_place(ctx, staged)?;
     copy_stub_exe(exe, stub_len(&trailer), &ctx.install_dir)?;
+
+    if let Some(key_pem) = resolve_integrity_key(opts.integrity_key.as_deref())
+        && let Err(e) = br_integrity::check_single_file(&ctx.install_dir, key_pem, SETUP_EXE)
+    {
+        log_line(
+            &ctx.home,
+            &format!("install integrity check failed on {SETUP_EXE}: {e}"),
+        );
+        return Err(InstallError::Integrity(e.to_string()));
+    }
 
     progress.step(Step::Registering);
     registry::register(ctx, &version)?;
@@ -298,6 +325,15 @@ pub fn uninstall_with_progress(
             opts.delete_data
         ),
     );
+
+    if let Some(key_pem) = resolve_integrity_key(opts.integrity_key.as_deref())
+        && let Err(e) = br_integrity::check_dir(&ctx.install_dir, key_pem)
+    {
+        log_line(
+            &ctx.home,
+            &format!("uninstall: install integrity check failed ({e}); continuing removal"),
+        );
+    }
 
     progress.step(Step::Closing);
     close_running(ctx)?;
@@ -395,6 +431,16 @@ pub fn modify_with_progress(
         ),
     );
 
+    if let Some(key_pem) = resolve_integrity_key(opts.integrity_key.as_deref())
+        && let Err(e) = br_integrity::check_dir(&ctx.install_dir, key_pem)
+    {
+        log_line(
+            &ctx.home,
+            &format!("modify refused: install integrity check failed: {e}"),
+        );
+        return Err(InstallError::Integrity(e.to_string()));
+    }
+
     progress.step(Step::SavingSettings);
     registry::write_model_mode(ctx, opts.model_mode)?;
 
@@ -465,6 +511,13 @@ pub fn modify_with_progress(
         mode: opts.model_mode,
         models,
     })
+}
+
+fn resolve_integrity_key(override_key: Option<&str>) -> Option<&str> {
+    match override_key {
+        Some(k) => Some(k),
+        None => br_integrity::embedded_public_key_pem(),
+    }
 }
 
 fn start_agent(ctx: &Ctx) -> Result<(), InstallError> {

@@ -66,6 +66,8 @@ pub const HINT_ALREADY_RUNNING: &str =
 pub const HINT_PAYLOAD: &str =
     "The installer file may be incomplete or damaged. Download BetterRecall Setup again.";
 pub const HINT_MODELS: &str = "Run Setup again (Apps > Installed apps > Modify) or open the Models page in the app to try again.";
+pub const HINT_INTEGRITY: &str =
+    "BetterRecall's files were changed or are damaged. Download BetterRecall Setup again and reinstall.";
 
 /// Formats a byte count in decimal GB (e.g. `about 6.6 GB`, `about 3.5 GB`).
 pub fn format_approx_gb(bytes: u64) -> String {

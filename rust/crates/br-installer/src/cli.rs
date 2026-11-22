@@ -224,6 +224,21 @@ pub fn run_main() -> i32 {
         }
     };
 
+    if args.action == Action::Modify
+        && let Some(key_pem) = br_integrity::embedded_public_key_pem()
+        && let Err(e) = br_integrity::check_dir(&ctx.install_dir, key_pem)
+    {
+        let err = InstallError::Integrity(e.to_string());
+        log_line(
+            &ctx.home,
+            &format!("modify refused before UI: install integrity check failed: {e}"),
+        );
+        if !args.silent {
+            show_message(&err.to_string(), MB_OK | MB_ICONERROR);
+        }
+        return err.exit_code();
+    }
+
     if args.action == Action::Uninstall && should_relaunch_uninstall(&ctx, &args) {
         let me = match std::env::current_exe() {
             Ok(p) => p,
@@ -311,6 +326,7 @@ fn dispatch_silent(ctx: &Ctx, args: &CliArgs) -> Result<Outcome, InstallError> {
                     allow_downgrade: args.allow_downgrade,
                     model_mode: args.model_mode.unwrap_or(ModelMode::Later),
                     catalog: dev_catalog,
+                    integrity_key: None,
                 },
             )?
         }
@@ -318,6 +334,7 @@ fn dispatch_silent(ctx: &Ctx, args: &CliArgs) -> Result<Outcome, InstallError> {
             ctx,
             &UninstallOpts {
                 delete_data: args.delete_data,
+                integrity_key: None,
             },
         )?,
         Action::Modify => {
@@ -330,6 +347,7 @@ fn dispatch_silent(ctx: &Ctx, args: &CliArgs) -> Result<Outcome, InstallError> {
                 &ModifyOpts {
                     model_mode,
                     catalog: dev_catalog,
+                    integrity_key: None,
                 },
                 &NoProgress,
             )?

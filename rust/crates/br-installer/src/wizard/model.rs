@@ -358,6 +358,11 @@ pub fn format_finish_error(err: &InstallError) -> FinishMessage {
             summary: err.to_string(),
             detail: strings::HINT_MODELS.to_string(),
         },
+        InstallError::Integrity(_) => FinishMessage {
+            header: strings::FINISH_HEADER_ERROR,
+            summary: err.to_string(),
+            detail: strings::HINT_INTEGRITY.to_string(),
+        },
         InstallError::Other(_) | InstallError::Usage(_) | InstallError::Io { .. } => {
             FinishMessage {
                 header: strings::FINISH_HEADER_ERROR,

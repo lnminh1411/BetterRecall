@@ -683,6 +683,7 @@ fn spawn_worker(hwnd: HWND, state: &mut WizardState) {
                     allow_downgrade,
                     model_mode,
                     catalog: dev_catalog,
+                    integrity_key: None,
                 },
                 available_disk_space,
                 &progress,
@@ -692,12 +693,18 @@ fn spawn_worker(hwnd: HWND, state: &mut WizardState) {
                 &ModifyOpts {
                     model_mode,
                     catalog: dev_catalog,
+                    integrity_key: None,
                 },
                 &progress,
             ),
-            Action::Uninstall => {
-                uninstall_with_progress(&ctx, &UninstallOpts { delete_data }, &progress)
-            }
+            Action::Uninstall => uninstall_with_progress(
+                &ctx,
+                &UninstallOpts {
+                    delete_data,
+                    integrity_key: None,
+                },
+                &progress,
+            ),
         };
         let ptr = Box::into_raw(Box::new(result));
         let target = HWND(hwnd_raw as *mut c_void);

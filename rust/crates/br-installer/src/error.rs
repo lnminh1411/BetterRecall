@@ -16,6 +16,7 @@ pub mod exit_code {
     pub const ALREADY_RUNNING: i32 = 7;
     pub const CANCELLED: i32 = 8;
     pub const MODELS: i32 = 9;
+    pub const INTEGRITY: i32 = 10;
 }
 
 /// Installer error with one variant per CLI exit code plus `Io`.
@@ -50,6 +51,9 @@ pub enum InstallError {
     #[error("model download failed: {0}")]
     Models(String),
 
+    #[error("integrity check failed: {0}")]
+    Integrity(String),
+
     #[error("{context}: {source}")]
     Io {
         context: String,
@@ -70,6 +74,7 @@ impl InstallError {
             Self::AlreadyRunning => exit_code::ALREADY_RUNNING,
             Self::Cancelled => exit_code::CANCELLED,
             Self::Models(_) => exit_code::MODELS,
+            Self::Integrity(_) => exit_code::INTEGRITY,
         }
     }
 

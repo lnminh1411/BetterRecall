@@ -778,6 +778,7 @@ fn model_mode_install_modify_and_unregister() {
             allow_downgrade: false,
             model_mode: ModelMode::Minimal,
             catalog: Some(catalog.clone()),
+            integrity_key: None,
         },
     )
     .expect("install");
@@ -788,6 +789,7 @@ fn model_mode_install_modify_and_unregister() {
         &ModifyOpts {
             model_mode: ModelMode::Full,
             catalog: Some(catalog),
+            integrity_key: None,
         },
         &br_installer::NoProgress,
     )
@@ -894,7 +896,14 @@ fn uninstall_delete_data_removes_only_allowlisted_entries() {
         &[(InstallLayout::AGENT_EXE, b"agent")],
     );
     install(&env_keep.ctx, &exe_a, &InstallOpts::default()).expect("install");
-    uninstall(&env_keep.ctx, &UninstallOpts { delete_data: true }).expect("uninstall delete_data");
+    uninstall(
+        &env_keep.ctx,
+        &UninstallOpts {
+            delete_data: true,
+            ..Default::default()
+        },
+    )
+    .expect("uninstall delete_data");
 
     for gone in [
         "keys",
@@ -935,7 +944,14 @@ fn uninstall_delete_data_removes_only_allowlisted_entries() {
         &[(InstallLayout::AGENT_EXE, b"agent")],
     );
     install(&env_empty.ctx, &exe_b, &InstallOpts::default()).expect("install");
-    uninstall(&env_empty.ctx, &UninstallOpts { delete_data: true }).expect("uninstall delete_data");
+    uninstall(
+        &env_empty.ctx,
+        &UninstallOpts {
+            delete_data: true,
+            ..Default::default()
+        },
+    )
+    .expect("uninstall delete_data");
     assert!(
         !env_empty.ctx.home.exists(),
         "empty home folder should be removed after deleting all listed entries"
@@ -1361,6 +1377,7 @@ fn i3_install_minimal_and_modify_full_to_minimal_removes_full_only() {
             allow_downgrade: false,
             model_mode: ModelMode::Minimal,
             catalog: Some(catalog.clone()),
+            integrity_key: None,
         },
     )
     .expect("install minimal");
@@ -1384,6 +1401,7 @@ fn i3_install_minimal_and_modify_full_to_minimal_removes_full_only() {
         &ModifyOpts {
             model_mode: ModelMode::Full,
             catalog: Some(catalog.clone()),
+            integrity_key: None,
         },
         &br_installer::NoProgress,
     )
@@ -1403,6 +1421,7 @@ fn i3_install_minimal_and_modify_full_to_minimal_removes_full_only() {
         &ModifyOpts {
             model_mode: ModelMode::Minimal,
             catalog: Some(catalog.clone()),
+            integrity_key: None,
         },
         &br_installer::NoProgress,
     )
@@ -1423,6 +1442,7 @@ fn i3_install_minimal_and_modify_full_to_minimal_removes_full_only() {
         &ModifyOpts {
             model_mode: ModelMode::Later,
             catalog: Some(catalog),
+            integrity_key: None,
         },
         &br_installer::NoProgress,
     )
@@ -1459,6 +1479,7 @@ fn i3_offline_returns_offline_and_silent_e2e_exits_zero() {
             allow_downgrade: false,
             model_mode: ModelMode::Minimal,
             catalog: Some(offline_cat),
+            integrity_key: None,
         },
     )
     .expect("offline install must succeed");
@@ -1572,9 +1593,166 @@ fn i3_install_space_check_includes_model_bytes() {
             allow_downgrade: false,
             model_mode: ModelMode::Minimal,
             catalog: Some(cat),
+            integrity_key: None,
         },
         |_| Ok(50_000),
     )
     .expect_err("space check must include model bytes");
     assert!(matches!(err, InstallError::NotEnoughSpace { .. }));
+}
+
+// --- I7 integrity verification tests ---
+
+fn gen_test_keypair() -> (String, String) {
+    use p256::ecdsa::SigningKey;
+    use p256::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
+    use rand_core::OsRng;
+
+    let sk = SigningKey::random(&mut OsRng);
+    let vk = sk.verifying_key();
+    let priv_pem = sk.to_pkcs8_pem(LineEnding::LF).expect("priv pem").to_string();
+    let pub_pem = vk.to_public_key_pem(LineEnding::LF).expect("pub pem");
+    (priv_pem, pub_pem)
+}
+
+fn build_signed_installer(
+    env: &TestEnv,
+    name: &str,
+    stub_bytes: &[u8],
+    version: &str,
+    files: &[(&str, &[u8])],
+    tamper_agent_after_sign: bool,
+) -> (PathBuf, String) {
+    let (priv_pem, pub_pem) = gen_test_keypair();
+    let layout_dir = env.root.join(format!("{name}-layout"));
+    fs::create_dir_all(&layout_dir).expect("create layout");
+
+    for (rel, data) in files {
+        let full = layout_dir.join(rel);
+        if let Some(p) = full.parent() {
+            fs::create_dir_all(p).expect("create parent");
+        }
+        fs::write(&full, data).expect("write layout file");
+    }
+    // Include BetterRecall-Setup.exe in the manifest (it is copied after swap, not in the zip).
+    fs::write(layout_dir.join(SETUP_EXE), stub_bytes).expect("write stub in layout");
+
+    let manifest = br_integrity::build_manifest(&layout_dir, version).expect("build_manifest");
+    let manifest_bytes = manifest.to_bytes().expect("manifest to_bytes");
+    let sig_bytes = br_integrity::sign_manifest(&manifest_bytes, &priv_pem).expect("sign");
+
+    let mut payload_entries: Vec<(String, Vec<u8>)> = files
+        .iter()
+        .map(|(rel, data)| ((*rel).to_string(), data.to_vec()))
+        .collect();
+    if tamper_agent_after_sign
+        && let Some((_, data)) = payload_entries
+            .iter_mut()
+            .find(|(p, _)| p == InstallLayout::AGENT_EXE)
+    {
+        data[0] ^= 0xFF;
+    }
+    payload_entries.push((br_integrity::INTEGRITY_JSON.to_string(), manifest_bytes));
+    payload_entries.push((br_integrity::INTEGRITY_SIG.to_string(), sig_bytes.to_vec()));
+
+    let borrowed: Vec<(&str, &[u8])> = payload_entries
+        .iter()
+        .map(|(p, d)| (p.as_str(), d.as_slice()))
+        .collect();
+
+    let exe = env.build_installer(name, stub_bytes, version, &borrowed);
+    (exe, pub_pem)
+}
+
+// 24. Signed installer passes staging + stub verification; tampered staged file fails with Integrity (exit 10)
+//     and leaves no staging folder; tampered install refuses modify but allows uninstall.
+#[test]
+fn i7_integrity_staging_modify_and_uninstall_behaviour() {
+    let env = TestEnv::new("i7-integrity");
+    let stub = b"MZ-STUB-SIGNED-BYTES";
+
+    // A. Tampered staged file fails with InstallError::Integrity (exit code 10) and cleans staging.
+    let (bad_exe, bad_pub) = build_signed_installer(
+        &env,
+        "tampered",
+        stub,
+        "0.3.0-dev",
+        &[
+            (InstallLayout::AGENT_EXE, b"agent-signed"),
+            (InstallLayout::WORKER_EXE, b"worker-signed"),
+        ],
+        true,
+    );
+    let err = install(
+        &env.ctx,
+        &bad_exe,
+        &InstallOpts {
+            integrity_key: Some(bad_pub),
+            ..Default::default()
+        },
+    )
+    .expect_err("tampered staged payload must fail integrity check");
+    assert!(matches!(err, InstallError::Integrity(_)));
+    assert_eq!(err.exit_code(), exit_code::INTEGRITY);
+    assert!(!has_prefix_dir(&env.root, STAGING_PREFIX));
+    assert!(!env.ctx.install_dir.exists());
+
+    // B. Clean signed payload installs successfully (verifying staging and copied BetterRecall-Setup.exe).
+    let (good_exe, pub_pem) = build_signed_installer(
+        &env,
+        "good",
+        stub,
+        "0.3.0-dev",
+        &[
+            (InstallLayout::AGENT_EXE, b"agent-signed"),
+            (InstallLayout::WORKER_EXE, b"worker-signed"),
+        ],
+        false,
+    );
+    install(
+        &env.ctx,
+        &good_exe,
+        &InstallOpts {
+            integrity_key: Some(pub_pem.clone()),
+            ..Default::default()
+        },
+    )
+    .expect("clean signed install must pass");
+    assert!(env.ctx.install_dir.join(SETUP_EXE).exists());
+
+    // C. Tamper an installed file -> modify refuses with Integrity (exit 10), uninstall still succeeds.
+    fs::write(
+        env.ctx.install_dir.join(InstallLayout::AGENT_EXE),
+        b"agent-tampered",
+    )
+    .expect("tamper installed agent");
+
+    let mod_err = modify_with_progress(
+        &env.ctx,
+        &ModifyOpts {
+            model_mode: ModelMode::Later,
+            catalog: None,
+            integrity_key: Some(pub_pem.clone()),
+        },
+        &br_installer::NoProgress,
+    )
+    .expect_err("modify must refuse damaged install");
+    assert!(matches!(mod_err, InstallError::Integrity(_)));
+    assert_eq!(mod_err.exit_code(), exit_code::INTEGRITY);
+
+    let uninst = uninstall(
+        &env.ctx,
+        &UninstallOpts {
+            delete_data: false,
+            integrity_key: Some(pub_pem),
+        },
+    )
+    .expect("uninstall must proceed on damaged install");
+    assert_eq!(
+        uninst,
+        Outcome::Uninstalled {
+            reboot_required: false
+        }
+    );
+    assert!(!env.ctx.install_dir.exists());
 }

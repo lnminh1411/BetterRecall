@@ -1,0 +1,29 @@
+[package]
+name = "br-integrity"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license = "AGPL-3.0-only"
+
+[lib]
+name = "br_integrity"
+path = "src/lib.rs"
+
+[dependencies]
+br-contracts = { path = "../br-contracts" }
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "pem", "sha256", "std"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.11"
+thiserror = "2.0"
+
+[dependencies.windows]
+version = "0.62"
+features = [
+  "Win32_Foundation",
+  "Win32_System_SystemInformation",
+  "Win32_UI_WindowsAndMessaging",
+]
+
+[dev-dependencies]
+rand_core = { version = "0.6", features = ["getrandom"] }

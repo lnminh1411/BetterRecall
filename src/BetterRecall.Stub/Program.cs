@@ -31,6 +31,7 @@ internal static partial class Program
                 Fail("BetterRecall is not installed here: run the BetterRecall download once, then retry.", relay);
                 return 1;
             }
+            IntegrityCheck.EnforceOrExit(install, gui: false);
             if (relay) return Relay(root, realRoot, args);
             Start(self, install, args);
             Maintenance.Run(root, install);

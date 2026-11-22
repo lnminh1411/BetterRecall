@@ -1,0 +1,1 @@
+{"format":1,"version":"0.3.0-fixture","files":[{"path":"app.txt","size":35,"sha256":"02b44e9f0bf9e272d72a23ff0b0db72ce7df272e9d50e5f5a62edf7d24df0ce1"},{"path":"data.bin","size":20,"sha256":"5a7a4229bf93cbd0cd1d695639851f03cd2039d02673c2beb29fe109ac7e4d69"},{"path":"sub\\nested.txt","size":29,"sha256":"211be756aca5bbf88eb839a3e6745211b20c68890387bb018c1eabbc8995e775"}]}
