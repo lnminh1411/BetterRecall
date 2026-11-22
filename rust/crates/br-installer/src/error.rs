@@ -14,6 +14,7 @@ pub mod exit_code {
     pub const PAYLOAD: i32 = 5;
     pub const NOT_ENOUGH_SPACE: i32 = 6;
     pub const ALREADY_RUNNING: i32 = 7;
+    pub const CANCELLED: i32 = 8;
 }
 
 /// Installer error with one variant per CLI exit code plus `Io`.
@@ -42,6 +43,9 @@ pub enum InstallError {
     #[error("another BetterRecall installer is already running")]
     AlreadyRunning,
 
+    #[error("setup was cancelled")]
+    Cancelled,
+
     #[error("{context}: {source}")]
     Io {
         context: String,
@@ -60,6 +64,7 @@ impl InstallError {
             Self::Payload(_) => exit_code::PAYLOAD,
             Self::NotEnoughSpace { .. } => exit_code::NOT_ENOUGH_SPACE,
             Self::AlreadyRunning => exit_code::ALREADY_RUNNING,
+            Self::Cancelled => exit_code::CANCELLED,
         }
     }
 

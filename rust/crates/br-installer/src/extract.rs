@@ -22,6 +22,7 @@ use crate::log::log_line;
 use crate::payload::{
     SETUP_JSON, SetupManifest, Trailer, open_payload_reader, read_setup_manifest, verify,
 };
+use crate::progress::{NoProgress, Progress, Step};
 
 /// Prefix for staging folders created beside `install_dir`.
 pub const STAGING_PREFIX: &str = ".BetterRecall.staging-";
@@ -99,7 +100,7 @@ pub fn extract_to_staging(
     exe: &Path,
     trailer: &Trailer,
 ) -> Result<Staged, InstallError> {
-    extract_to_staging_with_space(ctx, exe, trailer, available_disk_space)
+    extract_to_staging_with_progress(ctx, exe, trailer, available_disk_space, &NoProgress)
 }
 
 /// Same as [`extract_to_staging`], with an injectable free-space source for tests.
@@ -112,7 +113,27 @@ pub fn extract_to_staging_with_space<F>(
 where
     F: FnOnce(&Path) -> Result<u64, InstallError>,
 {
+    extract_to_staging_with_progress(ctx, exe, trailer, free_space, &NoProgress)
+}
+
+/// Same as [`extract_to_staging_with_space`], with progress reporting and cooperative cancellation.
+pub fn extract_to_staging_with_progress<F>(
+    ctx: &Ctx,
+    exe: &Path,
+    trailer: &Trailer,
+    free_space: F,
+    progress: &dyn Progress,
+) -> Result<Staged, InstallError>
+where
+    F: FnOnce(&Path) -> Result<u64, InstallError>,
+{
+    if progress.cancelled() {
+        return Err(InstallError::Cancelled);
+    }
     verify(exe, trailer)?;
+    if progress.cancelled() {
+        return Err(InstallError::Cancelled);
+    }
     let manifest = read_setup_manifest(exe, trailer)?;
 
     let parent = ctx
@@ -157,8 +178,9 @@ where
         keep: false,
     };
 
+    progress.step(Step::Extracting);
     let sha256_hex = trailer.sha256_hex();
-    let extracted_files = extract_entries(exe, trailer, &staging_dir)?;
+    let extracted_files = extract_entries(exe, trailer, &staging_dir, progress)?;
 
     let marker_content = format!("{}\n{}\n{}\n", manifest.version, sha256_hex, extracted_files);
     fs::write(staging_dir.join(INSTALL_MARKER), marker_content).map_err(|e| {
@@ -177,13 +199,37 @@ where
     })
 }
 
-fn extract_entries(exe: &Path, trailer: &Trailer, staging_dir: &Path) -> Result<u64, InstallError> {
+fn extract_entries(
+    exe: &Path,
+    trailer: &Trailer,
+    staging_dir: &Path,
+    progress: &dyn Progress,
+) -> Result<u64, InstallError> {
     let reader = open_payload_reader(exe, trailer)?;
     let mut archive = ZipArchive::new(reader)
         .map_err(|e| InstallError::Payload(format!("invalid payload zip: {e}")))?;
 
-    let mut file_count = 0u64;
+    let mut total_bytes = 0u64;
     for i in 0..archive.len() {
+        let entry = archive
+            .by_index(i)
+            .map_err(|e| InstallError::Payload(format!("reading zip entry {i}: {e}")))?;
+        if entry.is_dir() || entry.name() == SETUP_JSON {
+            continue;
+        }
+        total_bytes = total_bytes.saturating_add(entry.size());
+    }
+
+    if total_bytes > 0 {
+        progress.bytes(0, total_bytes);
+    }
+
+    let mut file_count = 0u64;
+    let mut done_bytes = 0u64;
+    for i in 0..archive.len() {
+        if progress.cancelled() {
+            return Err(InstallError::Cancelled);
+        }
         let mut entry = archive
             .by_index(i)
             .map_err(|e| InstallError::Payload(format!("reading zip entry {i}: {e}")))?;
@@ -210,6 +256,7 @@ fn extract_entries(exe: &Path, trailer: &Trailer, staging_dir: &Path) -> Result<
             continue;
         }
 
+        let entry_size = entry.size();
         let dest = staging_dir.join(&rel);
         if let Some(p) = dest.parent() {
             fs::create_dir_all(p)
@@ -220,8 +267,16 @@ fn extract_entries(exe: &Path, trailer: &Trailer, staging_dir: &Path) -> Result<
         io::copy(&mut entry, &mut out)
             .map_err(|e| InstallError::io(format!("extracting {}", dest.display()), e))?;
         file_count += 1;
+        done_bytes = done_bytes.saturating_add(entry_size);
+        if entry_size > 0 && done_bytes < total_bytes {
+            progress.bytes(done_bytes, total_bytes);
+        }
     }
 
+    if progress.cancelled() {
+        return Err(InstallError::Cancelled);
+    }
+    progress.bytes(total_bytes, total_bytes);
     Ok(file_count)
 }
 

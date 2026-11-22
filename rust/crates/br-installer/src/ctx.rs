@@ -28,6 +28,7 @@ pub struct Ctx {
     pub home: PathBuf,
     pub reg_prefix: String,
     pub start_menu_dir: PathBuf,
+    pub temp_dir: PathBuf,
     pub start_after: bool,
 }
 
@@ -47,6 +48,7 @@ impl Ctx {
             home: DataPaths::home(),
             reg_prefix: String::new(),
             start_menu_dir,
+            temp_dir: env::temp_dir(),
             start_after: true,
         }
     }
@@ -73,6 +75,7 @@ impl Ctx {
             home,
             reg_prefix: trimmed_prefix.to_string(),
             start_menu_dir: root_full.join("start-menu"),
+            temp_dir: root_full.join("temp"),
             start_after: false,
         })
     }
