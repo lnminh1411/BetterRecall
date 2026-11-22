@@ -1,0 +1,464 @@
+{
+  "repo": "lnminh1411/BetterRecall-models",
+  "revision": "893eb2c63a11443e9f5061745c69ecbd5e1bd16a",
+  "baseUrl": "https://huggingface.co/lnminh1411/BetterRecall-models/resolve/893eb2c63a11443e9f5061745c69ecbd5e1bd16a/",
+  "components": [
+    {
+      "id": "embeddinggemma-2",
+      "sets": [
+        "full",
+        "minimal"
+      ],
+      "bytes": 2782236945,
+      "files": [
+        {
+          "path": "LICENSE",
+          "size": 11358,
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        {
+          "path": "embed_tokens.bf16",
+          "size": 268435456,
+          "sha256": "56ebbdbfd706c827f3fae1d97aa39135c7ddc0f1e6d9b12f8565f84bbfbda877"
+        },
+        {
+          "path": "manifest.json",
+          "size": 7438,
+          "sha256": "bf79473d95a560e155d626c219b7120b2ed6c945566934c0b68ba303a4a7143b"
+        },
+        {
+          "path": "text.bin",
+          "size": 273561278,
+          "sha256": "509e9cf3b4ba54590bbc350caea8419876df9f73e91264cb6833c3cabb7b834f"
+        },
+        {
+          "path": "text.onnx",
+          "size": 548337813,
+          "sha256": "fdfca3bcace337b9ce76677dedce58d94648b82db7932f34db0efb487190cdc4"
+        },
+        {
+          "path": "text.xml",
+          "size": 2992560,
+          "sha256": "4dddd136916718c75c72f4bdfeb7c733582b858858b4f7a4277fe4cdb2603241"
+        },
+        {
+          "path": "tokenizer.model",
+          "size": 4689013,
+          "sha256": "e594c8a90eb08d8bda498ff4747977dc827ae0c3c56b5c0d41a605a22d02ef03"
+        },
+        {
+          "path": "vision.onnx",
+          "size": 671988705,
+          "sha256": "d5147a3bb1509f6c32e6ed63dcf2d05863f6ec4ecf3f3ec16d97b5c69b5b5e90"
+        },
+        {
+          "path": "vision_140.bin",
+          "size": 335514204,
+          "sha256": "3a5dde32f064e7b8957de03a411a4763b3207cccfee6e81bac1e1f1e6f4263ae"
+        },
+        {
+          "path": "vision_140.xml",
+          "size": 1891510,
+          "sha256": "bfe660c706c916317f5e77eabdc9c7ac3d3f1a29250880c54b160ee246af4d19"
+        },
+        {
+          "path": "vision_280.bin",
+          "size": 335514204,
+          "sha256": "c06bec70501a3f040a5d9806e49ebf2f0a2a2d5e161dd18236d0a2c1fcbd9b79"
+        },
+        {
+          "path": "vision_280.xml",
+          "size": 1891510,
+          "sha256": "9d3efcf2e75ca5dee950be57908a815aa6623b2c51b837044f603b1e84463a95"
+        },
+        {
+          "path": "vision_70.bin",
+          "size": 335514204,
+          "sha256": "4db15f24a3a278005c7b4568f1c360ebf0181e9fe2a431cc78b97c883f2b8621"
+        },
+        {
+          "path": "vision_70.xml",
+          "size": 1887692,
+          "sha256": "bdd9f10769265422d807f555d23b510c0f89707c596d66e691a52bfb16d87c3f"
+        }
+      ]
+    },
+    {
+      "id": "nsfw-classifier",
+      "sets": [
+        "full",
+        "minimal"
+      ],
+      "bytes": 430604834,
+      "files": [
+        {
+          "path": "LICENSE",
+          "size": 11358,
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        {
+          "path": "manifest.json",
+          "size": 1419,
+          "sha256": "8c4d0559aefde56254b31f49caeb203736b18da9537fad755d1d9263adddd232"
+        },
+        {
+          "path": "model_fp32.onnx",
+          "size": 343302400,
+          "sha256": "a765522aefbadeae1abd3b5511e008f6acda48a276a4730b11f4942a216d0078"
+        },
+        {
+          "path": "model_int8.onnx",
+          "size": 87289657,
+          "sha256": "febcf1c363ce7c4a65e7a51fc3f675e754552b32e4284758478c02e21f60ceb5"
+        }
+      ]
+    },
+    {
+      "id": "nsfw-detector",
+      "sets": [
+        "full",
+        "minimal"
+      ],
+      "bytes": 12186168,
+      "files": [
+        {
+          "path": "LICENSE",
+          "size": 34523,
+          "sha256": "8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef"
+        },
+        {
+          "path": "manifest.json",
+          "size": 1487,
+          "sha256": "79f71354f2f0e11160ca0ec542a6405232f7370c5f2699ca29dd0b31fc5ebefd"
+        },
+        {
+          "path": "model.onnx",
+          "size": 12150158,
+          "sha256": "c15d8273adad2d0a92f014cc69ab2d6c311a06777a55545f2c4eb46f51911f0f"
+        }
+      ]
+    },
+    {
+      "id": "ocr",
+      "sets": [
+        "full",
+        "minimal"
+      ],
+      "bytes": 100059153,
+      "files": [
+        {
+          "path": "LICENSE",
+          "size": 11358,
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        {
+          "path": "det.onnx",
+          "size": 9880512,
+          "sha256": "d73e0058b7a8086bbd57f3d10b8bcd4ff95363f67e06e2762b5e814fe9c9410e"
+        },
+        {
+          "path": "dict-arabic.txt",
+          "size": 2368,
+          "sha256": "8f239c13f6c8b1bdf15f332a65a05002ddd4d99b9286a4bfaf6f0327c36ebbec"
+        },
+        {
+          "path": "dict-cyrillic.txt",
+          "size": 2780,
+          "sha256": "2de016b31edd687acfc1bf72170f4feff9f0c4893edac87cef30b2c5a82443ec"
+        },
+        {
+          "path": "dict-devanagari.txt",
+          "size": 1942,
+          "sha256": "c66d17ef6ced6fbfb4413810e75f0f788cfde37d4192bd17af7923fa190066c8"
+        },
+        {
+          "path": "dict-el.txt",
+          "size": 1102,
+          "sha256": "60e017885fd98fd0fb5c402da86179f1fe24ae229b374b3b96d313f99a09de59"
+        },
+        {
+          "path": "dict-korean.txt",
+          "size": 47450,
+          "sha256": "a7872c929cd25cf615cdfea08579cf800db1943900fe683468df4dcff6f848bb"
+        },
+        {
+          "path": "dict-main.txt",
+          "size": 74946,
+          "sha256": "f7aa897ca828a4c7c9e2739c30f9161a33306d532f020bcdb91dcfb664a5507e"
+        },
+        {
+          "path": "dict-ta.txt",
+          "size": 1722,
+          "sha256": "20efa583a700c50d2192e325cb367644da4025c6545d0254c70ca5c7c8882dc8"
+        },
+        {
+          "path": "dict-te.txt",
+          "size": 1830,
+          "sha256": "9fe6ad8e4641c4520ce5fa18d4ca6d7695578d6af6f64cdb27b7c3b350aabd50"
+        },
+        {
+          "path": "dict-th.txt",
+          "size": 1766,
+          "sha256": "e0f32101004cc828ed4505bba80126be06e282700c4c79175ed2b21a4d454dfa"
+        },
+        {
+          "path": "manifest.json",
+          "size": 8955,
+          "sha256": "7dbe62ecf0d778db8f95be635ac532940e3eeba43810ca631bd30dc656128762"
+        },
+        {
+          "path": "rec-arabic.onnx",
+          "size": 7998947,
+          "sha256": "799113ebf267fbe742deb99eb36e8d42c9ddc5291ceacf92add41b4d52a59110"
+        },
+        {
+          "path": "rec-cyrillic.onnx",
+          "size": 8048799,
+          "sha256": "5371ee1ddaa7983cc62d0818d99e982b6804638c85e4f960d59a574094e172e5"
+        },
+        {
+          "path": "rec-devanagari.onnx",
+          "size": 7912311,
+          "sha256": "cb789212ce96c69d3e74728ae4309d179281d68cb3945d0616b67cafab41c986"
+        },
+        {
+          "path": "rec-el.onnx",
+          "size": 7808735,
+          "sha256": "2acf17fcaea2bc81b878e311e6263b8885f48bb03796f75f9f30ed3242bbaa6d"
+        },
+        {
+          "path": "rec-korean.onnx",
+          "size": 13418787,
+          "sha256": "92f0b7785e64fc9090106a241cf4c1eb97472824558272751b88a2a4476d3a08"
+        },
+        {
+          "path": "rec-main.onnx",
+          "size": 21159378,
+          "sha256": "5435fd747c9e0efe15a96d0b378d5bd157e9492ed8fd80edf08f30d02fa24634"
+        },
+        {
+          "path": "rec-ta.onnx",
+          "size": 7885691,
+          "sha256": "c6d2b682d2a0ea4cb1fccdba295976f93fd439964d16cdc666cadef531accbee"
+        },
+        {
+          "path": "rec-te.onnx",
+          "size": 7898759,
+          "sha256": "8238bfc46d4cffe720ed6706e3842802467343497428693ff2bfb4e6b3caa36b"
+        },
+        {
+          "path": "rec-th.onnx",
+          "size": 7891015,
+          "sha256": "27618be66018f8598ac0a526a593f9f1cebf794e7eded93428e8fb016e537f5f"
+        }
+      ]
+    },
+    {
+      "id": "ner",
+      "sets": [
+        "full",
+        "minimal"
+      ],
+      "bytes": 151131117,
+      "files": [
+        {
+          "path": "LICENSE",
+          "size": 1144,
+          "sha256": "92e0b0760e2b5ea6246e24f56f79fd0a87ae7ff003c3f097ba9fbeda360f0b48"
+        },
+        {
+          "path": "config.json",
+          "size": 5688,
+          "sha256": "3f07065571e22bb73eba28ddb1fae4509c0cf703762e3bfa7a6ab2111cf7cb88"
+        },
+        {
+          "path": "manifest.json",
+          "size": 3412,
+          "sha256": "d33f1171efde76aa6443d67db1d8f679d050f491dd2f803b00fdf64d4e5f407e"
+        },
+        {
+          "path": "model.onnx",
+          "size": 138730982,
+          "sha256": "139006aea2cbd8e709d322f056232570de54661f624143be4893aaa387190286"
+        },
+        {
+          "path": "tokenizer.json",
+          "size": 12389891,
+          "sha256": "c299144e68dfec1dc536204a7ae3712710c5c6cade9269a83f5042250d47d8de"
+        }
+      ]
+    },
+    {
+      "id": "siglip2-base",
+      "sets": [
+        "full"
+      ],
+      "bytes": 2255519502,
+      "files": [
+        {
+          "path": "LICENSE",
+          "size": 11358,
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        {
+          "path": "manifest.json",
+          "size": 3228,
+          "sha256": "07b433afe63d54c5be31c2cd00b56d6f83c281a2b398588be8b36d614289ce92"
+        },
+        {
+          "path": "text.bin",
+          "size": 564607608,
+          "sha256": "15924bfeb5643c32ac53eb215d029a36cd7778b72c12c393c1ce2773e44329d3"
+        },
+        {
+          "path": "text.onnx",
+          "size": 1129352708,
+          "sha256": "c0380db787012e5b5a8c5103da0c78957475ff8d4d0f13e2b3fe04e87e5ca240"
+        },
+        {
+          "path": "text.xml",
+          "size": 493285,
+          "sha256": "1bea2dcf52690ff2bda6b6ff39d47d9e482c6892b718de698ce89a0c83e0c986"
+        },
+        {
+          "path": "tokenizer.model",
+          "size": 4241003,
+          "sha256": "61a7b147390c64585d6c3543dd6fc636906c9af3865a5548f27f31aee1d4c8e2"
+        },
+        {
+          "path": "vision.bin",
+          "size": 184587590,
+          "sha256": "15917b09f0e4c57532c4a126ac66bdd9069016e8e13b30193ce4275f9c78d72b"
+        },
+        {
+          "path": "vision.onnx",
+          "size": 371695041,
+          "sha256": "2f89b9c110d31f0625e1e1885af0b357857267bf8adff098b7cf3befe8ad7f07"
+        },
+        {
+          "path": "vision.xml",
+          "size": 527681,
+          "sha256": "8a1d83a66aa45ec2bc462e6d1bca7d9a75408e993e9b7eeb98aeb27512fe7b83"
+        }
+      ]
+    },
+    {
+      "id": "whisper-large-v3-turbo",
+      "sets": [
+        "full"
+      ],
+      "bytes": 821993394,
+      "files": [
+        {
+          "path": "LICENSE",
+          "size": 1063,
+          "sha256": "b5d65a59060e68c4ff940e1eddfa6f94b2d68fdf58ed7f4dd57721c997e35e9d"
+        },
+        {
+          "path": "config.json",
+          "size": 1272,
+          "sha256": "1345cc1f4cbb50bf6d5df913b1b75f21c386184106534c6d90308018bb0ef85d"
+        },
+        {
+          "path": "generation_config.json",
+          "size": 4015,
+          "sha256": "a78e7a0908be255f7a1e683b713d07cfa0fba260aa0bc8ac57ab7e0e5984d6a7"
+        },
+        {
+          "path": "manifest.json",
+          "size": 4532,
+          "sha256": "7497494c07a7ade4b5bfb3268cada7636824f7371a2d55fe1cb4a102bbe91293"
+        },
+        {
+          "path": "openvino_config.json",
+          "size": 489,
+          "sha256": "03098e7aa523461dffe8c54ce06e631b16c832b64ac144062a716079e3d4ffa4"
+        },
+        {
+          "path": "openvino_decoder_model.bin",
+          "size": 172422054,
+          "sha256": "487c2672475835db70fbffd1a97d30582a75461451f076f4d12efcaa632e2a46"
+        },
+        {
+          "path": "openvino_decoder_model.xml",
+          "size": 430787,
+          "sha256": "0aa7fa1254f01c4e5ff4cbb2b3015348c02a37ba13b00e4e9cfe56cdeb39c766"
+        },
+        {
+          "path": "openvino_detokenizer.bin",
+          "size": 736198,
+          "sha256": "f2b3c47825a1089525ff65c0c8e49271e1dee69a401a04fc827ac2de5b7766e4"
+        },
+        {
+          "path": "openvino_detokenizer.xml",
+          "size": 10079,
+          "sha256": "07a1d8208a31dcb5222d9bf4b206d8784196b0e6a47b86618b8b69c6a8605be9"
+        },
+        {
+          "path": "openvino_encoder_model.bin",
+          "size": 640837232,
+          "sha256": "bc49750b4872f4ad3c184708104a4572d60d9e639dedc96c466c4c33ad96549c"
+        },
+        {
+          "path": "openvino_encoder_model.xml",
+          "size": 1683524,
+          "sha256": "490473e23678676357e079939b1ba254769764aa3ae002d16c5e3835301d98eb"
+        },
+        {
+          "path": "openvino_tokenizer.bin",
+          "size": 1898978,
+          "sha256": "057e0ae2149663711ed32ccb1da103f32cd48fff99849191e6b14f1bbd255328"
+        },
+        {
+          "path": "openvino_tokenizer.xml",
+          "size": 29575,
+          "sha256": "49a4130da3c6693f6c01d3cac7333fc6fbf1909eb2f7017104d1997855357888"
+        },
+        {
+          "path": "preprocessor_config.json",
+          "size": 330,
+          "sha256": "639427792a627557c19c95880aad248e591d8b57ef61e6dfa4e8249e353a0416"
+        },
+        {
+          "path": "processor_config.json",
+          "size": 427,
+          "sha256": "87236e5aa022472c14f29b827e26b988ffeac587ed0477a99f86412b57542342"
+        },
+        {
+          "path": "tokenizer.json",
+          "size": 3930645,
+          "sha256": "5c1bf30c9e716e1477bedef846b01be0013daecb89e9e3ef7ab89b23c178df1b"
+        },
+        {
+          "path": "tokenizer_config.json",
+          "size": 2194,
+          "sha256": "ca15f941e9579ece2822cfb8c2fb680dd39065cdc66b989488c86bfce29674bc"
+        }
+      ]
+    },
+    {
+      "id": "silero-vad",
+      "sets": [
+        "full"
+      ],
+      "bytes": 2329089,
+      "files": [
+        {
+          "path": "LICENSE",
+          "size": 1075,
+          "sha256": "2e63e9a38b6e8fc0c7bc37ce174caca1862870856c6daf5697cfb785e925520b"
+        },
+        {
+          "path": "manifest.json",
+          "size": 490,
+          "sha256": "f463baf37bae4a5bdd70b1dbcbe80d9da8aed87df6f8125986034dc6d9d9d362"
+        },
+        {
+          "path": "silero_vad.onnx",
+          "size": 2327524,
+          "sha256": "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3"
+        }
+      ]
+    }
+  ]
+}
