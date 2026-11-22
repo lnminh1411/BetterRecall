@@ -336,12 +336,10 @@ impl ReplayLibrary {
             let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
                 continue;
             };
-            if name.len() <= suffix.len()
-                || !name[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
-            {
+            let Some(id) = br_contracts::strip_suffix_ci(name, suffix).filter(|id| !id.is_empty())
+            else {
                 continue;
-            }
-            let id = &name[..name.len() - suffix.len()];
+            };
             let Some(ts) = Self::try_parse_id(id) else {
                 continue;
             };

@@ -258,11 +258,14 @@ public sealed partial class MainWindow : Window
         var st = Services.Current.Status;
         var now = DateTimeOffset.UtcNow;
         bool locked = Services.Current.Locked;   // counts stay hidden while locked (sweep 2 D37)
-        var state = st is null ? "" : string.Join("  ·  ", PauseControl.StateParts(st, now, locked).Select(Loc.Text));
+        var conn = Services.Current.Connection;
+        bool connected = conn is not (AgentErrorKind.NotRunning or AgentErrorKind.NotTrusted);
+        // N4: offline, the last status is stale: show the connection state, no capture state or counts.
+        var state = !connected ? Loc.Error(conn, null)
+            : st is null ? "" : string.Join("  ·  ", PauseControl.StateParts(st, now, locked).Select(Loc.Text));
         if (StateLine.Text != state) StateLine.Text = state;   // the live region speaks only when this changes
-        var detail = st is null ? "" : string.Join("  ·  ", StatusText.Fit(PauseControl.DetailParts(st, now, locked), StatusBar.ActualWidth > 0 ? StatusBar.ActualWidth : 1200).Select(Loc.Text));
+        var detail = st is null || !connected ? "" : string.Join("  ·  ", StatusText.Fit(PauseControl.DetailParts(st, now, locked), StatusBar.ActualWidth > 0 ? StatusBar.ActualWidth : 1200).Select(Loc.Text));
         StatusLine.Text = detail.Length == 0 ? "" : "·  " + detail;   // the column spacing stands in for the two spaces before the dot (D17)
-        bool connected = Services.Current.Connection is not (AgentErrorKind.NotRunning or AgentErrorKind.NotTrusted);
         PauseButton.Content = Loc.Get(PauseControl.LabelKey(st));
         PauseButton.IsEnabled = PauseControl.Enabled(st, connected);
         LockButton.Content = Loc.Get(Services.Current.Locked ? "Main_Unlock" : "Main_Lock");

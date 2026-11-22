@@ -1101,6 +1101,12 @@ fn b20_history_needles() {
         EncryptedStore::history_needles(&PurgeScope::for_app("chrome.exe")),
         vec!["chrome.exe", "chrome"]
     );
+    // N1: multi-byte app names must not panic (the `.exe` check cut inside a character).
+    assert!(EncryptedStore::history_needles(&PurgeScope::for_app("日日")).is_empty());
+    assert_eq!(
+        EncryptedStore::history_needles(&PurgeScope::for_app("日本語.exe")),
+        vec!["日本語.exe", "日本語"]
+    );
 }
 
 #[test]

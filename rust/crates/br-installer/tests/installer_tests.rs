@@ -351,6 +351,50 @@ fn locked_file_in_old_install_fails_swap_with_in_use() {
     assert!(!has_prefix_dir(&env.root, OLD_PREFIX));
 }
 
+// N2 (sweep 6): an upgrade refused because the old install is in use restarts the agent that
+// was running instead of leaving BetterRecall stopped.
+#[test]
+fn n2_refused_upgrade_restarts_the_running_agent() {
+    use windows::Win32::System::Threading::CreateEventW;
+    let env = TestEnv::new("n2-restart");
+    let v1 = env.build_installer(
+        "v1",
+        b"MZ-STUB-V1",
+        "0.3.0-dev",
+        &[(InstallLayout::AGENT_EXE, b"agent-v1-original")],
+    );
+    install(&env.ctx, &v1, &InstallOpts::default()).expect("install v1");
+
+    // An agent "runs" for this data folder: its scoped quit event exists.
+    let name: Vec<u16> = br_contracts::PipeNames::agent_quit_event_for(&env.ctx.home)
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    let ev = unsafe { CreateEventW(None, true, false, PCWSTR(name.as_ptr())) }.expect("quit event");
+
+    let locked_path = env.ctx.install_dir.join(InstallLayout::AGENT_EXE);
+    let lock = OpenOptions::new().read(true).share_mode(0).open(&locked_path).expect("lock");
+    let v2 = env.build_installer(
+        "v2",
+        b"MZ-STUB-V2",
+        "0.3.0",
+        &[(InstallLayout::AGENT_EXE, b"agent-v2-new")],
+    );
+    let err = install(&env.ctx, &v2, &InstallOpts::default()).expect_err("in use");
+    drop(lock);
+    unsafe {
+        let _ = windows::Win32::Foundation::CloseHandle(ev);
+    }
+    assert!(matches!(err, InstallError::InUse { .. }), "{err:?}");
+    let log = fs::read_to_string(env.ctx.home.join("logs").join("setup.log")).expect("setup.log");
+    assert!(
+        log.contains("restarting the agent that was running"),
+        "setup.log must show the restart attempt:
+{log}"
+    );
+    assert_eq!(fs::read(&locked_path).expect("old agent"), b"agent-v1-original");
+}
+
 // 6. Registry values written exactly as listed; unregister removes them; unrelated Run value survives.
 #[test]
 fn registry_register_and_unregister_preserves_other_run_value() {

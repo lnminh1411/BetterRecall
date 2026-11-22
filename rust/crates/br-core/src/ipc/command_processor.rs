@@ -448,12 +448,9 @@ impl CommandProcessor {
         if let Some(pos) = n.rfind(['\\', '/']) {
             n = &n[pos + 1..];
         }
-        // X1: compare bytes, slice only at a char boundary (".exe" is ASCII).
-        if n.len() >= 4
-            && n.as_bytes()[n.len() - 4..].eq_ignore_ascii_case(b".exe")
-            && n.is_char_boundary(n.len() - 4)
-        {
-            n = &n[..n.len() - 4];
+        // X1: never slice inside a multi-byte character.
+        if let Some(stem) = br_contracts::strip_suffix_ci(n, ".exe") {
+            n = stem;
         }
         n.trim().to_string()
     }

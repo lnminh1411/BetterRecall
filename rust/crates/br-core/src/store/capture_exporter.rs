@@ -301,10 +301,9 @@ fn normalize_app(app: Option<&str>) -> Option<String> {
     if a.is_empty() {
         return None;
     }
-    let stripped = if a.len() > 4 && a[a.len() - 4..].eq_ignore_ascii_case(".exe") {
-        &a[..a.len() - 4]
-    } else {
-        a
+    let stripped = match br_contracts::strip_suffix_ci(a, ".exe") {
+        Some(stem) if !stem.is_empty() => stem,
+        _ => a,
     };
     Some(stripped.to_lowercase())
 }

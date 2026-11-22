@@ -480,9 +480,10 @@ impl EncryptedStore {
             // Match `????-??.db`
             if name.len() == 10
                 && name.as_bytes()[4] == b'-'
-                && name[7..].eq_ignore_ascii_case(".db")
+                && let Some(month) = br_contracts::strip_suffix_ci(name, ".db")
+                && month.len() == 7
             {
-                months.push(name[..7].to_string());
+                months.push(month.to_string());
             }
         }
         months.sort();
@@ -2083,8 +2084,10 @@ impl EncryptedStore {
         {
             let a = app.trim();
             add(a);
-            if a.len() > 4 && a[a.len() - 4..].eq_ignore_ascii_case(".exe") {
-                add(&a[..a.len() - 4]);
+            if let Some(stem) = br_contracts::strip_suffix_ci(a, ".exe")
+                && !stem.is_empty()
+            {
+                add(stem);
             }
         } else if scope.kind == "site" {
             let host = Self::normalize_site(scope.site.as_deref());

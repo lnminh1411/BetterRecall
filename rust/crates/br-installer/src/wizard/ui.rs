@@ -285,6 +285,7 @@ unsafe extern "system" fn licence_proc(
                 if let Some(state) = unsafe { page_state(hwnd) } {
                     apply_buttons(hwnd, state.model.buttons_for(PageId::Licence));
                 }
+                clear_selection_later(hwnd, &[IDC_LICENCE_EDIT]);
                 return 1;
             }
             0
@@ -407,6 +408,10 @@ unsafe extern "system" fn ready_proc(
                     set_item_text(hwnd, IDC_READY_DOWNLOAD_INFO, &dl_summary);
                     apply_buttons(hwnd, state.model.buttons_for(PageId::Ready));
                 }
+                clear_selection_later(
+                    hwnd,
+                    &[IDC_READY_INSTALL_PATH, IDC_READY_DATA_PATH, IDC_READY_MODELS_PATH],
+                );
                 return 1;
             }
             0
@@ -525,7 +530,7 @@ unsafe extern "system" fn progress_proc(
                     if state.model.can_cancel() {
                         state.cancel_flag.store(true, Ordering::SeqCst);
                         set_item_text(hwnd, IDC_PROGRESS_STATUS, strings::PROGRESS_CANCELLING);
-                        set_sheet_cancel_enabled(hwnd, false);
+                        set_sheet_cancel(hwnd, false, true);
                     }
                     // Always block immediate sheet close on Progress; the worker posts WM_APP_DONE
                     // once cleanup finishes and advances to the Finish page.
@@ -762,15 +767,30 @@ fn apply_buttons(hwnd: HWND, buttons: WizardButtons) {
             LPARAM(flags as isize),
         );
     }
-    set_sheet_cancel_enabled(hwnd, buttons.cancel);
+    // N7: end pages (Finish, Cancelled, Uninstall Complete) show Finish alone, no dead Cancel.
+    set_sheet_cancel(hwnd, buttons.cancel, !buttons.finish);
 }
 
-fn set_sheet_cancel_enabled(hwnd: HWND, enabled: bool) {
+fn set_sheet_cancel(hwnd: HWND, enabled: bool, visible: bool) {
     if let Ok(sheet) = (unsafe { GetParent(hwnd) })
         && let Ok(cancel_btn) = (unsafe { GetDlgItem(Some(sheet), IDCANCEL.0) })
     {
         unsafe {
             let _ = EnableWindow(cancel_btn, enabled);
+            let _ = ShowWindow(cancel_btn, if visible { SW_SHOW } else { SW_HIDE });
+        }
+    }
+}
+
+/// N7: the dialog selects all text of a read-only edit when it takes focus on page activation;
+/// posted after activation, this puts the caret at the start with nothing selected.
+fn clear_selection_later(hwnd: HWND, ids: &[u16]) {
+    const EM_SETSEL: u32 = 0x00B1;
+    for &id in ids {
+        if let Ok(edit) = unsafe { GetDlgItem(Some(hwnd), i32::from(id)) } {
+            unsafe {
+                let _ = PostMessageW(Some(edit), EM_SETSEL, WPARAM(0), LPARAM(0));
+            }
         }
     }
 }
