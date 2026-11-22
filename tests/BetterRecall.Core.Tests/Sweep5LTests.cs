@@ -68,23 +68,6 @@ public sealed class Sweep5LTests : IAsyncLifetime
 
     private void Set(string json) => Assert.Null(_settings.TryUpdate(JsonDocument.Parse(json).RootElement));
 
-    private void Layout(string currentFolder)
-    {
-        foreach (var f in new[] { OldFolder, NewFolder })
-        {
-            Directory.CreateDirectory(Path.Combine(_root, f));
-            File.WriteAllBytes(Path.Combine(_root, f, InstallLayout.AgentExe), []);
-        }
-        SetCurrent(currentFolder);
-    }
-
-    private void SetCurrent(string folder)
-    {
-        var bin = Path.Combine(_root, InstallLayout.BinDir);
-        Directory.CreateDirectory(bin);
-        File.WriteAllText(Path.Combine(bin, InstallLayout.CurrentFile), Path.Combine(_root, folder));
-    }
-
     private string CreateJunction(string name, string target)
     {
         var link = Path.Combine(_root, name);
@@ -103,31 +86,6 @@ public sealed class Sweep5LTests : IAsyncLifetime
         Assert.Equal(0, p.ExitCode);
         _junctions.Add(link);
         return link;
-    }
-
-    // ---------------------------------------------------------------- C2: bin\current shared delete + replace
-
-    [Fact]
-    public void C2_CurrentInstall_shares_delete_so_replace_succeeds_during_concurrent_read()
-    {
-        Layout(OldFolder);
-        var currentFile = Path.Combine(_root, InstallLayout.BinDir, InstallLayout.CurrentFile);
-        var tmp = currentFile + ".tmp";
-
-        // Reader matching InstallLayout.CurrentInstall's FileShare.ReadWrite | FileShare.Delete does not block File.Replace.
-        using (var reader = new FileStream(currentFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
-        {
-            Assert.Equal(Path.Combine(_root, OldFolder), InstallLayout.CurrentInstall(_root));
-            File.WriteAllText(tmp, Path.Combine(_root, NewFolder));
-            File.Replace(tmp, currentFile, destinationBackupFileName: null, ignoreMetadataErrors: true);
-        }
-        Assert.Equal(Path.Combine(_root, NewFolder), InstallLayout.CurrentInstall(_root));
-
-        // An external reader that holds FileShare.Read only does not block CurrentInstall either.
-        using (var external = new FileStream(currentFile, FileMode.Open, FileAccess.Read, FileShare.Read))
-        {
-            Assert.Equal(Path.Combine(_root, NewFolder), InstallLayout.CurrentInstall(_root));
-        }
     }
 
     // ---------------------------------------------------------------- C3: StepClock multi-step and sub-tolerance steps
@@ -214,7 +172,7 @@ public sealed class Sweep5LTests : IAsyncLifetime
         var realApp = Path.Combine(_root, "b8-real");
         var verReal = Path.Combine(realApp, "0.2.4-bbbbbbbbbbbb");
         Directory.CreateDirectory(verReal);
-        Directory.CreateDirectory(Path.Combine(realApp, InstallLayout.BinDir));
+        Directory.CreateDirectory(Path.Combine(realApp, "bin"));
         var juncApp = CreateJunction("b8-junc", realApp);
         var selfJunc = CreateJunction("self-junc", Path.GetDirectoryName(Self)!);
 
@@ -229,7 +187,7 @@ public sealed class Sweep5LTests : IAsyncLifetime
         Assert.True(PipeManager.SameInstallFile(
             verReal,
             Path.Combine(verReal, InstallLayout.CliExe),
-            Path.Combine(juncApp, InstallLayout.BinDir, InstallLayout.CliShim)));
+            Path.Combine(juncApp, "bin", InstallLayout.CliShim)));
         Assert.True(PipeManager.SameInstallFile(
             Path.Combine(juncApp, "0.2.4-bbbbbbbbbbbb"),
             Path.Combine(verReal, InstallLayout.CliExe),

@@ -37,6 +37,7 @@ use crate::payload::{read_setup_manifest, read_trailer, stub_len};
 use crate::progress::{NoProgress, Progress, Step};
 use crate::registry;
 use crate::running::{agent_running, close_running, normalized_dir_prefix, path_is_under_prefix};
+use crate::shims;
 use crate::shortcut;
 use crate::swap::{old_folder_path, rename_with_retry, swap_into_place};
 
@@ -270,6 +271,8 @@ where
         return Err(InstallError::Cancelled);
     }
 
+    shims::cleanup_launcher_installs(&ctx.home);
+
     progress.step(Step::Swapping);
     swap_into_place(ctx, staged)?;
     copy_stub_exe(exe, stub_len(&trailer), &ctx.install_dir)?;
@@ -283,6 +286,8 @@ where
         );
         return Err(InstallError::Integrity(e.to_string()));
     }
+
+    shims::place_relay_and_shim(ctx)?;
 
     progress.step(Step::Registering);
     registry::register(ctx, &version)?;
@@ -391,6 +396,8 @@ pub fn uninstall_with_progress(
         }
     }
 
+    shims::remove_relay_and_shim(ctx);
+
     if opts.delete_data {
         progress.step(Step::DeletingData);
         delete_home_data(&ctx.home)?;
@@ -450,6 +457,9 @@ pub fn modify_with_progress(
 
     progress.step(Step::SavingSettings);
     registry::write_model_mode(ctx, opts.model_mode)?;
+    if ctx.install_dir.is_dir() {
+        shims::place_relay_and_shim(ctx)?;
+    }
 
     let mut restart_agent = false;
     let models = match opts.model_mode.to_model_set() {

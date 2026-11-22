@@ -198,7 +198,7 @@ impl PipeManager {
         }
         let folder = &in_root[..cut];
         let ent_rel = &in_root[cut + 1..];
-        if folder.eq_ignore_ascii_case(InstallLayout::BIN_DIR) {
+        if folder.eq_ignore_ascii_case("bin") {
             return ent_rel.eq_ignore_ascii_case(InstallLayout::CLI_SHIM)
                 && rel.eq_ignore_ascii_case(InstallLayout::CLI_EXE);
         }

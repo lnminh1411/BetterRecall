@@ -2,14 +2,15 @@
 # Copyright (c) BetterRecall contributors
 r"""Build every BetterRecall process into the install layout (docs/v1-design.md section 2).
 
-Usage: python Scripts/dev_build.py [--out DIR] [--config Release|Debug] [--test] [--only Agent,UI,...] [--run]
+Usage: python Scripts/dev_build.py [--out DIR] [--config Release|Debug] [--test] [--only Agent,UI,...] [--run] [--release] [--release-pubkey PATH]
 Default output: artifacts/dev. Run from anywhere; paths resolve from the repo root.
 --run starts the built agent afterwards with its own data folder (BETTERRECALL_DEV_HOME, default
 K:\scratch\betterrecall-dev-home) and --no-autostart; --run-only starts it without building.
 The output folder gets a .devbuild marker: an agent started from it refuses the real data folder
 (%LOCALAPPDATA%\BetterRecall) unless given --allow-default-home.
---release (implied for an output folder under artifacts/release, as package_single.py uses): no marker, third-party
+--release (implied for an output folder under artifacts/release): no marker, third-party
 licence notices in LICENSES/third-party, no .pdb, .lib or createdump.exe (Scripts/release_layout.py).
+--release-pubkey PATH embeds the ECDSA P-256 release public key (BR_RELEASE_PUBKEY / BetterRecallReleasePubKey).
 """
 import argparse
 import os
@@ -29,7 +30,6 @@ LAYOUT = {
     "Agent": "",
     "Cli": "",
     "Mcp": "",
-    "Stub": "",  # D6: copied by the launcher to <data>\app\bin (autostart and MCP stable paths)
     "Worker": "worker",
     "UI": "ui",
 }
@@ -74,10 +74,10 @@ def main() -> None:
     ap.add_argument("--run", action="store_true", help="start the dev agent on its own data folder after the build")
     ap.add_argument("--run-only", action="store_true", help="start the dev agent without building")
     ap.add_argument("--release", action="store_true", help="release layout: no dev marker, licence notices, no pdb/lib/createdump")
+    ap.add_argument("--release-pubkey", default="", help="embed ECDSA P-256 public key PEM (sets BR_RELEASE_PUBKEY and BetterRecallReleasePubKey)")
     a = ap.parse_args()
 
     env = os.environ.copy()
-    # Native AOT linking (Cli, Mcp, Stub) calls vswhere by name; Git Bash PATH lacks it.
     if VSWHERE_DIR not in env.get("PATH", ""):
         env["PATH"] = env.get("PATH", "") + os.pathsep + VSWHERE_DIR
 
@@ -100,12 +100,21 @@ def main() -> None:
         for t in TESTS:
             run(["dotnet", "test", t, "-c", a.config], env)
 
+    publish_env = env.copy()
+    publish_extra: list[str] = []
+    if a.release_pubkey:
+        pubkey = Path(a.release_pubkey).resolve()
+        if not pubkey.is_file():
+            sys.exit(f"--release-pubkey not found: {pubkey}")
+        publish_env["BR_RELEASE_PUBKEY"] = str(pubkey)
+        publish_extra.append(f"-p:BetterRecallReleasePubKey={pubkey}")
+
     for p in only:
         dest = out / LAYOUT[p] if LAYOUT[p] else out
         if LAYOUT[p] and dest.exists():
             shutil.rmtree(dest)  # subfolder belongs to one project only
         dest.mkdir(parents=True, exist_ok=True)
-        run(["dotnet", "publish", f"src/BetterRecall.{p}", "-c", a.config, "-o", str(dest)], env)
+        run(["dotnet", "publish", f"src/BetterRecall.{p}", "-c", a.config, "-o", str(dest), *publish_extra], publish_env)
 
     if a.release or (ROOT / "artifacts" / "release") in out.parents:
         if a.run:

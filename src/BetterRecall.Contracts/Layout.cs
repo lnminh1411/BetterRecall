@@ -16,21 +16,9 @@ public static partial class InstallLayout
     public const string WorkerExe = @"worker\BetterRecall.Worker.exe";
     public const string UiExe = @"ui\BetterRecall.UI.exe";
 
-    /// <summary>Set by the single-file launcher for the agent it starts: full path of the launcher exe.
-    /// Autostart then points at the launcher, which survives version upgrades.</summary>
-    public const string LauncherEnv = "BETTERRECALL_LAUNCHER";
-
     public static string Full(string installDir, string relative) => Path.GetFullPath(Path.Combine(installDir, relative));
 
-    // D6: stable paths. The launcher installs each version into <root>\<version>-<hash12> (root = <data>\app) and keeps
-    // <root>\bin pointing at the current one: bin\current names the install folder, bin\betterrecall.cmd runs its CLI,
-    // and two copies of the small payload-less stub (StubExe) start the current install: bin\BetterRecall.exe for
-    // autostart, bin\betterrecall-mcp.exe for MCP clients.
-    public const string BinDir = "bin";
-    public const string CurrentFile = "current";
     public const string CliShim = "betterrecall.cmd";
-    public const string StubExe = "BetterRecall.Stub.exe";
-    public const string AutostartExe = "BetterRecall.exe";
 
     /// <summary>Set by the bin\betterrecall-mcp.exe relay for the MCP server it starts: the relay restarts a server that
     /// exits with McpRestartExitCode against the current install and sends it the requests left unanswered.</summary>
@@ -46,53 +34,6 @@ public static partial class InstallLayout
             if (!char.IsAsciiHexDigitLower(name[i]) && !char.IsAsciiDigit(name[i])) return false;
         return true;
     }
-
-    /// <summary>The install folder bin\current under root names, or null (no file, or not a version folder name). The
-    /// result is always a direct child of root. The launcher writes the real path (SUBST drives and junctions resolved;
-    /// trust checks compare real image paths): it is kept as written only when its parent is root or realRoot (root
-    /// with links resolved, which the caller supplies) and it is not a UNC path; otherwise only its folder name counts.</summary>
-    public static string? CurrentInstall(string root, string? realRoot = null)
-    {
-        if (ReadSharedText(Path.Combine(root, BinDir, CurrentFile)) is not { } raw) return null;
-        var text = raw.Trim().TrimEnd('\\', '/');
-        var name = Path.GetFileName(text);
-        if (name.Length == 0 || !IsVersionFolder(name)) return null;
-        if (Path.IsPathFullyQualified(text) && !text.StartsWith(@"\\", StringComparison.Ordinal) && !text.StartsWith("//", StringComparison.Ordinal))
-        {
-            try
-            {
-                var parent = Path.GetDirectoryName(Path.GetFullPath(text));
-                if (SameDir(parent, root) || (realRoot is not null && SameDir(parent, realRoot))) return Path.GetFullPath(text);
-            }
-            catch (Exception e) when (e is ArgumentException or NotSupportedException or PathTooLongException) { }
-        }
-        return Path.Combine(root, name);
-    }
-
-    private static string? ReadSharedText(string path)
-    {
-        for (int attempt = 0; ; attempt++)
-        {
-            try
-            {
-                using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-                using var r = new StreamReader(fs, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
-                return r.ReadToEnd();
-            }
-            catch (Exception e) when (e is DirectoryNotFoundException or FileNotFoundException) { return null; }
-            catch (Exception e) when (e is IOException or UnauthorizedAccessException && attempt < 3)
-            {
-                Thread.Sleep(15);
-            }
-            catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
-            {
-                return null;
-            }
-        }
-    }
-
-    private static bool SameDir(string? a, string b) => a is not null && string.Equals(
-        Path.GetFullPath(a).TrimEnd('\\'), Path.GetFullPath(b).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase);
 
     /// <summary>The path with SUBST drives, junctions and symbolic links resolved (GetFinalPathNameByHandle); for a
     /// path not created yet, its nearest existing ancestor resolved plus the rest. The input when nothing resolves.</summary>
@@ -153,18 +94,18 @@ public static partial class InstallLayout
     /// <summary>Marker file Scripts/dev_build.py writes into its output folder: this install dir is a dev build.</summary>
     public const string DevBuildMarker = ".devbuild";
 
+    /// <summary>Marker file the installer writes into an extracted install folder.</summary>
+    public const string InstallMarker = ".install";
+
     /// <summary>Agent flag that lets a dev build open the default data folder anyway.</summary>
     public const string AllowDefaultHomeFlag = "--allow-default-home";
 
     /// <summary>A dev build never opens the user's real data folder (it would run dev code on their store) unless started
-    /// with --allow-default-home: it needs its own BETTERRECALL_HOME. A layout the single-file launcher extracted
-    /// (&lt;home&gt;\app\..., or started with BETTERRECALL_LAUNCHER) is installed, marker or not.</summary>
+    /// with --allow-default-home or the folder holds the installer's .install marker: it needs its own BETTERRECALL_HOME.</summary>
     public static bool RefusesHome(string installDir, string home, bool allowDefaultHome)
     {
         if (allowDefaultHome || !DataPaths.IsDefaultHome(home) || !File.Exists(Path.Combine(installDir, DevBuildMarker))) return false;
-        if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(LauncherEnv))) return false;
-        var app = Path.GetFullPath(Path.Combine(home, "app")).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-        return !Path.GetFullPath(installDir).StartsWith(app, StringComparison.OrdinalIgnoreCase);
+        return !File.Exists(Path.Combine(installDir, InstallMarker));
     }
 }
 
