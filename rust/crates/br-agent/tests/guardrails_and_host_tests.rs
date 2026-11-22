@@ -1249,6 +1249,41 @@ fn c3_end_session_stops_the_pipes() {
     core.shutdown();
 }
 
+// Rust-side regression (not a C# port): the port first joined the writer stops without a limit, so a stuck pipe stop
+// held up logoff. The C# agent waits 2.5 s for them; so does this one, and the stuck stop keeps running.
+#[test]
+fn end_session_shutdown_does_not_wait_past_the_writer_budget() {
+    let dir = TempDir::new("end_session_budget");
+    let core = CoreHost::create_with_hello_probe(
+        CoreHostOptions {
+            home: dir.path().to_path_buf(),
+            install_dir: dir.path().to_path_buf(),
+        },
+        false,
+    );
+    let agent = AgentHost::new(
+        core.clone(),
+        AgentOptions {
+            install_dir: dir.path().to_path_buf(),
+            home: dir.path().to_path_buf(),
+            autostart: false,
+        },
+    );
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = Arc::new(Mutex::new(release_rx));
+    agent.set_on_stop_pipes_for_test(Some(Arc::new(move || {
+        let _ = release_rx.lock().unwrap().recv();
+    })));
+    let started = std::time::Instant::now();
+    agent.end_session_shutdown();
+    let took = started.elapsed();
+    assert!(took >= std::time::Duration::from_millis(2400), "returned before the budget: {took:?}");
+    assert!(took < std::time::Duration::from_millis(4500), "waited past the budget: {took:?}");
+    release_tx.send(()).unwrap();
+    agent.shutdown();
+    core.shutdown();
+}
+
 #[test]
 fn c4_end_session_shutdown_dedupes_writer_and_pipe_stops_with_dispose() {
     let dir = TempDir::new("c4_end_session");

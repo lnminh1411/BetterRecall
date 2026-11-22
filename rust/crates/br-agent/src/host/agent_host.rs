@@ -1878,7 +1878,9 @@ impl AgentHost {
         }
     }
 
-    pub fn end_session_shutdown(&self) {
+    /// Logoff work, bounded like the C# agent so a stuck writer cannot hold up the session end: writers and pipes
+    /// get 2.5 s, held transcripts 0.5 s, the checkpoint 1.5 s. A step that overruns keeps running on its own thread.
+    pub fn end_session_shutdown(self: &Arc<Self>) {
         self.cts.cancel();
         {
             let (lock, cv) = &*self.timer_stop;
@@ -1890,8 +1892,18 @@ impl AgentHost {
         if let Some(ref st) = store {
             st.cancel_maintenance();
         }
-        self.stop_session_writers();
-        self.flush_held_transcripts();
+        let me = self.clone();
+        run_bounded(
+            "end session: stop writers",
+            Duration::from_millis(2500),
+            move || me.stop_session_writers(),
+        );
+        let me = self.clone();
+        run_bounded(
+            "end session: held transcripts",
+            Duration::from_millis(500),
+            move || me.flush_held_transcripts(),
+        );
         if let Some(ref st) = store
             && let Err(e) = st.checkpoint_timeout(Duration::from_millis(1500))
         {
@@ -1899,7 +1911,7 @@ impl AgentHost {
         }
     }
 
-    fn on_end_session(&self) {
+    fn on_end_session(self: &Arc<Self>) {
         AgentLog::info("session ending: stopping pipes and writers, checkpointing the store");
         self.end_session_shutdown();
         AgentLog::flush();
@@ -1913,7 +1925,7 @@ impl AgentHost {
             .unwrap_or_else(|e| e.into_inner()) = hook;
     }
 
-    pub fn on_end_session_for_test(&self) {
+    pub fn on_end_session_for_test(self: &Arc<Self>) {
         self.on_end_session();
     }
 
@@ -2298,4 +2310,29 @@ fn hotkeys_equal(a: &HotkeySettings, b: &HotkeySettings) -> bool {
         && a.timeline == b.timeline
         && a.home == b.home
         && a.lock == b.lock
+}
+
+/// Runs `f` on its own thread and waits at most `limit`, like C# `Task.Run(f).Wait(limit)`: logoff and quit must not
+/// wait on a stuck step, which keeps running and is logged.
+pub(crate) fn run_bounded(name: &'static str, limit: Duration, f: impl FnOnce() + Send + 'static) {
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let spawned = thread::Builder::new()
+        .name(format!("BetterRecall.Bounded.{name}"))
+        .spawn(move || {
+            f();
+            let _ = tx.send(());
+        });
+    match spawned {
+        Ok(_) => match rx.recv_timeout(limit) {
+            Ok(()) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => AgentLog::warn(&format!(
+                "{name} still running after {} ms",
+                limit.as_millis()
+            )),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                AgentLog::warn(&format!("{name} failed"))
+            }
+        },
+        Err(e) => AgentLog::warn_err(name, &e.to_string()),
+    }
 }
