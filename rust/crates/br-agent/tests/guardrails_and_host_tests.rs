@@ -65,23 +65,41 @@ fn installed_folder_keeps_the_plain_names_others_get_their_own() {
 
 #[test]
 fn only_the_installed_layout_registers_autostart() {
-    let real = real_home();
-    assert!(!StartupRegistration::is_installed(
-        Path::new(r"E:\BetterRecall\artifacts\dev"),
-        &real
+    let dir = TempDir::new("installed-check");
+    let install_dir = dir.path();
+
+    // Without .install marker: never installed, even on the default home.
+    assert!(!StartupRegistration::is_installed_with_default_check(
+        install_dir,
+        true
     ));
+    assert!(!StartupRegistration::is_installed_with_default_check(
+        install_dir,
+        false
+    ));
+
+    // With .install marker: installed only when home is the default data folder.
+    fs::write(install_dir.join(InstallLayout::INSTALL_MARKER), "0.3.0-dev\n").unwrap();
+    assert!(StartupRegistration::is_installed_with_default_check(
+        install_dir,
+        true
+    ));
+    assert!(!StartupRegistration::is_installed_with_default_check(
+        install_dir,
+        false
+    ));
+
+    // Non-default home via public is_installed helper.
     assert!(!StartupRegistration::is_installed(
-        &real.join("app").join("0.3.0-abc"),
+        install_dir,
         Path::new(r"K:\scratch\h")
     ));
-    if std::env::var_os(InstallLayout::LAUNCHER_ENV)
-        .is_none_or(|v| v.to_string_lossy().trim().is_empty())
-    {
-        assert!(StartupRegistration::is_installed(
-            &real.join("app").join("0.3.0-abc"),
-            &real
-        ));
-    }
+    // Default home without .install marker.
+    let real = real_home();
+    let unmarked = dir.path().join("unmarked");
+    fs::create_dir_all(&unmarked).unwrap();
+    assert!(!StartupRegistration::is_installed(&unmarked, &real));
+    assert!(StartupRegistration::is_installed(install_dir, &real));
 }
 
 // ---------------- PasswordFieldProbeTests ----------------
@@ -578,88 +596,15 @@ fn agent_log_stamps_local_time_with_offset() {
 
 // ---------------- Sweep4LAgentTests ----------------
 
-fn setup_stub_dir(dir: &TempDir) -> (PathBuf, PathBuf, PathBuf) {
-    let root = dir.path().join("app");
-    let install = root.join("0.2.3-dev-1df40c2e4158");
-    let download = dir
-        .path()
-        .join("Downloads")
-        .join("BetterRecall-0.2.3-dev-win-x64.exe");
+#[test]
+fn autostart_exe_always_returns_agent_exe() {
+    let dir = TempDir::new("autostart-exe");
+    let install = dir.path().join("BetterRecall");
     fs::create_dir_all(&install).unwrap();
-    fs::write(install.join(InstallLayout::AGENT_EXE), []).unwrap();
-    fs::create_dir_all(download.parent().unwrap()).unwrap();
-    fs::write(&download, []).unwrap();
-    let stub = root
-        .join(InstallLayout::BIN_DIR)
-        .join(InstallLayout::AUTOSTART_EXE);
-    (root, install, download)
-        .pipe_stub(stub)
-}
-
-trait TupleStubExt {
-    fn pipe_stub(self, stub: PathBuf) -> (PathBuf, PathBuf, PathBuf);
-}
-
-impl TupleStubExt for (PathBuf, PathBuf, PathBuf) {
-    fn pipe_stub(self, _stub: PathBuf) -> (PathBuf, PathBuf, PathBuf) {
-        self
-    }
-}
-
-#[test]
-fn c6_launcher_started_agent_registers_the_stable_stub_not_the_download() {
-    let dir = TempDir::new("s4l");
-    let (root, install, download) = setup_stub_dir(&dir);
-    let stub = root
-        .join(InstallLayout::BIN_DIR)
-        .join(InstallLayout::AUTOSTART_EXE);
-    fs::create_dir_all(stub.parent().unwrap()).unwrap();
-    fs::write(&stub, []).unwrap();
-    fs::write(
-        root.join(InstallLayout::BIN_DIR).join(InstallLayout::CURRENT_FILE),
-        install.to_string_lossy().as_bytes(),
-    )
-    .unwrap();
-    assert_eq!(stub, StartupRegistration::autostart_exe(&install, Some(&download)));
-}
-
-#[test]
-fn c6_agent_started_from_the_ui_registers_the_stable_stub_not_its_versioned_exe() {
-    let dir = TempDir::new("s4l");
-    let (root, install, _) = setup_stub_dir(&dir);
-    let stub = root
-        .join(InstallLayout::BIN_DIR)
-        .join(InstallLayout::AUTOSTART_EXE);
-    fs::create_dir_all(stub.parent().unwrap()).unwrap();
-    fs::write(&stub, []).unwrap();
-    fs::write(
-        root.join(InstallLayout::BIN_DIR).join(InstallLayout::CURRENT_FILE),
-        install.to_string_lossy().as_bytes(),
-    )
-    .unwrap();
-    assert_eq!(stub, StartupRegistration::autostart_exe(&install, None));
-}
-
-#[test]
-fn c6_without_a_stub_the_old_order_holds() {
-    let dir = TempDir::new("s4l");
-    let (root, install, download) = setup_stub_dir(&dir);
-    let stub = root
-        .join(InstallLayout::BIN_DIR)
-        .join(InstallLayout::AUTOSTART_EXE);
-    assert_eq!(download, StartupRegistration::autostart_exe(&install, Some(&download)));
     assert_eq!(
         InstallLayout::full(&install, InstallLayout::AGENT_EXE),
-        StartupRegistration::autostart_exe(&install, None)
+        StartupRegistration::autostart_exe(&install)
     );
-    let gone = PathBuf::from(format!("{}.gone", download.display()));
-    assert_eq!(
-        InstallLayout::full(&install, InstallLayout::AGENT_EXE),
-        StartupRegistration::autostart_exe(&install, Some(&gone))
-    );
-    fs::create_dir_all(stub.parent().unwrap()).unwrap();
-    fs::write(&stub, []).unwrap();
-    assert_eq!(download, StartupRegistration::autostart_exe(&install, Some(&download)));
 }
 
 // ---------------- Sweep4PAgentTests / Sweep4RAgentTests / Sweep4UAgentTests / Sweep5UAgentTests ----------------

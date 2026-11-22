@@ -31,59 +31,23 @@ impl StartupRegistration {
     const APP_KEY: &'static str = r"Software\BetterRecall";
     const VALUE_NAME: &'static str = "BetterRecall";
 
-    /// Started by the single-file launcher, or from the installed layout (`<home>\app\...`),
-    /// on the default data folder.
+    /// True when `install_dir` holds the installer's `.install` marker and `home` is the default data folder.
     pub fn is_installed(install_dir: &Path, home: &Path) -> bool {
-        if !DataPaths::is_default_home(home) {
-            return false;
-        }
-        if std::env::var_os(InstallLayout::LAUNCHER_ENV)
-            .is_some_and(|v| !v.to_string_lossy().trim().is_empty())
-        {
-            return true;
-        }
-        let app_base = full_path(&home.join("app")).unwrap_or_else(|_| home.join("app"));
-        let app = format!(
-            "{}\\",
-            app_base.to_string_lossy().trim_end_matches(['\\', '/'])
-        );
-        let inst = full_path(install_dir).unwrap_or_else(|_| install_dir.to_path_buf());
-        let inst_s = inst.to_string_lossy();
-        inst_s.len() >= app.len()
-            && inst_s.is_char_boundary(app.len())
-            && inst_s[..app.len()].eq_ignore_ascii_case(&app)
+        Self::is_installed_with_default_check(install_dir, DataPaths::is_default_home(home))
     }
 
-    /// What autostart runs: `<root>\bin\BetterRecall.exe` first (if `bin\current` is valid),
-    /// then `launcher`, then this agent exe.
-    pub fn autostart_exe(install_dir: &Path, launcher: Option<&Path>) -> PathBuf {
-        let install_full = full_path(install_dir).unwrap_or_else(|_| install_dir.to_path_buf());
-        let install_trimmed = PathBuf::from(
-            install_full
-                .to_string_lossy()
-                .trim_end_matches('\\')
-                .to_string(),
-        );
-        if let Some(root) = install_trimmed.parent() {
-            let stub = root
-                .join(InstallLayout::BIN_DIR)
-                .join(InstallLayout::AUTOSTART_EXE);
-            if stub.is_file() && InstallLayout::current_install(root, None).is_some() {
-                return stub;
-            }
-        }
-        if let Some(l) = launcher
-            && !l.as_os_str().is_empty()
-            && l.is_file()
-        {
-            return full_path(l).unwrap_or_else(|_| l.to_path_buf());
-        }
+    /// Testable seam for [`Self::is_installed`] with an injected default-home flag.
+    pub fn is_installed_with_default_check(install_dir: &Path, is_default_home: bool) -> bool {
+        is_default_home && install_dir.join(InstallLayout::INSTALL_MARKER).is_file()
+    }
+
+    /// What autostart runs: `<install>\BetterRecall.Agent.exe`.
+    pub fn autostart_exe(install_dir: &Path) -> PathBuf {
         InstallLayout::full(install_dir, InstallLayout::AGENT_EXE)
     }
 
     pub fn register(install_dir: &Path) -> Result<(), String> {
-        let launcher = std::env::var_os(InstallLayout::LAUNCHER_ENV).map(PathBuf::from);
-        let exe = Self::autostart_exe(install_dir, launcher.as_deref());
+        let exe = Self::autostart_exe(install_dir);
         let cmd = format!("\"{}\"", exe.to_string_lossy());
         let run_cur = reg_get_string(HKEY_CURRENT_USER, Self::RUN_KEY, Self::VALUE_NAME);
         if run_cur.as_deref() != Some(cmd.as_str()) {

@@ -1875,3 +1875,156 @@ fn i5_fresh_silent_install_without_models_records_later() {
     );
     assert_eq!(read_model_mode(&env.ctx), Some(ModelMode::Later));
 }
+
+// --- I6b relay, CLI shim, and launcher-era cleanup tests ---
+
+// 27. Install places MCP relay and CLI shim; in-use relay is renamed aside and swept on next install;
+//     uninstall removes both and prunes empty <home>\app\bin and <home>\app.
+#[test]
+fn i6b_relay_and_cli_shim_install_in_use_sweep_and_uninstall() {
+    use windows::Win32::Storage::FileSystem::{FILE_SHARE_DELETE, FILE_SHARE_READ};
+
+    let env = TestEnv::new("i6b-shims");
+    let v1 = env.build_installer(
+        "v1",
+        b"MZ-STUB-V1",
+        "0.3.0-dev.1",
+        &[
+            (InstallLayout::AGENT_EXE, b"agent-v1"),
+            (InstallLayout::CLI_EXE, b"cli-v1"),
+            (InstallLayout::MCP_EXE, b"mcp-v1"),
+        ],
+    );
+    install(&env.ctx, &v1, &InstallOpts::default()).expect("install v1");
+
+    let relay = br_installer::relay_path(&env.ctx.home);
+    let shim = br_installer::cli_shim_path(&env.ctx.home);
+    assert_eq!(fs::read(&relay).expect("relay v1"), b"mcp-v1");
+    let expected_shim = format!(
+        "@\"{}\" %*\r\n",
+        env.ctx.install_dir.join(InstallLayout::CLI_EXE).display()
+    );
+    assert_eq!(fs::read(&shim).expect("shim v1"), expected_shim.as_bytes());
+
+    // Hold the relay open with FILE_SHARE_READ | FILE_SHARE_DELETE (allows rename, blocks overwrite),
+    // simulating a running MCP relay session during an upgrade.
+    let share = (FILE_SHARE_READ | FILE_SHARE_DELETE).0;
+    let lock = OpenOptions::new()
+        .read(true)
+        .share_mode(share)
+        .open(&relay)
+        .expect("lock relay");
+
+    let v2 = env.build_installer(
+        "v2",
+        b"MZ-STUB-V2",
+        "0.3.0-dev.2",
+        &[
+            (InstallLayout::AGENT_EXE, b"agent-v2"),
+            (InstallLayout::CLI_EXE, b"cli-v2"),
+            (InstallLayout::MCP_EXE, b"mcp-v2"),
+        ],
+    );
+    install(&env.ctx, &v2, &InstallOpts::default()).expect("upgrade v2 with locked relay");
+    assert_eq!(fs::read(&relay).expect("relay v2"), b"mcp-v2");
+    let old1 = br_installer::bin_dir(&env.ctx.home).join("betterrecall-mcp.exe.old-1");
+    assert!(old1.is_file(), "in-use relay must be renamed to .old-1");
+
+    // Release the old relay handle; next install sweeps the stale .old-1 file.
+    drop(lock);
+    let v3 = env.build_installer(
+        "v3",
+        b"MZ-STUB-V3",
+        "0.3.0-dev.3",
+        &[
+            (InstallLayout::AGENT_EXE, b"agent-v3"),
+            (InstallLayout::CLI_EXE, b"cli-v3"),
+            (InstallLayout::MCP_EXE, b"mcp-v3"),
+        ],
+    );
+    install(&env.ctx, &v3, &InstallOpts::default()).expect("upgrade v3 sweeps .old-1");
+    assert!(!old1.exists(), "stale .old-1 must be swept on next install");
+    assert_eq!(fs::read(&relay).expect("relay v3"), b"mcp-v3");
+
+    // Uninstall removes relay, CLI shim, and empty <home>\app\bin and <home>\app.
+    uninstall(&env.ctx, &UninstallOpts::default()).expect("uninstall");
+    assert!(!relay.exists());
+    assert!(!shim.exists());
+    assert!(!br_installer::bin_dir(&env.ctx.home).exists());
+    assert!(!br_installer::app_dir(&env.ctx.home).exists());
+}
+
+// 28. Launcher-era cleanup removes version folders, bin\current, bin\BetterRecall.exe, and .tmp-*
+//     while leaving non-matching folders and user data files untouched, and skipping in-use files.
+#[test]
+fn i6b_launcher_era_cleanup_removes_old_binaries_and_keeps_data() {
+    let env = TestEnv::new("i6b-cleanup");
+    let app = br_installer::app_dir(&env.ctx.home);
+    let bin = br_installer::bin_dir(&env.ctx.home);
+    let old_ver = app.join("0.1.0-0123456789ab");
+    let locked_ver = app.join("0.2.0-fedcba987654");
+    let tmp_dir = app.join(".tmp-leftover");
+    let non_matching = app.join("custom-notes");
+
+    fs::create_dir_all(&old_ver).unwrap();
+    fs::create_dir_all(&locked_ver).unwrap();
+    fs::create_dir_all(&tmp_dir).unwrap();
+    fs::create_dir_all(&non_matching).unwrap();
+    fs::create_dir_all(&bin).unwrap();
+
+    fs::write(old_ver.join("BetterRecall.Agent.exe"), b"old").unwrap();
+    let locked_file = locked_ver.join("locked.bin");
+    fs::write(&locked_file, b"busy").unwrap();
+    fs::write(tmp_dir.join("part.tmp"), b"tmp").unwrap();
+    fs::write(non_matching.join("keep.txt"), b"keep").unwrap();
+    fs::write(bin.join("current"), old_ver.to_string_lossy().as_bytes()).unwrap();
+    fs::write(bin.join("BetterRecall.exe"), b"old-stub").unwrap();
+    fs::write(bin.join(".tmp-staging"), b"tmp").unwrap();
+
+    let settings_file = env.ctx.home.join("settings.json");
+    fs::write(&settings_file, b"{}").unwrap();
+
+    // Hold locked_file open with share_mode(0) so deletion fails and must be skipped, not abort install.
+    let _lock = OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(&locked_file)
+        .expect("lock file");
+
+    let exe = env.build_installer(
+        "setup",
+        b"MZ-STUB",
+        "0.3.0-dev",
+        &[
+            (InstallLayout::AGENT_EXE, b"agent"),
+            (InstallLayout::CLI_EXE, b"cli"),
+            (InstallLayout::MCP_EXE, b"mcp"),
+        ],
+    );
+    install(&env.ctx, &exe, &InstallOpts::default()).expect("install with launcher cleanup");
+
+    drop(_lock);
+    assert!(!old_ver.exists(), "old version folder must be removed");
+    assert!(!tmp_dir.exists(), ".tmp-* folder must be removed");
+    assert!(!bin.join("current").exists(), "bin\\current must be removed");
+    assert!(
+        !bin.join("BetterRecall.exe").exists(),
+        "bin\\BetterRecall.exe must be removed"
+    );
+    assert!(
+        !bin.join(".tmp-staging").exists(),
+        "bin\\.tmp-* must be removed"
+    );
+    assert!(
+        locked_file.exists(),
+        "in-use file must be skipped without failing install"
+    );
+    assert!(
+        non_matching.join("keep.txt").is_file(),
+        "non-matching folder must be untouched"
+    );
+    assert_eq!(
+        fs::read(&settings_file).expect("settings.json untouched"),
+        b"{}"
+    );
+}

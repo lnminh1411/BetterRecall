@@ -28,7 +28,7 @@ use crate::progress::{NoProgress, Progress, Step};
 pub const STAGING_PREFIX: &str = ".BetterRecall.staging-";
 
 /// Marker file written inside an extracted install folder.
-pub const INSTALL_MARKER: &str = ".install";
+pub const INSTALL_MARKER: &str = br_contracts::InstallLayout::INSTALL_MARKER;
 
 /// Result of a verified extraction into a staging folder.
 #[derive(Debug, Clone)]

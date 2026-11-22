@@ -20,6 +20,11 @@ Offline ECDSA P-256 release signing tool for BetterRecall (R8/R9, not shipped).
   br-sign verify <layout-dir> --public <public.pem>
   ```
 
+- Pack a layout into a self-extracting installer exe:
+  ```
+  br-sign pack --stub <br-installer.exe> --layout <layout-dir> --version <version> --out <BetterRecall-Setup.exe>
+  ```
+
 - Sign a release update manifest (`update.json` + `update.sig`):
   ```
   br-sign update --installer <path-to-setup.exe> --version <version> --key <private.pem> --out <out-dir>

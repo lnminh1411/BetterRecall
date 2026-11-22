@@ -398,5 +398,7 @@ public sealed class InstanceScopeTests
         Assert.True(InstallLayout.RefusesHome(dir.Path, Default, false));
         Assert.False(InstallLayout.RefusesHome(dir.Path, Default, true));
         Assert.False(InstallLayout.RefusesHome(dir.Path, Path.Combine(TestEnv.Root, "scratch-home"), false));
+        File.WriteAllText(Path.Combine(dir.Path, InstallLayout.InstallMarker), "0.3.0-dev\n");
+        Assert.False(InstallLayout.RefusesHome(dir.Path, Default, false));   // .install marker: installed layout
     }
 }

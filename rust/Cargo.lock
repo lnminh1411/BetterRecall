@@ -278,10 +278,14 @@ dependencies = [
 name = "br-sign"
 version = "0.3.0-dev"
 dependencies = [
+ "br-contracts",
+ "br-installer",
  "br-integrity",
  "p256",
  "rand_core",
+ "serde_json",
  "sha2 0.11.1",
+ "zip",
 ]
 
 [[package]]

@@ -3,13 +3,9 @@
 
 use std::env;
 use std::ffi::{OsString, c_void};
-use std::fs::OpenOptions;
-use std::io::{self, Read};
+use std::io;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
-use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::thread;
-use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, HLOCAL, LocalFree};
@@ -114,18 +110,14 @@ impl InstallLayout {
     pub const MCP_EXE: &'static str = "betterrecall-mcp.exe";
     pub const WORKER_EXE: &'static str = r"worker\BetterRecall.Worker.exe";
     pub const UI_EXE: &'static str = r"ui\BetterRecall.UI.exe";
-    pub const LAUNCHER_ENV: &'static str = "BETTERRECALL_LAUNCHER";
 
-    pub const BIN_DIR: &'static str = "bin";
-    pub const CURRENT_FILE: &'static str = "current";
     pub const CLI_SHIM: &'static str = "betterrecall.cmd";
-    pub const STUB_EXE: &'static str = "BetterRecall.Stub.exe";
-    pub const AUTOSTART_EXE: &'static str = "BetterRecall.exe";
 
     pub const MCP_RELAY_ENV: &'static str = "BETTERRECALL_MCP_RELAY";
     pub const MCP_RESTART_EXIT_CODE: i32 = 75;
 
     pub const DEV_BUILD_MARKER: &'static str = ".devbuild";
+    pub const INSTALL_MARKER: &'static str = ".install";
     pub const ALLOW_DEFAULT_HOME_FLAG: &'static str = "--allow-default-home";
 
     /// Default per-user install folder: `%LOCALAPPDATA%\Programs\BetterRecall`.
@@ -152,30 +144,6 @@ impl InstallLayout {
         name[dash + 1..]
             .bytes()
             .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
-    }
-
-    /// The install folder `bin\current` under `root` names, or `None`.
-    pub fn current_install(root: &Path, real_root: Option<&Path>) -> Option<PathBuf> {
-        let raw = read_shared_text(&root.join(Self::BIN_DIR).join(Self::CURRENT_FILE))?;
-        let text = raw.trim().trim_end_matches(['\\', '/']);
-        if text.is_empty() {
-            return None;
-        }
-        let name = Path::new(text).file_name()?.to_str()?;
-        if name.is_empty() || !Self::is_version_folder(name) {
-            return None;
-        }
-        if is_path_fully_qualified(text)
-            && !text.starts_with(r"\\")
-            && !text.starts_with("//")
-            && let Ok(resolved) = full_path(Path::new(text))
-            && let Some(parent) = resolved.parent()
-            && (same_dir(Some(parent), root)
-                || real_root.is_some_and(|rr| same_dir(Some(parent), rr)))
-        {
-            return Some(resolved);
-        }
-        Some(root.join(name))
     }
 
     /// Resolves SUBST drives, junctions and symlinks via `GetFinalPathNameByHandleW`; for a path
@@ -214,7 +182,8 @@ impl InstallLayout {
         full
     }
 
-    /// True when a dev build (`.devbuild` marker present) would open the default data folder without `--allow-default-home`.
+    /// True when a dev build (`.devbuild` marker present) would open the default data folder
+    /// without `--allow-default-home` and without the installer's `.install` marker.
     pub fn refuses_home(install_dir: &Path, home: &Path, allow_default_home: bool) -> bool {
         if allow_default_home
             || !DataPaths::is_default_home(home)
@@ -222,56 +191,8 @@ impl InstallLayout {
         {
             return false;
         }
-        if env::var_os(Self::LAUNCHER_ENV).is_some_and(|v| !v.to_string_lossy().trim().is_empty()) {
-            return false;
-        }
-        let app_base = full_path(&home.join("app")).unwrap_or_else(|_| home.join("app"));
-        let app = format!(
-            "{}\\",
-            app_base.to_string_lossy().trim_end_matches(['\\', '/'])
-        );
-        let inst = full_path(install_dir).unwrap_or_else(|_| install_dir.to_path_buf());
-        let inst_s = inst.to_string_lossy();
-        !(inst_s.len() >= app.len()
-            && inst_s.is_char_boundary(app.len())
-            && inst_s[..app.len()].eq_ignore_ascii_case(&app))
+        !install_dir.join(Self::INSTALL_MARKER).exists()
     }
-}
-
-fn read_shared_text(path: &Path) -> Option<String> {
-    let share = (FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0;
-    for attempt in 0..=3 {
-        match OpenOptions::new().read(true).share_mode(share).open(path) {
-            Ok(mut f) => {
-                let mut bytes = Vec::new();
-                if f.read_to_end(&mut bytes).is_ok() {
-                    let s = String::from_utf8_lossy(&bytes);
-                    let trimmed = s.strip_prefix('\u{FEFF}').unwrap_or(&s);
-                    return Some(trimmed.to_string());
-                }
-                if attempt < 3 {
-                    thread::sleep(Duration::from_millis(15));
-                    continue;
-                }
-                return None;
-            }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return None,
-            Err(_) if attempt < 3 => thread::sleep(Duration::from_millis(15)),
-            Err(_) => return None,
-        }
-    }
-    None
-}
-
-fn same_dir(a: Option<&Path>, b: &Path) -> bool {
-    let Some(a) = a else {
-        return false;
-    };
-    let af = full_path(a).unwrap_or_else(|_| a.to_path_buf());
-    let bf = full_path(b).unwrap_or_else(|_| b.to_path_buf());
-    af.to_string_lossy()
-        .trim_end_matches('\\')
-        .eq_ignore_ascii_case(bf.to_string_lossy().trim_end_matches('\\'))
 }
 
 fn final_path(path: &Path) -> Option<PathBuf> {

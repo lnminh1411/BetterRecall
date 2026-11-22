@@ -35,9 +35,8 @@ THIRD_PARTY = Path("LICENSES") / "third-party"
 # Imported by worker/*.dll (msvcp140_1 and _codecvt_ids by OpenVINO GenAI), the Rust exes and the agent's libvpl.dll (dumpbin /dependents).
 VC_RUNTIME_DLLS = ("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "msvcp140_1.dll", "msvcp140_codecvt_ids.dll")
 VC_RUNTIME_DIRS = (".", "worker")
-# src/BetterRecall.<name> projects published into a release layout (dev_build.py LAYOUT; package_single.py lists them for
-# the notices). Stub (D6): the launcher copies BetterRecall.Stub.exe to <data>\app\bin as the autostart and MCP stable paths.
-SHIPPED_PROJECTS = ("Agent", "Cli", "Mcp", "Stub", "Worker", "UI")
+# src/BetterRecall.<name> projects published into a release layout (dev_build.py LAYOUT).
+SHIPPED_PROJECTS = ("Agent", "Cli", "Mcp", "Worker", "UI")
 
 
 def is_shipped(rel: Path) -> bool:
@@ -168,7 +167,7 @@ def parse_cargo_metadata(data: dict, root_name: str = "br-worker") -> dict[tuple
     return found
 
 
-RUST_BINARIES = ("br-agent", "br-worker")  # shipped as BetterRecall.Agent.exe and worker\BetterRecall.Worker.exe
+RUST_BINARIES = ("br-agent", "br-worker", "br-cli", "br-mcp")  # shipped in the install layout
 
 
 def rust_crates(roots: tuple[str, ...] = RUST_BINARIES) -> dict[tuple[str, str], tuple[str, Path, list[str], str]]:
@@ -223,7 +222,7 @@ def write_notices(
                 shutil.copy2(src, target)
                 lines.append(f"    {target.relative_to(dest).as_posix()}")
     if crates:
-        lines += ["", "Rust crates (worker):"]
+        lines += ["", "Rust crates:"]
         for (cname, ver), (licence, crate_dir, files, url) in sorted(crates.items(), key=lambda kv: (kv[0][0].lower(), kv[0][1])):
             lines.append(f"{cname} {ver}: {licence}" + (f"; {url}" if url else ""))
             for f in files:
@@ -241,6 +240,25 @@ def write_notices(
             lines.append(f"    native/{src.name}")
     (dest / "README.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return len(pkgs) + len(crates or {})
+
+
+def write_installer_notices(
+    out_file: Path,
+    crates: dict[tuple[str, str], tuple[str, Path, list[str], str]] | None = None,
+) -> int:
+    """Writes a third-party Rust crate notice index for the installer stub (br-installer)."""
+    resolved = rust_crates(("br-installer",)) if crates is None else crates
+    lines = [
+        "Third-party Rust crates linked into BetterRecall-Setup (br-installer)",
+        "",
+    ]
+    for (cname, ver), (licence, _crate_dir, _files, url) in sorted(
+        resolved.items(), key=lambda kv: (kv[0][0].lower(), kv[0][1])
+    ):
+        lines.append(f"{cname} {ver}: {licence}" + (f"; {url}" if url else ""))
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    out_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return len(resolved)
 
 
 def assets_for(projects: list[str]) -> list[Path]:
@@ -397,7 +415,7 @@ def _self_test() -> None:
         }
         crates = parse_cargo_metadata(meta)
         assert list(crates) == [("demo-crate", "1.2.3")], crates
-        assert set(RUST_BINARIES) == {"br-agent", "br-worker"}
+        assert set(RUST_BINARIES) == {"br-agent", "br-worker", "br-cli", "br-mcp"}
         assert all(r in [p["name"] for p in json.loads(subprocess.run(
             ["cargo", "metadata", "--format-version", "1", "--no-deps"], cwd=ROOT / "rust", capture_output=True,
             text=True, check=True).stdout)["packages"]] for r in RUST_BINARIES)

@@ -13,6 +13,7 @@ pub mod payload;
 pub mod progress;
 pub mod registry;
 pub mod running;
+pub mod shims;
 pub mod shortcut;
 pub mod strings;
 pub mod swap;
@@ -45,6 +46,10 @@ pub use registry::{
     unregister, write_model_mode, write_reg_sz,
 };
 pub use running::{ProcInfo, close_running, pick_processes_to_end};
+pub use shims::{
+    app_dir, bin_dir, cleanup_launcher_installs, cli_shim_path, place_relay_and_shim, relay_path,
+    remove_relay_and_shim, sweep_old_files,
+};
 pub use shortcut::{
     SHORTCUT_NAME, create_shortcut, read_shortcut_target, remove_shortcut, shortcut_path,
 };

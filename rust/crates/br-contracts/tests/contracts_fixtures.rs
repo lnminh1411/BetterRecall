@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) BetterRecall contributors
 
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::Cursor;
-use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -18,11 +17,6 @@ use br_contracts::{
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use windows::Win32::Storage::FileSystem::{
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, REPLACEFILE_IGNORE_MERGE_ERRORS,
-    ReplaceFileW,
-};
-use windows::core::PCWSTR;
 
 fn fixtures_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -392,124 +386,11 @@ fn dev_build_refuses_the_default_home_without_the_flag() {
         &scratch_home,
         false
     ));
-}
-
-// ---- Sweep4LTests ----
-
-#[test]
-fn s2_current_install_never_leaves_the_root() {
-    let dir = ScopedDir::new("s4l-s2");
-    let root = dir.path();
-    let new_folder = "0.2.3-dev-1df40c2e4158";
-    let expected = root.join(new_folder);
-    fs::create_dir_all(&expected).unwrap();
-    let bin = root.join(InstallLayout::BIN_DIR);
-    fs::create_dir_all(&bin).unwrap();
-    let cur_file = bin.join(InstallLayout::CURRENT_FILE);
-    fs::write(&cur_file, expected.to_string_lossy().as_bytes()).unwrap();
-    assert_eq!(Some(expected.clone()), InstallLayout::current_install(root, None));
-
-    let other = root.join("other-root");
-    fs::create_dir_all(other.join(new_folder)).unwrap();
-    fs::write(&cur_file, other.join(new_folder).to_string_lossy().as_bytes()).unwrap();
-    assert_eq!(Some(expected.clone()), InstallLayout::current_install(root, None));
-
-    for text in [
-        format!(r"\\host\share\{new_folder}"),
-        new_folder.to_string(),
-        root.join("x")
-            .join("..")
-            .join("..")
-            .join(new_folder)
-            .to_string_lossy()
-            .into_owned(),
-    ] {
-        fs::write(&cur_file, text.as_bytes()).unwrap();
-        assert_eq!(
-            Some(expected.clone()),
-            InstallLayout::current_install(root, None),
-            "text={text}"
-        );
-    }
-
-    let real = test_tmp_root().join(format!("real-{}", std::process::id()));
-    let real_folder = real.join(new_folder);
-    fs::write(&cur_file, real_folder.to_string_lossy().as_bytes()).unwrap();
-    assert_eq!(
-        Some(full_path(&real_folder).unwrap()),
-        InstallLayout::current_install(root, Some(&real))
-    );
-    assert_eq!(Some(expected), InstallLayout::current_install(root, None));
-
-    fs::write(&cur_file, root.join("tools").to_string_lossy().as_bytes()).unwrap();
-    assert_eq!(None, InstallLayout::current_install(root, None));
+    fs::write(dir.path().join(InstallLayout::INSTALL_MARKER), "0.3.0-dev\n").unwrap();
+    assert!(!InstallLayout::refuses_home(dir.path(), &default, false));
 }
 
 // ---- Sweep5LTests ----
-
-#[test]
-fn c2_current_install_shares_delete_so_replace_succeeds_during_concurrent_read() {
-    let dir = ScopedDir::new("s5l-c2");
-    let root = dir.path();
-    let old_folder = "0.2.3-dev-00b55ae338ad";
-    let new_folder = "0.2.3-dev-1df40c2e4158";
-    let bin = root.join(InstallLayout::BIN_DIR);
-    fs::create_dir_all(&bin).unwrap();
-    let current_file = bin.join(InstallLayout::CURRENT_FILE);
-    let tmp = bin.join("current.tmp");
-    fs::write(&current_file, root.join(old_folder).to_string_lossy().as_bytes()).unwrap();
-
-    let share_all = (FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0;
-    {
-        let _reader = OpenOptions::new()
-            .read(true)
-            .share_mode(share_all)
-            .open(&current_file)
-            .unwrap();
-        assert_eq!(
-            Some(root.join(old_folder)),
-            InstallLayout::current_install(root, None)
-        );
-        fs::write(&tmp, root.join(new_folder).to_string_lossy().as_bytes()).unwrap();
-        let src_w: Vec<u16> = tmp
-            .as_os_str()
-            .to_string_lossy()
-            .encode_utf16()
-            .chain(Some(0))
-            .collect();
-        let dst_w: Vec<u16> = current_file
-            .as_os_str()
-            .to_string_lossy()
-            .encode_utf16()
-            .chain(Some(0))
-            .collect();
-        unsafe {
-            ReplaceFileW(
-                PCWSTR(dst_w.as_ptr()),
-                PCWSTR(src_w.as_ptr()),
-                PCWSTR::null(),
-                REPLACEFILE_IGNORE_MERGE_ERRORS,
-                None,
-                None,
-            )
-            .expect("ReplaceFileW");
-        }
-    }
-    assert_eq!(
-        Some(root.join(new_folder)),
-        InstallLayout::current_install(root, None)
-    );
-
-    let _external = OpenOptions::new()
-        .read(true)
-        .share_mode(FILE_SHARE_READ.0)
-        .open(&current_file)
-        .unwrap();
-    assert_eq!(
-        Some(root.join(new_folder)),
-        InstallLayout::current_install(root, None)
-    );
-}
 
 #[test]
 fn b8_real_path_resolves_junctions() {

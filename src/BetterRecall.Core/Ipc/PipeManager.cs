@@ -95,7 +95,7 @@ public sealed class PipeManager : IAsyncDisposable
         if (cut <= 0) return false;
         var folder = inRoot[..cut];
         var entRel = inRoot[(cut + 1)..];
-        if (string.Equals(folder, InstallLayout.BinDir, StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(folder, "bin", StringComparison.OrdinalIgnoreCase))
             return string.Equals(entRel, InstallLayout.CliShim, StringComparison.OrdinalIgnoreCase)
                 && string.Equals(rel, InstallLayout.CliExe, StringComparison.OrdinalIgnoreCase);
         return InstallLayout.IsVersionFolder(folder) && string.Equals(entRel, rel, StringComparison.OrdinalIgnoreCase);
