@@ -35,7 +35,6 @@ LAYOUT = {
 }
 TESTS = [
     "tests/BetterRecall.Core.Tests",
-    "tests/BetterRecall.Agent.Tests",
     "tests/BetterRecall.Worker.Tests",
     "tests/BetterRecall.UI.Tests",
     "tests/BetterRecall.Agent.Conformance",
@@ -78,7 +77,7 @@ def main() -> None:
     a = ap.parse_args()
 
     env = os.environ.copy()
-    # Native AOT linking calls vswhere by name; Git Bash PATH lacks it.
+    # Native AOT linking (Cli, Mcp, Stub) calls vswhere by name; Git Bash PATH lacks it.
     if VSWHERE_DIR not in env.get("PATH", ""):
         env["PATH"] = env.get("PATH", "") + os.pathsep + VSWHERE_DIR
 

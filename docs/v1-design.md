@@ -50,7 +50,7 @@ Only the lead edits `BetterRecall.slnx`, `Directory.Build.props` and `.gitignore
 Install layout (also the dev output layout):
 
 ```
-<install>\BetterRecall.Agent.exe        Native AOT
+<install>\BetterRecall.Agent.exe        Rust (rust\crates\br-agent)
 <install>\betterrecall.exe              CLI, Native AOT
 <install>\betterrecall-mcp.exe          MCP server, Native AOT
 <install>\BetterRecall.Stub.exe         payload-less stub, Native AOT; the launcher copies it into <data>\app\bin\
@@ -445,11 +445,11 @@ Vector search needs no ANN library at v1 sizes: 30 days of 2 s keyframes after d
 ## 9. Build
 
 - .NET SDK 10.0.403, Rust toolchain via `rustup` (stable, `x86_64-pc-windows-msvc` target), `BetterRecall.slnx`, `Directory.Build.props` (nullable on, artifacts output under `artifacts\`, `win-x64`).
-- Agent, CLI and MCP publish Native AOT. Worker builds the Rust binary (`rust\crates\br-worker`) via `cargo build -p br-worker` from `BetterRecall.Worker.csproj` and ships `BetterRecall.Worker.exe` next to the OpenVINO and ONNX Runtime native DLLs. UI publishes unpackaged and self-contained (`WindowsPackageType=None`, `WindowsAppSDKSelfContained=true`).
-- Contracts and Core are AOT and trim compatible: System.Text.Json source generation only.
+- CLI, MCP and Stub publish Native AOT. Agent and Worker are Rust binaries built by their wrapper projects: `BetterRecall.Agent.csproj` runs `cargo build -p br-agent` and ships `BetterRecall.Agent.exe` (icon, version information and `app.manifest` embedded by `build.rs` through `rc.exe`) with `sqlite3mc.dll`, `libSkiaSharp.dll`, `libvpl.dll` and the codec DLLs; `BetterRecall.Worker.csproj` runs `cargo build -p br-worker` and ships `BetterRecall.Worker.exe` next to the OpenVINO and ONNX Runtime native DLLs. UI publishes unpackaged and self-contained (`WindowsPackageType=None`, `WindowsAppSDKSelfContained=true`).
+- Contracts and Core are AOT and trim compatible: System.Text.Json source generation only. The C# Core library serves the CLI and MCP until they move to Rust; the agent runs `br-core`.
 - Build one project without rebuilding Contracts: `dotnet build src/<Project> -p:BuildProjectReferences=false`.
 - Model files are never committed. Model download needs the user's go-ahead; until then use `inference.fake`.
-- Image codecs: `src\BetterRecall.Agent\Native\` holds prebuilt x64 DLLs, copied next to the agent exe: `avif.dll` (libavif 1.4.2 with aom 3.15.3 encode, dav1d 1.5.4 decode, libyuv), `jxl.dll`, `jxl_cms.dll`, `jxl_threads.dll` (libjxl 0.12.0). Built with vcpkg, custom triplet `x64-windows-br` (static dependencies, static CRT, release only, only libavif and libjxl dynamic); the DLLs import KERNEL32 only. Licences in `codecs.LICENSE.txt` (BSD-2/BSD-3, aom and libjxl patent grants, dav1d, libyuv, libjpeg-turbo, brotli, highway, Little CMS). Loaded through `NativeLibrary` from the agent directory only, C ABI by `delegate* unmanaged` (`Avif.cs`, `Jxl.cs`). `BetterRecall.Agent.exe --selftest-codec` round-trips a synthetic frame in every format.
+- Image codecs: `src\BetterRecall.Agent\Native\` holds prebuilt x64 DLLs, copied next to the agent exe: `avif.dll` (libavif 1.4.2 with aom 3.15.3 encode, dav1d 1.5.4 decode, libyuv), `jxl.dll`, `jxl_cms.dll`, `jxl_threads.dll` (libjxl 0.12.0). Built with vcpkg, custom triplet `x64-windows-br` (static dependencies, static CRT, release only, only libavif and libjxl dynamic); the DLLs import KERNEL32 only. Licences in `codecs.LICENSE.txt` (BSD-2/BSD-3, aom and libjxl patent grants, dav1d, libyuv, libjpeg-turbo, brotli, highway, Little CMS). Loaded with `libloading` from the agent directory only (`br-agent` `codecs` module). `BetterRecall.Agent.exe --selftest-codec` round-trips a synthetic frame in every format.
 
 ## 10. Benchmark and recommendations
 

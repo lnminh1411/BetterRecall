@@ -5,13 +5,13 @@
 - Never shipped: .pdb, .lib (import libraries such as worker/onnxruntime.lib), createdump.exe (can write full memory
   dumps of processes holding decrypted data) and the .devbuild marker (the agent would refuse the real data folder).
 - Third-party notices: every NuGet package a published project resolved (obj/project.assets.json) and every Rust
-  crate the worker links (normal dependencies of br-worker from cargo metadata) contributes its licence and notice
+  crate the agent or the worker links (normal dependencies of br-agent and br-worker from cargo metadata) contributes its licence and notice
   files to LICENSES/third-party/<id>-<version>/, and LICENSES/third-party/README.txt lists each package and crate
   with the licence its metadata declares. Native pieces in the repo (src/**/Native/*LICENSE*) are copied too.
   So do the runtime packs a self-contained or AOT publish downloads (project.frameworks.*.downloadDependencies) when
   the build ships them: the .NET runtime (NETCore.App, NativeAOT, ILCompiler) and the Windows SDK projection
   (Windows.SDK.NET.Ref). AspNetCore and WindowsDesktop packs are downloaded but not framework-referenced, so not shipped.
-- Visual C++ runtime, app-local: the worker (OpenVINO, ONNX Runtime) and the agent's libvpl.dll import the VC++ 2015-2022
+- Visual C++ runtime, app-local: the worker (OpenVINO, ONNX Runtime), the agent and its libvpl.dll import the VC++ 2015-2022
   runtime, which a clean Windows lacks (the worker then cannot start). The DLLs they import are copied from the Visual
   Studio redist folder (VCToolsRedistDir, else the newest Microsoft.VC14*.CRT under Program Files) next to them, in the
   layout root and worker/. Visual Studio's licence terms allow that as distributable code; README.txt lists it.
@@ -32,7 +32,7 @@ JUNK_NAMES = {"createdump.exe", DEV_MARKER}
 JUNK_SUFFIXES = {".pdb", ".lib"}
 NOTICE_WORDS = ("license", "licence", "notice", "copying", "copyright")
 THIRD_PARTY = Path("LICENSES") / "third-party"
-# Imported by worker/*.dll (msvcp140_1 and _codecvt_ids by OpenVINO GenAI) and by the agent's libvpl.dll (dumpbin /dependents).
+# Imported by worker/*.dll (msvcp140_1 and _codecvt_ids by OpenVINO GenAI), the Rust exes and the agent's libvpl.dll (dumpbin /dependents).
 VC_RUNTIME_DLLS = ("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "msvcp140_1.dll", "msvcp140_codecvt_ids.dll")
 VC_RUNTIME_DIRS = (".", "worker")
 # src/BetterRecall.<name> projects published into a release layout (dev_build.py LAYOUT; package_single.py lists them for
@@ -168,8 +168,11 @@ def parse_cargo_metadata(data: dict, root_name: str = "br-worker") -> dict[tuple
     return found
 
 
-def rust_crates(root_name: str = "br-worker") -> dict[tuple[str, str], tuple[str, Path, list[str], str]]:
-    """Collects normal dependencies of br-worker from cargo metadata for x86_64-pc-windows-msvc."""
+RUST_BINARIES = ("br-agent", "br-worker")  # shipped as BetterRecall.Agent.exe and worker\BetterRecall.Worker.exe
+
+
+def rust_crates(roots: tuple[str, ...] = RUST_BINARIES) -> dict[tuple[str, str], tuple[str, Path, list[str], str]]:
+    """Collects normal dependencies of the shipped Rust binaries from cargo metadata for x86_64-pc-windows-msvc."""
     if not shutil.which("cargo"):
         raise SystemExit("release layout: cargo not found on PATH (install Rust via rustup)")
     r = subprocess.run(
@@ -180,7 +183,11 @@ def rust_crates(root_name: str = "br-worker") -> dict[tuple[str, str], tuple[str
     )
     if r.returncode != 0:
         raise SystemExit(f"release layout: cargo metadata failed ({r.returncode}): {r.stderr.strip()}")
-    return parse_cargo_metadata(json.loads(r.stdout), root_name)
+    meta = json.loads(r.stdout)
+    found: dict[tuple[str, str], tuple[str, Path, list[str], str]] = {}
+    for root in roots:
+        found.update(parse_cargo_metadata(meta, root))
+    return found
 
 
 def write_notices(
@@ -390,6 +397,10 @@ def _self_test() -> None:
         }
         crates = parse_cargo_metadata(meta)
         assert list(crates) == [("demo-crate", "1.2.3")], crates
+        assert set(RUST_BINARIES) == {"br-agent", "br-worker"}
+        assert all(r in [p["name"] for p in json.loads(subprocess.run(
+            ["cargo", "metadata", "--format-version", "1", "--no-deps"], cwd=ROOT / "rust", capture_output=True,
+            text=True, check=True).stdout)["packages"]] for r in RUST_BINARIES)
         assert write_notices(layout, [assets], [], crates) == 4
         readme = (layout / THIRD_PARTY / "README.txt").read_text(encoding="utf-8")
         assert "demo-crate 1.2.3: MIT; https://example.test/demo" in readme, readme
