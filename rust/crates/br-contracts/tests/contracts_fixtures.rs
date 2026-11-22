@@ -543,3 +543,22 @@ fn b8_real_path_resolves_junctions() {
         InstallLayout::real_path(&junc_app.join("0.2.4-bbbbbbbbbbbb").join("nonexistent.exe"))
     );
 }
+
+#[test]
+fn envelope_parse_raw_keeps_data_text_exactly() {
+    let line = r#"{"ok":true,"data":{"zeta":1,"alpha":2.50,"name":"ä"}}"#;
+    let (ok, data, err) = Envelope::parse_raw(line).unwrap();
+    assert!(ok);
+    assert_eq!(data.as_deref(), Some(r#"{"zeta":1,"alpha":2.50,"name":"ä"}"#));
+    assert!(err.is_none());
+
+    let (ok, data, err) = Envelope::parse_raw(r#"{"ok":false,"error":"Locked."}"#).unwrap();
+    assert!(!ok);
+    assert!(data.is_none());
+    assert_eq!(err.as_deref(), Some("Locked."));
+
+    let (ok, data, _) = Envelope::parse_raw(r#"{"ok":true,"data":null}"#).unwrap();
+    assert!(ok);
+    assert_eq!(data.as_deref(), Some("null"));
+    assert!(Envelope::parse_raw("not json").is_err());
+}

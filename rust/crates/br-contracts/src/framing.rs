@@ -199,6 +199,24 @@ impl Envelope {
         let error = v.get("error").and_then(Value::as_str).map(String::from);
         Ok((ok, data, error))
     }
+
+    /// Like [`Envelope::parse`], but `data` is returned as its raw JSON text exactly as received
+    /// (key order and number formatting kept), as C# `JsonElement.GetRawText()` does.
+    pub fn parse_raw(line: &str) -> serde_json::Result<(bool, Option<String>, Option<String>)> {
+        let map: std::collections::HashMap<String, Box<serde_json::value::RawValue>> =
+            serde_json::from_str(line)?;
+        let ok = map
+            .get("ok")
+            .and_then(|r| serde_json::from_str::<Value>(r.get()).ok())
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let data = map.get("data").map(|r| r.get().to_string());
+        let error = map
+            .get("error")
+            .and_then(|r| serde_json::from_str::<Value>(r.get()).ok())
+            .and_then(|v| v.as_str().map(String::from));
+        Ok((ok, data, error))
+    }
 }
 
 /// Errors returned while reading or writing a binary worker pipe frame.

@@ -6,7 +6,6 @@ using System.Text.Json;
 using BetterRecall.Contracts;
 using BetterRecall.Core.Crypto;
 using BetterRecall.Core.Ipc;
-using BetterRecall.Mcp;
 using BetterRecall.Stub;
 using StepClock = BetterRecall.Core.Ipc.StepClock;
 
@@ -175,113 +174,7 @@ public sealed class Sweep4LTests : IAsyncLifetime
         File.WriteAllText(Path.Combine(_root, InstallLayout.BinDir, InstallLayout.CurrentFile), Path.Combine(_root, folder));
     }
 
-    [Fact]
-    public void B5_IsStale_only_when_bin_current_names_another_install()
-    {
-        Layout(NewFolder);
-        Assert.True(McpPipe.IsStale(Path.Combine(_root, OldFolder)));
-        Assert.False(McpPipe.IsStale(Path.Combine(_root, NewFolder)));
-        Assert.False(McpPipe.IsStale(Path.GetDirectoryName(Self)!));   // dev layout: no version folder, never stale
-        SetCurrent(OldFolder);
-        Assert.False(McpPipe.IsStale(Path.Combine(_root, OldFolder)));
-        Assert.Equal(Path.Combine(_root, OldFolder), InstallLayout.CurrentInstall(_root));
-    }
-
-    /// <summary>An MCP server of install folder "folder": it trusts the agent exe next to it, except that the new
-    /// install's server trusts this process (it plays the agent of the new install).</summary>
-    private McpPipe Pipe(string folder, bool relayed)
-        => new(PublicName, folder == NewFolder ? Self : Path.Combine(_root, folder, InstallLayout.AgentExe), Path.Combine(_root, folder), relayed);
-
     private const string StatusCall = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"recall_status\"}}";
-
-    [Fact]
-    public async Task B5_Stale_server_without_relay_says_restart_the_client_and_exits()
-    {
-        Layout(NewFolder);
-        var pipe = Pipe(OldFolder, relayed: false);
-        var output = new StringWriter { NewLine = "\n" };
-        int code = await McpHost.RunAsync(new StringReader(StatusCall + "\n" + StatusCall + "\n"), output, new McpServer(pipe.CallAsync), pipe);
-        Assert.Equal(InstallLayout.McpRestartExitCode, code);
-        var lines = output.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries);
-        var r = Assert.Single(lines);   // exits after the first answer, freeing the old folder
-        var result = JsonDocument.Parse(r).RootElement.GetProperty("result");
-        Assert.True(result.GetProperty("isError").GetBoolean());
-        Assert.Equal(McpPipe.Updated, result.GetProperty("content")[0].GetProperty("text").GetString());
-    }
-
-    [Fact]
-    public async Task B5_Not_trusted_without_an_upgrade_keeps_the_old_answer()
-    {
-        Layout(OldFolder);   // bin\current still names this server's install
-        var pipe = Pipe(OldFolder, relayed: true);
-        var output = new StringWriter { NewLine = "\n" };
-        Assert.Equal(0, await McpHost.RunAsync(new StringReader(StatusCall + "\n"), output, new McpServer(pipe.CallAsync), pipe));
-        Assert.Contains(McpPipe.NotTrusted, output.ToString());
-        Assert.False(pipe.Stale);
-    }
-
-    [Fact]
-    public async Task B5_Relay_restarts_a_stale_server_from_the_new_install_and_the_same_call_succeeds()
-    {
-        Layout(NewFolder);   // the launcher already upgraded: the agent runs from the new folder
-        var started = new List<string>();
-        await using var client = new RelayClient();
-        var relay = new McpRelay(client.RelayIn, client.RelayOut, () => InstallLayout.CurrentInstall(_root), install =>
-        {
-            var folder = Path.GetFileName(install);
-            lock (started) started.Add(folder);
-            return new HostChild(Pipe(folder, relayed: true));
-        }, poll: TimeSpan.FromMinutes(5));   // no idle swap: the call itself must find the old server stale
-        SetCurrent(OldFolder);   // the session started before the upgrade
-        var run = relay.RunAsync();
-        await client.SendAsync("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\"}}");
-        Assert.Equal(1, (await client.ReadAsync()).GetProperty("id").GetInt32());
-        SetCurrent(NewFolder);   // launcher upgrade
-
-        await client.SendAsync(StatusCall);
-        var answer = await client.ReadAsync();
-        Assert.Equal(2, answer.GetProperty("id").GetInt32());
-        var result = answer.GetProperty("result");
-        Assert.False(result.GetProperty("isError").GetBoolean(), result.ToString());
-        Assert.True(JsonDocument.Parse(result.GetProperty("content")[0].GetProperty("text").GetString()!).RootElement.TryGetProperty("capturing", out _));
-        lock (started) Assert.Equal([OldFolder, NewFolder], started);
-        Assert.Equal(1, relay.Restarts);
-
-        client.EndInput();
-        Assert.Equal(0, await run.WaitAsync(TimeSpan.FromSeconds(10)));
-    }
-
-    [Fact]
-    public async Task B5_Idle_relay_moves_to_the_new_install_so_the_old_folder_is_free()
-    {
-        Layout(OldFolder);
-        var children = new List<(string Folder, HostChild Child)>();
-        await using var client = new RelayClient();
-        // Both servers trust this process: the old session keeps working until the swap, the new one after it.
-        var relay = new McpRelay(client.RelayIn, client.RelayOut, () => InstallLayout.CurrentInstall(_root), install =>
-        {
-            var folder = Path.GetFileName(install);
-            var child = new HostChild(new McpPipe(PublicName, Self, install, relayed: true));
-            lock (children) children.Add((folder, child));
-            return child;
-        }, poll: TimeSpan.FromMilliseconds(100));
-        var run = relay.RunAsync();
-        await client.SendAsync(StatusCall);
-        Assert.False((await client.ReadAsync()).GetProperty("result").GetProperty("isError").GetBoolean());
-
-        SetCurrent(NewFolder);
-        HostChild first;
-        lock (children) first = children[0].Child;
-        Assert.Equal(0, await first.Exited.WaitAsync(TimeSpan.FromSeconds(10)));   // ended by the relay, not by the client
-        await client.SendAsync(StatusCall.Replace("\"id\":2", "\"id\":3"));
-        var answer = await client.ReadAsync();
-        Assert.Equal(3, answer.GetProperty("id").GetInt32());
-        Assert.False(answer.GetProperty("result").GetProperty("isError").GetBoolean());
-        lock (children) Assert.Equal([OldFolder, NewFolder], children.Select(c => c.Folder));
-
-        client.EndInput();
-        Assert.Equal(0, await run.WaitAsync(TimeSpan.FromSeconds(10)));
-    }
 
     [Fact]
     public async Task B5_Relay_answers_pending_calls_with_an_error_when_no_new_install_appears()
@@ -394,19 +287,6 @@ public sealed class Sweep4LTests : IAsyncLifetime
         // Not a version folder name: nothing.
         File.WriteAllText(Path.Combine(_root, InstallLayout.BinDir, InstallLayout.CurrentFile), Path.Combine(_root, "tools"));
         Assert.Null(InstallLayout.CurrentInstall(_root));
-    }
-
-    [Fact]
-    public async Task S5_A_throwing_call_is_answered_with_an_internal_error()
-    {
-        var pipe = new McpPipe("BRtest.none." + _tag, Self, Path.GetDirectoryName(Self)!, relayed: true);
-        var server = new McpServer((_, _) => throw new ObjectDisposedException("pipe"));
-        var output = new StringWriter { NewLine = "\n" };
-        Assert.Equal(0, await McpHost.RunAsync(new StringReader(StatusCall + "\n"), output, server, pipe));
-        var r = JsonDocument.Parse(output.ToString()).RootElement;
-        Assert.Equal(2, r.GetProperty("id").GetInt32());
-        Assert.Equal(-32603, r.GetProperty("error").GetProperty("code").GetInt32());
-        Assert.Null(McpHost.InternalError("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}"));
     }
 
     [Fact]
@@ -616,34 +496,6 @@ public sealed class Sweep4LTests : IAsyncLifetime
         client.Connect(5000);
         wait.GetAwaiter().GetResult();
         return (server, client);
-    }
-
-    /// <summary>A real MCP server (McpHost loop, McpServer, McpPipe on the real agent pipe) running in this process.</summary>
-    private sealed class HostChild : IMcpChild
-    {
-        private readonly NamedPipeServerStream _in, _out;
-
-        public HostChild(McpPipe pipe)
-        {
-            (_in, var childIn) = PipePair(PipeDirection.Out);
-            (_out, var childOut) = PipePair(PipeDirection.In);
-            Exited = Task.Run(async () =>
-            {
-                using var reader = new StreamReader(childIn, new UTF8Encoding(false));
-                await using var writer = new StreamWriter(childOut, new UTF8Encoding(false)) { AutoFlush = true, NewLine = "\n" };
-                return await McpHost.RunAsync(reader, writer, new McpServer(pipe.CallAsync), pipe);
-            });
-        }
-
-        public Stream Input => _in;
-        public Stream Output => _out;
-        public Task<int> Exited { get; }
-
-        public void Dispose()
-        {
-            _in.Dispose();
-            _out.Dispose();
-        }
     }
 
     /// <summary>A server that reads one line and exits with code, answering nothing.</summary>

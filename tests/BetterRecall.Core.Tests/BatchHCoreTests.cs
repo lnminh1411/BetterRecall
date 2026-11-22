@@ -6,7 +6,6 @@ using BetterRecall.Contracts;
 using BetterRecall.Core.Ai;
 using BetterRecall.Core.Crypto;
 using BetterRecall.Core.Ipc;
-using BetterRecall.Mcp;
 
 namespace BetterRecall.Core.Tests;
 
@@ -53,22 +52,6 @@ public sealed class BatchHCoreTests : IDisposable
         => Envelope.Parse((await _p.HandleAsync(s, line, CancellationToken.None)).Line);
 
     private void Set(string json) => Assert.Null(_settings.TryUpdate(JsonDocument.Parse(json).RootElement));
-
-    // ---------------------------------------------------------------- S1: MCP search escaping
-
-    [Fact]
-    public async Task S1_Mcp_cjk_query_of_1024_characters_reaches_the_pipe_unescaped()
-    {
-        var sent = new List<string>();
-        var server = new McpServer((line, _) => { sent.Add(line); return Task.FromResult(new PipeAnswer(true, "{}")); });
-        var q = new string('検', 1024);
-        var r = await server.HandleAsync("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"search_history\",\"arguments\":{\"q\":\""
-            + q + "\"}}}", default);
-        Assert.DoesNotContain("Request too long", r);
-        var line = Assert.Single(sent);
-        Assert.Contains(q, line);                       // UTF-8, not \uXXXX
-        Assert.True(Encoding.UTF8.GetByteCount(line) < 4000);
-    }
 
     // ---------------------------------------------------------------- S5: exports are long-running (cancellable)
 
