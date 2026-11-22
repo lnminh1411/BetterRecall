@@ -15,6 +15,7 @@ pub mod exit_code {
     pub const NOT_ENOUGH_SPACE: i32 = 6;
     pub const ALREADY_RUNNING: i32 = 7;
     pub const CANCELLED: i32 = 8;
+    pub const MODELS: i32 = 9;
 }
 
 /// Installer error with one variant per CLI exit code plus `Io`.
@@ -46,6 +47,9 @@ pub enum InstallError {
     #[error("setup was cancelled")]
     Cancelled,
 
+    #[error("model download failed: {0}")]
+    Models(String),
+
     #[error("{context}: {source}")]
     Io {
         context: String,
@@ -65,6 +69,7 @@ impl InstallError {
             Self::NotEnoughSpace { .. } => exit_code::NOT_ENOUGH_SPACE,
             Self::AlreadyRunning => exit_code::ALREADY_RUNNING,
             Self::Cancelled => exit_code::CANCELLED,
+            Self::Models(_) => exit_code::MODELS,
         }
     }
 

@@ -9,6 +9,7 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use br_fetch::Catalog;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{
     MB_ICONERROR, MB_OK, MESSAGEBOX_STYLE, MessageBoxW,
@@ -18,9 +19,10 @@ use windows::core::PCWSTR;
 use crate::ctx::Ctx;
 use crate::error::{InstallError, exit_code};
 use crate::install::{
-    InstallOpts, ModelMode, ModifyOpts, Outcome, UninstallOpts, install, modify_with_progress,
-    uninstall,
+    InstallOpts, ModelMode, ModelsResult, ModifyOpts, Outcome, UninstallOpts, install,
+    modify_with_progress, uninstall,
 };
+use crate::log::log_line;
 use crate::progress::NoProgress;
 use crate::registry::read_model_mode;
 use crate::running::{normalized_dir_prefix, path_is_under_prefix};
@@ -46,6 +48,10 @@ pub struct CliArgs {
     pub delete_data: bool,
     pub dev_root: Option<PathBuf>,
     pub dev_reg_prefix: Option<String>,
+    /// Test/dev seam: path to a catalog JSON file (only allowed with `--dev-root`).
+    pub dev_models_catalog: Option<PathBuf>,
+    /// Test/dev seam: local loopback base URL override (only allowed with `--dev-root`).
+    pub dev_models_url: Option<String>,
     /// Internal: this process is the temp copy started by an uninstall from inside the install folder.
     pub relaunched: bool,
 }
@@ -67,6 +73,8 @@ where
     let mut delete_data = false;
     let mut dev_root: Option<PathBuf> = None;
     let mut dev_reg_prefix: Option<String> = None;
+    let mut dev_models_catalog: Option<PathBuf> = None;
+    let mut dev_models_url: Option<String> = None;
     let mut relaunched = false;
 
     let mut iter = args.into_iter();
@@ -121,6 +129,18 @@ where
                 })?;
                 dev_reg_prefix = Some(val.as_ref().to_string());
             }
+            "dev-models-catalog" => {
+                let val = iter.next().ok_or_else(|| {
+                    InstallError::Usage("--dev-models-catalog requires a file path".to_string())
+                })?;
+                dev_models_catalog = Some(PathBuf::from(val.as_ref()));
+            }
+            "dev-models-url" => {
+                let val = iter.next().ok_or_else(|| {
+                    InstallError::Usage("--dev-models-url requires a URL".to_string())
+                })?;
+                dev_models_url = Some(val.as_ref().to_string());
+            }
             _ => {
                 return Err(InstallError::Usage(format!("unknown flag: {arg}")));
             }
@@ -131,6 +151,19 @@ where
         return Err(InstallError::Usage(
             "--dev-root and --dev-reg-prefix must be supplied together".to_string(),
         ));
+    }
+    if (dev_models_catalog.is_some() || dev_models_url.is_some()) && dev_root.is_none() {
+        return Err(InstallError::Usage(
+            "--dev-models-catalog and --dev-models-url require --dev-root and --dev-reg-prefix"
+                .to_string(),
+        ));
+    }
+    if let Some(ref url) = dev_models_url
+        && !br_fetch::is_allowed_url(url)
+    {
+        return Err(InstallError::Usage(format!(
+            "--dev-models-url '{url}' is not an allowed URL"
+        )));
     }
 
     let resolved_action = action.unwrap_or(Action::Install);
@@ -154,6 +187,8 @@ where
         delete_data,
         dev_root,
         dev_reg_prefix,
+        dev_models_catalog,
+        dev_models_url,
         relaunched,
     })
 }
@@ -240,8 +275,32 @@ fn should_relaunch_uninstall(ctx: &Ctx, args: &CliArgs) -> bool {
             .is_some_and(|me| path_is_under_prefix(&me, &normalized_dir_prefix(&ctx.install_dir)))
 }
 
+pub(crate) fn load_dev_catalog(args: &CliArgs) -> Result<Option<Catalog>, InstallError> {
+    match (&args.dev_models_catalog, &args.dev_models_url) {
+        (None, None) => Ok(None),
+        (Some(path), url_opt) => {
+            let raw = fs::read_to_string(path).map_err(|e| {
+                InstallError::io(format!("reading dev catalog {}", path.display()), e)
+            })?;
+            let mut cat =
+                Catalog::from_json(&raw).map_err(|e| InstallError::Models(e.to_string()))?;
+            if let Some(url) = url_opt {
+                cat = cat.with_base_url_for_test(url.as_str());
+            }
+            Ok(Some(cat))
+        }
+        (None, Some(url)) => {
+            let cat = Catalog::embedded()
+                .map_err(|e| InstallError::Models(e.to_string()))?
+                .with_base_url_for_test(url.as_str());
+            Ok(Some(cat))
+        }
+    }
+}
+
 fn dispatch_silent(ctx: &Ctx, args: &CliArgs) -> Result<Outcome, InstallError> {
-    match args.action {
+    let dev_catalog = load_dev_catalog(args)?;
+    let outcome = match args.action {
         Action::Install => {
             let exe = std::env::current_exe()
                 .map_err(|e| InstallError::io("resolving current executable path", e))?;
@@ -251,22 +310,55 @@ fn dispatch_silent(ctx: &Ctx, args: &CliArgs) -> Result<Outcome, InstallError> {
                 &InstallOpts {
                     allow_downgrade: args.allow_downgrade,
                     model_mode: args.model_mode.unwrap_or(ModelMode::Later),
+                    catalog: dev_catalog,
                 },
-            )
+            )?
         }
         Action::Uninstall => uninstall(
             ctx,
             &UninstallOpts {
                 delete_data: args.delete_data,
             },
-        ),
+        )?,
         Action::Modify => {
             let model_mode = args
                 .model_mode
                 .or_else(|| read_model_mode(ctx))
                 .unwrap_or(ModelMode::Later);
-            modify_with_progress(ctx, &ModifyOpts { model_mode }, &NoProgress)
+            modify_with_progress(
+                ctx,
+                &ModifyOpts {
+                    model_mode,
+                    catalog: dev_catalog,
+                },
+                &NoProgress,
+            )?
         }
+    };
+
+    match &outcome {
+        Outcome::Installed { models, .. } | Outcome::Modified { models, .. } => match models {
+            ModelsResult::Complete | ModelsResult::Skipped => Ok(outcome),
+            ModelsResult::Offline => {
+                log_line(&ctx.home, "silent run finished with models offline (exit 0)");
+                Ok(outcome)
+            }
+            ModelsResult::Cancelled => {
+                log_line(
+                    &ctx.home,
+                    "silent run finished with model download cancelled (exit 0)",
+                );
+                Ok(outcome)
+            }
+            ModelsResult::Failed(reason) => {
+                log_line(
+                    &ctx.home,
+                    &format!("silent run finished with model download failure (exit 9): {reason}"),
+                );
+                Err(InstallError::Models(reason.clone()))
+            }
+        },
+        _ => Ok(outcome),
     }
 }
 

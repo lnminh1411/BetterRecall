@@ -6,30 +6,35 @@
 //! `HKCU\Software\BetterRecallTests\<unique>` prefix, cleaned up on drop.
 
 use std::cmp::Ordering;
+use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
+use std::net::{TcpListener, TcpStream};
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
-use std::thread;
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use br_contracts::InstallLayout;
+use br_fetch::{Catalog, CatalogFile, Component};
 use br_installer::{
     APP_SUBKEY, Action, Ctx, DISPLAY_NAME, InstallError, InstallOpts, LICENSE_ENTRY, ModelMode,
-    ModifyOpts, OLD_PREFIX, Outcome, PUBLISHER, ProcInfo, Progress, RUN_SUBKEY, SETUP_EXE,
-    SETUP_JSON, STAGING_PREFIX, SetupManifest, Step, TRAILER_LEN, UNINSTALL_SUBKEY, URL_INFO_ABOUT,
-    UninstallOpts, append_payload, available_disk_space, close_running, compare_versions,
-    create_shortcut, delete_key_tree, exit_code, extract_to_staging,
+    ModelsResult, ModifyOpts, OLD_PREFIX, Outcome, PUBLISHER, ProcInfo, Progress, RUN_SUBKEY,
+    SETUP_EXE, SETUP_JSON, STAGING_PREFIX, SetupManifest, Step, TRAILER_LEN, UNINSTALL_SUBKEY,
+    URL_INFO_ABOUT, UninstallOpts, append_payload, available_disk_space, close_running,
+    compare_versions, create_shortcut, delete_key_tree, exit_code, extract_to_staging,
     extract_to_staging_with_space, install, install_with_progress, install_with_space, modify,
     modify_with_progress, parse_args, pick_processes_to_end, read_install_marker,
     read_license_text, read_model_mode, read_reg_dword, read_reg_sz, read_shortcut_target,
-    read_trailer, register, remove_shortcut, shortcut_path, stub_len, swap_into_place, uninstall,
-    unregister, validate_delete_data_home, verify, write_reg_sz,
+    read_trailer, register, remove_shortcut, resolve_models_dir, shortcut_path, stub_len,
+    swap_into_place, uninstall, unregister, validate_delete_data_home, verify, write_reg_sz,
 };
+use sha2::{Digest, Sha256};
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RegDeleteKeyW};
 use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 use windows::core::PCWSTR;
@@ -243,7 +248,8 @@ fn fresh_install_places_files_marker_and_stub() {
     assert_eq!(
         outcome,
         Outcome::Installed {
-            version: "0.3.0-dev".to_string()
+            version: "0.3.0-dev".to_string(),
+            models: ModelsResult::Skipped,
         }
     );
 
@@ -291,7 +297,8 @@ fn upgrade_replaces_old_install_and_cleans_up() {
     assert_eq!(
         outcome,
         Outcome::Installed {
-            version: "0.3.0".to_string()
+            version: "0.3.0".to_string(),
+            models: ModelsResult::Skipped,
         }
     );
 
@@ -476,7 +483,8 @@ fn downgrade_refused_unless_allowed_and_version_ordering() {
     assert_eq!(
         outcome,
         Outcome::Installed {
-            version: "0.3.0".to_string()
+            version: "0.3.0".to_string(),
+            models: ModelsResult::Skipped,
         }
     );
     assert_eq!(
@@ -761,6 +769,7 @@ fn model_mode_install_modify_and_unregister() {
         "0.3.0-dev",
         &[(InstallLayout::AGENT_EXE, b"agent")],
     );
+    let (server, catalog) = start_tiny_model_server();
 
     install(
         &env.ctx,
@@ -768,6 +777,7 @@ fn model_mode_install_modify_and_unregister() {
         &InstallOpts {
             allow_downgrade: false,
             model_mode: ModelMode::Minimal,
+            catalog: Some(catalog.clone()),
         },
     )
     .expect("install");
@@ -777,13 +787,21 @@ fn model_mode_install_modify_and_unregister() {
         &env.ctx,
         &ModifyOpts {
             model_mode: ModelMode::Full,
+            catalog: Some(catalog),
         },
         &br_installer::NoProgress,
     )
     .expect("modify");
-    assert_eq!(out, Outcome::Modified { mode: ModelMode::Full });
+    assert_eq!(
+        out,
+        Outcome::Modified {
+            mode: ModelMode::Full,
+            models: ModelsResult::Complete,
+        }
+    );
     assert_eq!(read_model_mode(&env.ctx), Some(ModelMode::Full));
 
+    drop(server);
     unregister(&env.ctx).expect("unregister");
     assert_eq!(read_model_mode(&env.ctx), None);
 }
@@ -1084,7 +1102,10 @@ fn e2e_built_exe_silent_install_modify_and_uninstall() {
     // Seed fake data in test home to confirm /deletedata cleans it.
     fs::write(env.ctx.home.join("settings.json"), b"{}").expect("write settings.json");
 
-    // 2. Silent modify via installed BetterRecall-Setup.exe -> ModelMode = full.
+    // 2. Silent modify via installed BetterRecall-Setup.exe -> ModelMode = full (against closed local port).
+    let closed_port = closed_loopback_port();
+    let test_cat_path = env.root.join("tiny-catalog.json");
+    fs::write(&test_cat_path, tiny_catalog_json()).expect("write tiny catalog");
     let installed_setup = env.ctx.install_dir.join(SETUP_EXE);
     let status = Command::new(&installed_setup)
         .args([
@@ -1095,6 +1116,10 @@ fn e2e_built_exe_silent_install_modify_and_uninstall() {
             env.root.to_str().unwrap(),
             "--dev-reg-prefix",
             &env.reg_prefix,
+            "--dev-models-catalog",
+            test_cat_path.to_str().unwrap(),
+            "--dev-models-url",
+            &format!("http://127.0.0.1:{closed_port}/"),
         ])
         .creation_flags(CREATE_NO_WINDOW.0)
         .status()
@@ -1144,4 +1169,412 @@ fn e2e_built_exe_silent_install_modify_and_uninstall() {
         env.ctx.temp_dir.exists(),
         "relaunch should have used ctx.temp_dir (<root>\\temp)"
     );
+}
+
+// --- I3 local HTTP server & model download integration tests ---
+
+fn sha256_hex(data: &[u8]) -> String {
+    let digest = Sha256::digest(data);
+    let mut s = String::with_capacity(64);
+    for b in digest {
+        let _ = write!(&mut s, "{b:02x}");
+    }
+    s
+}
+
+fn closed_loopback_port() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    listener.local_addr().unwrap().port()
+}
+
+struct TinyHttpServer {
+    addr: String,
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl TinyHttpServer {
+    fn start(files: HashMap<String, Vec<u8>>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let port = listener.local_addr().unwrap().port();
+        let addr = format!("127.0.0.1:{port}");
+        let files = Arc::new(files);
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let files_c = Arc::clone(&files);
+        let stop_c = Arc::clone(&stop);
+        let handle = thread::spawn(move || {
+            for incoming in listener.incoming() {
+                if stop_c.load(AtomicOrdering::SeqCst) {
+                    break;
+                }
+                if let Ok(mut stream) = incoming {
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                    let mut reader = BufReader::new(match stream.try_clone() {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    });
+                    let mut req_line = String::new();
+                    if reader.read_line(&mut req_line).unwrap_or(0) == 0 {
+                        continue;
+                    }
+                    let path = req_line
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or("/")
+                        .to_string();
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                            break;
+                        }
+                        if line.trim().is_empty() {
+                            break;
+                        }
+                    }
+                    if let Some(data) = files_c.get(&path) {
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            data.len()
+                        );
+                        let _ = stream.write_all(data);
+                    } else {
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        );
+                    }
+                }
+            }
+        });
+
+        Self {
+            addr,
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    fn base_url(&self) -> String {
+        format!("http://{}/", self.addr)
+    }
+}
+
+impl Drop for TinyHttpServer {
+    fn drop(&mut self) {
+        self.stop.store(true, AtomicOrdering::SeqCst);
+        let _ = TcpStream::connect(&self.addr);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+fn tiny_catalog_data() -> (Catalog, HashMap<String, Vec<u8>>) {
+    let min_weights = b"minimal-weights-data".to_vec();
+    let min_manifest = br#"{"id":"comp-min"}"#.to_vec();
+    let full_weights = b"full-only-weights-data".to_vec();
+    let full_manifest = br#"{"id":"comp-full"}"#.to_vec();
+
+    let rev = "0123456789abcdef0123456789abcdef01234567";
+    let cat = Catalog {
+        repo: "test/models".to_string(),
+        revision: rev.to_string(),
+        base_url: format!("https://huggingface.co/test/models/resolve/{rev}/"),
+        components: vec![
+            Component {
+                id: "comp-min".to_string(),
+                sets: vec!["full".to_string(), "minimal".to_string()],
+                bytes: (min_weights.len() + min_manifest.len()) as u64,
+                files: vec![
+                    CatalogFile {
+                        path: "weights.bin".to_string(),
+                        size: min_weights.len() as u64,
+                        sha256: sha256_hex(&min_weights),
+                    },
+                    CatalogFile {
+                        path: "manifest.json".to_string(),
+                        size: min_manifest.len() as u64,
+                        sha256: sha256_hex(&min_manifest),
+                    },
+                ],
+            },
+            Component {
+                id: "comp-full".to_string(),
+                sets: vec!["full".to_string()],
+                bytes: (full_weights.len() + full_manifest.len()) as u64,
+                files: vec![
+                    CatalogFile {
+                        path: "weights.bin".to_string(),
+                        size: full_weights.len() as u64,
+                        sha256: sha256_hex(&full_weights),
+                    },
+                    CatalogFile {
+                        path: "manifest.json".to_string(),
+                        size: full_manifest.len() as u64,
+                        sha256: sha256_hex(&full_manifest),
+                    },
+                ],
+            },
+        ],
+    };
+    cat.validate().expect("tiny catalog validates");
+
+    let mut files = HashMap::new();
+    files.insert("/comp-min/weights.bin".to_string(), min_weights);
+    files.insert("/comp-min/manifest.json".to_string(), min_manifest);
+    files.insert("/comp-full/weights.bin".to_string(), full_weights);
+    files.insert("/comp-full/manifest.json".to_string(), full_manifest);
+    (cat, files)
+}
+
+fn tiny_catalog_json() -> String {
+    let (cat, _) = tiny_catalog_data();
+    serde_json::to_string(&cat).expect("serialize tiny catalog")
+}
+
+fn start_tiny_model_server() -> (TinyHttpServer, Catalog) {
+    let (cat, files) = tiny_catalog_data();
+    let server = TinyHttpServer::start(files);
+    let cat = cat.with_base_url_for_test(server.base_url());
+    (server, cat)
+}
+
+// 20. Install with minimal against local test server downloads models and records mode;
+//     modify full -> minimal removes the full-only component; modify -> later keeps models.
+#[test]
+fn i3_install_minimal_and_modify_full_to_minimal_removes_full_only() {
+    let env = TestEnv::new("i3-models");
+    let exe = env.build_installer(
+        "setup",
+        b"MZ-STUB",
+        "0.3.0-dev",
+        &[(InstallLayout::AGENT_EXE, b"agent")],
+    );
+    let (_server, catalog) = start_tiny_model_server();
+
+    let out = install(
+        &env.ctx,
+        &exe,
+        &InstallOpts {
+            allow_downgrade: false,
+            model_mode: ModelMode::Minimal,
+            catalog: Some(catalog.clone()),
+        },
+    )
+    .expect("install minimal");
+    assert_eq!(
+        out,
+        Outcome::Installed {
+            version: "0.3.0-dev".to_string(),
+            models: ModelsResult::Complete,
+        }
+    );
+    assert_eq!(read_model_mode(&env.ctx), Some(ModelMode::Minimal));
+
+    let models_dir = resolve_models_dir(&env.ctx.home);
+    assert!(models_dir.join("comp-min").join("manifest.json").exists());
+    assert!(models_dir.join("comp-min").join("weights.bin").exists());
+    assert!(!models_dir.join("comp-full").exists());
+
+    // Modify to Full downloads comp-full.
+    let out = modify_with_progress(
+        &env.ctx,
+        &ModifyOpts {
+            model_mode: ModelMode::Full,
+            catalog: Some(catalog.clone()),
+        },
+        &br_installer::NoProgress,
+    )
+    .expect("modify full");
+    assert_eq!(
+        out,
+        Outcome::Modified {
+            mode: ModelMode::Full,
+            models: ModelsResult::Complete,
+        }
+    );
+    assert!(models_dir.join("comp-full").join("manifest.json").exists());
+
+    // Modify from Full to Minimal removes comp-full and keeps comp-min.
+    let out = modify_with_progress(
+        &env.ctx,
+        &ModifyOpts {
+            model_mode: ModelMode::Minimal,
+            catalog: Some(catalog.clone()),
+        },
+        &br_installer::NoProgress,
+    )
+    .expect("modify full -> minimal");
+    assert_eq!(
+        out,
+        Outcome::Modified {
+            mode: ModelMode::Minimal,
+            models: ModelsResult::Complete,
+        }
+    );
+    assert!(!models_dir.join("comp-full").exists());
+    assert!(models_dir.join("comp-min").join("manifest.json").exists());
+
+    // Modify to Later downloads nothing and removes nothing.
+    let out = modify_with_progress(
+        &env.ctx,
+        &ModifyOpts {
+            model_mode: ModelMode::Later,
+            catalog: Some(catalog),
+        },
+        &br_installer::NoProgress,
+    )
+    .expect("modify later");
+    assert_eq!(
+        out,
+        Outcome::Modified {
+            mode: ModelMode::Later,
+            models: ModelsResult::Skipped,
+        }
+    );
+    assert!(models_dir.join("comp-min").join("manifest.json").exists());
+}
+
+// 21. Offline gives ModelsResult::Offline and exit code 0 in the silent end-to-end path.
+#[test]
+fn i3_offline_returns_offline_and_silent_e2e_exits_zero() {
+    let env = TestEnv::new("i3-offline");
+    let closed_port = closed_loopback_port();
+    let (raw_cat, _) = tiny_catalog_data();
+    let offline_cat = raw_cat.with_base_url_for_test(format!("http://127.0.0.1:{closed_port}/"));
+
+    // Library path.
+    let exe = env.build_installer(
+        "setup",
+        b"MZ-STUB",
+        "0.3.0-dev",
+        &[(InstallLayout::AGENT_EXE, b"agent")],
+    );
+    let out = install(
+        &env.ctx,
+        &exe,
+        &InstallOpts {
+            allow_downgrade: false,
+            model_mode: ModelMode::Minimal,
+            catalog: Some(offline_cat),
+        },
+    )
+    .expect("offline install must succeed");
+    assert_eq!(
+        out,
+        Outcome::Installed {
+            version: "0.3.0-dev".to_string(),
+            models: ModelsResult::Offline,
+        }
+    );
+    assert!(env.ctx.install_dir.join(InstallLayout::AGENT_EXE).exists());
+    assert_eq!(read_model_mode(&env.ctx), Some(ModelMode::Minimal));
+
+    // Silent end-to-end path through the built br-installer.exe -> exit code 0.
+    let env2 = TestEnv::new("i3-offline-e2e");
+    let bin_exe = Path::new(env!("CARGO_BIN_EXE_br-installer"));
+    let zip_path = env2.root.join("payload.zip");
+    let built_setup = env2.root.join("BetterRecall-Setup-offline.exe");
+    let cat_path = env2.root.join("tiny-catalog.json");
+    fs::write(&cat_path, tiny_catalog_json()).expect("write tiny catalog");
+    build_zip(
+        &zip_path,
+        "0.3.0-dev",
+        &[(InstallLayout::AGENT_EXE, b"fake-agent")],
+    );
+    append_payload(bin_exe, &zip_path, &built_setup).expect("append_payload");
+
+    let status = Command::new(&built_setup)
+        .args([
+            "/S",
+            "/norun",
+            "/models=minimal",
+            "--dev-root",
+            env2.root.to_str().unwrap(),
+            "--dev-reg-prefix",
+            &env2.reg_prefix,
+            "--dev-models-catalog",
+            cat_path.to_str().unwrap(),
+            "--dev-models-url",
+            &format!("http://127.0.0.1:{closed_port}/"),
+        ])
+        .creation_flags(CREATE_NO_WINDOW.0)
+        .status()
+        .expect("run built installer offline");
+    assert_eq!(status.code(), Some(exit_code::OK));
+    assert!(env2.ctx.install_dir.join(InstallLayout::AGENT_EXE).exists());
+    assert_eq!(read_model_mode(&env2.ctx), Some(ModelMode::Minimal));
+}
+
+// 22. Silent e2e verify failure returns exit code 9 (InstallError::Models) with app still installed.
+#[test]
+fn i3_silent_e2e_verify_failure_exits_9_with_app_installed() {
+    let env = TestEnv::new("i3-verify-fail");
+    let (raw_cat, mut files) = tiny_catalog_data();
+    // Corrupt weights.bin bytes on the server so SHA-256 verification fails.
+    files.insert("/comp-min/weights.bin".to_string(), b"CORRUPTED-WEIGHTS!!!".to_vec());
+    let server = TinyHttpServer::start(files);
+
+    let bin_exe = Path::new(env!("CARGO_BIN_EXE_br-installer"));
+    let zip_path = env.root.join("payload.zip");
+    let built_setup = env.root.join("BetterRecall-Setup-badhash.exe");
+    let cat_path = env.root.join("tiny-catalog.json");
+    fs::write(&cat_path, serde_json::to_string(&raw_cat).unwrap()).expect("write catalog");
+    build_zip(
+        &zip_path,
+        "0.3.0-dev",
+        &[(InstallLayout::AGENT_EXE, b"fake-agent")],
+    );
+    append_payload(bin_exe, &zip_path, &built_setup).expect("append_payload");
+
+    let status = Command::new(&built_setup)
+        .args([
+            "/S",
+            "/norun",
+            "/models=minimal",
+            "--dev-root",
+            env.root.to_str().unwrap(),
+            "--dev-reg-prefix",
+            &env.reg_prefix,
+            "--dev-models-catalog",
+            cat_path.to_str().unwrap(),
+            "--dev-models-url",
+            &server.base_url(),
+        ])
+        .creation_flags(CREATE_NO_WINDOW.0)
+        .status()
+        .expect("run built installer with bad hash");
+    assert_eq!(status.code(), Some(exit_code::MODELS));
+    assert!(env.ctx.install_dir.join(InstallLayout::AGENT_EXE).exists());
+    assert_eq!(read_model_mode(&env.ctx), Some(ModelMode::Minimal));
+}
+
+// 23. Install-time free space check adds model bytes when a model set is chosen.
+#[test]
+fn i3_install_space_check_includes_model_bytes() {
+    let env = TestEnv::new("i3-space");
+    let exe = env.build_installer(
+        "setup",
+        b"MZ-STUB",
+        "0.3.0-dev",
+        &[(InstallLayout::AGENT_EXE, b"agent")],
+    );
+    let (mut cat, _) = tiny_catalog_data();
+    cat.components[0].bytes = 100_000;
+
+    // 50_000 bytes is plenty for the 5-byte payload, but not enough once model bytes are added.
+    let err = install_with_space(
+        &env.ctx,
+        &exe,
+        &InstallOpts {
+            allow_downgrade: false,
+            model_mode: ModelMode::Minimal,
+            catalog: Some(cat),
+        },
+        |_| Ok(50_000),
+    )
+    .expect_err("space check must include model bytes");
+    assert!(matches!(err, InstallError::NotEnoughSpace { .. }));
 }

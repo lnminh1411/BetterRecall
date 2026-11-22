@@ -27,9 +27,10 @@ pub use extract::{
     read_install_marker,
 };
 pub use install::{
-    InstallOpts, ModelMode, ModifyOpts, Outcome, SETUP_EXE, SETUP_MUTEX, UninstallOpts,
-    compare_versions, install, install_with_progress, install_with_space, modify,
-    modify_with_progress, uninstall, uninstall_with_progress, validate_delete_data_home,
+    InstallOpts, ModelMode, ModelsResult, ModifyOpts, Outcome, SETUP_EXE, SETUP_MUTEX,
+    UninstallOpts, compare_versions, install, install_with_progress, install_with_space, modify,
+    modify_with_progress, resolve_models_dir, uninstall, uninstall_with_progress,
+    validate_delete_data_home,
 };
 pub use log::log_line;
 pub use payload::{

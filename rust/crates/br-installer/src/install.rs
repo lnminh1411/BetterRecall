@@ -11,8 +11,13 @@ use std::io::{self, Read, Write};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use br_contracts::{DataPaths, InstallLayout, PipeNames, Settings, full_path, strip_jsonc};
+use br_fetch::{
+    Catalog, FetchError, FetchProgress, InstallOptions, ModelSet, install_components,
+    remove_components_from_catalog,
+};
 use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE};
 use windows::Win32::Storage::FileSystem::{MOVEFILE_DELAY_UNTIL_REBOOT, MoveFileExW};
 use windows::Win32::System::Com::CoTaskMemFree;
@@ -25,13 +30,13 @@ use windows::core::{GUID, PCWSTR};
 use crate::InstallError;
 use crate::ctx::Ctx;
 use crate::extract::{
-    available_disk_space, extract_to_staging_with_progress, read_install_marker,
+    available_disk_space, extract_to_staging_with_progress_and_extra, read_install_marker,
 };
 use crate::log::log_line;
 use crate::payload::{read_setup_manifest, read_trailer, stub_len};
 use crate::progress::{NoProgress, Progress, Step};
 use crate::registry;
-use crate::running::{close_running, normalized_dir_prefix, path_is_under_prefix};
+use crate::running::{agent_running, close_running, normalized_dir_prefix, path_is_under_prefix};
 use crate::shortcut;
 use crate::swap::{old_folder_path, rename_with_retry, swap_into_place};
 
@@ -69,6 +74,25 @@ impl ModelMode {
             _ => None,
         }
     }
+
+    /// Maps `Full`/`Minimal` to the corresponding [`ModelSet`]; returns `None` for `Later`.
+    pub fn to_model_set(self) -> Option<ModelSet> {
+        match self {
+            Self::Full => Some(ModelSet::Full),
+            Self::Minimal => Some(ModelSet::Minimal),
+            Self::Later => None,
+        }
+    }
+}
+
+/// Outcome of the model download step during install or modify.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelsResult {
+    Complete,
+    Skipped,
+    Cancelled,
+    Offline,
+    Failed(String),
 }
 
 /// Options for [`install`].
@@ -76,12 +100,16 @@ impl ModelMode {
 pub struct InstallOpts {
     pub allow_downgrade: bool,
     pub model_mode: ModelMode,
+    /// Optional catalog override for tests; production always leaves this `None` (uses embedded).
+    pub catalog: Option<Catalog>,
 }
 
 /// Options for [`modify_with_progress`].
 #[derive(Debug, Clone, Default)]
 pub struct ModifyOpts {
     pub model_mode: ModelMode,
+    /// Optional catalog override for tests; production always leaves this `None` (uses embedded).
+    pub catalog: Option<Catalog>,
 }
 
 /// Options for [`uninstall`].
@@ -93,12 +121,26 @@ pub struct UninstallOpts {
 /// Result of an install, uninstall, or modify action.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
-    Installed { version: String },
-    Modified { mode: ModelMode },
-    Uninstalled { reboot_required: bool },
+    Installed {
+        version: String,
+        models: ModelsResult,
+    },
+    Modified {
+        mode: ModelMode,
+        models: ModelsResult,
+    },
+    Uninstalled {
+        reboot_required: bool,
+    },
     NothingToDo,
     /// Uninstall handed over to a temp copy of the setup exe (see `cli`).
     Relaunched,
+}
+
+/// Resolves the models directory for `home`, honoring `settings.json` when present.
+pub fn resolve_models_dir(home: &Path) -> PathBuf {
+    read_custom_models_dir(home)
+        .unwrap_or_else(|| DataPaths::models_dir(home, &Settings::default()))
 }
 
 /// Runs the full installation flow.
@@ -168,7 +210,25 @@ where
         });
     }
 
-    let staged = extract_to_staging_with_progress(ctx, exe, &trailer, free_space, progress)?;
+    let model_plan = match opts.model_mode.to_model_set() {
+        Some(set) => {
+            let cat = resolve_catalog(opts.catalog.as_ref())?;
+            Some((cat, set))
+        }
+        None => None,
+    };
+    let extra_model_bytes = model_plan
+        .as_ref()
+        .map_or(0, |(cat, set)| cat.bytes_for(*set));
+
+    let staged = extract_to_staging_with_progress_and_extra(
+        ctx,
+        exe,
+        &trailer,
+        extra_model_bytes,
+        free_space,
+        progress,
+    )?;
     let version = staged.manifest.version.clone();
 
     if progress.cancelled() {
@@ -195,18 +255,23 @@ where
     registry::write_model_mode(ctx, opts.model_mode)?;
     shortcut::create_shortcut(ctx)?;
 
+    let models = if let Some((ref cat, set)) = model_plan {
+        progress.step(Step::DownloadingModels);
+        download_models_set(&ctx.home, cat, set, progress)
+    } else {
+        ModelsResult::Skipped
+    };
+
     if ctx.start_after {
-        let agent = ctx.install_dir.join(InstallLayout::AGENT_EXE);
-        log_line(&ctx.home, &format!("starting {}", agent.display()));
-        Command::new(&agent)
-            .current_dir(&ctx.install_dir)
-            .spawn()
-            .map_err(|e| InstallError::io(format!("starting {}", agent.display()), e))?;
+        start_agent(ctx)?;
     }
 
     progress.step(Step::Done);
-    log_line(&ctx.home, &format!("install complete: {version}"));
-    Ok(Outcome::Installed { version })
+    log_line(
+        &ctx.home,
+        &format!("install complete: {version} (models={models:?})"),
+    );
+    Ok(Outcome::Installed { version, models })
 }
 
 /// Uninstalls BetterRecall from `ctx.install_dir`, optionally deleting allowlisted data in `ctx.home`.
@@ -313,29 +378,184 @@ pub fn modify(ctx: &Ctx) -> Result<Outcome, InstallError> {
     Ok(Outcome::NothingToDo)
 }
 
-/// Records the chosen [`ModelMode`] in the registry (I3 will also download models here).
+/// Updates the chosen [`ModelMode`] in the registry and downloads or removes model components.
 pub fn modify_with_progress(
     ctx: &Ctx,
     opts: &ModifyOpts,
     progress: &dyn Progress,
 ) -> Result<Outcome, InstallError> {
     let _mutex = acquire_setup_mutex(&ctx.home)?;
+    let prev_mode = registry::read_model_mode(ctx);
     log_line(
         &ctx.home,
-        &format!("modify start (models={})", opts.model_mode.as_str()),
+        &format!(
+            "modify start (prev={:?}, models={})",
+            prev_mode.map(ModelMode::as_str),
+            opts.model_mode.as_str()
+        ),
     );
 
     progress.step(Step::SavingSettings);
     registry::write_model_mode(ctx, opts.model_mode)?;
 
+    let mut restart_agent = false;
+    let models = match opts.model_mode.to_model_set() {
+        None => ModelsResult::Skipped,
+        Some(set) => {
+            let cat = resolve_catalog(opts.catalog.as_ref())?;
+            let models_dir = resolve_models_dir(&ctx.home);
+
+            if prev_mode == Some(ModelMode::Full) && opts.model_mode == ModelMode::Minimal {
+                let full_only: Vec<&str> = cat
+                    .components_for(ModelSet::Full)
+                    .into_iter()
+                    .filter(|c| !c.sets.iter().any(|s| s == ModelSet::Minimal.as_str()))
+                    .map(|c| c.id.as_str())
+                    .collect();
+                if !full_only.is_empty() {
+                    // The worker may hold these models open: close the app before deleting them
+                    // and start it again at the end.
+                    if close_running(ctx)? {
+                        restart_agent = true;
+                    }
+                    log_line(
+                        &ctx.home,
+                        &format!(
+                            "modify: removing full-only models {:?} from {}",
+                            full_only,
+                            models_dir.display()
+                        ),
+                    );
+                    if let Err(e) = remove_components_from_catalog(&models_dir, &cat, &full_only) {
+                        log_line(&ctx.home, &format!("modify: failed to remove models: {e}"));
+                        if restart_agent && ctx.start_after {
+                            start_agent(ctx)?;
+                        }
+                        progress.step(Step::Done);
+                        return Ok(Outcome::Modified {
+                            mode: opts.model_mode,
+                            models: ModelsResult::Failed(e.to_string()),
+                        });
+                    }
+                }
+            }
+
+            progress.step(Step::DownloadingModels);
+            let result = download_models_set(&ctx.home, &cat, set, progress);
+            // A running worker loads models at start: restart the app so it picks up new ones.
+            if result == ModelsResult::Complete && !restart_agent && agent_running(ctx) {
+                restart_agent = close_running(ctx)?;
+            }
+            result
+        }
+    };
+    if restart_agent && ctx.start_after {
+        start_agent(ctx)?;
+    }
+
     progress.step(Step::Done);
     log_line(
         &ctx.home,
-        &format!("modify complete (models={})", opts.model_mode.as_str()),
+        &format!(
+            "modify complete (models={}, result={models:?})",
+            opts.model_mode.as_str()
+        ),
     );
     Ok(Outcome::Modified {
         mode: opts.model_mode,
+        models,
     })
+}
+
+fn start_agent(ctx: &Ctx) -> Result<(), InstallError> {
+    let agent = ctx.install_dir.join(InstallLayout::AGENT_EXE);
+    log_line(&ctx.home, &format!("starting {}", agent.display()));
+    Command::new(&agent)
+        .current_dir(&ctx.install_dir)
+        .spawn()
+        .map_err(|e| InstallError::io(format!("starting {}", agent.display()), e))?;
+    Ok(())
+}
+
+fn resolve_catalog(override_cat: Option<&Catalog>) -> Result<Catalog, InstallError> {
+    match override_cat {
+        Some(c) => Ok(c.clone()),
+        None => Catalog::embedded().map_err(|e| InstallError::Models(e.to_string())),
+    }
+}
+
+struct InstallerFetchProgress<'a> {
+    progress: &'a dyn Progress,
+    done: AtomicU64,
+    total: AtomicU64,
+}
+
+impl FetchProgress for InstallerFetchProgress<'_> {
+    fn total(&self, bytes: u64) {
+        self.total.store(bytes, AtomicOrdering::Relaxed);
+        self.progress.bytes(0, bytes);
+    }
+
+    fn bytes(&self, delta: u64) {
+        let done = self.done.fetch_add(delta, AtomicOrdering::Relaxed) + delta;
+        let total = self.total.load(AtomicOrdering::Relaxed);
+        self.progress.bytes(done, total);
+    }
+}
+
+fn download_models_set(
+    home: &Path,
+    catalog: &Catalog,
+    set: ModelSet,
+    progress: &dyn Progress,
+) -> ModelsResult {
+    let models_dir = resolve_models_dir(home);
+    let components = catalog.components_for(set);
+    let fetch_opts = InstallOptions::for_catalog(catalog);
+    let bridge = InstallerFetchProgress {
+        progress,
+        done: AtomicU64::new(0),
+        total: AtomicU64::new(0),
+    };
+    log_line(
+        home,
+        &format!(
+            "downloading {} model components ({} bytes) into {}",
+            components.len(),
+            catalog.bytes_for(set),
+            models_dir.display()
+        ),
+    );
+    match install_components(
+        &models_dir,
+        &components,
+        &fetch_opts,
+        &bridge,
+        &|| progress.cancelled(),
+    ) {
+        Ok(report) => {
+            log_line(
+                home,
+                &format!(
+                    "model download complete: downloaded={}, skipped={}, bytes={}",
+                    report.downloaded_files, report.skipped_files, report.bytes_downloaded
+                ),
+            );
+            ModelsResult::Complete
+        }
+        Err(FetchError::Offline) => {
+            log_line(home, "model download skipped: offline");
+            ModelsResult::Offline
+        }
+        Err(FetchError::Cancelled) => {
+            log_line(home, "model download cancelled by user");
+            ModelsResult::Cancelled
+        }
+        Err(e) => {
+            log_line(home, &format!("model download failed: {e}"));
+            ModelsResult::Failed(e.to_string())
+        }
+    }
 }
 
 /// Refuses unsafe `home` paths before deleting BetterRecall data:

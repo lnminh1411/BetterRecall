@@ -34,6 +34,9 @@ pub const IDC_READY_INSTALL_PATH: u16 = 1202;
 pub const IDC_READY_DATA_LABEL: u16 = 1203;
 pub const IDC_READY_DATA_PATH: u16 = 1204;
 pub const IDC_READY_START_CHECK: u16 = 1205;
+pub const IDC_READY_MODELS_LABEL: u16 = 1206;
+pub const IDC_READY_MODELS_PATH: u16 = 1207;
+pub const IDC_READY_DOWNLOAD_INFO: u16 = 1208;
 
 // Uninstall confirm page controls.
 pub const IDC_UNINSTALL_KEEP: u16 = 1301;
@@ -44,6 +47,7 @@ pub const IDC_UNINSTALL_UNDERSTAND: u16 = 1304;
 // Progress page controls.
 pub const IDC_PROGRESS_STATUS: u16 = 1401;
 pub const IDC_PROGRESS_BAR: u16 = 1402;
+pub const IDC_PROGRESS_DETAIL: u16 = 1403;
 
 // Finish page controls.
 pub const IDC_FINISH_SUMMARY: u16 = 1501;

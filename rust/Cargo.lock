@@ -198,10 +198,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "br-fetch"
+version = "0.3.0-dev"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "ureq",
+ "windows",
+]
+
+[[package]]
 name = "br-installer"
 version = "0.3.0-dev"
 dependencies = [
  "br-contracts",
+ "br-fetch",
  "serde",
  "serde_json",
  "sha2",
