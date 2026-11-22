@@ -11,12 +11,15 @@ Written 2026-11-21. The plan for moving everything except the WinUI UI from C#/.
 | R3 | Tests: each crate's unit tests are ported to `cargo test`, and the C# tests that start a real process (worker end-to-end, agent tests that spawn the worker, later the pipe tests the UI depends on) are run against the Rust executables as a conformance suite. `BetterRecall.UI.Tests` stays as it is. |
 | R4 | Delivery part by part on `main`. A Rust part is built next to its C# twin and replaces it only once it passes the same tests. `main` stays buildable and shippable as a mixed build throughout. |
 | R5 | Stop for a user review after the Worker pilot, before Agent and Core. |
+| R6 | (2026-11-22) 0.3.0 ships an offline per-user exe installer written in Rust, replacing the single-file launcher. It installs to the fixed folder `%LOCALAPPDATA%\Programs\BetterRecall` without admin rights, writes an HKCU uninstall entry, and the Run value points straight at the installed agent. `bin\current` and the old-version sweeps go away. The Stub shrinks to the MCP relay, kept outside the install folder so open MCP sessions survive an upgrade. The app installs offline; models are downloaded in one of three modes: Full, Minimal, or Install later. |
+| R7 | (2026-11-22) The app gets a Models page: it lists what is installed (from the model manifest, with size and state), opens the models folder for a manual install, and downloads a model directly from Hugging Face after a warning that names the source, size and destination. |
+| R8 | (2026-11-22) The app gets an Update page with auto-update from GitHub Releases, off by default. With it off the app makes no network request unless the user presses Check. |
 
 ## Order
 
 1. **Worker (pilot).** The smallest part (5.3k lines), behind the private binary pipe, mostly inference. No persistent data except `cache\device.json`.
 2. **Agent and Core.** The big step (28.8k lines): capture, replay, audio, the encrypted store, keys and all pipe servers. This is where the data clean break (R2) applies.
-3. **Launcher, Stub, Mcp, Cli.** Small (2.1k lines).
+3. **Installer, MCP relay, Mcp, Cli.** The launcher is replaced by the installer (R6), the Stub shrinks to the MCP relay; Mcp and Cli are small (about 0.5k lines). Models (R7) and updates (R8) land in the same phase.
 4. **UI** stays C#.
 
 ## Layout
@@ -58,6 +61,22 @@ Rules for every stage:
 | A6 | Replay and audio: oneVPL AV1 and Media Foundation encoders, bitstream, fMP4 writer, packet ring, replay engine and library, cursor overlay, WASAPI, AAC, speech segmenter | ported replay and audio tests pass; a saved replay plays |
 | A7 | Bench, self tests and the keyframe budget run; measure against the C# agent (start, idle CPU, capture CPU with AVIF under 1%, memory, size) | numbers written here; user review before the swap |
 
+## Installer, models and updates milestones
+
+Rules for every stage:
+- One shared Rust download path (`br-fetch`): blocking HTTPS over the `ureq` and SChannel stack `br-core` already uses, resumable, writes to a `.part` file, checks size and SHA-256 before the final rename, and checks free space first. The installer, the Models page and the updater all use it.
+- Models come from the pinned revisions in `Scripts\models\common.py` and the converted-model repo on Hugging Face; the model manifest carries each file's size and SHA-256.
+- Tests never touch the real HKCU Run, uninstall or app keys, or `%LOCALAPPDATA%\Programs`: the installer takes a registry root and install root override for tests. Windows Sandbox runs only on the user's go-ahead.
+
+| Stage | Scope | Done when |
+|---|---|---|
+| I1 | `br-installer` crate: payload appended to the exe with a checked trailer, verified extraction into a staging folder, swap into the install folder with rollback, closing a running agent, UI and MCP relay through their quit events, HKCU uninstall entry, Run value, Start menu shortcut, silent mode (`/S`, `/modify`, `/uninstall`) | cargo tests for extraction, swap, rollback and registry writes pass under the overrides |
+| I2 | Wizard UI (Win32): licences, model mode (Full, Minimal, Install later), progress; uninstaller asks whether to keep or delete the data folder | an install, a modify and an uninstall run end to end on a scratch root |
+| I3 | `br-fetch` and the installer's model step: per-component download, verification, free-space check, falls back to Install later when offline | download, resume and hash-mismatch tests pass against a local test server |
+| I4 | Models page (R7): agent UI-pipe verbs `models.list`, `models.openFolder`, `models.download` (progress stream, cancel) on top of `br-fetch`; UI page with the warning dialog before a download | conformance tests for the verbs pass; the page shows installed models and a download lands verified |
+| I5 | Update page (R8): `update.check`, `update.download`, `update.apply` against GitHub Releases, a setting `update.auto` (default false), the installer run in silent upgrade mode, agent restart after it | tests against a local fake release feed pass; auto-update is off on a fresh install |
+| I6 | Packaging: release script builds the installer with the app payload; `release_layout.py` updated; the agent's autostart registers its own path and the `BETTERRECALL_LAUNCHER` handling goes; Stub reduced to the relay; Mcp and Cli ported | a release build installs, upgrades and uninstalls in Windows Sandbox |
+
 ## Status
 
 - 2026-11-21: version 0.3.0-dev, plan written. W1 next.
@@ -75,6 +94,7 @@ Rules for every stage:
 - 2026-11-22: A6 implemented — replay and audio ported into `br-agent` (`codecs::vpl` dynamic `libvpl.dll` binding with System32 fallback; `replay`: `Bitstream`, `EncoderWatchdog`, `PacketRing` with `VirtualAlloc`/`VirtualLock`, `ReplayLayout`, `Fmp4Writer`, `ReplaySampler`, `CanvasBlit`, `CursorOverlay`, `VideoStream`, `ReplayMux`, `ReplayLibrary`, `VideoEncoders`/`EncoderPlan`/`EncoderFactory`, `MfVideoEncoder` over Media Foundation + `ICodecAPI`, `VplAv1Encoder` over oneVPL + D3D11, `ReplayPipeline`, `ReplayEngine`; `audio`: `AudioTimeline`, `SpeechSegmenter`/`Resampler`, `AacEncoder` over MF `AACMFTEncoder`, `WasapiCapture` over WASAPI loopback/mic + process-loopback `ActivateAudioInterfaceAsync`, `LoopbackHub`/`AudioReplayEncoder`/`AudioGuardTimeline`/`TranscriptSource`/`Transcriber` with `redact` & `boundary_spans`; full `CaptureService`, `OutputCapture`, `KeyframePipeline`, `HardwareProbe` and `AgentHost` wiring with `UnavailableReplay`/`UnavailableAudio` seams removed) plus 102 ported cargo tests (`replay_tests` 50, `audio_tests` 37, and 15 capture, storage-guard, guardrail and session-end cases A5 had missed); cargo test (754, 5 ignored) and clippy pass, and the A0 conformance suite passes against the Rust agent (38 of 38, with `libvpl.dll` added beside the exe). Playing a saved replay needs real desktop capture and is checked in A7.
 - 2026-11-22: A7 code implemented — full benchmark (`BenchRunner`, `BenchTarget`, `AgentBenchTarget`, `AgentHost::bench_full`), dev self-tests (`DevSelfTest`: `--selftest-codec`, `--selftest-bench`, `--selftest-replay`, `--selftest-keyframe`), keyframe CPU budget run (`KeyframeBudgetRun`: `--selftest-keyframe-budget` with `--ocr-home`, `--worker`, `--store`, `--acg`, `--acg-at`, `--no-warm`, Win32 `GetProcessTimes`/`GetThreadTimes`/EcoQoS/below-normal priority), and dev CLI timers (`--dev-replay-at`, `--dev-export`, `--dev-bench` with indented `ContractsJson` output and `request_quit`) wired into `br-agent`, plus 8 ported `BenchTests` in `tests/bench_tests.rs`; replay pipeline counters are snapshotted only when a self test asks for them. cargo test (764 with the manifest tests, 5 ignored; 765 after the end-session bound) and clippy pass, and the A0 conformance suite passes against the Rust agent (38 of 38). Measured against the C# agent (below), which found the missing exe manifest, now fixed; awaiting the user's review before the swap.
 - 2026-11-22: Agent swap done — C# agent source (`src\BetterRecall.Agent\**\*.cs`, `app.manifest`) and `tests\BetterRecall.Agent.Tests` removed (ported to cargo); `BetterRecall.Agent.csproj` wraps `cargo build -p br-agent` and ships `BetterRecall.Agent.exe` with `sqlite3mc.dll` (`SQLite3MC.PCLRaw.lib`), `libSkiaSharp.dll` (`SkiaSharp.NativeAssets.Win32`), `libvpl.dll`, the codec DLLs and the tray icons; `br-agent\build.rs` embeds the icon, version information and manifest through the Windows SDK `rc.exe`; the A0 conformance suite runs against the wrapper's output by default (38 of 38); `release_layout.py` collects the notices of the crates `br-agent` links. The C# Core library stays for the CLI and MCP until phase 3.
+- 2026-11-22: Phase 3 planned: offline Rust installer (R6), Models page (R7), Update page with auto-update off by default (R8); stages I1 to I6 above.
 
 ## W4: Rust worker against the C# worker
 
