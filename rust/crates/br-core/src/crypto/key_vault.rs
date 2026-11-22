@@ -2,7 +2,7 @@
 // Copyright (c) BetterRecall contributors
 
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{self, Write};
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -51,6 +51,9 @@ struct VaultState {
 
 impl KeyVault {
     const MODE_INVALID: &'static str = "invalid";
+    /// C5: the key file exists but could not be read (sharing violation, access denied, AV scan).
+    /// Re-read on the next use; never reported as a lost key.
+    const MODE_UNREADABLE: &'static str = "unreadable";
     pub const MODE_TPM: &'static str = "tpm";
     pub const MODE_PASSPHRASE: &'static str = "passphrase";
     pub const MODE_DPAPI: &'static str = "dpapi";
@@ -74,13 +77,7 @@ impl KeyVault {
     ) -> Self {
         let key_file = DataPaths::key_file(home);
         let tpm_name = tpm_key_name.unwrap_or_else(|| Self::tpm_key_name_for(home));
-        let file_mode = match read_file_mode(&key_file) {
-            Ok(m) => m,
-            Err(why) => {
-                Log::error_err("key file damaged", &why);
-                Some(Self::MODE_INVALID)
-            }
-        };
+        let file_mode = mode_from_read(read_file_mode(&key_file));
         let hello_available = Arc::new(AtomicBool::new(false));
         let hello_checked = Arc::new(AtomicBool::new(!probe_hello));
         if probe_hello {
@@ -133,7 +130,8 @@ impl KeyVault {
 
     /// Mode of the key file when it exists, else the mode a new key would use.
     pub fn protection(&self) -> &'static str {
-        let st = self.gate.lock().expect("vault gate");
+        let mut st = self.gate.lock().expect("vault gate");
+        let _ = self.refresh_unreadable_locked(&mut st);
         st.file_mode
             .unwrap_or_else(|| self.resolve_new_mode(&(self.settings)().security.key_protection, false))
     }
@@ -163,8 +161,11 @@ impl KeyVault {
 
     /// True when the key file is passphrase-wrapped, or no key exists and passphrase mode is configured.
     pub fn needs_passphrase(&self) -> bool {
-        let st = self.gate.lock().expect("vault gate");
+        let mut st = self.gate.lock().expect("vault gate");
         if st.key.is_some() {
+            return false;
+        }
+        if self.refresh_unreadable_locked(&mut st).is_err() {
             return false;
         }
         if st.file_mode.is_none() && self.data_exists() {
@@ -257,6 +258,7 @@ impl KeyVault {
         if st.key.is_some() {
             return Ok(true);
         }
+        self.refresh_unreadable_locked(&mut st)?;
         let s = (self.settings)();
         let iso = s.security.memory_isolation;
         match st.file_mode {
@@ -311,6 +313,9 @@ impl KeyVault {
         }
         let mut st = self.gate.lock().expect("vault gate");
         if (st.now)().timestamp_millis() < st.pass_locked_until_ms {
+            return false;
+        }
+        if st.key.is_none() && self.refresh_unreadable_locked(&mut st).is_err() {
             return false;
         }
         let s = (self.settings)();
@@ -530,6 +535,21 @@ impl KeyVault {
         Ok(out)
     }
 
+    /// C5: re-reads a key file that could not be read before. A read failure now is an
+    /// `Io` error (store open retries as `storeerror`), never `KeyLost`.
+    fn refresh_unreadable_locked(&self, st: &mut VaultState) -> Result<(), CryptoError> {
+        if st.file_mode != Some(Self::MODE_UNREADABLE) {
+            return Ok(());
+        }
+        match read_file_mode(&self.key_file) {
+            Err(ModeReadError::Io(e)) => Err(CryptoError::Io(e)),
+            r => {
+                st.file_mode = mode_from_read(r);
+                Ok(())
+            }
+        }
+    }
+
     fn set_loaded_locked(&self, st: &mut VaultState, key: SecureKey, mode: &'static str) {
         st.key = Some(key);
         st.file_mode = Some(mode);
@@ -670,24 +690,47 @@ fn note_passphrase_locked(st: &mut VaultState, ok: bool) {
     ));
 }
 
-fn read_file_mode(key_file: &Path) -> Result<Option<&'static str>, String> {
-    if !key_file.exists() {
-        return Ok(None);
-    }
-    let file = fs::read(key_file).map_err(|e| format!("IO: {:?}", e.kind()))?;
+enum ModeReadError {
+    /// The file could not be read now; may succeed later.
+    Io(io::Error),
+    /// The file was read and its contents are not a valid key file.
+    Damaged(&'static str),
+}
+
+fn read_file_mode(key_file: &Path) -> Result<Option<&'static str>, ModeReadError> {
+    let file = match fs::read(key_file) {
+        Ok(f) => f,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(ModeReadError::Io(e)),
+    };
     if file.len() < 5 || file[..4] != KeyVault::MAGIC {
-        return Err("Bad key file.".to_string());
+        return Err(ModeReadError::Damaged("Bad key file."));
     }
     let mode = match file[4] {
         1 => KeyVault::MODE_TPM,
         2 => KeyVault::MODE_PASSPHRASE,
         3 => KeyVault::MODE_DPAPI,
-        _ => return Err("Bad key file mode.".to_string()),
+        _ => return Err(ModeReadError::Damaged("Bad key file mode.")),
     };
     if !KeyVault::payload_valid(&file, mode) {
-        return Err("Truncated or damaged key file.".to_string());
+        return Err(ModeReadError::Damaged("Truncated or damaged key file."));
     }
     Ok(Some(mode))
+}
+
+/// C5: only a file that was read and is bad counts as damaged; a read failure is retried later.
+fn mode_from_read(r: Result<Option<&'static str>, ModeReadError>) -> Option<&'static str> {
+    match r {
+        Ok(m) => m,
+        Err(ModeReadError::Damaged(why)) => {
+            Log::error_err("key file damaged", why);
+            Some(KeyVault::MODE_INVALID)
+        }
+        Err(ModeReadError::Io(e)) => {
+            Log::warn_err("key file unreadable, will retry", &format!("{:?}", e.kind()));
+            Some(KeyVault::MODE_UNREADABLE)
+        }
+    }
 }
 
 fn require_valid(file: &[u8], mode: &str) -> Result<(), CryptoError> {

@@ -647,6 +647,10 @@ fn describe_preview_send_redactor_and_fake_http_server() {
 fn d13_purge_app_name_and_site_host() {
     assert_eq!("claude", CommandProcessor::purge_app_name(r"C:\Apps\claude.exe"));
     assert_eq!("CHROME", CommandProcessor::purge_app_name("CHROME.EXE"));
+    // X1: multi-byte names must not panic on the ".exe" check.
+    assert_eq!("日日", CommandProcessor::purge_app_name("日日"));
+    assert_eq!("日本語", CommandProcessor::purge_app_name(r"D:\日本語.exe"));
+    assert_eq!("é", CommandProcessor::purge_app_name("é"));
     assert_eq!(
         "www.google.com",
         CommandProcessor::purge_site_host("https://www.google.com/path?a=1")

@@ -448,7 +448,11 @@ impl CommandProcessor {
         if let Some(pos) = n.rfind(['\\', '/']) {
             n = &n[pos + 1..];
         }
-        if n.len() >= 4 && n[n.len() - 4..].eq_ignore_ascii_case(".exe") {
+        // X1: compare bytes, slice only at a char boundary (".exe" is ASCII).
+        if n.len() >= 4
+            && n.as_bytes()[n.len() - 4..].eq_ignore_ascii_case(b".exe")
+            && n.is_char_boundary(n.len() - 4)
+        {
             n = &n[..n.len() - 4];
         }
         n.trim().to_string()

@@ -2028,3 +2028,35 @@ fn i6b_launcher_era_cleanup_removes_old_binaries_and_keeps_data() {
         b"{}"
     );
 }
+
+// C1 (sweep 5): a launcher-era folder that a running program was started from is left alone
+// (not half-deleted under it); it is removed on a later install once nothing runs from it.
+#[test]
+fn c1_launcher_cleanup_skips_a_folder_a_running_program_uses() {
+    let env = TestEnv::new("c1-cleanup-running");
+    let app = br_installer::app_dir(&env.ctx.home);
+    let busy_ver = app.join("0.2.3-0123456789ab");
+    fs::create_dir_all(&busy_ver).unwrap();
+    fs::write(busy_ver.join("readme.txt"), b"old").unwrap();
+    let exe = busy_ver.join("ping.exe");
+    fs::copy(r"C:\Windows\System32\PING.EXE", &exe).expect("copy ping.exe");
+
+    let images = vec![exe.clone()];
+    assert!(br_installer::running::any_image_under(&images, &busy_ver));
+    assert!(!br_installer::running::any_image_under(&images, &app.join("0.2.2-0123456789ab")));
+    assert!(!br_installer::running::any_image_under(&[app.join("0.2.3-0123456789abX").join("a.exe")], &busy_ver));
+
+    let mut child = Command::new(&exe)
+        .args(["-n", "30", "127.0.0.1"])
+        .creation_flags(CREATE_NO_WINDOW.0)
+        .spawn()
+        .expect("start copied ping.exe");
+    br_installer::cleanup_launcher_installs(&env.ctx.home);
+    let still_there = busy_ver.join("readme.txt").exists();
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(still_there, "folder in use by a running program must be kept whole");
+
+    br_installer::cleanup_launcher_installs(&env.ctx.home);
+    assert!(!busy_ver.exists(), "folder is removed once nothing runs from it");
+}

@@ -31,6 +31,7 @@ struct PipeFixture {
     settings: Arc<SettingsStore>,
     _vault: Arc<KeyVault>,
     agent: Arc<FakeAgent>,
+    embedder: Arc<FakeEmbedder>,
     pipes: PipeManager,
 }
 
@@ -54,13 +55,14 @@ impl PipeFixture {
             false,
         ));
         let agent = Arc::new(FakeAgent::new());
+        let embedder = Arc::new(FakeEmbedder::new());
         let st_for_proc = store.clone();
         let processor = Arc::new(CommandProcessor::new(CommandDeps {
             settings: settings.clone(),
             store: Arc::new(move || Some(st_for_proc.clone())),
             keys: vault.clone(),
             agent: agent.clone(),
-            embedder: Arc::new(FakeEmbedder::new()),
+            embedder: embedder.clone(),
             thumbnailer: Arc::new(FakeThumbs::new()),
             purge_all: Arc::new(|_| 0),
             purge_all_undeleted: None,
@@ -95,6 +97,7 @@ impl PipeFixture {
             settings,
             _vault: vault,
             agent,
+            embedder,
             pipes,
         }
     }
@@ -280,6 +283,46 @@ fn settings_toggle_pipes_live() {
         PipeConnectResult::NotRunning,
         PipeClient::connect(&f.name(PipeKind::Public), &self_exe, 300, &CancelToken::none()).0
     );
+}
+
+/// C4 (sweep 5): stopping the pipes at session end runs in parallel, so a slow handler on
+/// one pipe does not keep the later pipes serving for its whole wait.
+#[test]
+fn stop_does_not_wait_for_one_slow_pipe_before_the_others() {
+    let f = PipeFixture::new();
+    let self_exe = ProcessInfo::current_image().unwrap();
+    f.set(serde_json::json!({"mcp": {"enabled": true}}));
+    wait_for(|| f.pipes.mcp().is_some());
+    let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let e2 = entered.clone();
+    // A search whose query embedding ignores cancel and takes 4 s keeps one public handler busy.
+    *f.embedder.on_embed.lock().unwrap() = Some(Box::new(move |_q, _ct| {
+        e2.store(true, std::sync::atomic::Ordering::Release);
+        thread::sleep(Duration::from_secs(4));
+        Err(br_core::EmbedError::Cancelled)
+    }));
+    let mut c = f.connect(PipeKind::Public);
+    let slow = thread::spawn(move || {
+        let _ = c.request("search hello", &CancelToken::none());
+    });
+    wait_for(|| entered.load(std::sync::atomic::Ordering::Acquire));
+    let mcp_name = f.name(PipeKind::Mcp);
+    assert_eq!(
+        PipeConnectResult::Ok,
+        PipeClient::connect(&mcp_name, &self_exe, 300, &CancelToken::none()).0
+    );
+    let started = std::time::Instant::now();
+    thread::scope(|sc| {
+        sc.spawn(|| f.pipes.stop());
+        thread::sleep(Duration::from_millis(1200));
+        assert_eq!(
+            PipeConnectResult::NotRunning,
+            PipeClient::connect(&mcp_name, &self_exe, 200, &CancelToken::none()).0,
+            "MCP pipe still serving while the public pipe waits for its slow handler"
+        );
+    });
+    assert!(started.elapsed() < Duration::from_secs(7));
+    let _ = slow.join();
 }
 
 #[test]
@@ -762,4 +805,35 @@ fn b12_same_install_file() {
         Some(r"C:\Apps\BR\0.2.0-abcdef012345\other.exe"),
         r"C:\Apps\BR\bin\betterrecall.cmd"
     ));
+}
+
+/// B12 with the 0.3 layout: fixed install folder, shim in `<home>\app\bin`, and 0.2.x
+/// versioned entries under `<home>\app\<version>` still name the bundled CLI.
+#[test]
+fn b12_same_install_file_fixed_install_and_home_shim() {
+    let install = Path::new(r"C:\Users\u\AppData\Local\Programs\BetterRecall");
+    let cli = Some(r"C:\Users\u\AppData\Local\Programs\BetterRecall\betterrecall.exe");
+    let shim = r"C:\Users\u\AppData\Local\BetterRecall\app\bin\betterrecall.cmd";
+    assert!(PipeManager::same_install_file(install, cli, shim));
+    assert!(PipeManager::same_install_file(
+        install,
+        cli,
+        r"C:\Users\u\AppData\Local\BetterRecall\app\0.2.3-dev-0123456789ab\betterrecall.exe"
+    ));
+    // The shim names the CLI only, not another program in the install folder.
+    assert!(!PipeManager::same_install_file(
+        install,
+        Some(r"C:\Users\u\AppData\Local\Programs\BetterRecall\other.exe"),
+        shim
+    ));
+    // A client outside the install folder never matches.
+    assert!(!PipeManager::same_install_file(install, Some(r"C:\Temp\betterrecall.exe"), shim));
+    // A versioned entry for another file does not match the CLI.
+    assert!(!PipeManager::same_install_file(
+        install,
+        cli,
+        r"C:\Users\u\AppData\Local\BetterRecall\app\0.2.3-dev-0123456789ab\other.exe"
+    ));
+    // A shim-named file outside an `app\bin` folder does not match.
+    assert!(!PipeManager::same_install_file(install, cli, r"C:\Tools\betterrecall.cmd"));
 }
