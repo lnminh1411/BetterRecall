@@ -938,3 +938,342 @@ fn c4_end_session_cancels_maintenance_and_checkpoints_real_store() {
     agent.shutdown();
     core.shutdown();
 }
+
+// ---------------- SmartCaptureTests: StorageGuardTests ----------------
+
+struct FakeStorageStore {
+    use_bytes: Mutex<br_contracts::StorageUse>,
+    deletable: Mutex<i32>,
+    freed_per_row: Mutex<i64>,
+    delete_calls: std::sync::atomic::AtomicI32,
+}
+
+impl FakeStorageStore {
+    fn new(file_bytes: i64, free_bytes: i64) -> Arc<Self> {
+        Arc::new(Self {
+            use_bytes: Mutex::new(br_contracts::StorageUse {
+                file_bytes,
+                free_bytes,
+            }),
+            deletable: Mutex::new(0),
+            freed_per_row: Mutex::new(0),
+            delete_calls: std::sync::atomic::AtomicI32::new(0),
+        })
+    }
+
+    fn set_deletable(&self, n: i32) {
+        *self.deletable.lock().unwrap() = n;
+    }
+
+    fn deletable(&self) -> i32 {
+        *self.deletable.lock().unwrap()
+    }
+
+    fn set_freed_per_row(&self, n: i64) {
+        *self.freed_per_row.lock().unwrap() = n;
+    }
+
+    fn use_now(&self) -> br_contracts::StorageUse {
+        *self.use_bytes.lock().unwrap()
+    }
+
+    fn delete_calls(&self) -> i32 {
+        self.delete_calls.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+impl br_agent::host::StorageStore for FakeStorageStore {
+    fn get_storage_use(&self) -> br_contracts::StorageUse {
+        *self.use_bytes.lock().unwrap()
+    }
+
+    fn delete_for_space(&self, max_rows: i32) -> i32 {
+        self.delete_calls
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        let mut del = self.deletable.lock().unwrap();
+        let n = max_rows.min(*del);
+        *del -= n;
+        let per = *self.freed_per_row.lock().unwrap();
+        let mut u = self.use_bytes.lock().unwrap();
+        u.free_bytes = u.file_bytes.min(u.free_bytes + (n as i64) * per);
+        n
+    }
+}
+
+fn make_storage_guard(
+    disk_free: i64,
+    files: i64,
+    free: i64,
+    overwrite: bool,
+) -> (
+    br_agent::host::StorageGuard,
+    Arc<FakeStorageStore>,
+    Arc<Mutex<i64>>,
+) {
+    let store = FakeStorageStore::new(files, free);
+    let mut s = Settings::default();
+    s.storage.min_free_gb = 25;
+    s.storage.max_gb = 20;
+    s.storage.overwrite = overwrite;
+    let disk = Arc::new(Mutex::new(disk_free));
+    let st_cb = store.clone();
+    let d_cb = disk.clone();
+    let g = br_agent::host::StorageGuard::new(
+        move || Some(st_cb.clone() as Arc<dyn br_agent::host::StorageStore>),
+        move || s.clone(),
+        move || Some(*d_cb.lock().unwrap()),
+    );
+    (g, store, disk)
+}
+
+#[test]
+fn low_disk_pauses_once_and_resumes_with_margin() {
+    let gb = br_agent::host::StorageGuard::GB;
+    let (g, store, disk) = make_storage_guard(24 * gb, 5 * gb, 0, false);
+    let d = g.check();
+    assert!(d.pause);
+    assert!(d.notify);
+    assert_eq!("disk", d.why);
+    assert!(!g.check().notify); // balloon once
+    *disk.lock().unwrap() = 25 * gb + gb / 2; // above limit, inside margin: stays paused
+    assert!(g.check().pause);
+    *disk.lock().unwrap() = 26 * gb + 1;
+    assert!(!g.check().pause);
+    assert_eq!(0, store.delete_calls());
+}
+
+#[test]
+fn reusable_free_pages_count_as_free_space() {
+    let gb = br_agent::host::StorageGuard::GB;
+    let (g, _, _) = make_storage_guard(24 * gb, 6 * gb, 2 * gb, false);
+    assert!(!g.check().pause);
+}
+
+#[test]
+fn over_size_pauses_without_overwrite() {
+    let gb = br_agent::host::StorageGuard::GB;
+    let (g, _, _) = make_storage_guard(500 * gb, 21 * gb, 0, false);
+    let d = g.check();
+    assert!(d.pause);
+    assert_eq!("size", d.why);
+}
+
+#[test]
+fn overwrite_deletes_until_margin_instead_of_pausing() {
+    let gb = br_agent::host::StorageGuard::GB;
+    let (g, store, _) = make_storage_guard(500 * gb, 21 * gb, 0, true);
+    store.set_deletable(100_000);
+    store.set_freed_per_row(1024 * 1024); // 1 MiB per capture
+    let d = g.check();
+    assert!(!d.pause);
+    assert!(d.deleted > 0);
+    assert!(
+        store.use_now().live_bytes()
+            <= 20 * gb - br_agent::host::StorageGuard::margin(&br_contracts::StorageSettings::default())
+    );
+}
+
+#[test]
+fn overwrite_pauses_when_nothing_is_left_to_delete() {
+    let gb = br_agent::host::StorageGuard::GB;
+    let (g, store, _) = make_storage_guard(24 * gb, 5 * gb, 0, true);
+    store.set_deletable(3);
+    store.set_freed_per_row(1024);
+    let d = g.check();
+    assert!(d.pause);
+    assert_eq!(3, d.deleted);
+    assert_eq!("disk", d.why);
+}
+
+#[test]
+fn overwrite_keeps_the_store_when_deleting_cannot_free_enough() {
+    let gb = br_agent::host::StorageGuard::GB;
+    let (g, store, _) = make_storage_guard(10 * gb, gb, 0, true);
+    store.set_deletable(100_000);
+    store.set_freed_per_row(1024 * 1024);
+    let d = g.check();
+    assert!(d.pause);
+    assert!(d.notify);
+    assert_eq!(0, d.deleted);
+    assert_eq!(0, store.delete_calls());
+    assert_eq!("disk", d.why);
+}
+
+#[test]
+fn overwrite_deletes_for_disk_when_the_store_covers_the_shortfall() {
+    let gb = br_agent::host::StorageGuard::GB;
+    let (g, store, _) = make_storage_guard(24 * gb, 5 * gb, 0, true);
+    store.set_deletable(100_000);
+    store.set_freed_per_row(1024 * 1024);
+    let d = g.check();
+    assert!(!d.pause);
+    assert!(d.deleted > 0);
+    assert!(store.deletable() > 0); // only what the shortfall needed
+}
+
+// ---------------- CaptureRecoveryTests: GuardFreshnessTests ----------------
+
+fn freshness_snap(fg: isize, epoch: i64) -> br_agent::guardrails::GuardSnapshot {
+    br_agent::guardrails::GuardSnapshot {
+        taken_at_ms: br_agent::native::tick_count64(),
+        foreground: Some(WindowInfo {
+            hwnd: fg,
+            pid: 1,
+            exe_path: r"C:\Tools\notepad.exe".to_string(),
+            title: "Doc".to_string(),
+            class_name: "Notepad".to_string(),
+        }),
+        decision: GuardDecision::ALLOWED,
+        badge: BadgeResult::NotBrowser,
+        any_affinity: false,
+        mask_rects: Vec::new(),
+        per_monitor: std::collections::HashMap::new(),
+        site: String::new(),
+        secrets: None,
+        fg_epoch: epoch,
+        is_closed_sentinel: false,
+    }
+}
+
+#[test]
+fn snapshot_of_the_current_foreground_is_used() {
+    let s = freshness_snap(100, 7);
+    let r = br_agent::guardrails::GuardrailService::fresh_for_grab(&s, 7, 100);
+    assert_eq!(s.taken_at_ms, r.taken_at_ms);
+    assert_eq!(s.decision, r.decision);
+    assert_eq!(s.fg_epoch, r.fg_epoch);
+    assert!(!r.is_closed_sentinel);
+}
+
+#[test]
+fn foreground_change_after_the_scan_started_denies() {
+    let s = freshness_snap(100, 7);
+    let r = br_agent::guardrails::GuardrailService::fresh_for_grab(&s, 8, 100);
+    assert!(!r.decision.allow);
+    assert_eq!(GuardReason::ForegroundChanged, r.decision.reason);
+    let r = br_agent::guardrails::GuardrailService::fresh_for_grab(&s, 7, 200);
+    assert!(!r.decision.allow);
+    assert_eq!(GuardReason::ForegroundChanged, r.decision.reason);
+}
+
+#[test]
+fn closed_snapshot_stays_closed() {
+    let closed = br_agent::guardrails::GuardSnapshot::closed();
+    let r = br_agent::guardrails::GuardrailService::fresh_for_grab(&closed, 0, 0);
+    assert!(r.is_closed_sentinel);
+    assert!(!r.decision.allow);
+    assert_eq!(GuardReason::NoForeground, r.decision.reason);
+}
+
+// ---------------- Sweep2FTests: BadgeFailClosedTests ----------------
+
+fn browser_win(exe: &str, title: &str) -> WindowInfo {
+    WindowInfo {
+        hwnd: 42,
+        pid: 1,
+        exe_path: format!(r"C:\Apps\{exe}"),
+        title: title.to_string(),
+        class_name: "Chrome_WidgetWin_1".to_string(),
+    }
+}
+
+#[test]
+fn background_browser_window_is_hidden_unless_its_probe_says_normal() {
+    let cases = [
+        (BadgeResult::Private, true),
+        (BadgeResult::CheckFailed, true),
+        (BadgeResult::NotChecked, true),
+        (BadgeResult::NoBadge, false),
+        (BadgeResult::NotBrowser, false),
+    ];
+    for (result, hidden) in cases {
+        assert_eq!(
+            hidden,
+            GuardrailPolicy::hides_browser_window(
+                &browser_win("chrome.exe", "Some page"),
+                Some(|_| result),
+            )
+        );
+        assert_eq!(hidden, GuardrailPolicy::badge_hides(result));
+    }
+}
+
+#[test]
+fn no_ui_automation_hides_every_titled_browser_window_only() {
+    assert!(GuardrailPolicy::hides_browser_window::<fn(isize) -> BadgeResult>(
+        &browser_win("msedge.exe", "Some page"),
+        None,
+    ));
+    assert!(!GuardrailPolicy::hides_browser_window::<fn(isize) -> BadgeResult>(
+        &browser_win("notepad.exe", "Some page"),
+        None,
+    ));
+    assert!(!GuardrailPolicy::hides_browser_window::<fn(isize) -> BadgeResult>(
+        &browser_win("chrome.exe", ""),
+        None,
+    ));
+    assert!(!GuardrailPolicy::hides_browser_window(
+        &browser_win("notepad.exe", "Some page"),
+        Some(|_| BadgeResult::CheckFailed),
+    ));
+}
+
+// ---------------- Sweep4PAgentTests & Sweep5UAgentTests: EndSession ----------------
+
+#[test]
+fn c3_end_session_stops_the_pipes() {
+    let dir = TempDir::new("c3_end_session");
+    let core = CoreHost::create_with_hello_probe(
+        CoreHostOptions {
+            home: dir.path().to_path_buf(),
+            install_dir: dir.path().to_path_buf(),
+        },
+        false,
+    );
+    let agent = AgentHost::new(
+        core.clone(),
+        AgentOptions {
+            install_dir: dir.path().to_path_buf(),
+            home: dir.path().to_path_buf(),
+            autostart: false,
+        },
+    );
+    let pipe_stops = Arc::new(std::sync::atomic::AtomicI32::new(0));
+    let ps = pipe_stops.clone();
+    agent.set_on_stop_pipes_for_test(Some(Arc::new(move || {
+        ps.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    })));
+    agent.on_end_session_for_test();
+    assert_eq!(1, pipe_stops.load(std::sync::atomic::Ordering::Acquire));
+    agent.shutdown();
+    core.shutdown();
+}
+
+#[test]
+fn c4_end_session_shutdown_dedupes_writer_and_pipe_stops_with_dispose() {
+    let dir = TempDir::new("c4_end_session");
+    let core = CoreHost::create_with_hello_probe(
+        CoreHostOptions {
+            home: dir.path().to_path_buf(),
+            install_dir: dir.path().to_path_buf(),
+        },
+        false,
+    );
+    let agent = AgentHost::new(
+        core.clone(),
+        AgentOptions {
+            install_dir: dir.path().to_path_buf(),
+            home: dir.path().to_path_buf(),
+            autostart: false,
+        },
+    );
+    let pipe_stops = Arc::new(std::sync::atomic::AtomicI32::new(0));
+    let ps = pipe_stops.clone();
+    agent.set_on_stop_pipes_for_test(Some(Arc::new(move || {
+        ps.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    })));
+    agent.end_session_shutdown();
+    agent.shutdown();
+    assert_eq!(1, pipe_stops.load(std::sync::atomic::Ordering::Acquire));
+    core.shutdown();
+}

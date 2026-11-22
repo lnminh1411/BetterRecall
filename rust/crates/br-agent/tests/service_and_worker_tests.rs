@@ -1210,3 +1210,55 @@ fn a2_closing_the_job_kills_its_processes() {
         let _ = child.wait();
     }
 }
+
+// ---------------- Sweep2FTests: EmbeddingScheduler purge zeroize ----------------
+
+#[test]
+fn purged_ids_leave_the_embedding_queue_with_their_images_zeroed() {
+    let launcher = FakeWorker::new();
+    let sup = WorkerSupervisor::new(launcher, PathBuf::from("x"), || 120);
+    let sched = EmbeddingScheduler::new(
+        Arc::new(|| Some(FakeStore::new() as Arc<dyn EmbeddingStore>)),
+        Arc::new(Settings::default),
+        Arc::new(WorkerClient::new(sup.clone())),
+        Arc::new(|| {
+            gov_in(
+                1.0,
+                Some(0.0),
+                false,
+                UserNotificationState::AcceptsNotifications,
+                0,
+            )
+        }),
+        Arc::new(|| false),
+        None,
+    );
+    let gone = br_contracts::PendingJob {
+        id: "s_gone".to_string(),
+        kind: br_contracts::CaptureKind::Screen,
+        image: Some(vec![7, 7, 7]),
+        image_mime: Some("image/webp".to_string()),
+        text: None,
+    };
+    let kept = br_contracts::PendingJob {
+        id: "s_kept".to_string(),
+        kind: br_contracts::CaptureKind::Screen,
+        image: Some(vec![5, 5]),
+        image_mime: Some("image/webp".to_string()),
+        text: None,
+    };
+    sched.enqueue_for_test([gone, kept]);
+    let mut ids = std::collections::HashSet::new();
+    ids.insert("s_gone".to_string());
+    let (removed_count, removed) = sched.remove_for_test(&ids);
+    assert_eq!(1, removed_count);
+    assert_eq!(1, sched.queued());
+    assert_eq!(1, removed.len());
+    // C# checks the shared array reads 0,0,0; Rust owns the buffer and `zeroize` wipes it, then truncates it.
+    assert_eq!(Some(Vec::<u8>::new()), removed[0].image);
+    let remaining = sched.queued_jobs_for_test();
+    assert_eq!(1, remaining.len());
+    assert_eq!(Some(vec![5, 5]), remaining[0].image);
+    sched.stop();
+    sup.dispose();
+}

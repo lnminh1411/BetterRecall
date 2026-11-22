@@ -11,9 +11,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use br_contracts::{
-    AgentStatus, BenchReport, BenchResult, CaptureMeta, HotkeySettings, InstallLayout, PipeNames,
-    PrivacySettings, PurgeNotice, PurgeScope, QueueState, ReplayClip, Settings, StorageSettings,
-    StoreStats,
+    AgentStatus, AudioState, BenchReport, BenchResult, CaptureMeta, HotkeySettings, InstallLayout,
+    PipeNames, PrivacySettings, PurgeNotice, PurgeScope, QueueState, ReplayClip, Settings,
+    StorageSettings, StoreStats,
 };
 use br_core::{
     AgentControl, AgentError, CancelSource, CancelToken, CoreHost, EncryptedStore, KeyVault,
@@ -25,7 +25,9 @@ use windows::Win32::System::Threading::{
     CreateEventW, GetCurrentProcess, INFINITE, SetEvent, WaitForMultipleObjects,
 };
 use windows::core::PCWSTR;
+use zeroize::Zeroize;
 
+use crate::audio::{AudioStore, LoopbackHub, Transcriber, TranscriptSource};
 use crate::capture::{
     CaptureService, CaptureServiceOptions, ImageCodec, ImageCodecDecoder, KeyframePipeline,
     KeyframeStore, MonitorSelection, WorkerKeyframeReader,
@@ -43,16 +45,14 @@ use crate::native::{
     WTS_SESSION_LOCK, WTS_SESSION_UNLOCK, session_locked_now, tick_count64, to_wide_z,
 };
 use crate::privacy::{AgentDescribeRedactor, RedactionMasks};
+use crate::replay::{ReplayLibrary, ReplaySampler};
 use crate::scheduling::{
     EmbeddingScheduler, EmbeddingStore, Governance, GovernanceInputs, SystemProbe,
 };
-use crate::seams::{
-    AudioSubsystem, CaptureSubsystem, KeyframeSubsystem, ReplaySubsystem, UnavailableAudio,
-    UnavailableReplay,
-};
+use crate::seams::{CaptureSubsystem, KeyframeSubsystem};
 use crate::security::MemoryIsolation;
 use crate::thumbs::{AgentThumbnailer, KeyframeBlobStore};
-use crate::util::AgentLog;
+use crate::util::{AgentLog, RetryBackoff};
 use crate::worker::{
     ProcessWorkerLauncher, QueryEmbedderImpl, VcRuntime, WorkerClient, WorkerError,
     WorkerSettingsDiff, WorkerSupervisor,
@@ -142,8 +142,15 @@ struct StopWritersState {
     done: bool,
 }
 
+struct AudioSourcesState {
+    system_audio: Option<Arc<TranscriptSource>>,
+    mic_audio: Option<Arc<TranscriptSource>>,
+    system_retry: RetryBackoff,
+    mic_retry: RetryBackoff,
+}
+
 /// Composition root and `AgentControl`: wires `CoreHost`, worker supervision, embedding scheduler,
-/// guardrails, tray/message window, hotkeys, read gate, pause controller, and A5/A6 seams.
+/// guardrails, tray/message window, hotkeys, read gate, pause controller, capture, replay, and audio.
 pub struct AgentHost {
     core: Arc<CoreHost>,
     opt: AgentOptions,
@@ -155,8 +162,12 @@ pub struct AgentHost {
     thumbs: Arc<AgentThumbnailer>,
     capture: Mutex<Option<Arc<CaptureService>>>,
     keyframes: Mutex<Option<Arc<KeyframePipeline>>>,
-    replays: Arc<dyn ReplaySubsystem>,
-    audio: Arc<dyn AudioSubsystem>,
+    replays: Mutex<Arc<ReplayLibrary>>,
+    sampler: Arc<ReplaySampler>,
+    loopback: Arc<LoopbackHub>,
+    transcriber: Mutex<Option<Arc<Transcriber>>>,
+    audio_sources: Mutex<AudioSourcesState>,
+    save_lock: Mutex<()>,
     cts: CancelSource,
     window: Mutex<Option<Arc<MessageWindow>>>,
     quit_watcher: Mutex<Option<QuitEventWatcher>>,
@@ -181,6 +192,7 @@ pub struct AgentHost {
     timers: Mutex<Vec<JoinHandle<()>>>,
     stop_writers: Mutex<StopWritersState>,
     stop_writers_cv: Condvar,
+    on_stop_pipes_for_test: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     settings_guard: Mutex<Option<ListenerGuard>>,
     purged_guard: Mutex<Option<ListenerGuard>>,
 }
@@ -220,10 +232,25 @@ impl AgentHost {
             Arc::new(move || settings_for_thumbs.current()),
         ));
 
+        let gate = Arc::new(ReadGate::new());
+        let settings_for_replays = settings_store.clone();
+        let replays = Arc::new(ReplayLibrary::new(
+            opt.home.clone(),
+            Arc::new(move || settings_for_replays.current()),
+            Some(core.blobs().clone() as Arc<dyn crate::replay::ReplayBlobCipher>),
+        ));
+        let core_for_purging = core.clone();
+        replays.set_purging_all(Some(Arc::new(move || core_for_purging.purging_all())));
+        let gate_for_replays = gate.clone();
+        let settings_for_locked = settings_store.clone();
+        replays.set_locked(Some(Arc::new(move || {
+            !gate_for_replays.is_open(settings_for_locked.current().security.require_unlock)
+        })));
+
         Arc::new(Self {
             core,
             opt,
-            gate: Arc::new(ReadGate::new()),
+            gate,
             pause: Arc::new(PauseController::new()),
             supervisor,
             worker,
@@ -231,8 +258,17 @@ impl AgentHost {
             thumbs,
             capture: Mutex::new(None),
             keyframes: Mutex::new(None),
-            replays: Arc::new(UnavailableReplay),
-            audio: Arc::new(UnavailableAudio),
+            replays: Mutex::new(replays),
+            sampler: Arc::new(ReplaySampler::new()),
+            loopback: Arc::new(LoopbackHub::new()),
+            transcriber: Mutex::new(None),
+            audio_sources: Mutex::new(AudioSourcesState {
+                system_audio: None,
+                mic_audio: None,
+                system_retry: RetryBackoff::new(2000, 120_000),
+                mic_retry: RetryBackoff::new(2000, 120_000),
+            }),
+            save_lock: Mutex::new(()),
             cts: CancelSource::new(),
             window: Mutex::new(None),
             quit_watcher: Mutex::new(None),
@@ -260,6 +296,7 @@ impl AgentHost {
                 done: false,
             }),
             stop_writers_cv: Condvar::new(),
+            on_stop_pipes_for_test: Mutex::new(None),
             settings_guard: Mutex::new(None),
             purged_guard: Mutex::new(None),
         })
@@ -352,6 +389,28 @@ impl AgentHost {
 
     pub fn set_capture_started_for_test(&self, started: bool) {
         self.capture_started.store(started, Ordering::Release);
+    }
+
+    pub fn pause_controller(&self) -> &Arc<PauseController> {
+        &self.pause
+    }
+
+    pub fn replays(&self) -> Arc<ReplayLibrary> {
+        self.replays
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub fn set_replays_for_test(&self, lib: Arc<ReplayLibrary>) {
+        *self.replays.lock().unwrap_or_else(|e| e.into_inner()) = lib;
+    }
+
+    pub fn set_system_audio_for_test(&self, src: Option<Arc<TranscriptSource>>) {
+        self.audio_sources
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .system_audio = src;
     }
 
     // ---------------- startup ----------------
@@ -464,7 +523,7 @@ impl AgentHost {
                 .unwrap_or_else(|e| e.into_inner()) = Some(guard);
         }
 
-        self.replays.delete_partials();
+        self.replays().delete_partials();
 
         let probe = Arc::new(Mutex::new(SystemProbe::new(
             HardwareProbe::intel_igpu_pdh_token(),
@@ -539,7 +598,31 @@ impl AgentHost {
             Some(self.redactions.clone()),
             None,
         );
+        pipeline.set_sampler(Some(self.sampler.clone()));
         *self.keyframes.lock().unwrap_or_else(|e| e.into_inner()) = Some(pipeline.clone());
+
+        let core_for_tr = self.core.clone();
+        let me_for_tr_s = Arc::downgrade(self);
+        let me_for_tr_stored = Arc::downgrade(self);
+        let transcriber = Arc::new(Transcriber::new(
+            self.worker.clone(),
+            Arc::new(move || core_for_tr.store().map(|st| st as Arc<dyn AudioStore>)),
+            Arc::new(move || {
+                me_for_tr_s
+                    .upgrade()
+                    .map(|h| h.settings())
+                    .unwrap_or_default()
+            }),
+            Arc::new(move || {
+                if let Some(h) = me_for_tr_stored.upgrade() {
+                    *h.stats_cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                    if let Some(sc) = h.scheduler() {
+                        sc.signal();
+                    }
+                }
+            }),
+        ));
+        *self.transcriber.lock().unwrap_or_else(|e| e.into_inner()) = Some(transcriber);
 
         let me_for_desc_s = Arc::downgrade(self);
         let core_for_desc = self.core.clone();
@@ -881,13 +964,14 @@ impl AgentHost {
                     lock_memory: lock_mem,
                     samples_paused: Some(Arc::new(move || pause_samples.continuous_paused(true))),
                     monitor_selection_file: Some(self.opt.home.join(MonitorSelection::FILE_NAME)),
+                    loopback: Some(self.loopback.clone()),
                 },
             );
             *self.capture.lock().unwrap_or_else(|e| e.into_inner()) = Some(cap.clone());
             cap.start();
         }
         ImageCodec::preload();
-        self.audio.sync_sources(&s, true);
+        self.sync_audio_sources();
 
         let me = Arc::downgrade(self);
         let stop_pair = self.timer_stop.clone();
@@ -917,6 +1001,227 @@ impl AgentHost {
                     MemoryIsolation::apply_late(acg);
                 }
             });
+    }
+
+    fn sync_audio_sources(self: &Arc<Self>) {
+        if !self.capture_started.load(Ordering::Acquire) {
+            return;
+        }
+        let Some(guard) = self.guard() else {
+            return;
+        };
+        let Some(transcriber) = self
+            .transcriber
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        else {
+            return;
+        };
+        let mut st = self
+            .audio_sources
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let s = self.settings();
+        let want_system = s.audio.system && s.capture.consented;
+        let want_mic = s.audio.mic && s.capture.consented;
+        let now = tick_count64();
+
+        if st.mic_audio.as_ref().is_some_and(|m| m.mic_lost()) {
+            AgentLog::info("microphone lost, reopening");
+            if let Some(old) = st.mic_audio.take() {
+                old.stop();
+            }
+        }
+
+        if want_system && st.system_audio.is_none() {
+            if st.system_retry.due(now) {
+                let me_s = Arc::downgrade(self);
+                let pause_c = self.pause.clone();
+                let g_c = guard.clone();
+                match TranscriptSource::new(
+                    "system",
+                    Some(self.loopback.clone()),
+                    Arc::new(move || me_s.upgrade().map(|h| h.settings()).unwrap_or_default()),
+                    Arc::new(move || pause_c.continuous_paused(true)),
+                    Arc::new(move || g_c.audio_now()),
+                ) {
+                    Ok(src) => {
+                        let tr = transcriber.clone();
+                        let src_bg = src.clone();
+                        let ct = self.cts.token();
+                        let _ = thread::Builder::new()
+                            .name("BetterRecall.TranscribeSystem".to_string())
+                            .spawn(move || tr.run(src_bg, &ct));
+                        st.system_audio = Some(src);
+                        st.system_retry.succeeded();
+                    }
+                    Err(e) => {
+                        let next_s = st.system_retry.failed(now) / 1000;
+                        AgentLog::warn_err(&format!("system audio (retry in {next_s} s)"), &e);
+                    }
+                }
+            }
+        } else if !want_system
+            && let Some(old) = st.system_audio.take()
+        {
+            old.stop();
+        }
+
+        if want_mic && st.mic_audio.is_none() {
+            if st.mic_retry.due(now) {
+                let me_s = Arc::downgrade(self);
+                let pause_c = self.pause.clone();
+                let g_c = guard.clone();
+                match TranscriptSource::new(
+                    "mic",
+                    None,
+                    Arc::new(move || me_s.upgrade().map(|h| h.settings()).unwrap_or_default()),
+                    Arc::new(move || pause_c.continuous_paused(true)),
+                    Arc::new(move || g_c.audio_now()),
+                ) {
+                    Ok(src) => {
+                        let tr = transcriber.clone();
+                        let src_bg = src.clone();
+                        let ct = self.cts.token();
+                        let _ = thread::Builder::new()
+                            .name("BetterRecall.TranscribeMic".to_string())
+                            .spawn(move || tr.run(src_bg, &ct));
+                        st.mic_audio = Some(src);
+                        st.mic_retry.succeeded();
+                    }
+                    Err(e) => {
+                        let next_s = st.mic_retry.failed(now) / 1000;
+                        AgentLog::warn_err(&format!("microphone (retry in {next_s} s)"), &e);
+                    }
+                }
+            }
+        } else if !want_mic
+            && let Some(old) = st.mic_audio.take()
+        {
+            old.stop();
+        }
+
+        if !want_system {
+            st.system_retry.succeeded();
+        }
+        if !want_mic {
+            st.mic_retry.succeeded();
+        }
+    }
+
+    fn audio_needs_sync_now(&self, s: &Settings) -> bool {
+        let st = self
+            .audio_sources
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        Self::audio_needs_sync(
+            s.audio.system && s.capture.consented,
+            st.system_audio.is_some(),
+            s.audio.mic && s.capture.consented,
+            st.mic_audio.is_some(),
+            st.mic_audio.as_ref().is_some_and(|m| m.mic_lost()),
+        )
+    }
+
+    fn audio_state(&self) -> AudioState {
+        let st = self
+            .audio_sources
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        AudioState {
+            system: st.system_audio.is_some(),
+            mic: st.mic_audio.is_some(),
+        }
+    }
+
+    fn flush_audio(&self) {
+        let (sys, mic) = {
+            let st = self
+                .audio_sources
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            (st.system_audio.clone(), st.mic_audio.clone())
+        };
+        if let Some(s) = sys {
+            s.flush();
+        }
+        if let Some(m) = mic {
+            m.flush();
+        }
+    }
+
+    fn clear_audio(&self) {
+        let (sys, mic) = {
+            let st = self
+                .audio_sources
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            (st.system_audio.clone(), st.mic_audio.clone())
+        };
+        if let Some(s) = sys {
+            s.clear();
+        }
+        if let Some(m) = mic {
+            m.clear();
+        }
+    }
+
+    fn flush_held_transcripts(&self) {
+        if let Some(tr) = self
+            .transcriber
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        {
+            tr.flush_held();
+        }
+    }
+
+    fn stop_audio(&self) {
+        let (sys, mic) = {
+            let mut st = self
+                .audio_sources
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            (st.system_audio.take(), st.mic_audio.take())
+        };
+        if let Some(s) = sys {
+            s.stop();
+        }
+        if let Some(m) = mic {
+            m.stop();
+        }
+        self.loopback.stop();
+    }
+
+    fn index_replay_frames(&self, id: &str, end: DateTime<Utc>, duration_ms: i32) {
+        let s = self.settings();
+        if !s.replay.searchable {
+            return;
+        }
+        let Some(store) = self.store() else {
+            return;
+        };
+        let start = end - ChronoDuration::milliseconds(duration_ms as i64);
+        let samples = self
+            .sampler
+            .take(start, end, s.replay.sample_seconds.clamp(2, 60));
+        let mut n = 0usize;
+        for mut f in ReplaySampler::to_frames(id, start, duration_ms, &samples) {
+            match store.add_replay_frame(&f) {
+                Ok(_) => n += 1,
+                Err(StoreError::PurgedWindow(_)) => {}
+                Err(e) => AgentLog::warn_err("replay frames", &e.to_string()),
+            }
+            f.image.zeroize();
+        }
+        if n > 0
+            && let Some(sc) = self.scheduler()
+        {
+            sc.signal();
+        }
+        AgentLog::info(&format!("replay {id}: {n} frames queued for search"));
     }
 
     /// Pure replay pause decision (`AgentHost.ShouldPauseReplay`).
@@ -1053,8 +1358,7 @@ impl AgentHost {
                 } else if let Some(c) = me.capture() {
                     c.apply_settings();
                 }
-                me.audio
-                    .sync_sources(&next, me.capture_started.load(Ordering::Acquire));
+                me.sync_audio_sources();
                 me.raise_status(true);
             });
         }
@@ -1209,12 +1513,12 @@ impl AgentHost {
                 if s.privacy.pause_on_lock {
                     self.pause.set("lock", None);
                 }
-                self.audio.flush();
+                self.flush_audio();
                 self.session_locked.store(true, Ordering::Release);
                 if s.security.lock_on_session_lock {
                     self.gate.close();
                 }
-                self.replays.clear_sampler();
+                self.sampler.clear();
             }
             WTS_SESSION_UNLOCK | WTS_CONSOLE_CONNECT | WTS_REMOTE_CONNECT => {
                 self.session_locked.store(false, Ordering::Release);
@@ -1247,7 +1551,7 @@ impl AgentHost {
             if let Some(sc) = self.scheduler() {
                 sc.clear();
             }
-            self.replays.on_purge_all();
+            self.replays().on_purge_all();
             if self.settings().security.key_protection == KeyVault::MODE_PASSPHRASE {
                 self.pause.set("keylocked", None);
                 self.raise_status(true);
@@ -1261,9 +1565,9 @@ impl AgentHost {
             if let Some(c) = self.capture() {
                 c.forget_recent();
             }
-            self.replays.clear_sampler();
-            self.audio.clear();
-            self.replays.discard_saves_in_flight();
+            self.sampler.clear();
+            self.clear_audio();
+            self.replays().discard_saves_in_flight();
             AgentLog::info(&format!(
                 "purge ({}) reached the replay window: replay ring, samples and pending audio cleared",
                 n.reason
@@ -1282,10 +1586,10 @@ impl AgentHost {
             self.pause.clear("fullscreen");
         }
         let cap_started = self.capture_started.load(Ordering::Acquire);
-        if cap_started && self.audio.needs_sync(&s, cap_started) {
-            self.audio.sync_sources(&s, cap_started);
+        if cap_started && self.audio_needs_sync_now(&s) {
+            self.sync_audio_sources();
         }
-        self.audio.check_health(tick_count64());
+        let _ = self.loopback.check_health(tick_count64());
 
         let store_open = self.store().is_some();
         Self::sync_key_lock_pause(&self.pause, store_open, self.core.keys().needs_passphrase());
@@ -1530,11 +1834,21 @@ impl AgentHost {
         };
         if should_run {
             let core = self.core.clone();
+            let stop_hook = self
+                .on_stop_pipes_for_test
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
             let cap = self.capture();
             let kf = self.keyframes();
             let sched = self.scheduler();
 
-            let t1 = thread::spawn(move || core.stop_pipes());
+            let t1 = thread::spawn(move || {
+                core.stop_pipes();
+                if let Some(h) = stop_hook {
+                    h();
+                }
+            });
             let t2 = thread::spawn(move || {
                 if let Some(c) = cap {
                     c.stop();
@@ -1574,7 +1888,7 @@ impl AgentHost {
             st.cancel_maintenance();
         }
         self.stop_session_writers();
-        self.audio.flush_held();
+        self.flush_held_transcripts();
         if let Some(ref st) = store
             && let Err(e) = st.checkpoint_timeout(Duration::from_millis(1500))
         {
@@ -1589,6 +1903,17 @@ impl AgentHost {
         self.request_quit();
     }
 
+    pub fn set_on_stop_pipes_for_test(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
+        *self
+            .on_stop_pipes_for_test
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = hook;
+    }
+
+    pub fn on_end_session_for_test(&self) {
+        self.on_end_session();
+    }
+
     pub fn shutdown(&self) {
         if let Some(mut w) = self
             .quit_watcher
@@ -1598,7 +1923,7 @@ impl AgentHost {
         {
             w.stop();
         }
-        self.audio.flush_held();
+        self.flush_held_transcripts();
         self.cts.cancel();
         {
             let (lock, cv) = &*self.timer_stop;
@@ -1618,7 +1943,7 @@ impl AgentHost {
             }
         }
         self.stop_session_writers();
-        self.audio.stop();
+        self.stop_audio();
         self.supervisor.dispose();
         if let Some(g) = self.guard.lock().unwrap_or_else(|e| e.into_inner()).take() {
             g.stop();
@@ -1659,7 +1984,7 @@ impl AgentControl for AgentHost {
             pause_reason: reason,
             locked: !self.is_unlocked(),
             unlocked_until: self.gate.until(),
-            audio: self.audio.state(),
+            audio: self.audio_state(),
             queue: QueueState {
                 pending: stats.pending_embeddings,
             },
@@ -1681,7 +2006,7 @@ impl AgentControl for AgentHost {
         let r = if reason == "ipc" { "ipc" } else { "user" };
         let until = duration.map(|d| Utc::now() + ChronoDuration::from_std(d).unwrap_or_default());
         self.pause.set(r, until);
-        self.audio.flush();
+        self.flush_audio();
         let desc = match duration {
             None => "until resume".to_string(),
             Some(d) => format!("for {:.0} min", d.as_secs_f64() / 60.0),
@@ -1744,7 +2069,7 @@ impl AgentControl for AgentHost {
     fn lock(&self) {
         self.gate.lock_by_user();
         self.thumbs.clear_cache();
-        self.replays.clear_sampler();
+        self.sampler.clear();
         self.raise_status(true);
     }
 
@@ -1763,19 +2088,58 @@ impl AgentControl for AgentHost {
     }
 
     fn save_replay(&self, ct: &CancelToken) -> Result<ReplayClip, AgentError> {
-        self.replays.save_replay(ct)
+        let capture = self.capture().ok_or_else(|| {
+            AgentError::InvalidOperation("Replay is not running.".to_string())
+        })?;
+        let _guard = self.save_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let replays = self.replays();
+        let ts = Utc::now();
+        let id = replays.unique_id(ts);
+        let (path, encrypted) = replays.target_for(&id);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let sw = Instant::now();
+        let duration_ms =
+            replays.write_clip(&path, encrypted, |out| capture.save_replay(out), ct)?;
+        let bytes = std::fs::metadata(&path).map(|m| m.len() as i64).unwrap_or(0);
+        AgentLog::info(&format!(
+            "replay saved: {duration_ms} ms, {} KiB, encrypted={encrypted}, {} ms",
+            bytes / 1024,
+            sw.elapsed().as_millis()
+        ));
+        if self.settings().replay.notify
+            && let Some(win) = self.window.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        {
+            win.notify(
+                "Replay saved",
+                &format!(
+                    "Last {} s saved. Click to open the replay list.",
+                    duration_ms / 1000
+                ),
+            );
+        }
+        self.index_replay_frames(&id, ts, duration_ms);
+        Ok(ReplayClip {
+            id,
+            ts,
+            duration_ms,
+            bytes,
+            encrypted,
+            path: path.to_string_lossy().into_owned(),
+        })
     }
 
     fn list_replays(&self) -> Vec<ReplayClip> {
-        self.replays.list_replays()
+        self.replays().list()
     }
 
     fn export_replay(&self, id: &str, path: &Path, ct: &CancelToken) -> Result<(), AgentError> {
-        self.replays.export_replay(id, path, ct)
+        self.replays().export(id, path, ct)
     }
 
     fn delete_replay(&self, id: &str) -> Result<(), AgentError> {
-        self.replays.delete_replay(id)?;
+        self.replays().delete(id)?;
         if let Some(st) = self.store()
             && let Err(e) = st.delete_replay_frames(id)
         {
@@ -1789,13 +2153,13 @@ impl AgentControl for AgentHost {
         if let Some(c) = self.capture() {
             c.panic();
         }
-        self.replays.clear_sampler();
-        self.replays.discard_saves_in_flight();
+        self.sampler.clear();
+        self.replays().discard_saves_in_flight();
         if let Some(sc) = self.scheduler() {
             sc.clear();
         }
         self.thumbs.clear_cache();
-        self.audio.clear();
+        self.clear_audio();
         self.gate.lock_by_user();
         let minutes = self.settings().privacy.panic_purge_minutes.max(0);
         let mut purged = 0usize;

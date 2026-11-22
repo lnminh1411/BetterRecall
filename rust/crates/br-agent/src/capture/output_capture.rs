@@ -207,6 +207,8 @@ struct SharedCapture {
     grab_override: Mutex<Option<GrabCallback>>,
     state: Mutex<String>,
     feed_dirty: Mutex<Rect>,
+    dev_shared: Mutex<Option<Arc<GpuDevice>>>,
+    latest_shared: Mutex<Option<ID3D11Texture2D>>,
     src_w: AtomicI32,
     src_h: AtomicI32,
     rotation: AtomicI32,
@@ -219,6 +221,9 @@ struct SharedCapture {
     grab_count: AtomicU64,
     skipped_no_change: AtomicU64,
 }
+
+unsafe impl Send for SharedCapture {}
+unsafe impl Sync for SharedCapture {}
 
 /// Desktop Duplication of one output (`OutputCapture.cs`).
 pub struct OutputCapture {
@@ -243,6 +248,8 @@ impl OutputCapture {
                 grab_override: Mutex::new(None),
                 state: Mutex::new("starting".to_string()),
                 feed_dirty: Mutex::new(Rect::default()),
+                dev_shared: Mutex::new(None),
+                latest_shared: Mutex::new(None),
                 src_w: AtomicI32::new(0),
                 src_h: AtomicI32::new(0),
                 rotation: AtomicI32::new(0),
@@ -303,6 +310,30 @@ impl OutputCapture {
 
     pub fn set_replay_poll_fps(&self, fps: i32) {
         self.shared.replay_poll_fps.store(fps, Ordering::Release);
+    }
+
+    pub fn replay_poll_fps(&self) -> i32 {
+        self.shared.replay_poll_fps.load(Ordering::Acquire)
+    }
+
+    pub fn device(&self) -> Option<Arc<GpuDevice>> {
+        self.shared
+            .dev_shared
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub fn latest(&self) -> Option<ID3D11Texture2D> {
+        self.shared
+            .latest_shared
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub fn disposed(&self) -> bool {
+        self.shared.disposed.load(Ordering::Acquire)
     }
 
     pub fn state(&self) -> String {
@@ -612,6 +643,11 @@ impl CaptureWorker {
             None => match self.shared.devices.get(self.shared.info.adapter_luid) {
                 Ok(d) => {
                     self.dev = Some(d.clone());
+                    *self
+                        .shared
+                        .dev_shared
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()) = Some(d.clone());
                     d
                 }
                 Err(e) => {
@@ -805,7 +841,12 @@ impl CaptureWorker {
                 Err(VideoScalerError::Failed(e)) => return Err(e),
             }
         }
-        self.latest = Some(latest);
+        self.latest = Some(latest.clone());
+        *self
+            .shared
+            .latest_shared
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(latest);
         self.shared.feed_generation.fetch_add(1, Ordering::AcqRel);
         *self
             .shared
@@ -822,6 +863,11 @@ impl CaptureWorker {
         self.rotator = None;
         self.raw = None;
         self.latest = None;
+        *self
+            .shared
+            .latest_shared
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     fn drop_device_if_removed(&mut self) {
@@ -836,6 +882,11 @@ impl CaptureWorker {
         if let Some(d) = self.dev.take() {
             let _g = d.gate.lock().unwrap_or_else(|e| e.into_inner());
             self.dispose_frame_resources();
+            *self
+                .shared
+                .dev_shared
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = None;
         }
     }
 
