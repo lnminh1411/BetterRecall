@@ -99,10 +99,28 @@ impl ProcessInfo {
     fn system_started() -> Option<DateTime<Utc>> {
         static SYS_STARTED: OnceLock<Option<DateTime<Utc>>> = OnceLock::new();
         *SYS_STARTED.get_or_init(|| {
-            let h = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, 4) }.ok()?;
-            let _guard = OwnedHandle(h);
-            created_utc_handle(h)
+            let pid4 = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, 4) }
+                .ok()
+                .and_then(|h| {
+                    let _guard = OwnedHandle(h);
+                    created_utc_handle(h)
+                });
+            if pid4.is_none() {
+                Log::info("boot time not readable (standard user): clock-step checks count from now");
+            }
+            Some(Self::boot_anchor(pid4, Utc::now(), win32::tick_count64()))
         })
+    }
+
+    /// N3: the boot reference for clock-step detection. The System process start time when
+    /// readable; otherwise (a standard user cannot open pid 4) wall time now minus uptime,
+    /// taken once, so later backward clock steps are still seen.
+    pub fn boot_anchor(
+        pid4_started: Option<DateTime<Utc>>,
+        wall_now_utc: DateTime<Utc>,
+        ms_since_boot: i64,
+    ) -> DateTime<Utc> {
+        pid4_started.unwrap_or_else(|| wall_now_utc - Duration::milliseconds(ms_since_boot))
     }
 
     fn global_step_clock() -> &'static StepClock {

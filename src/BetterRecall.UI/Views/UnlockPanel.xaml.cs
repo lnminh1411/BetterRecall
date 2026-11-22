@@ -37,6 +37,8 @@ public sealed partial class UnlockPanel : UserControl
         PassPanel.Visibility = pass ? Visibility.Visible : Visibility.Collapsed;
         HelloButton.Visibility = pass ? Visibility.Collapsed : Visibility.Visible;
         BodyText.Text = Loc.Get(mode switch { UnlockMode.Password => "Unlock_BodyPassword", UnlockMode.Passphrase => "Unlock_BodyPassphrase", _ => "Unlock_BodyHello" });
+        HelloButton.Content = Loc.Get("Unlock_HelloButton");
+        if (mode == UnlockMode.Hello) _ = ShowHelloMissingAsync();
         var hint = Loc.Get(mode == UnlockMode.Password ? "Unlock_PasswordHint" : "Unlock_PassphraseHint");
         Pass.PlaceholderText = hint;
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(Pass, hint);
@@ -47,6 +49,15 @@ public sealed partial class UnlockPanel : UserControl
         Pass.Password = "";
         if (pass) Pass.Focus(FocusState.Programmatic);
         else HelloButton.Focus(FocusState.Programmatic);
+    }
+
+    /// <summary>N8: on a PC without Windows Hello, say so instead of offering a Hello unlock that cannot work.</summary>
+    private async Task ShowHelloMissingAsync()
+    {
+        var r = await Services.Current.Api.PasswordStatusAsync();
+        if (!r.Ok || r.Value!.HelloAvailable || _shown != UnlockMode.Hello || Visibility != Visibility.Visible) return;
+        BodyText.Text = Loc.Get("Unlock_BodyNoHello");
+        HelloButton.Content = Loc.Get("Unlock_HelloRetry");
     }
 
     private async void Hello_Click(object sender, RoutedEventArgs e) => await UnlockAsync(null);

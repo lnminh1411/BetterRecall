@@ -36,7 +36,7 @@
             </Button>
             <Button x:Uid="Timeline_Today" Grid.Column="3" Click="Today_Click" />
             <ProgressRing x:Name="Busy" Grid.Column="4" IsActive="False" Width="20" Height="20" />
-            <TextBlock x:Name="MessageText" Grid.Column="5" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap"
+            <TextBlock x:Name="MessageText" Grid.Column="5" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" TextWrapping="Wrap" MaxLines="2"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" AutomationProperties.LiveSetting="Polite" />
         </Grid>
 

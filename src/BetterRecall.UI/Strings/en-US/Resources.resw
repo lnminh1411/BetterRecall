@@ -549,6 +549,9 @@
   <data name="Timeline_Title.Text" xml:space="preserve"><value>Timeline</value></data>
   <data name="Timeline_Today.Content" xml:space="preserve"><value>Today</value></data>
   <data name="Unlock_BodyHello" xml:space="preserve"><value>Your history is locked. Unlock with Windows Hello to search and view it.</value></data>
+  <data name="Unlock_BodyNoHello" xml:space="preserve"><value>Your history is locked, and Windows Hello is not set up on this PC. Set an unlock password in Settings &gt; Security, or set up Windows Hello in Windows Settings, then unlock.</value></data>
+  <data name="Unlock_HelloButton" xml:space="preserve"><value>Unlock with Windows Hello</value></data>
+  <data name="Unlock_HelloRetry" xml:space="preserve"><value>Try to unlock</value></data>
   <data name="Unlock_BodyPassphrase" xml:space="preserve"><value>Your history is locked. Enter your BetterRecall passphrase to unlock it.</value></data>
   <data name="Unlock_Hello.Content" xml:space="preserve"><value>Unlock with Windows Hello</value></data>
   <data name="Unlock_PassButton.Content" xml:space="preserve"><value>Unlock</value></data>

@@ -9,6 +9,7 @@ pub mod json;
 pub mod layout;
 pub mod models;
 pub mod settings;
+pub mod text;
 pub mod whisper_languages;
 
 pub use framing::{
@@ -20,6 +21,7 @@ pub use json::{
     parse_jsonc_object, strip_jsonc, to_json_string, to_pretty_json_string, utc_timestamp,
 };
 pub use layout::{DataPaths, InstallLayout, PipeNames, full_path};
+pub use text::strip_suffix_ci;
 pub use models::{
     AgentStatus, AiStatus, AiUsage, AuditEntry, AudioState, BenchDevice, BenchReport, BenchResult,
     CaptureBench, CaptureDetail, CaptureKind, CaptureMeta, ChatApprovalItem, ChatDetail, ChatEvent,

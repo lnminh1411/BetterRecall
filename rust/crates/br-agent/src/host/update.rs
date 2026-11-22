@@ -1208,7 +1208,7 @@ fn is_valid_installer_name(name: &str) -> bool {
     {
         return false;
     }
-    name.len() > 4 && name[name.len() - 4..].eq_ignore_ascii_case(".exe")
+    br_contracts::strip_suffix_ci(name, ".exe").is_some_and(|stem| !stem.is_empty())
 }
 
 fn hash_open_file(file: &mut File) -> io::Result<String> {

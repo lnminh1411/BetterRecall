@@ -263,7 +263,13 @@ where
     }
 
     progress.step(Step::Closing);
-    close_running(ctx)?;
+    let agent_was_running = close_running(ctx)?;
+    // N2: any failure or cancel from here on restarts the agent that was running, so a
+    // refused upgrade (folder in use, exit 3) does not leave BetterRecall stopped.
+    let mut restart_on_exit = RestartAgentGuard {
+        ctx,
+        armed: agent_was_running,
+    };
 
     if progress.cancelled() {
         let _ = fs::remove_dir_all(&staged.dir);
@@ -301,6 +307,7 @@ where
         ModelsResult::Skipped
     };
 
+    restart_on_exit.armed = false;
     if ctx.start_after {
         start_agent(ctx)?;
     }
@@ -311,6 +318,29 @@ where
         &format!("install complete: {version} (models={models:?})"),
     );
     Ok(Outcome::Installed { version, models })
+}
+
+/// Restarts the agent from the install folder when an install that closed it does not finish.
+struct RestartAgentGuard<'a> {
+    ctx: &'a Ctx,
+    armed: bool,
+}
+
+impl Drop for RestartAgentGuard<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let agent = self.ctx.install_dir.join(InstallLayout::AGENT_EXE);
+        if !agent.is_file() {
+            log_line(&self.ctx.home, "install did not finish; no agent to restart");
+            return;
+        }
+        log_line(&self.ctx.home, "install did not finish; restarting the agent that was running");
+        if let Err(e) = start_agent(self.ctx) {
+            log_line(&self.ctx.home, &format!("agent restart failed: {e}"));
+        }
+    }
 }
 
 /// Uninstalls BetterRecall from `ctx.install_dir`, optionally deleting allowlisted data in `ctx.home`.

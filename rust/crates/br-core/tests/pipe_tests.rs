@@ -767,6 +767,25 @@ fn s6_boot_bound_lasts_only_for_the_catch_up_period_and_is_logged_once_per_step(
     assert_eq!(1, logs.load(Ordering::Acquire));
 }
 
+/// N3 (sweep 6): a standard user cannot read pid 4's start time; the fallback anchor (wall
+/// time minus uptime, taken once) still lets a later backward clock step be seen.
+#[test]
+fn n3_boot_anchor_fallback_still_detects_a_clock_step() {
+    let t0 = DateTime::parse_from_rfc3339("2026-11-22T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let pid4 = t0 - ChronoDuration::hours(3);
+    assert_eq!(pid4, ProcessInfo::boot_anchor(Some(pid4), t0, 3 * 3600 * 1000));
+    let up0 = 5 * 3600 * 1000;
+    let anchor = ProcessInfo::boot_anchor(None, t0, up0);
+    assert_eq!(t0 - ChronoDuration::hours(5), anchor);
+    // One minute later the wall clock is stepped back 2 h.
+    let up1 = up0 + 60_000;
+    let wall1 = t0 + ChronoDuration::minutes(1) - ChronoDuration::hours(2);
+    let bound = StepClock::new(None).bound(wall1, up1, Some(anchor));
+    assert!(bound >= t0 + ChronoDuration::minutes(1) - ChronoDuration::seconds(1), "{bound}");
+}
+
 #[test]
 fn c3_step_clock_preserves_until_across_multiple_backward_steps_and_sub_tolerance_steps() {
     let clock = StepClock::new(None);

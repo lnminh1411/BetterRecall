@@ -296,11 +296,26 @@ impl GuardrailService {
             .take()
             && h.thread().id() != thread::current().id()
         {
-            // Join bounded-ish: Rust JoinHandle doesn't have timed join, so wait briefly via park?
-            // Normally UIA finishes quickly; joining directly keeps shutdown deterministic.
-            let _ = h.join();
+            // N5: a UI Automation call into a hung window (e.g. a suspended UI) can block for a long
+            // time; quit must not wait on it. Wait up to STOP_WAIT, then leave the thread to finish
+            // on its own (it sees `stop` and exits once the call returns).
+            let deadline = std::time::Instant::now() + Self::STOP_WAIT;
+            while !h.is_finished() && std::time::Instant::now() < deadline {
+                thread::sleep(std::time::Duration::from_millis(10));
+            }
+            if h.is_finished() {
+                let _ = h.join();
+            } else {
+                AgentLog::warn(&format!(
+                    "guard thread still busy after {} ms (UI Automation call), not waiting",
+                    Self::STOP_WAIT.as_millis()
+                ));
+            }
         }
     }
+
+    /// Longest `stop` waits for the guard thread.
+    pub const STOP_WAIT: std::time::Duration = std::time::Duration::from_millis(1500);
 }
 
 impl Drop for GuardrailService {
