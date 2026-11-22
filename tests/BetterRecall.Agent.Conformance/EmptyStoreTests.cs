@@ -76,7 +76,7 @@ public sealed class EmptyStoreTests(InstallFixture install)
         Assert.Null(st.Store.Newest);
         Assert.Equal(0, st.Store.PendingEmbeddings);
         Assert.Equal(0, st.Store.Vectors);
-        Assert.True(st.Store.Bytes >= 0); // the C# agent reports 0 right after setup
+        Assert.True(st.Store.Bytes >= 0); // the agent reports 0 right after setup
 
         var (aOk, aData, aErr) = await h.Ui.RequestAsync("ui", "audit 20");
         Assert.True(aOk, aErr);
