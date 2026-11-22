@@ -26,13 +26,17 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use br_contracts::{CoreHostOptions, DataPaths, InstallLayout, PipeNames, full_path};
-use br_core::CoreHost;
+use br_contracts::{
+    CoreHostOptions, DataPaths, InstallLayout, PipeNames, full_path, to_pretty_json_string,
+};
+use br_core::{AgentControl, CancelToken, CoreHost};
 use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE};
 use windows::Win32::System::Threading::{CreateMutexW, ReleaseMutex};
 use windows::core::PCWSTR;
 
-use crate::host::{AgentHost, AgentOptions, Diagnostics, StartupRegistration};
+use crate::host::{
+    AgentHost, AgentOptions, DevSelfTest, Diagnostics, KeyframeBudgetRun, StartupRegistration,
+};
 use crate::native::to_wide_z;
 use crate::util::AgentLog;
 
@@ -56,18 +60,15 @@ pub fn run() -> i32 {
 }
 
 pub fn run_with_args(args: &[String]) -> i32 {
-    if let Some(first) = args.first()
-        && matches!(
-            first.as_str(),
-            "--selftest-replay"
-                | "--selftest-keyframe"
-                | "--selftest-bench"
-                | "--selftest-codec"
-                | "--selftest-keyframe-budget"
-        )
-    {
-        eprintln!("Self-test '{first}' is not available yet.");
-        return 2;
+    if let Some(first) = args.first() {
+        match first.as_str() {
+            "--selftest-replay" => return DevSelfTest::replay(args),
+            "--selftest-keyframe" => return DevSelfTest::keyframe(args),
+            "--selftest-bench" => return DevSelfTest::bench(args),
+            "--selftest-codec" => return DevSelfTest::codec(args),
+            "--selftest-keyframe-budget" => return KeyframeBudgetRun::run(args),
+            _ => {}
+        }
     }
 
     let mut install_dir = std::env::current_exe()
@@ -76,6 +77,9 @@ pub fn run_with_args(args: &[String]) -> i32 {
         .unwrap_or_else(|| PathBuf::from("."));
     let mut autostart = true;
     let mut exit_after_s: i32 = 0;
+    let mut dev_replay_at: i32 = 0;
+    let mut dev_export: Option<String> = None;
+    let mut dev_bench: Option<String> = None;
     let mut allow_default_home = false;
 
     let mut i = 0;
@@ -101,8 +105,23 @@ pub fn run_with_args(args: &[String]) -> i32 {
                     }
                 }
             }
-            "--dev-replay-at" | "--dev-export" | "--dev-bench" if i + 1 < args.len() => {
-                i += 1; // parsed and ignored until A6/A7
+            "--dev-replay-at" if i + 1 < args.len() => {
+                i += 1;
+                match args[i].parse::<i32>() {
+                    Ok(v) => dev_replay_at = v,
+                    Err(_) => {
+                        eprintln!("Invalid --dev-replay-at value.");
+                        return 2;
+                    }
+                }
+            }
+            "--dev-export" if i + 1 < args.len() => {
+                i += 1;
+                dev_export = Some(args[i].clone());
+            }
+            "--dev-bench" if i + 1 < args.len() => {
+                i += 1;
+                dev_bench = Some(args[i].clone());
             }
             flag if flag == InstallLayout::ALLOW_DEFAULT_HOME_FLAG => allow_default_home = true,
             _ => {}
@@ -189,6 +208,51 @@ pub fn run_with_args(args: &[String]) -> i32 {
         None
     };
 
+    let dev_thread = if dev_replay_at > 0 {
+        let host_bg = host.clone();
+        let stop_bg = exit_stop.clone();
+        let secs = dev_replay_at as u64;
+        thread::Builder::new()
+            .name("BetterRecall.DevReplay".to_string())
+            .spawn(move || {
+                let (lock, cv) = &*stop_bg;
+                let g = lock.lock().unwrap_or_else(|e| e.into_inner());
+                if *g {
+                    return;
+                }
+                let (g2, _) = cv
+                    .wait_timeout(g, Duration::from_secs(secs))
+                    .unwrap_or_else(|e| e.into_inner());
+                if !*g2 {
+                    drop(g2);
+                    dev_save_replay(&host_bg, dev_export.as_deref());
+                }
+            })
+            .ok()
+    } else if let Some(bench_path) = dev_bench {
+        let host_bg = host.clone();
+        let stop_bg = exit_stop.clone();
+        thread::Builder::new()
+            .name("BetterRecall.DevBench".to_string())
+            .spawn(move || {
+                let (lock, cv) = &*stop_bg;
+                let g = lock.lock().unwrap_or_else(|e| e.into_inner());
+                if *g {
+                    return;
+                }
+                let (g2, _) = cv
+                    .wait_timeout(g, Duration::from_secs(20))
+                    .unwrap_or_else(|e| e.into_inner());
+                if !*g2 {
+                    drop(g2);
+                    dev_bench_run(&host_bg, &bench_path);
+                }
+            })
+            .ok()
+    } else {
+        None
+    };
+
     if let Err(e) = host.run() {
         AgentLog::error_err("agent failed", &e);
     }
@@ -201,6 +265,9 @@ pub fn run_with_args(args: &[String]) -> i32 {
     if let Some(h) = exit_thread {
         let _ = h.join();
     }
+    if let Some(h) = dev_thread {
+        let _ = h.join();
+    }
 
     let sw = Instant::now();
     host.shutdown();
@@ -210,6 +277,54 @@ pub fn run_with_args(args: &[String]) -> i32 {
 
     cleanup_pid_file(&pid_file, &pid_str);
     0
+}
+
+/// Dev run: save a replay through the real path (`BlobCipher`), then export it decrypted for checking.
+fn dev_save_replay(host: &AgentHost, export_path: Option<&str>) {
+    match host.save_replay(&CancelToken::none()) {
+        Ok(clip) => {
+            AgentLog::info(&format!(
+                "dev replay {}: {} ms, {} bytes, encrypted {}",
+                clip.id,
+                clip.duration_ms,
+                clip.bytes,
+                if clip.encrypted { "True" } else { "False" }
+            ));
+            if let Some(exp) = export_path {
+                match host.export_replay(&clip.id, Path::new(exp), &CancelToken::none()) {
+                    Ok(()) => {
+                        let listed_ms = host
+                            .list_replays()
+                            .into_iter()
+                            .find(|c| c.id == clip.id)
+                            .map(|c| c.duration_ms.to_string())
+                            .unwrap_or_default();
+                        AgentLog::info(&format!("dev export done; listed duration {listed_ms} ms"));
+                    }
+                    Err(e) => AgentLog::error_err("dev replay", &e.to_string()),
+                }
+            }
+        }
+        Err(e) => AgentLog::error_err("dev replay", &e.to_string()),
+    }
+}
+
+fn dev_bench_run(host: &AgentHost, path: &str) {
+    match host.bench_full(&CancelToken::none()) {
+        Ok(report) => match to_pretty_json_string(&report) {
+            Ok(json) => match fs::write(path, json) {
+                Ok(()) => AgentLog::info(&format!(
+                    "dev bench written to {path}: {} encoder results in {} ms",
+                    report.encoders.len(),
+                    report.took_ms
+                )),
+                Err(e) => AgentLog::error_err("dev bench", &e.to_string()),
+            },
+            Err(e) => AgentLog::error_err("dev bench", &e.to_string()),
+        },
+        Err(e) => AgentLog::error_err("dev bench", &e.to_string()),
+    }
+    host.request_quit();
 }
 
 fn cleanup_pid_file(pid_file: &Path, own_pid: &str) {

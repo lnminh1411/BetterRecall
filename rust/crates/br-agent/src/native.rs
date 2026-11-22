@@ -11,20 +11,22 @@ use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
-use windows::Win32::System::Performance::QueryPerformanceCounter;
+use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
+use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX};
 use windows::Win32::System::RemoteDesktop::{
     WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION, WTSFreeMemory, WTSQuerySessionInformationW,
     WTSSessionInfoEx,
 };
 use windows::Win32::System::SystemInformation::{GetTickCount, GetTickCount64};
 use windows::Win32::System::Threading::{
-    GetCurrentProcessId, GetCurrentThread, GetThreadTimes, OpenProcess,
-    PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    GetCurrentProcess, GetCurrentProcessId, GetCurrentThread, GetProcessTimes, GetThreadTimes,
+    OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL, THREAD_PRIORITY_LOWEST,
 };
 use windows::Win32::System::WindowsProgramming::QueryUnbiasedInterruptTime;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetClassNameW, GetWindowTextLengthW, GetWindowTextW,
+    GetClassNameW, GetForegroundWindow, GetWindowTextLengthW, GetWindowTextW,
 };
 use windows::core::PWSTR;
 
@@ -107,8 +109,108 @@ pub fn qpc() -> i64 {
     v
 }
 
+pub fn qpc_frequency() -> i64 {
+    let mut f = 0i64;
+    unsafe {
+        let _ = QueryPerformanceFrequency(&mut f);
+    }
+    f.max(1)
+}
+
 pub fn filetime_to_u64(ft: FILETIME) -> u64 {
     ((ft.dwHighDateTime as u64) << 32) | (ft.dwLowDateTime as u64)
+}
+
+/// CPU time (kernel + user) of the current process in milliseconds.
+pub fn process_cpu_ms() -> f64 {
+    let mut creation = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    let ok = unsafe {
+        GetProcessTimes(
+            GetCurrentProcess(),
+            &mut creation,
+            &mut exit,
+            &mut kernel,
+            &mut user,
+        )
+    };
+    if ok.is_ok() {
+        (filetime_to_u64(kernel) + filetime_to_u64(user)) as f64 / 10_000.0
+    } else {
+        0.0
+    }
+}
+
+/// CPU time (kernel + user) of another process by PID in milliseconds, or `None` if inaccessible.
+pub fn process_cpu_ms_by_pid(pid: u32) -> Option<f64> {
+    if pid == 0 {
+        return None;
+    }
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+    let mut creation = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    let ok = unsafe { GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) };
+    unsafe {
+        let _ = CloseHandle(handle);
+    }
+    if ok.is_ok() {
+        Some((filetime_to_u64(kernel) + filetime_to_u64(user)) as f64 / 10_000.0)
+    } else {
+        None
+    }
+}
+
+/// Working set and private memory of the current process in MiB.
+pub fn process_memory_mb() -> (i64, i64) {
+    let mut pmc = PROCESS_MEMORY_COUNTERS_EX {
+        cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
+        ..Default::default()
+    };
+    let ok = unsafe {
+        GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            (&raw mut pmc).cast(),
+            std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
+        )
+    };
+    if ok.is_ok() {
+        (
+            (pmc.WorkingSetSize / 1_048_576) as i64,
+            (pmc.PrivateUsage / 1_048_576) as i64,
+        )
+    } else {
+        (0, 0)
+    }
+}
+
+/// Current foreground window handle (`GetForegroundWindow`).
+pub fn foreground_window() -> isize {
+    unsafe { GetForegroundWindow().0 as isize }
+}
+
+/// Logical processor count (at least 1).
+pub fn logical_processor_count() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+}
+
+/// Sets the calling thread priority to below-normal (`THREAD_PRIORITY_BELOW_NORMAL`).
+pub fn set_current_thread_below_normal() {
+    unsafe {
+        let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    }
+}
+
+/// Sets the calling thread priority to lowest (`THREAD_PRIORITY_LOWEST`).
+pub fn set_current_thread_lowest() {
+    unsafe {
+        let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
+    }
 }
 
 /// CPU time (kernel + user) of the calling thread in milliseconds.

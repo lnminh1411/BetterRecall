@@ -34,6 +34,7 @@ use crate::capture::{
 };
 use crate::guardrails::GuardrailService;
 use crate::host::agent_state::{PauseController, ReadGate};
+use crate::host::bench::{AgentBenchTarget, BenchError, BenchRunner};
 use crate::host::diagnostics::Diagnostics;
 use crate::host::hardware_probe::HardwareProbe;
 use crate::host::hotkey_parser::HotkeyParser;
@@ -168,6 +169,7 @@ pub struct AgentHost {
     transcriber: Mutex<Option<Arc<Transcriber>>>,
     audio_sources: Mutex<AudioSourcesState>,
     save_lock: Mutex<()>,
+    bench_lock: Mutex<()>,
     cts: CancelSource,
     window: Mutex<Option<Arc<MessageWindow>>>,
     quit_watcher: Mutex<Option<QuitEventWatcher>>,
@@ -269,6 +271,7 @@ impl AgentHost {
                 mic_retry: RetryBackoff::new(2000, 120_000),
             }),
             save_lock: Mutex::new(()),
+            bench_lock: Mutex::new(()),
             cts: CancelSource::new(),
             window: Mutex::new(None),
             quit_watcher: Mutex::new(None),
@@ -2208,10 +2211,45 @@ impl AgentControl for AgentHost {
         })
     }
 
-    fn bench_full(&self, _ct: &CancelToken) -> Result<BenchReport, AgentError> {
-        Err(AgentError::InvalidOperation(
-            "Capture is not running.".to_string(),
-        ))
+    fn bench_full(&self, ct: &CancelToken) -> Result<BenchReport, AgentError> {
+        let capture = self.capture().ok_or_else(|| {
+            AgentError::InvalidOperation("Capture is not running.".to_string())
+        })?;
+        let Ok(_bench_guard) = self.bench_lock.try_lock() else {
+            return Err(AgentError::InvalidOperation(
+                "A benchmark is already running.".to_string(),
+            ));
+        };
+        let worker = self.worker.clone();
+        let settings_store = self.core.settings().clone();
+        let devices = capture.devices().clone();
+        let target = AgentBenchTarget::from_capture(
+            capture,
+            Arc::new(move |ct2| match worker.bench(ct2) {
+                Ok(res) => Ok(Some(res)),
+                Err(WorkerError::Cancelled) => Err(BenchError::Cancelled),
+                Err(e) => Err(BenchError::Failed(e.message().to_string())),
+            }),
+            Arc::new(move || settings_store.current()),
+            devices,
+        )
+        .map_err(|e| match e {
+            BenchError::Cancelled => AgentError::Cancelled,
+            BenchError::Failed(msg) => AgentError::InvalidOperation(msg),
+        })?;
+        let report =
+            BenchRunner::run(&target, Duration::from_millis(2500), Utc::now, ct).map_err(|e| {
+                match e {
+                    BenchError::Cancelled => AgentError::Cancelled,
+                    BenchError::Failed(msg) => AgentError::Other(msg),
+                }
+            })?;
+        AgentLog::info(&format!(
+            "full benchmark completed in {} ms with {} encoder results",
+            report.took_ms,
+            report.encoders.len()
+        ));
+        Ok(report)
     }
 
     fn on_panicked(&self, cb: Arc<dyn Fn() + Send + Sync>) -> ListenerGuard {

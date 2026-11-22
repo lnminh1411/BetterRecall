@@ -18,6 +18,7 @@ use windows::Win32::System::Threading::{
 use crate::capture::gpu_devices::{GpuDeviceCache, GpuDevices};
 use crate::capture::output_capture::{FramePacer, OutputCapture};
 use crate::native::{Rect, qpc, tick_count64};
+use crate::replay::bitstream::VideoCodec;
 use crate::replay::replay_layout::ReplayRate;
 use crate::replay::replay_mux::{AudioRingSource, ReplayMux};
 use crate::replay::replay_pipeline::{PipelineSpec, ReplayPipeline};
@@ -38,6 +39,30 @@ pub struct ReplayEngineConfig {
     pub resolution: String,
     pub scale_percent: i32,
     pub lock_memory: bool,
+}
+
+/// Point-in-time snapshot of a live replay pipeline's counters for diagnostics / `--selftest-replay`.
+#[derive(Debug, Clone)]
+pub struct PipelineDiagStats {
+    pub key: String,
+    pub codec: VideoCodec,
+    pub api: String,
+    pub name: String,
+    pub width: i32,
+    pub height: i32,
+    pub fps: i32,
+    pub frames_in: i64,
+    pub packets_out: i64,
+    pub frames_dropped: i64,
+    pub busy_count: i64,
+    pub forced_keyframes: i64,
+    pub repeat_count: i64,
+    pub copy_ticks: i64,
+    pub copy_count: i64,
+    pub latency_p95: f64,
+    pub ring_committed_bytes: usize,
+    pub ring_capacity: usize,
+    pub ring_lock_failed: bool,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -66,6 +91,7 @@ struct EngineState {
     built_at_ms: i64,
     streams: HashMap<String, Arc<VideoStream>>,
     last_signatures: Vec<OutputSignature>,
+    pipeline_stats: Vec<PipelineDiagStats>,
 }
 
 struct EngineShared {
@@ -79,6 +105,8 @@ struct EngineShared {
     panic_requested: AtomicBool,
     pipelines_count: AtomicI32,
     encoder_failures: AtomicI32,
+    /// Set by [`ReplayEngine::pipeline_stats`]; the engine thread fills the snapshot on its next tick and clears it.
+    stats_requested: AtomicBool,
     state: Mutex<EngineState>,
 }
 
@@ -104,6 +132,7 @@ impl ReplayEngine {
                 suspended: AtomicBool::new(false),
                 ticking: AtomicBool::new(false),
                 panic_requested: AtomicBool::new(false),
+                stats_requested: AtomicBool::new(false),
                 pipelines_count: AtomicI32::new(0),
                 encoder_failures: AtomicI32::new(0),
                 state: Mutex::new(EngineState {
@@ -118,6 +147,7 @@ impl ReplayEngine {
                     built_at_ms: 0,
                     streams: HashMap::new(),
                     last_signatures: Vec::new(),
+                    pipeline_stats: Vec::new(),
                 }),
             }),
             thread: Mutex::new(None),
@@ -174,6 +204,22 @@ impl ReplayEngine {
 
     pub fn pipelines_count(&self) -> i32 {
         self.shared.pipelines_count.load(Ordering::Acquire)
+    }
+
+    /// Snapshot of the live pipelines for `--selftest-replay`. Asks the engine thread for it and waits up to 1 s,
+    /// so the agent pays nothing for these counters unless a self test reads them.
+    pub fn pipeline_stats(&self) -> Vec<PipelineDiagStats> {
+        self.shared.stats_requested.store(true, Ordering::Release);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while self.shared.stats_requested.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        self.shared
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pipeline_stats
+            .clone()
     }
 
     pub fn streams(&self) -> Vec<Arc<VideoStream>> {
@@ -312,10 +358,47 @@ fn run_engine(shared: Arc<EngineShared>) {
 
         check_rebuild(&shared, &mut pipelines, freq);
         tick_pipelines(&shared, &mut pipelines, &mut timer, freq);
+        if shared.stats_requested.load(Ordering::Acquire) {
+            update_pipeline_stats(&shared, &pipelines);
+            shared.stats_requested.store(false, Ordering::Release);
+        }
     }
 
     pipelines.clear();
     shared.pipelines_count.store(0, Ordering::Release);
+    update_pipeline_stats(&shared, &pipelines);
+}
+
+fn update_pipeline_stats(shared: &EngineShared, pipelines: &[ReplayPipeline]) {
+    let snap: Vec<PipelineDiagStats> = pipelines
+        .iter()
+        .map(|p| PipelineDiagStats {
+            key: p.spec.key.clone(),
+            codec: p.encoder.codec(),
+            api: p.encoder.api().to_string(),
+            name: p.encoder.name().to_string(),
+            width: p.encoder.width(),
+            height: p.encoder.height(),
+            fps: p.spec.fps,
+            frames_in: p.encoder.frames_in(),
+            packets_out: p.encoder.packets_out(),
+            frames_dropped: p.encoder.frames_dropped(),
+            busy_count: p.busy_count,
+            forced_keyframes: p.encoder.forced_keyframes(),
+            repeat_count: p.repeat_count,
+            copy_ticks: p.copy_ticks,
+            copy_count: p.copy_count,
+            latency_p95: p.encoder.latency().percentile(95.0),
+            ring_committed_bytes: p.stream.ring().committed_bytes(),
+            ring_capacity: p.stream.ring().capacity(),
+            ring_lock_failed: p.stream.ring().lock_failed(),
+        })
+        .collect();
+    shared
+        .state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .pipeline_stats = snap;
 }
 
 fn apply_pending_config(
