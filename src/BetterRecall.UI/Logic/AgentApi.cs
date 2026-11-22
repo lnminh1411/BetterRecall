@@ -74,6 +74,10 @@ public static class Responses
 
     public static VersionReply Version(JsonElement d) => d.Deserialize(ContractsJson.Default.VersionReply) ?? throw new JsonException();
 
+    public static ModelsList? ModelsList(JsonElement d) => d.Deserialize(ContractsJson.Default.ModelsList);
+
+    public static ModelsProgress? ModelsProgress(JsonElement d) => d.Deserialize(ContractsJson.Default.ModelsProgress);
+
     public static JsonObject SettingsObject(JsonElement d) =>
         JsonNode.Parse(d.GetRawText()) as JsonObject ?? throw new JsonException("settings is not an object");
 }
@@ -317,6 +321,35 @@ public sealed class AgentApi(IAgentClient client)
             onEvent(e);
             return e.Type is "done" or "approval" or "error";
         }, ct);
+
+    // ---------------- models (R7, stage I4) ----------------
+
+    public async Task<AgentResult<ModelsList>> ModelsListAsync(CancellationToken ct = default) =>
+        (await client.SendAsync("models list", ct)).As(d => Responses.ModelsList(d) ?? throw new JsonException());
+
+    /// <summary>Streams `models download &lt;target&gt;` on a dedicated run client.</summary>
+    public static Task<AgentResult> ModelsDownloadStreamAsync(AgentClient run, string target, Action<ModelsProgress> onProgress, CancellationToken ct = default) =>
+        run.StreamAsync("models download " + OneLine(target), r =>
+        {
+            ModelsProgress? p;
+            try { p = Responses.ModelsProgress(r.Data); }
+            catch (JsonException) { p = null; }
+            if (p is null)
+            {
+                onProgress(new ModelsProgress("failed", 0, 0, Error: "Bad response."));
+                return true;
+            }
+            onProgress(p);
+            return p.Phase is "done" or "cancelled" or "offline" or "failed";
+        }, ct);
+
+    /// <summary>Instance overload for callers holding an AgentApi backed by a dedicated AgentClient.</summary>
+    public Task<AgentResult> ModelsDownloadStreamAsync(string target, Action<ModelsProgress> onProgress, CancellationToken ct = default)
+    {
+        if (client is not AgentClient ac)
+            throw new InvalidOperationException("Streaming requires AgentClient.");
+        return ModelsDownloadStreamAsync(ac, target, onProgress, ct);
+    }
 
     private static string Json(Action<Utf8JsonWriter> body)
     {

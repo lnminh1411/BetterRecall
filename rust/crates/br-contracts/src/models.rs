@@ -1221,3 +1221,45 @@ impl WorkerResponse {
         }
     }
 }
+
+// ---- models page (R7, stage I4) ----
+
+/// One model component entry returned by the UI-pipe `models list` verb.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelComponent {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub sets: Vec<String>,
+    pub bytes: u64,
+    pub state: String,
+}
+
+/// Reply to the UI-pipe `models list` verb.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelsList {
+    pub models_dir: String,
+    pub repo: String,
+    pub revision: String,
+    pub components: Vec<ModelComponent>,
+    pub full_bytes: u64,
+    pub minimal_bytes: u64,
+    pub free_bytes: u64,
+    pub downloading: bool,
+}
+
+/// One streamed line of `models download <target>`.
+/// `phase`: `"checking" | "downloading" | "done" | "cancelled" | "offline" | "failed"`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelsProgress {
+    pub phase: String,
+    pub done_bytes: u64,
+    pub total_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}

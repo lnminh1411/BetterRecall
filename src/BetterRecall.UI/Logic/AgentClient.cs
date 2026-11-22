@@ -217,7 +217,7 @@ public sealed class AgentClient(string pipeName, IServerTrust trust, TimeSpan? c
     }
 
     private static readonly string[] ReadOnlyVerbs = ["version", "status", "search", "get", "thumb", "keyframe", "timeline", "facets", "audit"];
-    private static readonly string[] ReadOnlyLines = ["history", "password", "ai", "settings get", "replay list", "bench last", "chat list"];
+    private static readonly string[] ReadOnlyLines = ["history", "password", "ai", "settings get", "replay list", "bench last", "chat list", "models list"];
 
     /// <summary>Verbs that change nothing on the agent, so sending them twice is harmless.</summary>
     public static bool IsReadOnly(string line)

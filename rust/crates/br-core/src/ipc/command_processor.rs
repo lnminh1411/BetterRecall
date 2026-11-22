@@ -15,8 +15,8 @@ use std::time::{Duration, Instant};
 use br_contracts::{
     AgentStatus, AiDefaults, AiStatus, AuditEntry, BenchReport, CaptureDetail, CaptureKind,
     CaptureMeta, ChatDetail, ChatEvent as WireChatEvent, ChatSummary, DataPaths, DescribePreview,
-    Envelope, ExportRequest, FacetsReply, HistoryEntry, ItemsReply, LineError,
-    LineProtocol, PurgeConfirmReply, PurgeNotice, PurgeResult, PurgeScope, QueueState,
+    Envelope, ExportRequest, FacetsReply, HistoryEntry, ItemsReply, LineError, LineProtocol,
+    ModelsProgress, PurgeConfirmReply, PurgeNotice, PurgeResult, PurgeScope, QueueState,
     RemovedEvent, ReplayClip, SearchBench, SearchMode, SearchRequest, SearchResponse, Settings,
     StoreStats, UnlockReply, VersionReply, is_abs_path,
 };
@@ -223,6 +223,8 @@ impl CommandProcessor {
     pub const USAGE_AI: &'static str = "Usage: ai | ai setkey <key> | ai clearkey";
     pub const USAGE_DESCRIBE: &'static str = "Usage: describe preview <id> | describe send <token>";
     pub const USAGE_CHAT: &'static str = "Usage: chat list | chat get <id> | chat send <json> | chat approve <json> | chat deny <token> | chat rename <json> | chat delete <id> | chat clear";
+    pub const USAGE_MODELS: &'static str = "Usage: models list | models download <full|minimal|<id>>";
+    pub const ERR_MODELS_BUSY: &'static str = "A model download is already running.";
     pub const ERR_WRONG_PASSWORD: &'static str = "Wrong password.";
     pub const ERR_NO_PASSWORD: &'static str = "No unlock password is set.";
     pub const ERR_PASSWORD_RULE: &'static str = "Password must be 6 to 256 characters.";
@@ -253,10 +255,10 @@ impl CommandProcessor {
         "resume", "purge",
     ];
     const MCP_VERBS: [&'static str; 5] = ["ping", "version", "status", "search", "get"];
-    const UI_ONLY_VERBS: [&'static str; 18] = [
+    const UI_ONLY_VERBS: [&'static str; 19] = [
         "unlock", "lock", "consent", "settings", "timeline", "keyframe", "replay", "panic",
         "audit", "bench", "facets", "history", "password", "passphrase", "ai", "describe",
-        "export", "chat",
+        "export", "chat", "models",
     ];
     const GUARDED_SETTING_GROUPS: [&'static str; 12] = [
         "security", "ai", "ipc", "mcp", "privacy", "ocr", "retention", "storage", "replay",
@@ -644,6 +646,12 @@ impl CommandProcessor {
         {
             return true;
         }
+        if parts.len() >= 2
+            && parts[0].eq_ignore_ascii_case("models")
+            && parts[1].eq_ignore_ascii_case("download")
+        {
+            return true;
+        }
         parts.len() == 2
             && parts[0].eq_ignore_ascii_case("bench")
             && parts[1].eq_ignore_ascii_case("full")
@@ -943,6 +951,7 @@ impl CommandProcessor {
             "describe" => self.describe(s, &args, ct),
             "export" => self.export(s, rest, ct),
             "chat" => self.chat_verb(s, rest, ct),
+            "models" => self.models_verb(&args, ct),
             _ => Reply::err(&format!("Unknown command '{verb_raw}'.")),
         }
     }
@@ -3114,6 +3123,67 @@ impl CommandProcessor {
                 }
             }
             _ => Reply::err(Self::USAGE_CHAT),
+        }
+    }
+
+    // ---- models verb (R7, stage I4) ----
+
+    fn models_verb(&self, args: &[&str], ct: &CancelToken) -> Reply {
+        if args.is_empty() {
+            return Reply::err(Self::USAGE_MODELS);
+        }
+        match args[0].to_ascii_lowercase().as_str() {
+            "list" if args.len() == 1 => match self.d.agent.models_list() {
+                Ok(list) => Reply::ok(CoreJson::to_string(&list).unwrap()),
+                Err(AgentError::InvalidOperation(msg)) => Reply::err(&msg),
+                Err(AgentError::NotSupported) => Reply::err("Not supported."),
+                Err(e) => {
+                    Log::error_err("models list failed", &e.to_string());
+                    Reply::err(Self::ERR_INTERNAL)
+                }
+            },
+            "download" if args.len() == 2 => {
+                let target = args[1].to_string();
+                let agent = self.d.agent.clone();
+                let ct_owned = ct.clone();
+                Reply {
+                    line: String::new(),
+                    subscribe: Subscription::None,
+                    close: false,
+                    stream: Some(Box::new(move |emit_line| {
+                        let mut emit_progress = |p: ModelsProgress| {
+                            if let Ok(line) = Envelope::ok(&p) {
+                                emit_line(line);
+                            }
+                        };
+                        match agent.models_download(&target, &mut emit_progress, &ct_owned) {
+                            Ok(()) => {}
+                            Err(AgentError::InvalidOperation(msg)) => {
+                                emit_line(Envelope::error(&msg));
+                            }
+                            Err(AgentError::NotSupported) => {
+                                emit_line(Envelope::error("Not supported."));
+                            }
+                            Err(AgentError::Cancelled) => {
+                                if let Ok(line) = Envelope::ok(&ModelsProgress {
+                                    phase: "cancelled".to_string(),
+                                    done_bytes: 0,
+                                    total_bytes: 0,
+                                    file: None,
+                                    error: None,
+                                }) {
+                                    emit_line(line);
+                                }
+                            }
+                            Err(e) => {
+                                Log::error_err("models download failed", &e.to_string());
+                                emit_line(Envelope::error(Self::ERR_INTERNAL));
+                            }
+                        }
+                    })),
+                }
+            }
+            _ => Reply::err(Self::USAGE_MODELS),
         }
     }
 }

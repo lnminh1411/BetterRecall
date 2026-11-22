@@ -16,6 +16,7 @@ path = "src/main.rs"
 [dependencies]
 br-contracts = { path = "../br-contracts" }
 br-core = { path = "../br-core" }
+br-fetch = { path = "../br-fetch" }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 fancy-regex = "0.14"
 libloading = "0.9"
@@ -64,3 +65,6 @@ features = [
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",
 ]
+
+[dev-dependencies]
+sha2 = "0.11"

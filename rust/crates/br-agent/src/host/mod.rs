@@ -10,6 +10,7 @@ pub mod hardware_probe;
 pub mod hotkey_parser;
 pub mod keyframe_budget_run;
 pub mod message_window;
+pub mod models;
 pub mod shell;
 pub mod storage_guard;
 

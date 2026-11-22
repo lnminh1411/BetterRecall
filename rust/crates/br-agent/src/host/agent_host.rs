@@ -11,9 +11,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use br_contracts::{
-    AgentStatus, AudioState, BenchReport, BenchResult, CaptureMeta, HotkeySettings, InstallLayout,
-    PipeNames, PrivacySettings, PurgeNotice, PurgeScope, QueueState, ReplayClip, Settings,
-    StorageSettings, StoreStats,
+    AgentStatus, AudioState, BenchReport, BenchResult, CaptureMeta, DataPaths, HotkeySettings,
+    InstallLayout, ModelsList, ModelsProgress, PipeNames, PrivacySettings, PurgeNotice, PurgeScope,
+    QueueState, ReplayClip, Settings, StorageSettings, StoreStats,
 };
 use br_core::{
     AgentControl, AgentError, CancelSource, CancelToken, CoreHost, EncryptedStore, KeyVault,
@@ -77,6 +77,7 @@ pub struct AgentOptions {
 type StatusListener = Arc<dyn Fn(&AgentStatus) + Send + Sync>;
 type CaptureListener = Arc<dyn Fn(&CaptureMeta) + Send + Sync>;
 type PanicListener = Arc<dyn Fn() + Send + Sync>;
+type RestartHook = Arc<dyn Fn(&str) + Send + Sync>;
 
 struct QuitEventWatcher {
     stop_event: HANDLE,
@@ -195,6 +196,9 @@ pub struct AgentHost {
     stop_writers: Mutex<StopWritersState>,
     stop_writers_cv: Condvar,
     on_stop_pipes_for_test: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    models_downloading: AtomicBool,
+    catalog_for_test: Mutex<Option<br_fetch::Catalog>>,
+    on_worker_restart_for_test: Mutex<Option<RestartHook>>,
     settings_guard: Mutex<Option<ListenerGuard>>,
     purged_guard: Mutex<Option<ListenerGuard>>,
 }
@@ -300,6 +304,9 @@ impl AgentHost {
             }),
             stop_writers_cv: Condvar::new(),
             on_stop_pipes_for_test: Mutex::new(None),
+            models_downloading: AtomicBool::new(false),
+            catalog_for_test: Mutex::new(None),
+            on_worker_restart_for_test: Mutex::new(None),
             settings_guard: Mutex::new(None),
             purged_guard: Mutex::new(None),
         })
@@ -1925,6 +1932,34 @@ impl AgentHost {
             .unwrap_or_else(|e| e.into_inner()) = hook;
     }
 
+    pub fn set_catalog_for_test(&self, catalog: Option<br_fetch::Catalog>) {
+        *self
+            .catalog_for_test
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = catalog;
+    }
+
+    pub fn set_on_worker_restart_for_test(&self, hook: Option<RestartHook>) {
+        *self
+            .on_worker_restart_for_test
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = hook;
+    }
+
+    fn effective_catalog(&self) -> Result<(br_fetch::Catalog, bool), AgentError> {
+        if let Some(cat) = self
+            .catalog_for_test
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        {
+            return Ok((cat, true));
+        }
+        br_fetch::Catalog::embedded()
+            .map(|c| (c, false))
+            .map_err(|e| AgentError::Other(e.to_string()))
+    }
+
     pub fn on_end_session_for_test(self: &Arc<Self>) {
         self.on_end_session();
     }
@@ -2262,6 +2297,44 @@ impl AgentControl for AgentHost {
             report.encoders.len()
         ));
         Ok(report)
+    }
+
+    fn models_list(&self) -> Result<ModelsList, AgentError> {
+        let (catalog, _) = self.effective_catalog()?;
+        let live_settings = self.core.settings().current();
+        let models_dir = DataPaths::models_dir(&self.opt.home, &live_settings);
+        Ok(crate::host::models::list_models(
+            &models_dir,
+            &catalog,
+            self.models_downloading.load(Ordering::Acquire),
+        ))
+    }
+
+    fn models_download(
+        &self,
+        target: &str,
+        emit: &mut dyn FnMut(ModelsProgress),
+        ct: &CancelToken,
+    ) -> Result<(), AgentError> {
+        let (catalog, is_test) = self.effective_catalog()?;
+        let live_settings = self.core.settings().current();
+        let models_dir = DataPaths::models_dir(&self.opt.home, &live_settings);
+        let ctx = crate::host::models::DownloadContext {
+            models_dir: &models_dir,
+            catalog: &catalog,
+            fast_retries: is_test,
+            downloading_flag: &self.models_downloading,
+        };
+        crate::host::models::download_models(&ctx, target, emit, ct, || {
+            if let Some(ref hook) = *self
+                .on_worker_restart_for_test
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+            {
+                hook("models");
+            }
+            self.supervisor.request_restart("models");
+        })
     }
 
     fn on_panicked(&self, cb: Arc<dyn Fn() + Send + Sync>) -> ListenerGuard {

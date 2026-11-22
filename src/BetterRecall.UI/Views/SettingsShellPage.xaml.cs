@@ -31,6 +31,12 @@ public sealed partial class SettingsShellPage : Page
                 Tag = g,
                 Icon = new FontIcon { Glyph = Glyphs.GetValueOrDefault(g, "\uE713") },
             });
+        Groups.MenuItems.Add(new NavigationViewItem
+        {
+            Content = Loc.Get("G_models"),
+            Tag = "models",
+            Icon = new FontIcon { Glyph = "\uE896" },
+        });
         SizeChanged += (_, e) =>
         {
             var mode = SettingsShellLayout.GroupsOnTop(e.NewSize.Width) ? NavigationViewPaneDisplayMode.Top : NavigationViewPaneDisplayMode.Left;
@@ -40,12 +46,21 @@ public sealed partial class SettingsShellPage : Page
 
     protected override void OnNavigatedTo(NavigationEventArgs e) => Show(e.Parameter as string);
 
-    /// <summary>Opens a group; unknown or empty opens the first.</summary>
+    /// <summary>Opens a group or the Models page; unknown or empty opens the first.</summary>
     public void Show(string? group)
     {
-        if (group is null || !SettingsSchema.Groups.Contains(group)) group = _group.Length > 0 ? _group : SettingsSchema.Groups[0];
+        if (group == "models")
+        {
+            Groups.SelectedItem = Groups.MenuItems.OfType<NavigationViewItem>().FirstOrDefault(i => Equals(i.Tag, "models"));
+            if (_group == "models" && GroupFrame.Content is ModelsPage) return;
+            _group = "models";
+            GroupFrame.Navigate(typeof(ModelsPage), null, new SuppressNavigationTransitionInfo());
+            GroupFrame.BackStack.Clear();
+            return;
+        }
+        if (group is null || !SettingsSchema.Groups.Contains(group)) group = _group.Length > 0 && _group != "models" ? _group : SettingsSchema.Groups[0];
         Groups.SelectedItem = Groups.MenuItems.OfType<NavigationViewItem>().FirstOrDefault(i => Equals(i.Tag, group));
-        if (group == _group && GroupFrame.Content is not null) return;
+        if (group == _group && GroupFrame.Content is SettingsPage) return;
         _group = group;
         GroupFrame.Navigate(typeof(SettingsPage), group, new SuppressNavigationTransitionInfo());
         GroupFrame.BackStack.Clear();
