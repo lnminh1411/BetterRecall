@@ -43,6 +43,8 @@ pub trait FetchProgress {
     fn total(&self, bytes: u64);
     /// Called as each chunk of bytes arrives from the server.
     fn bytes(&self, delta: u64);
+    /// Called before each file starts downloading with `<component_id>/<rel_path>`.
+    fn file(&self, _rel_path: &str) {}
 }
 
 /// No-op [`FetchProgress`] implementation.
@@ -619,6 +621,7 @@ pub fn install_components(
             return Err(FetchError::Cancelled);
         }
         let url = join_base_url(&opts.base_url, item.component_id, item.rel_path);
+        progress.file(&format!("{}/{}", item.component_id, item.rel_path));
         opts.downloader.download_file(
             &url,
             &item.dest,

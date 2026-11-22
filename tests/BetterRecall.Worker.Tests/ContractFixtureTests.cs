@@ -205,6 +205,24 @@ public class ContractFixtureTests
                 Degraded: null))),
             ("ErrorReply", Envelope.Error("Store is locked.")),
             ("McpToolList", ExtractMcpToolList()),
+            ("ModelsList", Serialize(new ModelsList(
+                ModelsDir: @"C:\BetterRecall\models",
+                Repo: "lnminh1411/BetterRecall-models",
+                Revision: "893eb2c63a11443e9f5061745c69ecbd5e1bd16a",
+                Components:
+                [
+                    new ModelComponent("embeddinggemma-2", "EmbeddingGemma 2", "Search", ["full", "minimal"], 2782236945, "complete"),
+                    new ModelComponent("silero-vad", "Silero VAD", "Speech detection for transcription", ["full"], 2329089, "missing"),
+                ],
+                FullBytes: 6555959572,
+                MinimalBytes: 3476218217,
+                FreeBytes: 53687091200,
+                Downloading: false))),
+            ("ModelsProgress", Serialize(new ModelsProgress(
+                Phase: "downloading",
+                DoneBytes: 524288000,
+                TotalBytes: 2782236945,
+                File: "embeddinggemma-2/vision.onnx"))),
         };
 
         bool update = Environment.GetEnvironmentVariable("BR_UPDATE_FIXTURES") == "1";

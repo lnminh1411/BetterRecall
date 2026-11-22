@@ -10,10 +10,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use br_contracts::{
     AgentStatus, BenchDevice, BenchResult, BinaryFrame, DataPaths, Envelope, ErrorReply,
-    FrameError, InstallLayout, LineError, LineProtocol, LineReader, McpToolList, OcrEntity,
-    OcrLine, OcrResult, PipeNames, PurgeResult, SearchResponse, Settings, ThumbData, TokenBench,
-    TranscribeResult, TranscriptSegment, WhisperLanguages, WorkerHello, WorkerRequest,
-    WorkerResponse, full_path, to_json_string,
+    FrameError, InstallLayout, LineError, LineProtocol, LineReader, McpToolList, ModelsList,
+    ModelsProgress, OcrEntity, OcrLine, OcrResult, PipeNames, PurgeResult, SearchResponse,
+    Settings, ThumbData, TokenBench, TranscribeResult, TranscriptSegment, WhisperLanguages,
+    WorkerHello, WorkerRequest, WorkerResponse, full_path, to_json_string,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -119,6 +119,8 @@ fn contract_fixtures_round_trip_identically() {
     assert_fixture_roundtrip::<SearchResponse>("SearchResponse");
     assert_fixture_roundtrip::<ErrorReply>("ErrorReply");
     assert_fixture_roundtrip::<McpToolList>("McpToolList");
+    assert_fixture_roundtrip::<ModelsList>("ModelsList");
+    assert_fixture_roundtrip::<ModelsProgress>("ModelsProgress");
 }
 
 #[test]

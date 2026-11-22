@@ -7,7 +7,10 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use br_contracts::{AgentStatus, BenchReport, BenchResult, CaptureMeta, ReplayClip, ThumbData};
+use br_contracts::{
+    AgentStatus, BenchReport, BenchResult, CaptureMeta, ModelsList, ModelsProgress, ReplayClip,
+    ThumbData,
+};
 use thiserror::Error;
 
 use crate::cancel::{CancelToken, ListenerGuard};
@@ -55,6 +58,19 @@ pub trait AgentControl: Send + Sync {
     fn bench(&self, ct: &CancelToken) -> Result<BenchResult, AgentError>;
 
     fn bench_full(&self, _ct: &CancelToken) -> Result<BenchReport, AgentError> {
+        Err(AgentError::NotSupported)
+    }
+
+    fn models_list(&self) -> Result<ModelsList, AgentError> {
+        Err(AgentError::NotSupported)
+    }
+
+    fn models_download(
+        &self,
+        _target: &str,
+        _emit: &mut dyn FnMut(ModelsProgress),
+        _ct: &CancelToken,
+    ) -> Result<(), AgentError> {
         Err(AgentError::NotSupported)
     }
 

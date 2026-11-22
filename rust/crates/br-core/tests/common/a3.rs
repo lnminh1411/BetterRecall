@@ -16,8 +16,8 @@ use std::time::Duration;
 
 use br_contracts::{
     AgentStatus, AudioState, BenchDevice, BenchReport, BenchResult, CaptureBench, CaptureMeta,
-    EncoderBench, GpuInfo, HardwareInfo, MonitorInfo, NpuInfo, QueueState, ReplayClip, StoreStats,
-    ThumbData,
+    EncoderBench, GpuInfo, HardwareInfo, ModelsList, ModelsProgress, MonitorInfo, NpuInfo,
+    QueueState, ReplayClip, StoreStats, ThumbData,
 };
 use br_core::{
     AgentControl, AgentError, CancelToken, EmbedError, HttpRequest, HttpResponse, HttpTransport,
@@ -299,6 +299,8 @@ pub struct FakeAgent {
     pub full_bench_cancelled: Arc<(Mutex<bool>, Condvar)>,
     pub on_save_replay: Mutex<Option<Box<dyn Fn(&CancelToken) -> Result<ReplayClip, AgentError> + Send + Sync>>>,
     pub on_export_replay: Mutex<Option<Box<dyn Fn(&str, &Path, &CancelToken) -> Result<(), AgentError> + Send + Sync>>>,
+    pub models_list_reply: Mutex<Option<ModelsList>>,
+    pub on_models_download: Mutex<Option<Arc<dyn Fn(&str, &mut dyn FnMut(ModelsProgress), &CancelToken) -> Result<(), AgentError> + Send + Sync>>>,
     next_id: AtomicU64,
     status_listeners: Arc<Mutex<Vec<(u64, Arc<dyn Fn(&AgentStatus) + Send + Sync>)>>>,
     capture_listeners: Arc<Mutex<Vec<(u64, Arc<dyn Fn(&CaptureMeta) + Send + Sync>)>>>,
@@ -344,6 +346,8 @@ impl FakeAgent {
             full_bench_cancelled: Arc::new((Mutex::new(false), Condvar::new())),
             on_save_replay: Mutex::new(None),
             on_export_replay: Mutex::new(None),
+            models_list_reply: Mutex::new(None),
+            on_models_download: Mutex::new(None),
             next_id: AtomicU64::new(1),
             status_listeners: Arc::new(Mutex::new(Vec::new())),
             capture_listeners: Arc::new(Mutex::new(Vec::new())),
@@ -516,6 +520,28 @@ impl AgentControl for FakeAgent {
             .unwrap()
             .clone()
             .ok_or(AgentError::NotSupported)
+    }
+
+    fn models_list(&self) -> Result<ModelsList, AgentError> {
+        self.models_list_reply
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or(AgentError::NotSupported)
+    }
+
+    fn models_download(
+        &self,
+        target: &str,
+        emit: &mut dyn FnMut(ModelsProgress),
+        ct: &CancelToken,
+    ) -> Result<(), AgentError> {
+        // Clone the hook out so the lock is not held while it runs (concurrent downloads).
+        let hook = self.on_models_download.lock().unwrap().clone();
+        if let Some(f) = hook {
+            return f(target, emit, ct);
+        }
+        Err(AgentError::NotSupported)
     }
 
     fn on_panicked(&self, cb: Arc<dyn Fn() + Send + Sync>) -> ListenerGuard {

@@ -378,3 +378,33 @@ public sealed record WorkerResponse(
     string? Model = null,
     string? Revision = null,
     string? Device = null);
+
+// ---- models page (R7, stage I4) ----
+
+/// <summary>One model component entry returned by the UI-pipe `models list` verb.</summary>
+public sealed record ModelComponent(
+    string Id,
+    string Title,
+    string Description,
+    string[] Sets,
+    long Bytes,
+    string State);
+
+/// <summary>Reply to the UI-pipe `models list` verb.</summary>
+public sealed record ModelsList(
+    string ModelsDir,
+    string Repo,
+    string Revision,
+    ModelComponent[] Components,
+    long FullBytes,
+    long MinimalBytes,
+    long FreeBytes,
+    bool Downloading);
+
+/// <summary>One streamed line of `models download &lt;target&gt;`. Phase: checking | downloading | done | cancelled | offline | failed.</summary>
+public sealed record ModelsProgress(
+    string Phase,
+    long DoneBytes,
+    long TotalBytes,
+    string? File = null,
+    string? Error = null);

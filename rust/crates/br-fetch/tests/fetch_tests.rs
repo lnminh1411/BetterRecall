@@ -853,3 +853,57 @@ fn installed_state_reports_missing_partial_and_complete() {
         ]
     );
 }
+
+#[test]
+fn progress_reports_each_file_with_manifest_last() {
+    let dir = TestDir::new("file-progress");
+    let models_dir = dir.path().join("models");
+    let weights = b"weights-payload".to_vec();
+    let manifest = br#"{"id":"comp-p"}"#.to_vec();
+
+    let mut files = HashMap::new();
+    files.insert("/comp-p/weights.bin".to_string(), weights.clone());
+    files.insert("/comp-p/manifest.json".to_string(), manifest.clone());
+    let server = LocalHttpServer::start(files);
+
+    let catalog = make_test_catalog(
+        &server.base_url(),
+        vec![Component {
+            id: "comp-p".to_string(),
+            sets: vec!["full".to_string()],
+            bytes: (weights.len() + manifest.len()) as u64,
+            files: vec![
+                catalog_file("manifest.json", &manifest),
+                catalog_file("weights.bin", &weights),
+            ],
+        }],
+    );
+
+    struct FileRecorder {
+        files: Mutex<Vec<String>>,
+    }
+
+    impl FetchProgress for FileRecorder {
+        fn total(&self, _bytes: u64) {}
+        fn bytes(&self, _delta: u64) {}
+        fn file(&self, rel_path: &str) {
+            self.files.lock().unwrap().push(rel_path.to_string());
+        }
+    }
+
+    let recorder = FileRecorder {
+        files: Mutex::new(Vec::new()),
+    };
+    let opts = InstallOptions::for_catalog(&catalog)
+        .with_downloader(Downloader::new().with_retry_delays(vec![]));
+    let comps = catalog.components_for(ModelSet::Full);
+    install_components(&models_dir, &comps, &opts, &recorder, &|| false).expect("install ok");
+
+    assert_eq!(
+        *recorder.files.lock().unwrap(),
+        vec![
+            "comp-p/weights.bin".to_string(),
+            "comp-p/manifest.json".to_string(),
+        ]
+    );
+}
