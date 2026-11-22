@@ -13,6 +13,7 @@ pub mod message_window;
 pub mod models;
 pub mod shell;
 pub mod storage_guard;
+pub mod update;
 
 pub use agent_host::{AgentHost, AgentOptions};
 pub use agent_state::{PauseController, ReadGate};
@@ -25,3 +26,4 @@ pub use keyframe_budget_run::KeyframeBudgetRun;
 pub use message_window::{MenuStateSnapshot, MessageWindow, TrayCommand};
 pub use shell::{StartupRegistration, UiLauncher};
 pub use storage_guard::{StorageDecision, StorageGuard, StorageStore};
+pub use update::{AutoStepOutcome, InstallerLauncher, UpdateManager, UpdateTestConfig};

@@ -777,6 +777,7 @@ fn model_mode_install_modify_and_unregister() {
         &InstallOpts {
             allow_downgrade: false,
             model_mode: ModelMode::Minimal,
+            skip_model_download: false,
             catalog: Some(catalog.clone()),
             integrity_key: None,
         },
@@ -1205,6 +1206,7 @@ fn closed_loopback_port() -> u16 {
 
 struct TinyHttpServer {
     addr: String,
+    requests: Arc<Mutex<Vec<String>>>,
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
 }
@@ -1215,9 +1217,11 @@ impl TinyHttpServer {
         let port = listener.local_addr().unwrap().port();
         let addr = format!("127.0.0.1:{port}");
         let files = Arc::new(files);
+        let requests = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
 
         let files_c = Arc::clone(&files);
+        let requests_c = Arc::clone(&requests);
         let stop_c = Arc::clone(&stop);
         let handle = thread::spawn(move || {
             for incoming in listener.incoming() {
@@ -1239,6 +1243,7 @@ impl TinyHttpServer {
                         .nth(1)
                         .unwrap_or("/")
                         .to_string();
+                    requests_c.lock().unwrap().push(path.clone());
                     loop {
                         let mut line = String::new();
                         if reader.read_line(&mut line).unwrap_or(0) == 0 {
@@ -1267,6 +1272,7 @@ impl TinyHttpServer {
 
         Self {
             addr,
+            requests,
             stop,
             handle: Some(handle),
         }
@@ -1274,6 +1280,10 @@ impl TinyHttpServer {
 
     fn base_url(&self) -> String {
         format!("http://{}/", self.addr)
+    }
+
+    fn requests(&self) -> Vec<String> {
+        self.requests.lock().unwrap().clone()
     }
 }
 
@@ -1376,6 +1386,7 @@ fn i3_install_minimal_and_modify_full_to_minimal_removes_full_only() {
         &InstallOpts {
             allow_downgrade: false,
             model_mode: ModelMode::Minimal,
+            skip_model_download: false,
             catalog: Some(catalog.clone()),
             integrity_key: None,
         },
@@ -1478,6 +1489,7 @@ fn i3_offline_returns_offline_and_silent_e2e_exits_zero() {
         &InstallOpts {
             allow_downgrade: false,
             model_mode: ModelMode::Minimal,
+            skip_model_download: false,
             catalog: Some(offline_cat),
             integrity_key: None,
         },
@@ -1592,6 +1604,7 @@ fn i3_install_space_check_includes_model_bytes() {
         &InstallOpts {
             allow_downgrade: false,
             model_mode: ModelMode::Minimal,
+            skip_model_download: false,
             catalog: Some(cat),
             integrity_key: None,
         },
@@ -1755,4 +1768,110 @@ fn i7_integrity_staging_modify_and_uninstall_behaviour() {
         }
     );
     assert!(!env.ctx.install_dir.exists());
+}
+
+// --- I5 silent upgrade model-mode preservation tests ---
+
+// 25. Silent upgrade without /models= keeps Full in the registry and fetches nothing.
+#[test]
+fn i5_silent_upgrade_without_models_keeps_full_and_fetches_nothing() {
+    let env = TestEnv::new("i5-silent-upgrade");
+    let (raw_cat, files) = tiny_catalog_data();
+    let server = TinyHttpServer::start(files);
+    let cat_path = env.root.join("tiny-catalog.json");
+    fs::write(&cat_path, serde_json::to_string(&raw_cat).unwrap()).expect("write catalog");
+
+    // Seed an existing 0.3.0-dev install with ModelMode::Full recorded in the registry.
+    let v1 = env.build_installer(
+        "v1",
+        b"MZ-STUB-V1",
+        "0.3.0-dev",
+        &[(InstallLayout::AGENT_EXE, b"agent-v1")],
+    );
+    install(
+        &env.ctx,
+        &v1,
+        &InstallOpts {
+            allow_downgrade: false,
+            model_mode: ModelMode::Full,
+            skip_model_download: true,
+            catalog: None,
+            integrity_key: None,
+        },
+    )
+    .expect("seed v1");
+    assert_eq!(read_model_mode(&env.ctx), Some(ModelMode::Full));
+
+    // Upgrade silently to 0.3.0 without /models=, passing a dev catalog pointing at the local server.
+    let v2 = env.build_installer(
+        "v2",
+        b"MZ-STUB-V2",
+        "0.3.0",
+        &[(InstallLayout::AGENT_EXE, b"agent-v2")],
+    );
+    let args = br_installer::cli::parse_args([
+        "/S",
+        "/norun",
+        "--dev-root",
+        env.root.to_str().unwrap(),
+        "--dev-reg-prefix",
+        &env.reg_prefix,
+        "--dev-models-catalog",
+        cat_path.to_str().unwrap(),
+        "--dev-models-url",
+        &server.base_url(),
+    ])
+    .expect("parse args");
+    let out = br_installer::cli::dispatch_silent_for_exe(&env.ctx, &args, &v2)
+        .expect("silent upgrade ok");
+    assert_eq!(
+        out,
+        Outcome::Installed {
+            version: "0.3.0".to_string(),
+            models: ModelsResult::Skipped,
+        }
+    );
+    assert_eq!(read_model_mode(&env.ctx), Some(ModelMode::Full));
+    assert_eq!(
+        fs::read(env.ctx.install_dir.join(InstallLayout::AGENT_EXE)).unwrap(),
+        b"agent-v2"
+    );
+    assert!(
+        server.requests().is_empty(),
+        "silent upgrade must not fetch any models, got {:?}",
+        server.requests()
+    );
+}
+
+// 26. Fresh silent install without /models= records Later and fetches nothing.
+#[test]
+fn i5_fresh_silent_install_without_models_records_later() {
+    let env = TestEnv::new("i5-silent-fresh");
+    assert_eq!(read_model_mode(&env.ctx), None);
+
+    let v1 = env.build_installer(
+        "v1",
+        b"MZ-STUB-V1",
+        "0.3.0",
+        &[(InstallLayout::AGENT_EXE, b"agent-v1")],
+    );
+    let args = br_installer::cli::parse_args([
+        "/S",
+        "/norun",
+        "--dev-root",
+        env.root.to_str().unwrap(),
+        "--dev-reg-prefix",
+        &env.reg_prefix,
+    ])
+    .expect("parse args");
+    let out = br_installer::cli::dispatch_silent_for_exe(&env.ctx, &args, &v1)
+        .expect("fresh silent install ok");
+    assert_eq!(
+        out,
+        Outcome::Installed {
+            version: "0.3.0".to_string(),
+            models: ModelsResult::Skipped,
+        }
+    );
+    assert_eq!(read_model_mode(&env.ctx), Some(ModelMode::Later));
 }

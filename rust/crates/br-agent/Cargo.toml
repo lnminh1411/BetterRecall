@@ -21,8 +21,10 @@ br-integrity = { path = "../br-integrity" }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 fancy-regex = "0.14"
 libloading = "0.9"
+semver = "1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha2 = "0.11"
 thiserror = "2.0"
 zeroize = { version = "1", features = ["derive"] }
 
@@ -68,4 +70,5 @@ features = [
 ]
 
 [dev-dependencies]
-sha2 = "0.11"
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "pem", "sha256", "std"] }
+rand_core = { version = "0.6", features = ["getrandom"] }

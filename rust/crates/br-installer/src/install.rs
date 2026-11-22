@@ -100,6 +100,9 @@ pub enum ModelsResult {
 pub struct InstallOpts {
     pub allow_downgrade: bool,
     pub model_mode: ModelMode,
+    /// When true, records `model_mode` in the registry without downloading or removing models
+    /// (used by silent upgrades when `/models=` was not passed).
+    pub skip_model_download: bool,
     /// Optional catalog override for tests; production always leaves this `None` (uses embedded).
     pub catalog: Option<Catalog>,
     /// Optional public key PEM override for tests; `None` uses the compile-time release key (or skips).
@@ -216,12 +219,16 @@ where
         });
     }
 
-    let model_plan = match opts.model_mode.to_model_set() {
-        Some(set) => {
-            let cat = resolve_catalog(opts.catalog.as_ref())?;
-            Some((cat, set))
+    let model_plan = if opts.skip_model_download {
+        None
+    } else {
+        match opts.model_mode.to_model_set() {
+            Some(set) => {
+                let cat = resolve_catalog(opts.catalog.as_ref())?;
+                Some((cat, set))
+            }
+            None => None,
         }
-        None => None,
     };
     let extra_model_bytes = model_plan
         .as_ref()

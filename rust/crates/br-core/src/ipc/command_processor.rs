@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -18,7 +18,7 @@ use br_contracts::{
     Envelope, ExportRequest, FacetsReply, HistoryEntry, ItemsReply, LineError, LineProtocol,
     ModelsProgress, PurgeConfirmReply, PurgeNotice, PurgeResult, PurgeScope, QueueState,
     RemovedEvent, ReplayClip, SearchBench, SearchMode, SearchRequest, SearchResponse, Settings,
-    StoreStats, UnlockReply, VersionReply, is_abs_path,
+    StoreStats, UnlockReply, UpdateProgress, VersionReply, is_abs_path,
 };
 use chrono::{DateTime, Duration as ChronoDuration, NaiveDate, NaiveDateTime, Utc};
 use serde_json::Value;
@@ -178,6 +178,7 @@ pub struct CommandProcessor {
     next_removed_id: AtomicU64,
     lock_cts: Arc<Mutex<CancelSource>>,
     unlocked_with_passphrase: AtomicBool,
+    active_exports: AtomicUsize,
     _guards: Vec<ListenerGuard>,
 }
 
@@ -225,6 +226,10 @@ impl CommandProcessor {
     pub const USAGE_CHAT: &'static str = "Usage: chat list | chat get <id> | chat send <json> | chat approve <json> | chat deny <token> | chat rename <json> | chat delete <id> | chat clear";
     pub const USAGE_MODELS: &'static str = "Usage: models list | models download <full|minimal|<id>>";
     pub const ERR_MODELS_BUSY: &'static str = "A model download is already running.";
+    pub const USAGE_UPDATE: &'static str = "Usage: update status | update check | update download | update apply";
+    pub const ERR_UPDATE_BUSY: &'static str = "An update download is already running.";
+    pub const ERR_UPDATE_RUNNING_FOR_MODELS: &'static str = "An update download is running.";
+    pub const ERR_MODELS_RUNNING_FOR_UPDATE: &'static str = "A model download is running.";
     pub const ERR_WRONG_PASSWORD: &'static str = "Wrong password.";
     pub const ERR_NO_PASSWORD: &'static str = "No unlock password is set.";
     pub const ERR_PASSWORD_RULE: &'static str = "Password must be 6 to 256 characters.";
@@ -255,10 +260,10 @@ impl CommandProcessor {
         "resume", "purge",
     ];
     const MCP_VERBS: [&'static str; 5] = ["ping", "version", "status", "search", "get"];
-    const UI_ONLY_VERBS: [&'static str; 19] = [
+    const UI_ONLY_VERBS: [&'static str; 20] = [
         "unlock", "lock", "consent", "settings", "timeline", "keyframe", "replay", "panic",
         "audit", "bench", "facets", "history", "password", "passphrase", "ai", "describe",
-        "export", "chat", "models",
+        "export", "chat", "models", "update",
     ];
     const GUARDED_SETTING_GROUPS: [&'static str; 12] = [
         "security", "ai", "ipc", "mcp", "privacy", "ocr", "retention", "storage", "replay",
@@ -364,8 +369,13 @@ impl CommandProcessor {
             next_removed_id: AtomicU64::new(1),
             lock_cts,
             unlocked_with_passphrase: AtomicBool::new(false),
+            active_exports: AtomicUsize::new(0),
             _guards: guards,
         }
+    }
+
+    pub fn is_export_running(&self) -> bool {
+        self.active_exports.load(Ordering::Acquire) > 0
     }
 
     pub fn set_now_for_test(&self, now: impl Fn() -> DateTime<Utc> + Send + Sync + 'static) {
@@ -649,6 +659,12 @@ impl CommandProcessor {
         if parts.len() >= 2
             && parts[0].eq_ignore_ascii_case("models")
             && parts[1].eq_ignore_ascii_case("download")
+        {
+            return true;
+        }
+        if parts.len() >= 2
+            && parts[0].eq_ignore_ascii_case("update")
+            && (parts[1].eq_ignore_ascii_case("download") || parts[1].eq_ignore_ascii_case("check"))
         {
             return true;
         }
@@ -952,6 +968,7 @@ impl CommandProcessor {
             "export" => self.export(s, rest, ct),
             "chat" => self.chat_verb(s, rest, ct),
             "models" => self.models_verb(&args, ct),
+            "update" => self.update_verb(&args, ct),
             _ => Reply::err(&format!("Unknown command '{verb_raw}'.")),
         }
     }
@@ -1547,6 +1564,15 @@ impl CommandProcessor {
         let _reg = linked_tok.on_cancel(move || cancel_flag_cb.store(true, Ordering::Release));
 
         let thumbs = self.d.thumbnailer.clone();
+        struct ActiveExportGuard<'a>(&'a AtomicUsize);
+        impl Drop for ActiveExportGuard<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::AcqRel);
+            }
+        }
+        self.active_exports.fetch_add(1, Ordering::AcqRel);
+        let _export_guard = ActiveExportGuard(&self.active_exports);
+
         let is_locked = || self.is_locked(s.kind);
         let res = CaptureExporter::write_with_lock(
             &store,
@@ -3184,6 +3210,89 @@ impl CommandProcessor {
                 }
             }
             _ => Reply::err(Self::USAGE_MODELS),
+        }
+    }
+
+    // ---- update verb (R8, stage I5) ----
+
+    fn update_verb(&self, args: &[&str], ct: &CancelToken) -> Reply {
+        if args.len() != 1 {
+            return Reply::err(Self::USAGE_UPDATE);
+        }
+        match args[0].to_ascii_lowercase().as_str() {
+            "status" => match self.d.agent.update_status() {
+                Ok(st) => Reply::ok(CoreJson::to_string(&st).unwrap()),
+                Err(AgentError::InvalidOperation(msg)) => Reply::err(&msg),
+                Err(AgentError::NotSupported) => Reply::err("Not supported."),
+                Err(e) => {
+                    Log::error_err("update status failed", &e.to_string());
+                    Reply::err(Self::ERR_INTERNAL)
+                }
+            },
+            "check" => match self.d.agent.update_check(ct) {
+                Ok(st) => Reply::ok(CoreJson::to_string(&st).unwrap()),
+                Err(AgentError::InvalidOperation(msg)) => Reply::err(&msg),
+                Err(AgentError::NotSupported) => Reply::err("Not supported."),
+                Err(AgentError::Cancelled) => Reply {
+                    line: Envelope::error(Self::ERR_INTERNAL),
+                    subscribe: Subscription::None,
+                    close: true,
+                    stream: None,
+                },
+                Err(e) => {
+                    Log::error_err("update check failed", &e.to_string());
+                    Reply::err(Self::ERR_INTERNAL)
+                }
+            },
+            "download" => {
+                let agent = self.d.agent.clone();
+                let ct_owned = ct.clone();
+                Reply {
+                    line: String::new(),
+                    subscribe: Subscription::None,
+                    close: false,
+                    stream: Some(Box::new(move |emit_line| {
+                        let mut emit_progress = |p: UpdateProgress| {
+                            if let Ok(line) = Envelope::ok(&p) {
+                                emit_line(line);
+                            }
+                        };
+                        match agent.update_download(&mut emit_progress, &ct_owned) {
+                            Ok(()) => {}
+                            Err(AgentError::InvalidOperation(msg)) => {
+                                emit_line(Envelope::error(&msg));
+                            }
+                            Err(AgentError::NotSupported) => {
+                                emit_line(Envelope::error("Not supported."));
+                            }
+                            Err(AgentError::Cancelled) => {
+                                if let Ok(line) = Envelope::ok(&UpdateProgress {
+                                    phase: "cancelled".to_string(),
+                                    done_bytes: 0,
+                                    total_bytes: 0,
+                                    error: None,
+                                }) {
+                                    emit_line(line);
+                                }
+                            }
+                            Err(e) => {
+                                Log::error_err("update download failed", &e.to_string());
+                                emit_line(Envelope::error(Self::ERR_INTERNAL));
+                            }
+                        }
+                    })),
+                }
+            }
+            "apply" => match self.d.agent.update_apply() {
+                Ok(st) => Reply::ok(CoreJson::to_string(&st).unwrap()),
+                Err(AgentError::InvalidOperation(msg)) => Reply::err(&msg),
+                Err(AgentError::NotSupported) => Reply::err("Not supported."),
+                Err(e) => {
+                    Log::error_err("update apply failed", &e.to_string());
+                    Reply::err(Self::ERR_INTERNAL)
+                }
+            },
+            _ => Reply::err(Self::USAGE_UPDATE),
         }
     }
 }

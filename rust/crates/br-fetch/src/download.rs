@@ -217,7 +217,12 @@ impl Downloader {
 
             let body_budget = READ_STALL_TIMEOUT
                 + Duration::from_secs(expected_size.saturating_sub(resume_from) / MIN_BYTES_PER_SEC);
-            let resp = match self.send_following_redirects(url, range_header.as_deref(), body_budget) {
+            let resp = match self.send_following_redirects(
+                url,
+                range_header.as_deref(),
+                &[],
+                body_budget,
+            ) {
                 Ok(r) => r,
                 Err(SendErr::Connect) => {
                     if !received_any_byte && attempt == 0 {
@@ -358,13 +363,105 @@ impl Downloader {
         }
     }
 
+    /// Performs a bounded GET request, returning at most `max_bytes` of body bytes.
+    /// Enforces the same allowed-URL rule, manual HTTPS-only redirects, timeouts, and retries as
+    /// [`Self::download_file`]. Non-200 statuses (other than retryable 5xx) return [`FetchError::Http`].
+    pub fn get_bytes(
+        &self,
+        url: &str,
+        max_bytes: usize,
+        headers: &[(&str, &str)],
+    ) -> Result<Vec<u8>, FetchError> {
+        if !is_allowed_url(url) {
+            return Err(FetchError::Http {
+                status: 0,
+                url: url.to_string(),
+            });
+        }
+
+        let mut attempt = 0usize;
+        loop {
+            let resp = match self.send_following_redirects(url, None, headers, READ_STALL_TIMEOUT) {
+                Ok(r) => r,
+                Err(SendErr::Connect) => {
+                    if attempt == 0 {
+                        return Err(FetchError::Offline);
+                    }
+                    if let Some(&delay) = self.retry_delays.get(attempt) {
+                        thread::sleep(delay);
+                        attempt += 1;
+                        continue;
+                    }
+                    return Err(FetchError::Offline);
+                }
+                Err(SendErr::Transient(msg)) => {
+                    if let Some(&delay) = self.retry_delays.get(attempt) {
+                        thread::sleep(delay);
+                        attempt += 1;
+                        continue;
+                    }
+                    return Err(FetchError::io(
+                        format!("request failed for {url}: {msg}"),
+                        io::Error::other(msg),
+                    ));
+                }
+                Err(SendErr::Fatal(e)) => return Err(e),
+            };
+
+            let status = resp.status().as_u16();
+            if (500..600).contains(&status) {
+                if let Some(&delay) = self.retry_delays.get(attempt) {
+                    thread::sleep(delay);
+                    attempt += 1;
+                    continue;
+                }
+                return Err(FetchError::Http {
+                    status,
+                    url: url.to_string(),
+                });
+            }
+            if status != 200 {
+                return Err(FetchError::Http {
+                    status,
+                    url: url.to_string(),
+                });
+            }
+
+            let cap_plus_one = (max_bytes as u64).saturating_add(1);
+            let mut reader = resp.into_body().into_reader().take(cap_plus_one);
+            let mut buf = Vec::new();
+            match reader.read_to_end(&mut buf) {
+                Ok(_) => {}
+                Err(e) => {
+                    if let Some(&delay) = self.retry_delays.get(attempt) {
+                        thread::sleep(delay);
+                        attempt += 1;
+                        continue;
+                    }
+                    return Err(FetchError::io(format!("reading response from {url}"), e));
+                }
+            }
+            if buf.len() > max_bytes {
+                return Err(FetchError::io(
+                    format!("response from {url} exceeded {max_bytes} bytes"),
+                    io::Error::new(io::ErrorKind::InvalidData, "response too large"),
+                ));
+            }
+            return Ok(buf);
+        }
+    }
+
     fn send_following_redirects(
         &self,
         initial_url: &str,
         range_header: Option<&str>,
+        extra_headers: &[(&str, &str)],
         body_budget: Duration,
     ) -> Result<ureq::http::Response<ureq::Body>, SendErr> {
         let mut current = initial_url.to_string();
+        let has_custom_ua = extra_headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("user-agent"));
         for hop in 0..=MAX_REDIRECTS {
             if !is_allowed_url(&current) {
                 return Err(SendErr::Fatal(FetchError::Http {
@@ -377,8 +474,13 @@ impl Downloader {
                 .get(&current)
                 .config()
                 .timeout_recv_body(Some(body_budget))
-                .build()
-                .header("User-Agent", &self.user_agent);
+                .build();
+            if !has_custom_ua {
+                req = req.header("User-Agent", &self.user_agent);
+            }
+            for &(k, v) in extra_headers {
+                req = req.header(k, v);
+            }
             if let Some(range) = range_header {
                 req = req.header("Range", range);
             }

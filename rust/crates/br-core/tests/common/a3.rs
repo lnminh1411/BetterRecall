@@ -17,7 +17,7 @@ use std::time::Duration;
 use br_contracts::{
     AgentStatus, AudioState, BenchDevice, BenchReport, BenchResult, CaptureBench, CaptureMeta,
     EncoderBench, GpuInfo, HardwareInfo, ModelsList, ModelsProgress, MonitorInfo, NpuInfo,
-    QueueState, ReplayClip, StoreStats, ThumbData,
+    QueueState, ReplayClip, StoreStats, ThumbData, UpdateProgress, UpdateStatus,
 };
 use br_core::{
     AgentControl, AgentError, CancelToken, EmbedError, HttpRequest, HttpResponse, HttpTransport,
@@ -301,6 +301,10 @@ pub struct FakeAgent {
     pub on_export_replay: Mutex<Option<Box<dyn Fn(&str, &Path, &CancelToken) -> Result<(), AgentError> + Send + Sync>>>,
     pub models_list_reply: Mutex<Option<ModelsList>>,
     pub on_models_download: Mutex<Option<Arc<dyn Fn(&str, &mut dyn FnMut(ModelsProgress), &CancelToken) -> Result<(), AgentError> + Send + Sync>>>,
+    pub update_status_reply: Mutex<Option<UpdateStatus>>,
+    pub on_update_check: Mutex<Option<Arc<dyn Fn(&CancelToken) -> Result<UpdateStatus, AgentError> + Send + Sync>>>,
+    pub on_update_download: Mutex<Option<Arc<dyn Fn(&mut dyn FnMut(UpdateProgress), &CancelToken) -> Result<(), AgentError> + Send + Sync>>>,
+    pub on_update_apply: Mutex<Option<Arc<dyn Fn() -> Result<UpdateStatus, AgentError> + Send + Sync>>>,
     next_id: AtomicU64,
     status_listeners: Arc<Mutex<Vec<(u64, Arc<dyn Fn(&AgentStatus) + Send + Sync>)>>>,
     capture_listeners: Arc<Mutex<Vec<(u64, Arc<dyn Fn(&CaptureMeta) + Send + Sync>)>>>,
@@ -348,6 +352,10 @@ impl FakeAgent {
             on_export_replay: Mutex::new(None),
             models_list_reply: Mutex::new(None),
             on_models_download: Mutex::new(None),
+            update_status_reply: Mutex::new(None),
+            on_update_check: Mutex::new(None),
+            on_update_download: Mutex::new(None),
+            on_update_apply: Mutex::new(None),
             next_id: AtomicU64::new(1),
             status_listeners: Arc::new(Mutex::new(Vec::new())),
             capture_listeners: Arc::new(Mutex::new(Vec::new())),
@@ -540,6 +548,42 @@ impl AgentControl for FakeAgent {
         let hook = self.on_models_download.lock().unwrap().clone();
         if let Some(f) = hook {
             return f(target, emit, ct);
+        }
+        Err(AgentError::NotSupported)
+    }
+
+    fn update_status(&self) -> Result<UpdateStatus, AgentError> {
+        self.update_status_reply
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or(AgentError::NotSupported)
+    }
+
+    fn update_check(&self, ct: &CancelToken) -> Result<UpdateStatus, AgentError> {
+        let hook = self.on_update_check.lock().unwrap().clone();
+        if let Some(f) = hook {
+            return f(ct);
+        }
+        Err(AgentError::NotSupported)
+    }
+
+    fn update_download(
+        &self,
+        emit: &mut dyn FnMut(UpdateProgress),
+        ct: &CancelToken,
+    ) -> Result<(), AgentError> {
+        let hook = self.on_update_download.lock().unwrap().clone();
+        if let Some(f) = hook {
+            return f(emit, ct);
+        }
+        Err(AgentError::NotSupported)
+    }
+
+    fn update_apply(&self) -> Result<UpdateStatus, AgentError> {
+        let hook = self.on_update_apply.lock().unwrap().clone();
+        if let Some(f) = hook {
+            return f();
         }
         Err(AgentError::NotSupported)
     }

@@ -388,6 +388,10 @@ impl DataPaths {
         home.join("cache").join("bench.json")
     }
 
+    pub fn updates_dir(home: &Path) -> PathBuf {
+        home.join("cache").join("updates")
+    }
+
     pub fn logs_dir(home: &Path) -> PathBuf {
         home.join("logs")
     }

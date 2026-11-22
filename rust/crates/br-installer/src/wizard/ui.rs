@@ -682,6 +682,7 @@ fn spawn_worker(hwnd: HWND, state: &mut WizardState) {
                 &InstallOpts {
                     allow_downgrade,
                     model_mode,
+                    skip_model_download: false,
                     catalog: dev_catalog,
                     integrity_key: None,
                 },

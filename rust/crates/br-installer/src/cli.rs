@@ -314,17 +314,34 @@ pub(crate) fn load_dev_catalog(args: &CliArgs) -> Result<Option<Catalog>, Instal
 }
 
 fn dispatch_silent(ctx: &Ctx, args: &CliArgs) -> Result<Outcome, InstallError> {
+    let exe = std::env::current_exe()
+        .map_err(|e| InstallError::io("resolving current executable path", e))?;
+    dispatch_silent_for_exe(ctx, args, &exe)
+}
+
+/// Runs the silent CLI action using an explicit installer executable path (exposed for tests).
+pub fn dispatch_silent_for_exe(
+    ctx: &Ctx,
+    args: &CliArgs,
+    exe: &Path,
+) -> Result<Outcome, InstallError> {
     let dev_catalog = load_dev_catalog(args)?;
     let outcome = match args.action {
         Action::Install => {
-            let exe = std::env::current_exe()
-                .map_err(|e| InstallError::io("resolving current executable path", e))?;
+            let (model_mode, skip_model_download) = match args.model_mode {
+                Some(explicit) => (explicit, false),
+                None => match read_model_mode(ctx) {
+                    Some(existing) => (existing, true),
+                    None => (ModelMode::Later, false),
+                },
+            };
             install(
                 ctx,
-                &exe,
+                exe,
                 &InstallOpts {
                     allow_downgrade: args.allow_downgrade,
-                    model_mode: args.model_mode.unwrap_or(ModelMode::Later),
+                    model_mode,
+                    skip_model_download,
                     catalog: dev_catalog,
                     integrity_key: None,
                 },

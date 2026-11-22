@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use br_contracts::{
     AgentStatus, AudioState, BenchReport, BenchResult, CaptureMeta, DataPaths, HotkeySettings,
     InstallLayout, ModelsList, ModelsProgress, PipeNames, PrivacySettings, PurgeNotice, PurgeScope,
-    QueueState, ReplayClip, Settings, StorageSettings, StoreStats,
+    QueueState, ReplayClip, Settings, StorageSettings, StoreStats, UpdateProgress, UpdateStatus,
 };
 use br_core::{
     AgentControl, AgentError, CancelSource, CancelToken, CoreHost, EncryptedStore, KeyVault,
@@ -41,6 +41,9 @@ use crate::host::hotkey_parser::HotkeyParser;
 use crate::host::message_window::{MenuStateSnapshot, MessageWindow, TrayCommand};
 use crate::host::shell::{StartupRegistration, UiLauncher};
 use crate::host::storage_guard::{StorageGuard, StorageStore};
+use crate::host::update::{
+    AUTO_INITIAL_DELAY, AUTO_WAKE_INTERVAL, UpdateManager, UpdateTestConfig,
+};
 use crate::native::{
     WTS_CONSOLE_CONNECT, WTS_CONSOLE_DISCONNECT, WTS_REMOTE_CONNECT, WTS_REMOTE_DISCONNECT,
     WTS_SESSION_LOCK, WTS_SESSION_UNLOCK, session_locked_now, tick_count64, to_wide_z,
@@ -151,6 +154,29 @@ struct AudioSourcesState {
     mic_retry: RetryBackoff,
 }
 
+struct AutoUpdateHandle {
+    stop: Arc<(Mutex<bool>, Condvar)>,
+    cts: CancelSource,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl AutoUpdateHandle {
+    fn stop(&mut self) {
+        self.cts.cancel();
+        {
+            let (lock, cv) = &*self.stop;
+            let mut s = lock.lock().unwrap_or_else(|e| e.into_inner());
+            *s = true;
+            cv.notify_all();
+        }
+        if let Some(h) = self.thread.take()
+            && h.thread().id() != thread::current().id()
+        {
+            let _ = h.join();
+        }
+    }
+}
+
 /// Composition root and `AgentControl`: wires `CoreHost`, worker supervision, embedding scheduler,
 /// guardrails, tray/message window, hotkeys, read gate, pause controller, capture, replay, and audio.
 pub struct AgentHost {
@@ -196,7 +222,10 @@ pub struct AgentHost {
     stop_writers: Mutex<StopWritersState>,
     stop_writers_cv: Condvar,
     on_stop_pipes_for_test: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
-    models_downloading: AtomicBool,
+    models_downloading: Arc<AtomicBool>,
+    update_downloading: Arc<AtomicBool>,
+    updater: Arc<UpdateManager>,
+    auto_update_thread: Mutex<Option<AutoUpdateHandle>>,
     catalog_for_test: Mutex<Option<br_fetch::Catalog>>,
     on_worker_restart_for_test: Mutex<Option<RestartHook>>,
     settings_guard: Mutex<Option<ListenerGuard>>,
@@ -253,6 +282,14 @@ impl AgentHost {
             !gate_for_replays.is_open(settings_for_locked.current().security.require_unlock)
         })));
 
+        let models_downloading = Arc::new(AtomicBool::new(false));
+        let update_downloading = Arc::new(AtomicBool::new(false));
+        let updater = Arc::new(UpdateManager::new(
+            opt.home.clone(),
+            update_downloading.clone(),
+            models_downloading.clone(),
+        ));
+
         Arc::new(Self {
             core,
             opt,
@@ -304,7 +341,10 @@ impl AgentHost {
             }),
             stop_writers_cv: Condvar::new(),
             on_stop_pipes_for_test: Mutex::new(None),
-            models_downloading: AtomicBool::new(false),
+            models_downloading,
+            update_downloading,
+            updater,
+            auto_update_thread: Mutex::new(None),
             catalog_for_test: Mutex::new(None),
             on_worker_restart_for_test: Mutex::new(None),
             settings_guard: Mutex::new(None),
@@ -534,6 +574,7 @@ impl AgentHost {
         }
 
         self.replays().delete_partials();
+        self.updater.cleanup_on_start();
 
         let probe = Arc::new(Mutex::new(SystemProbe::new(
             HardwareProbe::intel_igpu_pdh_token(),
@@ -773,6 +814,7 @@ impl AgentHost {
         *self.storage.lock().unwrap_or_else(|e| e.into_inner()) = Some(storage);
 
         self.spawn_periodic_timers();
+        self.sync_auto_updater();
 
         if self.opt.autostart && StartupRegistration::is_installed(&self.opt.install_dir, &self.opt.home)
             && let Err(e) = StartupRegistration::register(&self.opt.install_dir) {
@@ -1390,6 +1432,9 @@ impl AgentHost {
         if let Some(key) = WorkerSettingsDiff::changed(&old, &s) {
             self.supervisor.request_restart(key);
         }
+        if old.update.auto != s.update.auto {
+            self.sync_auto_updater();
+        }
     }
 
     fn storage_check(&self) {
@@ -1946,6 +1991,93 @@ impl AgentHost {
             .unwrap_or_else(|e| e.into_inner()) = hook;
     }
 
+    pub fn set_update_test_config(&self, cfg: Option<UpdateTestConfig>) {
+        self.updater.set_test_config(cfg);
+    }
+
+    pub fn updater(&self) -> &Arc<UpdateManager> {
+        &self.updater
+    }
+
+    pub fn is_busy_for_auto_update(&self) -> bool {
+        self.models_downloading.load(Ordering::Acquire)
+            || self.update_downloading.load(Ordering::Acquire)
+            || self.core.is_export_running()
+            || self.bench_lock.try_lock().is_err()
+    }
+
+    fn sync_auto_updater(self: &Arc<Self>) {
+        let want = self.settings().update.auto && self.updater.has_public_key();
+        let mut slot = self
+            .auto_update_thread
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !want {
+            if let Some(mut handle) = slot.take() {
+                drop(slot);
+                handle.stop();
+            }
+            return;
+        }
+        if slot.is_some() {
+            return;
+        }
+        let stop = Arc::new((Mutex::new(false), Condvar::new()));
+        let cts = CancelSource::new();
+        let ct = cts.token();
+        let stop_bg = stop.clone();
+        let weak = Arc::downgrade(self);
+        let thread = thread::Builder::new()
+            .name("BetterRecall.AutoUpdate".to_string())
+            .spawn(move || {
+                let mut wait = AUTO_INITIAL_DELAY;
+                loop {
+                    let (lock, cv) = &*stop_bg;
+                    let g = lock.lock().unwrap_or_else(|e| e.into_inner());
+                    if *g || ct.is_cancelled() {
+                        return;
+                    }
+                    let (g2, _) = cv
+                        .wait_timeout(g, wait)
+                        .unwrap_or_else(|e| e.into_inner());
+                    if *g2 || ct.is_cancelled() {
+                        return;
+                    }
+                    drop(g2);
+                    let Some(h) = weak.upgrade() else { return };
+                    let auto_on = h.settings().update.auto;
+                    if !auto_on {
+                        return;
+                    }
+                    let idle_ms = crate::native::idle_milliseconds();
+                    let busy = h.is_busy_for_auto_update();
+                    let _ = h
+                        .updater
+                        .auto_step(Utc::now(), idle_ms, busy, auto_on, &ct);
+                    wait = AUTO_WAKE_INTERVAL;
+                }
+            })
+            .ok();
+        if let Some(t) = thread {
+            *slot = Some(AutoUpdateHandle {
+                stop,
+                cts,
+                thread: Some(t),
+            });
+        }
+    }
+
+    fn stop_auto_updater(&self) {
+        let handle = self
+            .auto_update_thread
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(mut h) = handle {
+            h.stop();
+        }
+    }
+
     fn effective_catalog(&self) -> Result<(br_fetch::Catalog, bool), AgentError> {
         if let Some(cat) = self
             .catalog_for_test
@@ -1974,6 +2106,7 @@ impl AgentHost {
             w.stop();
         }
         self.flush_held_transcripts();
+        self.stop_auto_updater();
         self.cts.cancel();
         {
             let (lock, cv) = &*self.timer_stop;
@@ -2316,6 +2449,11 @@ impl AgentControl for AgentHost {
         emit: &mut dyn FnMut(ModelsProgress),
         ct: &CancelToken,
     ) -> Result<(), AgentError> {
+        if self.update_downloading.load(Ordering::Acquire) {
+            return Err(AgentError::InvalidOperation(
+                br_core::CommandProcessor::ERR_UPDATE_RUNNING_FOR_MODELS.to_string(),
+            ));
+        }
         let (catalog, is_test) = self.effective_catalog()?;
         let live_settings = self.core.settings().current();
         let models_dir = DataPaths::models_dir(&self.opt.home, &live_settings);
@@ -2335,6 +2473,27 @@ impl AgentControl for AgentHost {
             }
             self.supervisor.request_restart("models");
         })
+    }
+
+    fn update_status(&self) -> Result<UpdateStatus, AgentError> {
+        Ok(self.updater.status(self.core.settings().current().update.auto))
+    }
+
+    fn update_check(&self, ct: &CancelToken) -> Result<UpdateStatus, AgentError> {
+        self.updater
+            .check(self.core.settings().current().update.auto, ct)
+    }
+
+    fn update_download(
+        &self,
+        emit: &mut dyn FnMut(UpdateProgress),
+        ct: &CancelToken,
+    ) -> Result<(), AgentError> {
+        self.updater.download(emit, ct)
+    }
+
+    fn update_apply(&self) -> Result<UpdateStatus, AgentError> {
+        self.updater.apply(self.core.settings().current().update.auto)
     }
 
     fn on_panicked(&self, cb: Arc<dyn Fn() + Send + Sync>) -> ListenerGuard {

@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use br_contracts::{
     AgentStatus, BenchReport, BenchResult, CaptureMeta, ModelsList, ModelsProgress, ReplayClip,
-    ThumbData,
+    ThumbData, UpdateProgress, UpdateStatus,
 };
 use thiserror::Error;
 
@@ -71,6 +71,26 @@ pub trait AgentControl: Send + Sync {
         _emit: &mut dyn FnMut(ModelsProgress),
         _ct: &CancelToken,
     ) -> Result<(), AgentError> {
+        Err(AgentError::NotSupported)
+    }
+
+    fn update_status(&self) -> Result<UpdateStatus, AgentError> {
+        Err(AgentError::NotSupported)
+    }
+
+    fn update_check(&self, _ct: &CancelToken) -> Result<UpdateStatus, AgentError> {
+        Err(AgentError::NotSupported)
+    }
+
+    fn update_download(
+        &self,
+        _emit: &mut dyn FnMut(UpdateProgress),
+        _ct: &CancelToken,
+    ) -> Result<(), AgentError> {
+        Err(AgentError::NotSupported)
+    }
+
+    fn update_apply(&self) -> Result<UpdateStatus, AgentError> {
         Err(AgentError::NotSupported)
     }
 

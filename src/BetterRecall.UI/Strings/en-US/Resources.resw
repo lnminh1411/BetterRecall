@@ -931,4 +931,35 @@
   <data name="ModelsPage_Offline" xml:space="preserve"><value>No internet connection. Try again later or install manually.</value></data>
   <data name="ModelsPage_Failed" xml:space="preserve"><value>Download failed: {0}</value></data>
   <data name="ModelsPage_OpenFolderFailed" xml:space="preserve"><value>Could not open folder: {0}</value></data>
+  <data name="G_update" xml:space="preserve"><value>Update</value></data>
+  <data name="S_update_auto" xml:space="preserve"><value>Install updates automatically</value></data>
+  <data name="S_update_auto_D" xml:space="preserve"><value>When on, BetterRecall checks GitHub once a day and installs signed updates while you are away from the PC. When off, it connects only when you select Check for updates.</value></data>
+  <data name="UpdatePage_Title.Text" xml:space="preserve"><value>Update</value></data>
+  <data name="UpdatePage_Desc.Text" xml:space="preserve"><value>BetterRecall can update itself from GitHub Releases.</value></data>
+  <data name="UpdatePage_InstalledVersion" xml:space="preserve"><value>Installed version: {0}</value></data>
+  <data name="UpdatePage_Check.Content" xml:space="preserve"><value>Check for updates</value></data>
+  <data name="UpdatePage_LastChecked" xml:space="preserve"><value>Last checked: {0}</value></data>
+  <data name="UpdatePage_NeverChecked" xml:space="preserve"><value>Not checked yet</value></data>
+  <data name="UpdatePage_UpToDate" xml:space="preserve"><value>BetterRecall is up to date.</value></data>
+  <data name="UpdatePage_Available" xml:space="preserve"><value>Version {0} is available</value></data>
+  <data name="UpdatePage_DownloadSize" xml:space="preserve"><value>Download size: {0}</value></data>
+  <data name="UpdatePage_SizeUnknown" xml:space="preserve"><value>Unknown</value></data>
+  <data name="UpdatePage_ReleaseNotes.Content" xml:space="preserve"><value>Release notes</value></data>
+  <data name="UpdatePage_DownloadInstall.Content" xml:space="preserve"><value>Download and install</value></data>
+  <data name="UpdatePage_Cancel.Content" xml:space="preserve"><value>Cancel</value></data>
+  <data name="UpdatePage_Checking" xml:space="preserve"><value>Checking for updates…</value></data>
+  <data name="UpdatePage_Verifying" xml:space="preserve"><value>Verifying download…</value></data>
+  <data name="UpdatePage_Installing" xml:space="preserve"><value>Installing… BetterRecall will close and start again.</value></data>
+  <data name="UpdatePage_Cancelled" xml:space="preserve"><value>Download cancelled. Partial download was kept so you can resume later.</value></data>
+  <data name="UpdatePage_Offline" xml:space="preserve"><value>No internet connection. Try again later.</value></data>
+  <data name="UpdatePage_Failed" xml:space="preserve"><value>Update failed: {0}</value></data>
+  <data name="UpdatePage_OpenNotesFailed" xml:space="preserve"><value>Could not open release notes: {0}</value></data>
+  <data name="UpdatePage_WarnTitle" xml:space="preserve"><value>Install BetterRecall {0}?</value></data>
+  <data name="UpdatePage_WarnSource" xml:space="preserve"><value>Source: github.com/lnminh1411/BetterRecall</value></data>
+  <data name="UpdatePage_WarnSize" xml:space="preserve"><value>Download size: {0}</value></data>
+  <data name="UpdatePage_WarnVerify" xml:space="preserve"><value>The update's signature and checksum are checked before it runs.</value></data>
+  <data name="UpdatePage_WarnRestart" xml:space="preserve"><value>BetterRecall will close while the update installs and then start again.</value></data>
+  <data name="UpdatePage_WarnPrimary" xml:space="preserve"><value>Download and install</value></data>
+  <data name="UpdatePage_AutoToggle.Header" xml:space="preserve"><value>Install updates automatically</value></data>
+  <data name="UpdatePage_AutoDesc.Text" xml:space="preserve"><value>When on, BetterRecall checks GitHub once a day and installs signed updates while you are away from the PC. When off, it connects only when you select Check for updates.</value></data>
 </root>

@@ -1263,3 +1263,52 @@ pub struct ModelsProgress {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
+
+// ---- update page (R8, stage I5) ----
+
+/// Reply to the UI-pipe `update status`, `update check`, and `update apply` verbs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateStatus {
+    pub current_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_version: Option<String>,
+    pub available: bool,
+    pub can_install: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes_url: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "utc_timestamp::opt"
+    )]
+    pub published_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installer_bytes: Option<u64>,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub downloaded_version: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "utc_timestamp::opt"
+    )]
+    pub last_check: Option<DateTime<Utc>>,
+    pub auto: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// One streamed line of `update download`.
+/// `phase`: `"checking" | "downloading" | "verifying" | "done" | "cancelled" | "offline" | "failed"`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateProgress {
+    pub phase: String,
+    pub done_bytes: u64,
+    pub total_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}

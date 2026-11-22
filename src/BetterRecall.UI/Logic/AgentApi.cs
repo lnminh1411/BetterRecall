@@ -78,6 +78,10 @@ public static class Responses
 
     public static ModelsProgress? ModelsProgress(JsonElement d) => d.Deserialize(ContractsJson.Default.ModelsProgress);
 
+    public static UpdateStatus? UpdateStatus(JsonElement d) => d.Deserialize(ContractsJson.Default.UpdateStatus);
+
+    public static UpdateProgress? UpdateProgress(JsonElement d) => d.Deserialize(ContractsJson.Default.UpdateProgress);
+
     public static JsonObject SettingsObject(JsonElement d) =>
         JsonNode.Parse(d.GetRawText()) as JsonObject ?? throw new JsonException("settings is not an object");
 }
@@ -350,6 +354,41 @@ public sealed class AgentApi(IAgentClient client)
             throw new InvalidOperationException("Streaming requires AgentClient.");
         return ModelsDownloadStreamAsync(ac, target, onProgress, ct);
     }
+
+    // ---------------- updates (R8, stage I5) ----------------
+
+    public async Task<AgentResult<UpdateStatus>> UpdateStatusAsync(CancellationToken ct = default) =>
+        (await client.SendAsync("update status", ct)).As(d => Responses.UpdateStatus(d) ?? throw new JsonException());
+
+    public async Task<AgentResult<UpdateStatus>> UpdateCheckAsync(CancellationToken ct = default) =>
+        (await client.SendAsync("update check", ct)).As(d => Responses.UpdateStatus(d) ?? throw new JsonException());
+
+    /// <summary>Streams `update download` on a dedicated run client.</summary>
+    public static Task<AgentResult> UpdateDownloadStreamAsync(AgentClient run, Action<UpdateProgress> onProgress, CancellationToken ct = default) =>
+        run.StreamAsync("update download", r =>
+        {
+            UpdateProgress? p;
+            try { p = Responses.UpdateProgress(r.Data); }
+            catch (JsonException) { p = null; }
+            if (p is null)
+            {
+                onProgress(new UpdateProgress("failed", 0, 0, Error: "Bad response."));
+                return true;
+            }
+            onProgress(p);
+            return p.Phase is "done" or "cancelled" or "offline" or "failed";
+        }, ct);
+
+    /// <summary>Instance overload for callers holding an AgentApi backed by a dedicated AgentClient.</summary>
+    public Task<AgentResult> UpdateDownloadStreamAsync(Action<UpdateProgress> onProgress, CancellationToken ct = default)
+    {
+        if (client is not AgentClient ac)
+            throw new InvalidOperationException("Streaming requires AgentClient.");
+        return UpdateDownloadStreamAsync(ac, onProgress, ct);
+    }
+
+    public async Task<AgentResult<UpdateStatus>> UpdateApplyAsync(CancellationToken ct = default) =>
+        (await client.SendAsync("update apply", ct)).As(d => Responses.UpdateStatus(d) ?? throw new JsonException());
 
     private static string Json(Action<Utf8JsonWriter> body)
     {

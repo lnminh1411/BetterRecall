@@ -223,6 +223,25 @@ public class ContractFixtureTests
                 DoneBytes: 524288000,
                 TotalBytes: 2782236945,
                 File: "embeddinggemma-2/vision.onnx"))),
+            ("UpdateStatus", Serialize(new UpdateStatus(
+                CurrentVersion: "0.3.0-dev",
+                LatestVersion: "0.3.0",
+                Available: true,
+                CanInstall: true,
+                Reason: null,
+                NotesUrl: "https://github.com/lnminh1411/BetterRecall/releases/tag/v0.3.0",
+                PublishedAt: new DateTimeOffset(2026, 11, 22, 10, 0, 0, TimeSpan.Zero),
+                InstallerBytes: 125829120,
+                State: "idle",
+                DownloadedVersion: null,
+                LastCheck: new DateTimeOffset(2026, 11, 22, 10, 5, 0, TimeSpan.Zero),
+                Auto: false,
+                Error: null))),
+            ("UpdateProgress", Serialize(new UpdateProgress(
+                Phase: "downloading",
+                DoneBytes: 52428800,
+                TotalBytes: 125829120,
+                Error: null))),
         };
 
         bool update = Environment.GetEnvironmentVariable("BR_UPDATE_FIXTURES") == "1";
