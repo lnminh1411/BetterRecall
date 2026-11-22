@@ -198,6 +198,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "br-installer"
+version = "0.3.0-dev"
+dependencies = [
+ "br-contracts",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "windows",
+ "zip",
+]
+
+[[package]]
 name = "br-worker"
 version = "0.3.0-dev"
 dependencies = [
