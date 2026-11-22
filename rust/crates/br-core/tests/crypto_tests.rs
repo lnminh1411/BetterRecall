@@ -280,6 +280,31 @@ fn damaged_key_file_reports_key_lost_and_purge_replaces_it() {
     assert_eq!("dpapi", v.protection());
 }
 
+/// C5: a key file held open without read sharing (AV scan, backup tool at logon) is a
+/// retryable I/O error, never a lost key, and loads once the lock is gone.
+#[test]
+fn locked_key_file_is_io_error_then_loads_after_release() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let h = TempHome::new();
+    let s = with_mode("dpapi");
+    let a = {
+        let v = KeyVault::new(h.path(), settings_fn(&s), None, false);
+        assert!(v.try_load_silent().unwrap());
+        v.derive("x").unwrap().to_vec()
+    };
+    let kf = DataPaths::key_file(h.path());
+    let lock = fs::OpenOptions::new().read(true).share_mode(0).open(&kf).unwrap();
+    let v = KeyVault::new(h.path(), settings_fn(&s), None, false);
+    assert!(matches!(v.try_load_silent(), Err(CryptoError::Io(_))));
+    assert!(!v.needs_passphrase());
+    assert!(!v.would_set_passphrase());
+    assert!(matches!(v.try_load_silent(), Err(CryptoError::Io(_))));
+    drop(lock);
+    assert!(v.try_load_silent().unwrap());
+    assert_eq!("dpapi", v.protection());
+    assert_eq!(a, v.derive("x").unwrap().to_vec());
+}
+
 #[test]
 fn argon2id_matches_rfc9106_shape_and_is_deterministic() {
     let salt = [0u8; 16];

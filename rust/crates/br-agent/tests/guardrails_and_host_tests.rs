@@ -439,6 +439,33 @@ fn a8_no_toolbar_result() {
 }
 
 #[test]
+fn a13_audio_status_follows_loopback_and_mic_loss() {
+    let on = |sys: bool, mic: bool| (sys, mic);
+    let st = |a: br_contracts::AudioState| (a.system, a.mic);
+    assert_eq!(on(true, true), st(AgentHost::audio_state_of(true, true, true, false)));
+    // Loopback ended, waiting to restart: system audio is off.
+    assert_eq!(on(false, true), st(AgentHost::audio_state_of(true, false, true, false)));
+    // Mic lost before the status tick reopens it: mic is off.
+    assert_eq!(on(true, false), st(AgentHost::audio_state_of(true, true, true, true)));
+    assert_eq!(on(false, false), st(AgentHost::audio_state_of(false, true, false, false)));
+}
+
+#[test]
+fn a8_failed_uia_search_fails_closed() {
+    assert_eq!(
+        BadgeResult::NoBadge,
+        BrowserBadgeDetector::search_error_result(true, BadgeResult::NoBadge)
+    );
+    assert_eq!(
+        BadgeResult::CheckFailed,
+        BrowserBadgeDetector::search_error_result(false, BadgeResult::NoBadge)
+    );
+    // windows-rs reports "nothing found" as an error with code S_OK; a real failure is not S_OK.
+    assert!(windows::core::Error::empty().code().is_ok());
+    assert!(!windows::core::Error::from_hresult(windows::core::HRESULT(0x80131505u32 as i32)).code().is_ok());
+}
+
+#[test]
 fn a8_edge_badge_name_is_matched() {
     assert!(BrowserBadgeDetector::BADGE_NAMES.contains(&"InPrivate browsing"));
 }

@@ -1177,13 +1177,32 @@ impl AgentHost {
     }
 
     fn audio_state(&self) -> AudioState {
-        let st = self
-            .audio_sources
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let (system_src, mic_src, mic_lost) = {
+            let st = self
+                .audio_sources
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            (
+                st.system_audio.is_some(),
+                st.mic_audio.is_some(),
+                st.mic_audio.as_ref().is_some_and(|m| m.mic_lost()),
+            )
+        };
+        // Loopback state read outside the audio_sources lock.
+        Self::audio_state_of(system_src, self.loopback.running(), mic_src, mic_lost)
+    }
+
+    /// A13: system audio is on only while its loopback capture runs (not while it waits to
+    /// restart); the mic is on only while open and not lost.
+    pub fn audio_state_of(
+        system_src: bool,
+        loopback_running: bool,
+        mic_src: bool,
+        mic_lost: bool,
+    ) -> AudioState {
         AudioState {
-            system: st.system_audio.is_some(),
-            mic: st.mic_audio.is_some(),
+            system: system_src && loopback_running,
+            mic: mic_src && !mic_lost,
         }
     }
 

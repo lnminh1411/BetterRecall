@@ -130,6 +130,18 @@ pub fn close_running(ctx: &Ctx) -> Result<bool, InstallError> {
     Ok(agent_was_running)
 }
 
+/// Executable paths of the processes this installer can query (its own session and user).
+pub fn running_images() -> Vec<PathBuf> {
+    snapshot_processes().into_iter().filter_map(|p| p.image).collect()
+}
+
+/// C1 (sweep 5): true when any image lies inside `dir`; such a folder must not be deleted
+/// while the program runs from it (an old MCP server, CLI, or a slow-quitting agent).
+pub fn any_image_under(images: &[PathBuf], dir: &Path) -> bool {
+    let prefix = normalized_dir_prefix(dir);
+    images.iter().any(|img| path_is_under_prefix(img, &prefix))
+}
+
 /// True while an agent holds this data folder's single-instance mutex.
 pub fn agent_running(ctx: &Ctx) -> bool {
     named_mutex_exists(&PipeNames::agent_mutex_for(&ctx.home))

@@ -177,10 +177,13 @@ impl PipeManager {
         {
             return false;
         }
+        let rel = &img[install_prefix.len()..];
+        if Self::home_app_entry_matches(&ent, rel) {
+            return true;
+        }
         let Some(root) = Path::new(&install).parent() else {
             return false;
         };
-        let rel = &img[install_prefix.len()..];
         let root_str = root.to_string_lossy();
         let root_prefix = format!("{}\\", root_str.trim_end_matches('\\'));
         if ent.len() < root_prefix.len()
@@ -203,6 +206,37 @@ impl PipeManager {
                 && rel.eq_ignore_ascii_case(InstallLayout::CLI_EXE);
         }
         InstallLayout::is_version_folder(folder) && ent_rel.eq_ignore_ascii_case(rel)
+    }
+
+    /// B12 (0.3 layout): the install folder is fixed and the CLI shim lives in
+    /// `<home>\app\bin\betterrecall.cmd`; 0.2.x entries named `<home>\app\<version>\<file>`.
+    /// Either names the same file as `rel` (the client image relative to the install folder).
+    fn home_app_entry_matches(ent: &str, rel: &str) -> bool {
+        let parts: Vec<&str> = ent.split('\\').filter(|p| !p.is_empty()).collect();
+        let rel_parts: Vec<&str> = rel.split('\\').filter(|p| !p.is_empty()).collect();
+        if rel_parts.is_empty() {
+            return false;
+        }
+        let shim = ["app", "bin", InstallLayout::CLI_SHIM];
+        if parts.len() > shim.len()
+            && parts[parts.len() - shim.len()..]
+                .iter()
+                .zip(shim)
+                .all(|(a, b)| a.eq_ignore_ascii_case(b))
+        {
+            return rel.eq_ignore_ascii_case(InstallLayout::CLI_EXE);
+        }
+        let n = rel_parts.len() + 2;
+        if parts.len() <= n {
+            return false;
+        }
+        let at = parts.len() - n;
+        parts[at].eq_ignore_ascii_case("app")
+            && InstallLayout::is_version_folder(parts[at + 1])
+            && parts[at + 2..]
+                .iter()
+                .zip(&rel_parts)
+                .all(|(a, b)| a.eq_ignore_ascii_case(b))
     }
 
     /// True when a permission went from on to off (or `require_unlocked` became true).
@@ -230,9 +264,13 @@ impl PipeManager {
             }
             v
         };
-        for s in servers {
-            s.stop();
-        }
+        // C4 (sweep 5): stop all pipes at once; each waits up to 5 s for its handlers, and a
+        // slow UI handler must not keep the public and MCP pipes serving past the session-end budget.
+        std::thread::scope(|scope| {
+            for s in &servers {
+                scope.spawn(move || s.stop());
+            }
+        });
     }
 }
 

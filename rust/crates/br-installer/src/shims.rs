@@ -113,6 +113,7 @@ pub fn cleanup_launcher_installs(home: &Path) {
         return;
     }
 
+    let images = crate::running::running_images();
     if let Ok(entries) = fs::read_dir(&app) {
         for entry in entries.flatten() {
             let name = entry.file_name();
@@ -126,6 +127,13 @@ pub fn cleanup_launcher_installs(home: &Path) {
             if meta.is_dir()
                 && (InstallLayout::is_version_folder(name_str) || name_str.starts_with(TMP_PREFIX))
             {
+                if crate::running::any_image_under(&images, &path) {
+                    log_line(
+                        home,
+                        &format!("cleanup: skipped folder a running program uses {}", path.display()),
+                    );
+                    continue;
+                }
                 match fs::remove_dir_all(&path) {
                     Ok(()) => log_line(
                         home,

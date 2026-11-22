@@ -142,18 +142,32 @@ impl BrowserBadgeDetector {
         let toolbar = match unsafe { root.FindFirst(TreeScope_Descendants, &self.toolbar_condition) }
         {
             Ok(tb) => tb,
-            Err(_) => {
-                // FindFirst returns Ok(null/empty) or Err when not found? In windows-rs, a null out-pointer returns Err(E_POINTER or S_OK null).
-                // Distinguish COM failure vs not found by checking hr == S_OK (0).
+            // windows-rs maps a null result (S_OK, nothing found) to an error whose code is S_OK.
+            Err(e) if e.code().is_ok() => {
                 self.short_cache = true;
                 return Self::no_toolbar_result(Some(&root_name));
+            }
+            Err(e) => {
+                AgentLog::debug(&format!("uia toolbar search failed: {e}"));
+                return Self::search_error_result(false, BadgeResult::NoBadge);
             }
         };
         match unsafe { toolbar.FindFirst(TreeScope_Descendants, &self.badge_condition) } {
             Ok(_) => BadgeResult::Private,
-            Err(e) if e.code().is_ok() => BadgeResult::NoBadge,
-            Err(_) => BadgeResult::NoBadge,
+            Err(e) => {
+                let not_found = e.code().is_ok();
+                if !not_found {
+                    AgentLog::debug(&format!("uia badge search failed: {e}"));
+                }
+                Self::search_error_result(not_found, BadgeResult::NoBadge)
+            }
         }
+    }
+
+    /// A8: a UI Automation search that found nothing gives `if_not_found`; a search that
+    /// failed (timeout, COM error) fails closed as `CheckFailed`, never `NoBadge`.
+    pub fn search_error_result(not_found: bool, if_not_found: BadgeResult) -> BadgeResult {
+        if not_found { if_not_found } else { BadgeResult::CheckFailed }
     }
 
     /// A window with no toolbar (fullscreen, kiosk, web app, DevTools, PiP, or initialising):
