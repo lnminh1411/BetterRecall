@@ -333,5 +333,7 @@ public sealed class UtcTimestampConverter : JsonConverter<DateTimeOffset>
 [JsonSerializable(typeof(ModelComponent))]
 [JsonSerializable(typeof(ModelsList))]
 [JsonSerializable(typeof(ModelsProgress))]
+[JsonSerializable(typeof(UpdateStatus))]
+[JsonSerializable(typeof(UpdateProgress))]
 [JsonSerializable(typeof(string))]
 public partial class ContractsJson : JsonSerializerContext;

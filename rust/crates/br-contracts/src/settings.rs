@@ -63,6 +63,15 @@ pub struct Settings {
     pub ocr: OcrSettings,
     #[serde(deserialize_with = "deser_or_default")]
     pub ai: AiSettings,
+    #[serde(deserialize_with = "deser_or_default")]
+    pub update: UpdateSettings,
+}
+
+/// Auto-update from GitHub Releases (R8). Off by default.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct UpdateSettings {
+    pub auto: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

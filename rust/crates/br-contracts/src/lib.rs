@@ -32,14 +32,14 @@ pub use models::{
     PasswordStatus, PendingJob, PurgeConfirmReply, PurgeNotice, PurgeResult, PurgeScope,
     PurgedWindowError, QueueState, Recommendation, RemovedEvent, ReplayClip, SearchBench,
     SearchHit, SearchMode, SearchRequest, SearchResponse, StorageUse, StoreStats, ThumbData,
-    TokenBench, TranscribeResult, TranscriptSegment, UnlockReply, VersionReply, WorkerHello,
-    WorkerRequest, WorkerResponse,
+    TokenBench, TranscribeResult, TranscriptSegment, UnlockReply, UpdateProgress, UpdateStatus,
+    VersionReply, WorkerHello, WorkerRequest, WorkerResponse,
 };
 pub use settings::{
     AiDefaults, AiSettings, AiShare, AudioSettings, CaptureSettings, GovernanceSettings,
     HotkeySettings, IndexSettings, InferenceSettings, IpcSettings, KeyframeSettings, LogSettings,
     McpSettings, OcrSettings, PrivacySettings, ReplaySettings, RetentionSettings, SecuritySettings,
-    Settings, StorageSettings, UiSettings, all_hotkeys, hotkey_ok, is_abs_path, valid_ai_endpoint,
-    valid_hotkey, valid_ocr_languages, validate_settings,
+    Settings, StorageSettings, UiSettings, UpdateSettings, all_hotkeys, hotkey_ok, is_abs_path,
+    valid_ai_endpoint, valid_hotkey, valid_ocr_languages, validate_settings,
 };
 pub use whisper_languages::WhisperLanguages;

@@ -907,3 +907,69 @@ fn progress_reports_each_file_with_manifest_last() {
         ]
     );
 }
+
+// 11. get_bytes: bounded size cap enforced, redirect followed, custom headers sent, non-allowed URL refused.
+#[test]
+fn get_bytes_enforces_cap_follows_redirect_and_refuses_disallowed_urls() {
+    let mut files = HashMap::new();
+    files.insert("/small.json".to_string(), b"{\"ok\":true}".to_vec());
+    files.insert("/exact.bin".to_string(), vec![0x42u8; 16]);
+    files.insert("/too-big.bin".to_string(), vec![0x99u8; 17]);
+    let server = LocalHttpServer::start(files);
+    server
+        .config
+        .lock()
+        .unwrap()
+        .redirects
+        .insert("/redir".to_string(), "/small.json".to_string());
+    server
+        .config
+        .lock()
+        .unwrap()
+        .redirects
+        .insert("/bad-redir".to_string(), "http://example.com/evil".to_string());
+
+    let dl = Downloader::new().with_retry_delays(vec![]);
+
+    // Exact cap passes and custom User-Agent is forwarded.
+    let exact = dl
+        .get_bytes(
+            &server.url("/exact.bin"),
+            16,
+            &[("User-Agent", "BetterRecall-Updater/0.3.0-dev")],
+        )
+        .expect("exact cap succeeds");
+    assert_eq!(exact, vec![0x42u8; 16]);
+    assert_eq!(
+        server.requests().last().and_then(|r| r.user_agent.as_deref()),
+        Some("BetterRecall-Updater/0.3.0-dev")
+    );
+
+    // Over cap fails with Io error.
+    let err = dl
+        .get_bytes(&server.url("/too-big.bin"), 16, &[])
+        .expect_err("over cap must fail");
+    assert!(matches!(err, FetchError::Io { .. }), "got {err:?}");
+
+    // Redirect to allowed loopback URL is followed.
+    let redir = dl
+        .get_bytes(&server.url("/redir"), 1024, &[])
+        .expect("allowed redirect succeeds");
+    assert_eq!(redir, b"{\"ok\":true}");
+
+    // Redirect to disallowed plain-HTTP non-loopback host is refused.
+    let err = dl
+        .get_bytes(&server.url("/bad-redir"), 1024, &[])
+        .expect_err("disallowed redirect refused");
+    // Same as `download_file`: the refused hop reports the redirect status and its target.
+    assert!(
+        matches!(&err, FetchError::Http { status: 302, url } if url == "http://example.com/evil"),
+        "got {err:?}"
+    );
+
+    // Disallowed initial URL is refused without network.
+    let err = dl
+        .get_bytes("http://example.com/releases", 1024, &[])
+        .expect_err("disallowed initial url refused");
+    assert!(matches!(err, FetchError::Http { status: 0, .. }), "got {err:?}");
+}

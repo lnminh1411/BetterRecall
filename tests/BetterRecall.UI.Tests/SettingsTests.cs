@@ -25,7 +25,7 @@ public class SettingsTests
         var extra = SettingsSchema.All.Select(d => d.Key).Except(keys).ToList();
         Assert.Empty(extra);
         Assert.All(SettingsSchema.All, d => Assert.NotNull(SettingsSchema.Get(Defaults(), d.Key)));
-        Assert.All(SettingsSchema.All, d => Assert.Contains(d.Group, SettingsSchema.Groups.Append("hotkeys")));   // hotkeys: Shortcuts page
+        Assert.All(SettingsSchema.All, d => Assert.Contains(d.Group, SettingsSchema.Groups.Append("hotkeys").Append("update")));   // hotkeys: Shortcuts page; update: Update page
         Assert.All(SettingsSchema.All.Where(d => d.Group == "hotkeys"), d => Assert.Contains(d.Key, ShortcutRules.Actions.Select(ShortcutRules.Key)));
     }
 

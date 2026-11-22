@@ -408,3 +408,28 @@ public sealed record ModelsProgress(
     long TotalBytes,
     string? File = null,
     string? Error = null);
+
+// ---- update page (R8, stage I5) ----
+
+/// <summary>Reply to the UI-pipe `update status`, `update check`, and `update apply` verbs.</summary>
+public sealed record UpdateStatus(
+    string CurrentVersion,
+    string? LatestVersion,
+    bool Available,
+    bool CanInstall,
+    string? Reason,
+    string? NotesUrl,
+    DateTimeOffset? PublishedAt,
+    long? InstallerBytes,
+    string State,
+    string? DownloadedVersion,
+    DateTimeOffset? LastCheck,
+    bool Auto,
+    string? Error = null);
+
+/// <summary>One streamed line of `update download`. Phase: checking | downloading | verifying | done | cancelled | offline | failed.</summary>
+public sealed record UpdateProgress(
+    string Phase,
+    long DoneBytes,
+    long TotalBytes,
+    string? Error = null);

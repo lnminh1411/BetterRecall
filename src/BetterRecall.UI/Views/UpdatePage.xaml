@@ -1,0 +1,70 @@
+<Page
+    x:Class="BetterRecall.UI.Views.UpdatePage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Style="{StaticResource PageStackStyle}" Spacing="12" MaxWidth="920">
+            <TextBlock x:Uid="UpdatePage_Title" Style="{StaticResource PageTitleStyle}" AutomationProperties.HeadingLevel="Level1" />
+            <TextBlock x:Uid="UpdatePage_Desc" TextWrapping="Wrap" Margin="0,-8,0,0" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+
+            <InfoBar x:Name="ResultBar" IsOpen="False" IsClosable="True" Closed="ResultBar_Closed" />
+
+            <Border Style="{StaticResource CardStyle}">
+                <StackPanel Spacing="10">
+                    <TextBlock x:Name="CurrentVersionText" Style="{StaticResource BodyStrongTextBlockStyle}" TextWrapping="Wrap" />
+
+                    <StackPanel Orientation="Horizontal" Spacing="10">
+                        <Button x:Name="CheckButton" x:Uid="UpdatePage_Check" Click="Check_Click" />
+                        <ProgressRing x:Name="CheckingRing" IsActive="False" Width="20" Height="20" VerticalAlignment="Center" />
+                        <TextBlock x:Name="LastCheckText" VerticalAlignment="Center" TextWrapping="Wrap"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    </StackPanel>
+
+                    <TextBlock x:Name="StatusHeadlineText" Style="{StaticResource BodyStrongTextBlockStyle}" TextWrapping="Wrap"
+                               AutomationProperties.LiveSetting="Polite" />
+                    <TextBlock x:Name="StatusDetailText" Visibility="Collapsed" TextWrapping="Wrap"
+                               Style="{StaticResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBlock x:Name="NoInstallReasonText" Visibility="Collapsed" TextWrapping="Wrap"
+                               Style="{StaticResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+
+                    <StackPanel Orientation="Horizontal" Spacing="12">
+                        <Button x:Name="DownloadButton" x:Uid="UpdatePage_DownloadInstall"
+                                Style="{StaticResource AccentButtonStyle}"
+                                Visibility="Collapsed"
+                                Click="Download_Click" />
+                        <HyperlinkButton x:Name="NotesLink" x:Uid="UpdatePage_ReleaseNotes"
+                                         Visibility="Collapsed"
+                                         Click="Notes_Click" />
+                    </StackPanel>
+
+                    <StackPanel x:Name="ProgressPanel" Visibility="Collapsed" Spacing="6">
+                        <ProgressBar x:Name="DownloadProgressBar" Minimum="0" Maximum="100" Value="0" />
+                        <Grid ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock x:Name="ProgressText" VerticalAlignment="Center" TextWrapping="Wrap"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                       AutomationProperties.LiveSetting="Polite" />
+                            <Button x:Name="CancelButton" x:Uid="UpdatePage_Cancel" Grid.Column="1" Click="Cancel_Click" />
+                        </Grid>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <Border Style="{StaticResource CardStyle}">
+                <StackPanel Spacing="6">
+                    <ToggleSwitch x:Name="AutoToggle" x:Uid="UpdatePage_AutoToggle" Toggled="AutoToggle_Toggled" />
+                    <TextBlock x:Uid="UpdatePage_AutoDesc" TextWrapping="Wrap"
+                               Style="{StaticResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</Page>

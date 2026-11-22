@@ -37,6 +37,12 @@ public sealed partial class SettingsShellPage : Page
             Tag = "models",
             Icon = new FontIcon { Glyph = "\uE896" },
         });
+        Groups.MenuItems.Add(new NavigationViewItem
+        {
+            Content = Loc.Get("G_update"),
+            Tag = "update",
+            Icon = new FontIcon { Glyph = "\uE777" },
+        });
         SizeChanged += (_, e) =>
         {
             var mode = SettingsShellLayout.GroupsOnTop(e.NewSize.Width) ? NavigationViewPaneDisplayMode.Top : NavigationViewPaneDisplayMode.Left;
@@ -58,7 +64,16 @@ public sealed partial class SettingsShellPage : Page
             GroupFrame.BackStack.Clear();
             return;
         }
-        if (group is null || !SettingsSchema.Groups.Contains(group)) group = _group.Length > 0 && _group != "models" ? _group : SettingsSchema.Groups[0];
+        if (group == "update")
+        {
+            Groups.SelectedItem = Groups.MenuItems.OfType<NavigationViewItem>().FirstOrDefault(i => Equals(i.Tag, "update"));
+            if (_group == "update" && GroupFrame.Content is UpdatePage) return;
+            _group = "update";
+            GroupFrame.Navigate(typeof(UpdatePage), null, new SuppressNavigationTransitionInfo());
+            GroupFrame.BackStack.Clear();
+            return;
+        }
+        if (group is null || !SettingsSchema.Groups.Contains(group)) group = _group.Length > 0 && _group != "models" && _group != "update" ? _group : SettingsSchema.Groups[0];
         Groups.SelectedItem = Groups.MenuItems.OfType<NavigationViewItem>().FirstOrDefault(i => Equals(i.Tag, group));
         if (group == _group && GroupFrame.Content is SettingsPage) return;
         _group = group;

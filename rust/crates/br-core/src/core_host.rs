@@ -192,6 +192,11 @@ impl CoreHost {
             .clone()
     }
 
+    pub fn is_export_running(&self) -> bool {
+        self.processor()
+            .is_some_and(|p| p.is_export_running())
+    }
+
     pub fn on_clients_changed(&self, cb: impl Fn(i32) + Send + Sync + 'static) {
         self.clients_changed
             .lock()

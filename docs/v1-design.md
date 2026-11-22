@@ -440,6 +440,7 @@ Vector search needs no ANN library at v1 sizes: 30 days of 2 s keyframes after d
 | `ai.dailyRequests` | 200 (range 0 to 100,000) | cloud requests per local day; 0 = no limit. Warning at 80%, stop at 100% |
 | `ai.dailyTokens` | 500,000 (range 0 to 1,000,000,000) | cloud tokens (input + output) per local day; 0 = no limit |
 | `ai.chatHistory` | true | keep chats in `store.db`; turning it off deletes saved chats |
+| `update.auto` | false | check GitHub Releases once a day and install signed updates while idle (R8) |
 | `log.level` | `info` | `debug`, `info`, `warn`, `error` |
 
 ## 9. Build

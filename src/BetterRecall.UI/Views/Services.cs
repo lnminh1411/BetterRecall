@@ -24,6 +24,7 @@ internal sealed class Services
     public ThumbnailCache Thumbs { get; } = new(48L * 1024 * 1024);
     public SettingsEditor Settings { get; } = new();
     public ModelsDownloadService ModelsDownload { get; }
+    public UpdateDownloadService UpdateDownload { get; }
     public AgentStatus? Status { get; private set; }
     public bool Locked { get; private set; }
     /// <summary>None when the last exchange worked, else NotRunning or NotTrusted.</summary>
@@ -78,6 +79,7 @@ internal sealed class Services
         MediaApi = new AgentApi(MediaClient);
         Subscription = new StatusSubscription(pipe, trust);
         ModelsDownload = new ModelsDownloadService(CreateRunClient, a => ui.TryEnqueue(() => a()));
+        UpdateDownload = new UpdateDownloadService(CreateRunClient, a => ui.TryEnqueue(() => a()));
 
         MainClient.ResponseClassified += k => ui.TryEnqueue(() => OnClassified(k));
         MediaClient.ResponseClassified += k => ui.TryEnqueue(() => OnClassified(k));
@@ -318,6 +320,7 @@ internal sealed class Services
     public async Task ShutdownAsync()
     {
         ModelsDownload.Cancel();
+        UpdateDownload.Cancel();
         _agentWatch.Dispose();
         await Subscription.DisposeAsync();
         await MainClient.DisposeAsync();

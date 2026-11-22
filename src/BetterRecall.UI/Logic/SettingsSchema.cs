@@ -185,6 +185,8 @@ public static partial class SettingsSchema
         new("ai.dailyRequests", "ai", SettingType.Int, 0, 100000, EnabledWhenKey: "ai.enabled", EnabledWhenValue: "true"),
         new("ai.dailyTokens", "ai", SettingType.Int, 0, 1000000000, EnabledWhenKey: "ai.enabled", EnabledWhenValue: "true"),
         new("ai.chatHistory", "ai", SettingType.Bool, EnabledWhenKey: "ai.enabled", EnabledWhenValue: "true"),
+
+        new("update.auto", "update", SettingType.Bool),
     ];
 
     public static SettingDescriptor? Find(string key) => All.FirstOrDefault(d => string.Equals(d.Key, key, StringComparison.OrdinalIgnoreCase));

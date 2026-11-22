@@ -25,6 +25,13 @@ public sealed class Settings
     public UiSettings Ui { get; set; } = new();
     public OcrSettings Ocr { get; set; } = new();
     public AiSettings Ai { get; set; } = new();
+    public UpdateSettings Update { get; set; } = new();
+}
+
+/// <summary>Auto-update from GitHub Releases (R8). Off by default.</summary>
+public sealed class UpdateSettings
+{
+    public bool Auto { get; set; }
 }
 
 public sealed class OcrSettings
