@@ -4,26 +4,32 @@
 //! Top-level install, uninstall, and modify orchestration.
 
 use std::cmp::Ordering;
+use std::env;
 use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
-use std::os::windows::ffi::OsStrExt;
-use std::path::{Path, PathBuf};
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
-use br_contracts::{InstallLayout, PipeNames};
+use br_contracts::{DataPaths, InstallLayout, PipeNames, Settings, full_path, strip_jsonc};
 use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE};
 use windows::Win32::Storage::FileSystem::{MOVEFILE_DELAY_UNTIL_REBOOT, MoveFileExW};
+use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::Threading::CreateMutexW;
-use windows::core::PCWSTR;
+use windows::Win32::UI::Shell::{
+    FOLDERID_LocalAppData, FOLDERID_Profile, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
+};
+use windows::core::{GUID, PCWSTR};
 
 use crate::InstallError;
 use crate::ctx::Ctx;
 use crate::extract::{
-    available_disk_space, extract_to_staging_with_space, read_install_marker,
+    available_disk_space, extract_to_staging_with_progress, read_install_marker,
 };
 use crate::log::log_line;
 use crate::payload::{read_setup_manifest, read_trailer, stub_len};
+use crate::progress::{NoProgress, Progress, Step};
 use crate::registry;
 use crate::running::{close_running, normalized_dir_prefix, path_is_under_prefix};
 use crate::shortcut;
@@ -35,20 +41,60 @@ pub const SETUP_EXE: &str = "BetterRecall-Setup.exe";
 /// Base single-instance mutex name (scoped via `PipeNames::scoped` for non-default homes).
 pub const SETUP_MUTEX: &str = r"Local\BetterRecall.Setup";
 
+/// Which AI models the user chose to install (recorded in HKCU; downloaded in I3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ModelMode {
+    Full,
+    Minimal,
+    #[default]
+    Later,
+}
+
+impl ModelMode {
+    /// Canonical lowercase registry and CLI representation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Minimal => "minimal",
+            Self::Later => "later",
+        }
+    }
+
+    /// Parses a case-insensitive model mode string (`full`, `minimal`, `later`).
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "full" => Some(Self::Full),
+            "minimal" => Some(Self::Minimal),
+            "later" => Some(Self::Later),
+            _ => None,
+        }
+    }
+}
+
 /// Options for [`install`].
 #[derive(Debug, Clone, Default)]
 pub struct InstallOpts {
     pub allow_downgrade: bool,
+    pub model_mode: ModelMode,
+}
+
+/// Options for [`modify_with_progress`].
+#[derive(Debug, Clone, Default)]
+pub struct ModifyOpts {
+    pub model_mode: ModelMode,
 }
 
 /// Options for [`uninstall`].
 #[derive(Debug, Clone, Default)]
-pub struct UninstallOpts {}
+pub struct UninstallOpts {
+    pub delete_data: bool,
+}
 
 /// Result of an install, uninstall, or modify action.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     Installed { version: String },
+    Modified { mode: ModelMode },
     Uninstalled { reboot_required: bool },
     NothingToDo,
     /// Uninstall handed over to a temp copy of the setup exe (see `cli`).
@@ -57,7 +103,7 @@ pub enum Outcome {
 
 /// Runs the full installation flow.
 pub fn install(ctx: &Ctx, exe: &Path, opts: &InstallOpts) -> Result<Outcome, InstallError> {
-    install_with_space(ctx, exe, opts, available_disk_space)
+    install_with_progress(ctx, exe, opts, available_disk_space, &NoProgress)
 }
 
 /// Same as [`install`], with an injectable free-space source for tests.
@@ -70,10 +116,37 @@ pub fn install_with_space<F>(
 where
     F: FnOnce(&Path) -> Result<u64, InstallError>,
 {
-    let _mutex = acquire_setup_mutex(&ctx.home)?;
-    log_line(&ctx.home, &format!("install start -> {}", ctx.install_dir.display()));
+    install_with_progress(ctx, exe, opts, free_space, &NoProgress)
+}
 
-    // The payload hash is checked once, by `extract_to_staging_with_space`, before anything is
+/// Same as [`install_with_space`], with progress reporting and cooperative cancellation.
+pub fn install_with_progress<F>(
+    ctx: &Ctx,
+    exe: &Path,
+    opts: &InstallOpts,
+    free_space: F,
+    progress: &dyn Progress,
+) -> Result<Outcome, InstallError>
+where
+    F: FnOnce(&Path) -> Result<u64, InstallError>,
+{
+    let _mutex = acquire_setup_mutex(&ctx.home)?;
+    log_line(
+        &ctx.home,
+        &format!(
+            "install start -> {} (models={})",
+            ctx.install_dir.display(),
+            opts.model_mode.as_str()
+        ),
+    );
+
+    progress.step(Step::Verifying);
+    if progress.cancelled() {
+        log_line(&ctx.home, "install cancelled before verification");
+        return Err(InstallError::Cancelled);
+    }
+
+    // The payload hash is checked once, by `extract_to_staging_with_progress`, before anything is
     // extracted; the version read here only decides whether to refuse a downgrade.
     let trailer = read_trailer(exe)?;
     let manifest = read_setup_manifest(exe, &trailer)?;
@@ -95,14 +168,31 @@ where
         });
     }
 
-    let staged = extract_to_staging_with_space(ctx, exe, &trailer, free_space)?;
+    let staged = extract_to_staging_with_progress(ctx, exe, &trailer, free_space, progress)?;
     let version = staged.manifest.version.clone();
 
+    if progress.cancelled() {
+        let _ = fs::remove_dir_all(&staged.dir);
+        log_line(&ctx.home, "install cancelled after extraction");
+        return Err(InstallError::Cancelled);
+    }
+
+    progress.step(Step::Closing);
     close_running(ctx)?;
+
+    if progress.cancelled() {
+        let _ = fs::remove_dir_all(&staged.dir);
+        log_line(&ctx.home, "install cancelled before swap");
+        return Err(InstallError::Cancelled);
+    }
+
+    progress.step(Step::Swapping);
     swap_into_place(ctx, staged)?;
     copy_stub_exe(exe, stub_len(&trailer), &ctx.install_dir)?;
 
+    progress.step(Step::Registering);
     registry::register(ctx, &version)?;
+    registry::write_model_mode(ctx, opts.model_mode)?;
     shortcut::create_shortcut(ctx)?;
 
     if ctx.start_after {
@@ -114,22 +204,44 @@ where
             .map_err(|e| InstallError::io(format!("starting {}", agent.display()), e))?;
     }
 
+    progress.step(Step::Done);
     log_line(&ctx.home, &format!("install complete: {version}"));
     Ok(Outcome::Installed { version })
 }
 
-/// Uninstalls BetterRecall from `ctx.install_dir` without touching `ctx.home`.
-pub fn uninstall(ctx: &Ctx, _opts: &UninstallOpts) -> Result<Outcome, InstallError> {
+/// Uninstalls BetterRecall from `ctx.install_dir`, optionally deleting allowlisted data in `ctx.home`.
+pub fn uninstall(ctx: &Ctx, opts: &UninstallOpts) -> Result<Outcome, InstallError> {
+    uninstall_with_progress(ctx, opts, &NoProgress)
+}
+
+/// Same as [`uninstall`], with progress reporting.
+pub fn uninstall_with_progress(
+    ctx: &Ctx,
+    opts: &UninstallOpts,
+    progress: &dyn Progress,
+) -> Result<Outcome, InstallError> {
+    if opts.delete_data {
+        validate_delete_data_home(&ctx.home)?;
+    }
+
     let _mutex = acquire_setup_mutex(&ctx.home)?;
     log_line(
         &ctx.home,
-        &format!("uninstall start: {}", ctx.install_dir.display()),
+        &format!(
+            "uninstall start: {} (delete_data={})",
+            ctx.install_dir.display(),
+            opts.delete_data
+        ),
     );
 
+    progress.step(Step::Closing);
     close_running(ctx)?;
+
+    progress.step(Step::Unregistering);
     registry::unregister(ctx)?;
     shortcut::remove_shortcut(ctx)?;
 
+    progress.step(Step::RemovingFiles);
     let mut reboot_required = false;
     if ctx.install_dir.exists() {
         let self_inside = std::env::current_exe().ok().is_some_and(|me| {
@@ -171,17 +283,209 @@ pub fn uninstall(ctx: &Ctx, _opts: &UninstallOpts) -> Result<Outcome, InstallErr
         }
     }
 
+    if opts.delete_data {
+        progress.step(Step::DeletingData);
+        delete_home_data(&ctx.home)?;
+    }
+
     log_line(
         &ctx.home,
-        &format!("uninstall complete (reboot_required={reboot_required})"),
+        &format!(
+            "uninstall complete (reboot_required={reboot_required}, delete_data={})",
+            opts.delete_data
+        ),
     );
+
+    if opts.delete_data {
+        // Remove logs\ after the final log line is written; ignore failure.
+        let _ = fs::remove_dir_all(DataPaths::logs_dir(&ctx.home));
+        // Remove ctx.home only if it is now empty (leaves app\ or unknown files intact).
+        let _ = fs::remove_dir(&ctx.home);
+    }
+
+    progress.step(Step::Done);
     Ok(Outcome::Uninstalled { reboot_required })
 }
 
-/// Modify action (I1 placeholder; I3 adds model management).
+/// Modify action (I1 compatibility entry point; use [`modify_with_progress`] for I2+).
 pub fn modify(ctx: &Ctx) -> Result<Outcome, InstallError> {
     log_line(&ctx.home, "modify: nothing to do in I1");
     Ok(Outcome::NothingToDo)
+}
+
+/// Records the chosen [`ModelMode`] in the registry (I3 will also download models here).
+pub fn modify_with_progress(
+    ctx: &Ctx,
+    opts: &ModifyOpts,
+    progress: &dyn Progress,
+) -> Result<Outcome, InstallError> {
+    let _mutex = acquire_setup_mutex(&ctx.home)?;
+    log_line(
+        &ctx.home,
+        &format!("modify start (models={})", opts.model_mode.as_str()),
+    );
+
+    progress.step(Step::SavingSettings);
+    registry::write_model_mode(ctx, opts.model_mode)?;
+
+    progress.step(Step::Done);
+    log_line(
+        &ctx.home,
+        &format!("modify complete (models={})", opts.model_mode.as_str()),
+    );
+    Ok(Outcome::Modified {
+        mode: opts.model_mode,
+    })
+}
+
+/// Refuses unsafe `home` paths before deleting BetterRecall data:
+/// empty paths, drive/UNC roots, the user profile folder, and `%LOCALAPPDATA%` itself.
+pub fn validate_delete_data_home(home: &Path) -> Result<(), InstallError> {
+    if home.as_os_str().is_empty() {
+        return Err(InstallError::Usage(
+            "refusing to delete data: data folder path is empty".to_string(),
+        ));
+    }
+    let normalized = full_path(home).map_err(|e| {
+        InstallError::Usage(format!(
+            "refusing to delete data from invalid path {}: {e}",
+            home.display()
+        ))
+    })?;
+
+    if !normalized
+        .components()
+        .any(|c| matches!(c, Component::Normal(_)))
+    {
+        return Err(InstallError::Usage(format!(
+            "refusing to delete data from drive or root folder {}",
+            normalized.display()
+        )));
+    }
+
+    let norm_str = trim_trailing_seps(&normalized);
+
+    let forbidden: [Option<PathBuf>; 4] = [
+        known_folder(&FOLDERID_Profile),
+        env::var_os("USERPROFILE").map(PathBuf::from),
+        known_folder(&FOLDERID_LocalAppData),
+        env::var_os("LOCALAPPDATA").map(PathBuf::from),
+    ];
+    for candidate in forbidden.into_iter().flatten() {
+        let full = full_path(&candidate).unwrap_or(candidate);
+        if norm_str.eq_ignore_ascii_case(&trim_trailing_seps(&full)) {
+            return Err(InstallError::Usage(format!(
+                "refusing to delete data from protected folder {}",
+                normalized.display()
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn delete_home_data(home: &Path) -> Result<(), InstallError> {
+    validate_delete_data_home(home)?;
+    if !home.exists() {
+        return Ok(());
+    }
+
+    // Read custom models_dir from settings.json before removing settings.json.
+    let custom_models_dir = read_custom_models_dir(home);
+
+    let default_models_dir = DataPaths::models_dir(home, &Settings::default());
+    let keys_dir = DataPaths::key_file(home)
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| home.join("keys"));
+    let cache_dir = DataPaths::compiled_cache(home)
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| home.join("cache"));
+
+    let files = [
+        DataPaths::store_db(home),
+        home.join("store.db-wal"),
+        home.join("store.db-shm"),
+        DataPaths::settings_file(home),
+        DataPaths::agent_pid_file(home),
+    ];
+    for file in files {
+        remove_file_if_exists(&file)?;
+    }
+
+    let dirs = [
+        keys_dir,
+        DataPaths::keyframes_dir(home),
+        DataPaths::replays_dir(home),
+        default_models_dir.clone(),
+        cache_dir,
+    ];
+    for dir in dirs {
+        remove_dir_all_if_exists(&dir)?;
+    }
+
+    if let Some(custom_models) = custom_models_dir {
+        let home_prefix = normalized_dir_prefix(home);
+        if path_is_under_prefix(&custom_models, &home_prefix)
+            && !trim_trailing_seps(&custom_models)
+                .eq_ignore_ascii_case(&trim_trailing_seps(&default_models_dir))
+        {
+            remove_dir_all_if_exists(&custom_models)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn read_custom_models_dir(home: &Path) -> Option<PathBuf> {
+    let raw = fs::read_to_string(DataPaths::settings_file(home)).ok()?;
+    let stripped = strip_jsonc(&raw);
+    let settings: Settings = serde_json::from_str(&stripped).ok()?;
+    Some(DataPaths::models_dir(home, &settings))
+}
+
+fn remove_file_if_exists(path: &Path) -> Result<(), InstallError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(InstallError::io(
+            format!("removing {}", path.display()),
+            e,
+        )),
+    }
+}
+
+fn remove_dir_all_if_exists(path: &Path) -> Result<(), InstallError> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(InstallError::io(
+            format!("removing {}", path.display()),
+            e,
+        )),
+    }
+}
+
+fn trim_trailing_seps(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_string()
+}
+
+fn known_folder(id: &GUID) -> Option<PathBuf> {
+    unsafe {
+        let pwstr = SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, None).ok()?;
+        let mut len = 0usize;
+        while *pwstr.0.add(len) != 0 {
+            len += 1;
+        }
+        let slice = std::slice::from_raw_parts(pwstr.0, len);
+        let s = OsString::from_wide(slice);
+        CoTaskMemFree(Some(pwstr.0.cast()));
+        Some(PathBuf::from(s))
+    }
 }
 
 /// Compares two semantic version strings (`major.minor.patch[-prerelease][+build]`).

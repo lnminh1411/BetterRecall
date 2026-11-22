@@ -20,13 +20,14 @@ use windows::core::PCWSTR;
 
 use crate::InstallError;
 use crate::ctx::Ctx;
-use crate::install::SETUP_EXE;
+use crate::install::{ModelMode, SETUP_EXE};
 use crate::running::{normalized_dir_prefix, path_is_under_prefix};
 
 pub const UNINSTALL_SUBKEY: &str =
     r"Software\Microsoft\Windows\CurrentVersion\Uninstall\BetterRecall";
 pub const RUN_SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 pub const APP_SUBKEY: &str = r"Software\BetterRecall";
+pub const MODEL_MODE_VALUE: &str = "ModelMode";
 
 pub const DISPLAY_NAME: &str = "BetterRecall";
 pub const PUBLISHER: &str = "BetterRecall contributors";
@@ -76,14 +77,26 @@ pub fn register(ctx: &Ctx, version: &str) -> Result<(), InstallError> {
     Ok(())
 }
 
-/// Removes the Uninstall key, the `InstallPath` value, and the `Run` value only if it points
-/// into `ctx.install_dir`.
+/// Writes `ModelMode` (`full`, `minimal`, or `later`) as `REG_SZ` under `HKCU\<reg_prefix>\Software\BetterRecall`.
+pub fn write_model_mode(ctx: &Ctx, mode: ModelMode) -> Result<(), InstallError> {
+    write_reg_sz(&ctx.reg_key(APP_SUBKEY), MODEL_MODE_VALUE, mode.as_str())
+}
+
+/// Reads `ModelMode` from `HKCU\<reg_prefix>\Software\BetterRecall`, returning `None` if absent or invalid.
+pub fn read_model_mode(ctx: &Ctx) -> Option<ModelMode> {
+    let raw = read_reg_sz(&ctx.reg_key(APP_SUBKEY), MODEL_MODE_VALUE).ok()??;
+    ModelMode::parse(&raw)
+}
+
+/// Removes the Uninstall key, the `InstallPath` and `ModelMode` values, and the `Run` value only
+/// if it points into `ctx.install_dir`.
 pub fn unregister(ctx: &Ctx) -> Result<(), InstallError> {
     delete_key_tree(&ctx.reg_key(UNINSTALL_SUBKEY))?;
 
     let app_key = ctx.reg_key(APP_SUBKEY);
     if let Some(hkey) = open_key_opt(&app_key, KEY_SET_VALUE)? {
         delete_value_opt(hkey.0, "InstallPath")?;
+        delete_value_opt(hkey.0, MODEL_MODE_VALUE)?;
     }
 
     let run_key = ctx.reg_key(RUN_SUBKEY);

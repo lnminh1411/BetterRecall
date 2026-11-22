@@ -1,23 +1,31 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) BetterRecall contributors
 
-//! CLI argument parsing and non-silent `MessageBoxW` reporting.
+//! CLI argument parsing, silent execution, and interactive Aero Wizard dispatch.
 
 use std::ffi::OsString;
+use std::fs;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{
-    MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MESSAGEBOX_STYLE, MessageBoxW,
+    MB_ICONERROR, MB_OK, MESSAGEBOX_STYLE, MessageBoxW,
 };
 use windows::core::PCWSTR;
 
 use crate::ctx::Ctx;
 use crate::error::{InstallError, exit_code};
-use crate::install::{InstallOpts, Outcome, UninstallOpts, install, modify, uninstall};
+use crate::install::{
+    InstallOpts, ModelMode, ModifyOpts, Outcome, UninstallOpts, install, modify_with_progress,
+    uninstall,
+};
+use crate::progress::NoProgress;
+use crate::registry::read_model_mode;
 use crate::running::{normalized_dir_prefix, path_is_under_prefix};
+use crate::strings;
+use crate::wizard;
 
 /// Requested installer action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +42,8 @@ pub struct CliArgs {
     pub action: Action,
     pub no_run: bool,
     pub allow_downgrade: bool,
+    pub model_mode: Option<ModelMode>,
+    pub delete_data: bool,
     pub dev_root: Option<PathBuf>,
     pub dev_reg_prefix: Option<String>,
     /// Internal: this process is the temp copy started by an uninstall from inside the install folder.
@@ -53,6 +63,8 @@ where
     let mut action: Option<Action> = None;
     let mut no_run = false;
     let mut allow_downgrade = false;
+    let mut model_mode: Option<ModelMode> = None;
+    let mut delete_data = false;
     let mut dev_root: Option<PathBuf> = None;
     let mut dev_reg_prefix: Option<String> = None;
     let mut relaunched = false;
@@ -62,6 +74,19 @@ where
         let arg = raw.as_ref();
         let flag = strip_flag_prefix(arg)
             .ok_or_else(|| InstallError::Usage(format!("unexpected argument: {arg}")))?;
+
+        if let Some((name, val)) = flag.split_once('=')
+            && name.eq_ignore_ascii_case("models")
+        {
+            let parsed = ModelMode::parse(val).ok_or_else(|| {
+                InstallError::Usage(format!(
+                    "invalid /models value '{val}' (expected full, minimal, or later)"
+                ))
+            })?;
+            model_mode = Some(parsed);
+            continue;
+        }
+
         match flag.to_ascii_lowercase().as_str() {
             "s" => silent = true,
             "uninstall" => {
@@ -82,6 +107,7 @@ where
             }
             "norun" => no_run = true,
             "allowdowngrade" => allow_downgrade = true,
+            "deletedata" => delete_data = true,
             "relaunched" => relaunched = true,
             "dev-root" => {
                 let val = iter.next().ok_or_else(|| {
@@ -107,11 +133,25 @@ where
         ));
     }
 
+    let resolved_action = action.unwrap_or(Action::Install);
+    if delete_data && resolved_action != Action::Uninstall {
+        return Err(InstallError::Usage(
+            "/deletedata can only be used with /uninstall".to_string(),
+        ));
+    }
+    if model_mode.is_some() && resolved_action == Action::Uninstall {
+        return Err(InstallError::Usage(
+            "/models cannot be used with /uninstall".to_string(),
+        ));
+    }
+
     Ok(CliArgs {
         silent,
-        action: action.unwrap_or(Action::Install),
+        action: resolved_action,
         no_run,
         allow_downgrade,
+        model_mode,
+        delete_data,
         dev_root,
         dev_reg_prefix,
         relaunched,
@@ -139,38 +179,47 @@ pub fn run_main() -> i32 {
         }
     };
 
-    let result = dispatch(&args, &raw_args);
-    match result {
-        Ok(outcome) => {
-            if !args.silent {
-                let msg = match outcome {
-                    Outcome::Installed { version } => {
-                        format!("BetterRecall {version} has been installed.")
-                    }
-                    Outcome::Uninstalled {
-                        reboot_required: true,
-                    } => "BetterRecall has been uninstalled. A reboot is needed to remove the remaining setup files.".to_string(),
-                    Outcome::Uninstalled {
-                        reboot_required: false,
-                    } => "BetterRecall has been uninstalled.".to_string(),
-                    Outcome::NothingToDo => "Nothing to modify.".to_string(),
-                    // The temp copy carries on and reports; this process only started it.
-                    Outcome::Relaunched => return exit_code::OK,
-                };
-                show_message(&msg, MB_OK | MB_ICONINFORMATION);
-            }
-            exit_code::OK
-        }
+    let ctx = match build_ctx(&args) {
+        Ok(c) => c,
         Err(e) => {
             if !args.silent {
                 show_message(&e.to_string(), MB_OK | MB_ICONERROR);
             }
-            e.exit_code()
+            return e.exit_code();
         }
+    };
+
+    if args.action == Action::Uninstall && should_relaunch_uninstall(&ctx, &args) {
+        let me = match std::env::current_exe() {
+            Ok(p) => p,
+            Err(e) => {
+                let err = InstallError::io("resolving current executable path", e);
+                if !args.silent {
+                    show_message(&err.to_string(), MB_OK | MB_ICONERROR);
+                }
+                return err.exit_code();
+            }
+        };
+        if let Err(e) = relaunch_from_temp(&ctx.temp_dir, &me, &raw_args) {
+            if !args.silent {
+                show_message(&e.to_string(), MB_OK | MB_ICONERROR);
+            }
+            return e.exit_code();
+        }
+        return exit_code::OK;
+    }
+
+    if !args.silent {
+        return wizard::run_wizard(ctx, args);
+    }
+
+    match dispatch_silent(&ctx, &args) {
+        Ok(_) => exit_code::OK,
+        Err(e) => e.exit_code(),
     }
 }
 
-fn dispatch(args: &CliArgs, raw_args: &[String]) -> Result<Outcome, InstallError> {
+fn build_ctx(args: &CliArgs) -> Result<Ctx, InstallError> {
     let mut ctx = match (&args.dev_root, &args.dev_reg_prefix) {
         (Some(root), Some(prefix)) => Ctx::from_dev_root(root, prefix)?,
         _ => Ctx::production(),
@@ -178,54 +227,77 @@ fn dispatch(args: &CliArgs, raw_args: &[String]) -> Result<Outcome, InstallError
     if args.no_run {
         ctx.start_after = false;
     }
+    Ok(ctx)
+}
 
+fn should_relaunch_uninstall(ctx: &Ctx, args: &CliArgs) -> bool {
+    // A running exe cannot be deleted, and a per-user process may not schedule a delete
+    // at reboot. So the installed BetterRecall-Setup.exe copies itself out of the install
+    // folder and lets that copy uninstall; the copy is left in `ctx.temp_dir`.
+    !args.relaunched
+        && std::env::current_exe()
+            .ok()
+            .is_some_and(|me| path_is_under_prefix(&me, &normalized_dir_prefix(&ctx.install_dir)))
+}
+
+fn dispatch_silent(ctx: &Ctx, args: &CliArgs) -> Result<Outcome, InstallError> {
     match args.action {
         Action::Install => {
             let exe = std::env::current_exe()
                 .map_err(|e| InstallError::io("resolving current executable path", e))?;
             install(
-                &ctx,
+                ctx,
                 &exe,
                 &InstallOpts {
                     allow_downgrade: args.allow_downgrade,
+                    model_mode: args.model_mode.unwrap_or(ModelMode::Later),
                 },
             )
         }
-        Action::Uninstall => {
-            // A running exe cannot be deleted, and a per-user process may not schedule a delete
-            // at reboot. So the installed BetterRecall-Setup.exe copies itself out of the install
-            // folder and lets that copy uninstall; the copy is left in the temp folder.
-            if !args.relaunched
-                && let Ok(me) = std::env::current_exe()
-                && path_is_under_prefix(&me, &normalized_dir_prefix(&ctx.install_dir))
-            {
-                relaunch_from_temp(&me, raw_args)?;
-                return Ok(Outcome::Relaunched);
-            }
-            uninstall(&ctx, &UninstallOpts::default())
+        Action::Uninstall => uninstall(
+            ctx,
+            &UninstallOpts {
+                delete_data: args.delete_data,
+            },
+        ),
+        Action::Modify => {
+            let model_mode = args
+                .model_mode
+                .or_else(|| read_model_mode(ctx))
+                .unwrap_or(ModelMode::Later);
+            modify_with_progress(ctx, &ModifyOpts { model_mode }, &NoProgress)
         }
-        Action::Modify => modify(&ctx),
     }
 }
 
-fn relaunch_from_temp(me: &Path, raw_args: &[String]) -> Result<(), InstallError> {
-    let copy = std::env::temp_dir().join(format!(
+fn relaunch_from_temp(
+    temp_dir: &Path,
+    me: &Path,
+    raw_args: &[String],
+) -> Result<(), InstallError> {
+    fs::create_dir_all(temp_dir).map_err(|e| {
+        InstallError::io(
+            format!("creating temp folder {}", temp_dir.display()),
+            e,
+        )
+    })?;
+    let copy = temp_dir.join(format!(
         "BetterRecall-uninstall-{}.exe",
         std::process::id()
     ));
-    std::fs::copy(me, &copy)
+    fs::copy(me, &copy)
         .map_err(|e| InstallError::io(format!("copying the uninstaller to {}", copy.display()), e))?;
     Command::new(&copy)
         .args(raw_args)
         .arg(RELAUNCHED_FLAG)
-        .current_dir(std::env::temp_dir())
+        .current_dir(temp_dir)
         .spawn()
         .map_err(|e| InstallError::io(format!("starting {}", copy.display()), e))?;
     Ok(())
 }
 
 fn show_message(text: &str, style: MESSAGEBOX_STYLE) {
-    let title: Vec<u16> = OsString::from("BetterRecall Setup")
+    let title: Vec<u16> = OsString::from(strings::WINDOW_TITLE)
         .encode_wide()
         .chain(Some(0))
         .collect();

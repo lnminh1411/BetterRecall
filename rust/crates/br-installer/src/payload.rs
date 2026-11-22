@@ -23,6 +23,9 @@ pub const TRAILER_LEN: u64 = 64;
 /// Root metadata entry inside the payload zip.
 pub const SETUP_JSON: &str = "setup.json";
 
+/// Root licence entry inside the payload zip.
+pub const LICENSE_ENTRY: &str = "LICENSE";
+
 const HASH_BUF_LEN: usize = 1024 * 1024;
 
 /// Parsed 64-byte trailer located at the end of the installer executable.
@@ -220,6 +223,47 @@ pub fn read_setup_manifest(path: &Path, trailer: &Trailer) -> Result<SetupManife
         .map_err(|e| InstallError::Payload(format!("reading {SETUP_JSON}: {e}")))?;
     serde_json::from_str(&text)
         .map_err(|e| InstallError::Payload(format!("invalid {SETUP_JSON}: {e}")))
+}
+
+/// Reads the root `LICENSE` entry from the appended payload zip, normalizing line endings to CRLF
+/// for Win32 multi-line edit controls. Returns `Ok(None)` if the entry is missing.
+pub fn read_license_text(path: &Path) -> Result<Option<String>, InstallError> {
+    let trailer = read_trailer(path)?;
+    let reader = open_payload_reader(path, &trailer)?;
+    let mut archive = ZipArchive::new(reader)
+        .map_err(|e| InstallError::Payload(format!("invalid payload zip: {e}")))?;
+    let mut entry = match archive.by_name(LICENSE_ENTRY) {
+        Ok(e) => e,
+        Err(zip::result::ZipError::FileNotFound) => return Ok(None),
+        Err(e) => {
+            return Err(InstallError::Payload(format!(
+                "reading {LICENSE_ENTRY} from payload: {e}"
+            )));
+        }
+    };
+    let mut text = String::new();
+    entry
+        .read_to_string(&mut text)
+        .map_err(|e| InstallError::Payload(format!("reading {LICENSE_ENTRY}: {e}")))?;
+    Ok(Some(normalize_crlf(&text)))
+}
+
+fn normalize_crlf(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + text.len() / 16);
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                out.push_str("\r\n");
+            }
+            '\n' => out.push_str("\r\n"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 /// Opens a bounded `SliceReader` covering only `[trailer.offset .. trailer.offset + trailer.length]`.
