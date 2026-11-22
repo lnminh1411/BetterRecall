@@ -6,6 +6,7 @@
 pub mod avif;
 pub mod jxl;
 pub mod skia;
+pub mod vpl;
 
 use std::path::{Path, PathBuf};
 
@@ -18,6 +19,7 @@ use windows::Win32::System::LibraryLoader::{
 pub use avif::Avif;
 pub use jxl::Jxl;
 pub use skia::Skia;
+pub use vpl::{MfxVariant, Vpl, VplApi};
 
 /// Locates a native codec DLL bundled under `src\BetterRecall.Agent\native\` (`avif.dll`,
 /// `jxl.dll`, `jxl_threads.dll`).

@@ -212,6 +212,16 @@ impl HardwareProbe {
                     )
                 })
                 .unwrap_or_default();
+            let adapter_info = crate::capture::AdapterInfo {
+                luid,
+                vendor_id: desc.VendorId,
+                name: name.clone(),
+                software,
+                integrated,
+                vram_mb,
+                device_id: desc.DeviceId,
+            };
+            let codecs = crate::replay::EncoderFactory::codecs(&adapter_info);
             list.push(GpuInfo {
                 name,
                 vendor,
@@ -219,7 +229,7 @@ impl HardwareProbe {
                 vram_mb,
                 luid: format!("0x{luid:016X}"),
                 driver,
-                codecs: Vec::new(), // A6 populates hardware video encoder codecs
+                codecs,
             });
         }
         list

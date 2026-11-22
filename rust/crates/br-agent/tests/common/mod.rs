@@ -27,6 +27,7 @@ use windows::Win32::Storage::FileSystem::{
 use windows::Win32::System::Pipes::WaitNamedPipeW;
 use windows::core::PCWSTR;
 
+use br_agent::audio::{AudioStore, AudioStoreError};
 use br_agent::host::StorageStore;
 use br_agent::native::{current_process_id, tick_count64, to_wide_z};
 use br_agent::scheduling::{EmbeddingStore, GovernanceInputs, UserNotificationState};
@@ -236,6 +237,12 @@ impl FakeStore {
         g.audio.insert(id.clone(), c);
         g.pending.push_back(id.clone());
         id
+    }
+}
+
+impl AudioStore for FakeStore {
+    fn add_audio_capture(&self, cap: &NewAudioCapture) -> Result<String, AudioStoreError> {
+        Ok(self.add_audio(cap.clone()))
     }
 }
 

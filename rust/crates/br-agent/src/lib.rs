@@ -5,12 +5,14 @@
 //! hotkeys, hardware probe, governance, memory isolation, worker supervision, embedding scheduler,
 //! guardrails, and seams for A5/A6).
 
+pub mod audio;
 pub mod capture;
 pub mod codecs;
 pub mod guardrails;
 pub mod host;
 pub mod native;
 pub mod privacy;
+pub mod replay;
 pub mod scheduling;
 pub mod seams;
 pub mod security;

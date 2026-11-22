@@ -275,6 +275,27 @@ impl EmbeddingScheduler {
     }
 
     pub fn remove(&self, ids: &HashSet<String>) -> usize {
+        self.remove_inner(ids, None)
+    }
+
+    /// Removes `ids` and returns `(removed_count, removed_jobs_after_zeroize)` for tests.
+    pub fn remove_for_test(&self, ids: &HashSet<String>) -> (usize, Vec<PendingJob>) {
+        let mut removed = Vec::new();
+        let count = self.remove_inner(ids, Some(&mut removed));
+        (count, removed)
+    }
+
+    /// Snapshots queued jobs for tests.
+    pub fn queued_jobs_for_test(&self) -> Vec<PendingJob> {
+        let q = self.inner.qstate.lock().unwrap_or_else(|e| e.into_inner());
+        q.queue.iter().cloned().collect()
+    }
+
+    fn remove_inner(
+        &self,
+        ids: &HashSet<String>,
+        mut out_removed: Option<&mut Vec<PendingJob>>,
+    ) -> usize {
         if ids.is_empty() {
             return 0;
         }
@@ -285,6 +306,9 @@ impl EmbeddingScheduler {
             if ids.contains(&j.id) {
                 if let Some(ref mut img) = j.image {
                     img.zeroize();
+                }
+                if let Some(ref mut out) = out_removed {
+                    out.push(j);
                 }
             } else {
                 keep.push_back(j);

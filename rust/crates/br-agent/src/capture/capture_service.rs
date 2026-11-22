@@ -3,8 +3,9 @@
 
 //! Per-output capture coordinator, keyframe clock, event triggers, and replay mask merger (`Capture\CaptureService.cs`).
 
+use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -13,16 +14,20 @@ use br_contracts::{ReplaySettings, Settings};
 use chrono::Utc;
 use windows::Win32::System::SystemInformation::GetTickCount;
 
+use crate::audio::{AudioReplayEncoder, LoopbackHub};
 use crate::capture::change_map::CapturePolicy;
 use crate::capture::gpu_devices::{GpuDeviceCache, GpuDevices, OutputInfo};
 use crate::capture::keyframe_pipeline::KeyframePipeline;
 use crate::capture::monitor_selection::MonitorSelection;
 use crate::capture::output_capture::{KeyframeRequest, OutputCapture};
-use crate::guardrails::{GuardReason, GuardSnapshot, GuardrailService, WindowInfo, WindowInspector};
+use crate::guardrails::{
+    AudioGate, GuardReason, GuardSnapshot, GuardrailService, WindowInfo, WindowInspector,
+};
 use crate::native::{MASK_EVERYTHING, Rect, idle_milliseconds, tick_count64};
 use crate::privacy::{RedactionMasks, RedactionOptions};
+use crate::replay::{MediaFoundationRuntime, ReplayEngine, ReplayEngineConfig};
 use crate::seams::CaptureSubsystem;
-use crate::util::AgentLog;
+use crate::util::{AgentLog, RetryBackoff};
 
 type SettingsProvider = Arc<dyn Fn() -> Settings + Send + Sync>;
 type BoolProvider = Arc<dyn Fn() -> bool + Send + Sync>;
@@ -44,8 +49,7 @@ struct OutputsState {
     layout_gen: i32,
 }
 
-/// Owns per-output DXGI capture threads, keyframe clock, event triggers, and replay mask merging.
-/// Replay video/audio encoding remains behind the A6 seam until stage A6.
+/// Owns per-output DXGI capture threads, keyframe clock, event triggers, replay engine, and replay audio.
 pub struct CaptureService {
     settings: SettingsProvider,
     keyframes_paused: BoolProvider,
@@ -54,8 +58,12 @@ pub struct CaptureService {
     guard: Arc<GuardrailService>,
     pipeline: Option<Arc<KeyframePipeline>>,
     redactions: Option<Arc<RedactionMasks>>,
+    loopback: Arc<LoopbackHub>,
     monitor_selection_file: Option<PathBuf>,
     devices: Arc<GpuDeviceCache>,
+    engine: Mutex<Option<Arc<ReplayEngine>>>,
+    audio: Mutex<Option<Arc<AudioReplayEncoder>>>,
+    audio_retry: Mutex<RetryBackoff>,
     outputs: Mutex<OutputsState>,
     tick_state: Mutex<TickState>,
     pending_trigger_at: AtomicI64,
@@ -65,8 +73,6 @@ pub struct CaptureService {
     lock_memory: AtomicBool,
     timer_stop: Arc<(Mutex<bool>, Condvar)>,
     timer_thread: Mutex<Option<JoinHandle<()>>>,
-    // Tracks A6 replay pipeline count (0 until A6 wires ReplayEngine).
-    replay_pipelines_count: AtomicI32,
     // Unused in A5; kept for tick state parity.
     _last_input_tick_atomic: AtomicU32,
 }
@@ -76,6 +82,7 @@ pub struct CaptureServiceOptions {
     pub lock_memory: bool,
     pub samples_paused: Option<BoolProvider>,
     pub monitor_selection_file: Option<PathBuf>,
+    pub loopback: Option<Arc<LoopbackHub>>,
 }
 
 impl CaptureService {
@@ -105,6 +112,7 @@ impl CaptureService {
                 lock_memory,
                 samples_paused: None,
                 monitor_selection_file: None,
+                loopback: None,
             },
         )
     }
@@ -118,6 +126,7 @@ impl CaptureService {
         redactions: Option<Arc<RedactionMasks>>,
         opts: CaptureServiceOptions,
     ) -> Arc<Self> {
+        let devices = Arc::new(GpuDeviceCache::new());
         let cs = Arc::new(Self {
             settings,
             keyframes_paused,
@@ -126,8 +135,12 @@ impl CaptureService {
             guard,
             pipeline: pipeline.clone(),
             redactions,
+            loopback: opts.loopback.unwrap_or_else(|| Arc::new(LoopbackHub::new())),
             monitor_selection_file: opts.monitor_selection_file,
-            devices: Arc::new(GpuDeviceCache::new()),
+            devices: devices.clone(),
+            engine: Mutex::new(None),
+            audio: Mutex::new(None),
+            audio_retry: Mutex::new(RetryBackoff::new(2000, 120_000)),
             outputs: Mutex::new(OutputsState {
                 outputs: Vec::new(),
                 layout_gen: 0,
@@ -150,9 +163,16 @@ impl CaptureService {
             lock_memory: AtomicBool::new(opts.lock_memory),
             timer_stop: Arc::new((Mutex::new(false), Condvar::new())),
             timer_thread: Mutex::new(None),
-            replay_pipelines_count: AtomicI32::new(0),
             _last_input_tick_atomic: AtomicU32::new(0),
         });
+        let weak_out = Arc::downgrade(&cs);
+        let weak_masks = Arc::downgrade(&cs);
+        let engine = ReplayEngine::new(
+            devices,
+            Arc::new(move || weak_out.upgrade().map(|c| c.outputs()).unwrap_or_default()),
+            Arc::new(move || weak_masks.upgrade().map(|c| c.masks()).unwrap_or_default()),
+        );
+        *cs.engine.lock().unwrap_or_else(|e| e.into_inner()) = Some(engine);
         if let Some(ref p) = pipeline {
             let weak = Arc::downgrade(&cs);
             p.set_ocr_dropped(Some(Arc::new(move |monitor| {
@@ -162,6 +182,20 @@ impl CaptureService {
             })));
         }
         cs
+    }
+
+    pub fn engine(&self) -> Option<Arc<ReplayEngine>> {
+        self.engine
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub fn audio(&self) -> Option<Arc<AudioReplayEncoder>> {
+        self.audio
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn devices(&self) -> &Arc<GpuDeviceCache> {
@@ -214,7 +248,13 @@ impl CaptureService {
     }
 
     pub fn start(self: &Arc<Self>) {
+        if let Err(e) = MediaFoundationRuntime::ensure_started() {
+            AgentLog::warn_err("MediaFoundation startup", &e);
+        }
         self.rebuild();
+        if let Some(eng) = self.engine() {
+            eng.start();
+        }
         let mut slot = self.timer_thread.lock().unwrap_or_else(|e| e.into_inner());
         if slot.is_some() {
             return;
@@ -292,13 +332,110 @@ impl CaptureService {
         for o in &list {
             o.start();
         }
+        if let Some(eng) = self.engine() {
+            eng.request_rebuild("outputs");
+        }
         AgentLog::info(&format!("capturing {} output(s)", list.len()));
         self.guard.refresh();
     }
 
     pub fn apply_settings(&self) {
-        let rp = (self.replay_paused_fn)();
-        self.replay_paused_cached.store(rp, Ordering::Release);
+        let s = (self.settings)();
+        let r = &s.replay;
+        let clamped_seconds = r.seconds.clamp(15, 600);
+        if let Some(eng) = self.engine() {
+            eng.configure(ReplayEngineConfig {
+                enabled: r.enabled,
+                layout: r.layout.clone(),
+                fps: r.fps,
+                kbps: r.bitrate_kbps.clamp(500, 50_000),
+                seconds: clamped_seconds,
+                encoder: r.encoder.clone(),
+                encoder_adapter: r.encoder_adapter.clone(),
+                resolution: r.resolution.clone(),
+                scale_percent: r.scale_percent,
+                lock_memory: self.lock_memory.load(Ordering::Acquire),
+            });
+            let rp = (self.replay_paused_fn)();
+            self.replay_paused_cached.store(rp, Ordering::Release);
+            eng.set_paused(rp);
+            self.sync_replay_audio(&s, rp);
+        } else {
+            let rp = (self.replay_paused_fn)();
+            self.replay_paused_cached.store(rp, Ordering::Release);
+        }
+    }
+
+    fn sync_replay_audio(&self, s: &Settings, replay_paused: bool) {
+        let r = &s.replay;
+        let clamped_seconds = r.seconds.clamp(15, 600);
+        let want_audio = r.enabled && r.audio;
+        let mut audio_slot = self.audio.lock().unwrap_or_else(|e| e.into_inner());
+        let retry = self.audio_retry.lock().unwrap_or_else(|e| e.into_inner());
+        if want_audio
+            && audio_slot
+                .as_ref()
+                .is_none_or(|a| a.seconds() != clamped_seconds)
+        {
+            let now = tick_count64();
+            if audio_slot.is_some() || retry.due(now) {
+                if let Some(old) = audio_slot.take() {
+                    old.stop();
+                }
+                let guard = self.guard.clone();
+                let muted: BoolProvider =
+                    Arc::new(move || guard.audio_now().gate != AudioGate::Allowed);
+                match AudioReplayEncoder::new(
+                    self.loopback.clone(),
+                    clamped_seconds,
+                    self.lock_memory.load(Ordering::Acquire),
+                    muted,
+                ) {
+                    Ok(enc) => {
+                        *audio_slot = Some(Arc::new(enc));
+                        retry.succeeded();
+                    }
+                    Err(e) => {
+                        let next_s = retry.failed(now) / 1000;
+                        AgentLog::warn_err(
+                            &format!("replay audio unavailable (retry in {next_s} s)"),
+                            &e,
+                        );
+                    }
+                }
+            }
+        } else if !want_audio
+            && let Some(old) = audio_slot.take()
+        {
+            old.stop();
+        }
+        if !want_audio {
+            retry.succeeded();
+        }
+        if let Some(ref a) = *audio_slot {
+            a.set_paused(replay_paused);
+        }
+    }
+
+    /// A-H2 (D1): replay audio is silence while a denied, private, or unscanned window is in front.
+    pub fn replay_audio_muted(&self) -> bool {
+        self.guard.audio_now().gate != AudioGate::Allowed
+    }
+
+    /// Writes the last `replay.seconds` of every pipeline plus desktop audio as fragmented MP4.
+    pub fn save_replay(&self, output: &mut dyn Write) -> Result<i32, String> {
+        let s = (self.settings)();
+        let eng = self
+            .engine()
+            .ok_or_else(|| "Replay is not running.".to_string())?;
+        let audio_src = self.audio().map(|a| a.source());
+        eng.save(output, audio_src.as_ref(), s.replay.seconds.clamp(15, 600))
+    }
+
+    pub fn replay_ring_bytes(&self) -> usize {
+        let v = self.engine().map_or(0, |e| e.ring_bytes());
+        let a = self.audio().map_or(0, |a| a.ring().committed_bytes());
+        v + a
     }
 
     /// Computes replay masks: denied windows, password fields, keyframe OCR boxes,
@@ -416,12 +553,20 @@ impl CaptureService {
         let replay_paused = (self.replay_paused_fn)();
         self.replay_paused_cached
             .store(replay_paused, Ordering::Release);
+        if let Some(eng) = self.engine() {
+            eng.set_paused(replay_paused);
+        }
+        if let Some(a) = self.audio() {
+            a.set_paused(replay_paused);
+        } else if s.replay.enabled && s.replay.audio {
+            self.sync_replay_audio(&s, replay_paused);
+        }
 
         let kf_paused = (self.keyframes_paused)();
         self.note_pause_samples(kf_paused);
 
         let samples_paused = self.samples_paused.as_ref().is_some_and(|f| f());
-        let pipelines = self.replay_pipelines_count.load(Ordering::Acquire);
+        let pipelines = self.engine().map_or(0, |e| e.pipelines_count());
         let since_last_sample = {
             let ts = self.tick_state.lock().unwrap_or_else(|e| e.into_inner());
             now - ts.last_sample_tick
@@ -685,12 +830,24 @@ impl CaptureService {
     }
 
     pub fn forget_recent(&self) {
+        if let Some(eng) = self.engine() {
+            eng.panic();
+        }
+        if let Some(a) = self.audio() {
+            a.ring().clear();
+        }
         if let Some(ref p) = self.pipeline {
             p.flush();
         }
     }
 
     pub fn panic(&self) {
+        if let Some(eng) = self.engine() {
+            eng.panic();
+        }
+        if let Some(a) = self.audio() {
+            a.ring().clear();
+        }
         if let Some(ref p) = self.pipeline {
             p.reset_dedup();
             p.flush();
@@ -726,12 +883,18 @@ impl CaptureService {
         {
             let _ = h.join();
         }
+        if let Some(eng) = self.engine.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            eng.stop();
+        }
         let old: Vec<Arc<OutputCapture>> = {
             let mut st = self.outputs.lock().unwrap_or_else(|e| e.into_inner());
             std::mem::take(&mut st.outputs)
         };
         for o in old {
             o.stop();
+        }
+        if let Some(a) = self.audio.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            a.stop();
         }
         self.devices.clear();
     }
@@ -775,11 +938,11 @@ impl CaptureSubsystem for CaptureService {
     }
 
     fn replay_active(&self) -> bool {
-        self.replay_pipelines_count.load(Ordering::Acquire) > 0
+        self.engine().is_some_and(|e| e.pipelines_count() > 0)
     }
 
     fn replay_last_error(&self) -> Option<String> {
-        None
+        self.engine().and_then(|e| e.last_error())
     }
 
     fn diagnostics(&self) -> Option<String> {

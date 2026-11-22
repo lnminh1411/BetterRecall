@@ -35,6 +35,29 @@ impl<'a> BitReader<'a> {
         Ok(self.read(1)? == 1)
     }
 
+    pub fn skip(&mut self, n: usize) -> Result<(), String> {
+        for _ in 0..n {
+            self.read(1)?;
+        }
+        Ok(())
+    }
+
+    /// Exp-Golomb `ue(v)` (H.264/HEVC).
+    pub fn ue(&mut self) -> Result<u32, String> {
+        let mut zeros = 0usize;
+        while self.read(1)? == 0 {
+            zeros += 1;
+            if zeros > 31 {
+                return Err("Bad ue(v).".to_string());
+            }
+        }
+        if zeros == 0 {
+            Ok(0)
+        } else {
+            Ok(((1u32 << zeros) - 1) + self.read(zeros)?)
+        }
+    }
+
     pub fn uvlc(&mut self) -> Result<u32, String> {
         let mut leading = 0usize;
         while self.read(1)? == 0 {
@@ -144,6 +167,16 @@ impl Av1 {
             w += o.length;
         }
         Ok(w)
+    }
+
+    /// Finds the sequence header OBU (with header bytes) in a temporal unit.
+    pub fn find_sequence_header(tu: &[u8]) -> Result<Option<Vec<u8>>, String> {
+        for o in Self::split(tu)? {
+            if o.obu_type == Self::OBU_SEQUENCE_HEADER {
+                return Ok(Some(tu[o.start..o.start + o.length].to_vec()));
+            }
+        }
+        Ok(None)
     }
 
     pub fn parse_sequence_header(obu: &[u8]) -> Result<SeqInfo, String> {
