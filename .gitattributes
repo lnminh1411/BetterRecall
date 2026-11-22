@@ -1,0 +1,2 @@
+# Signed integrity fixtures: exact bytes are hashed and signed; never convert line endings.
+tests/fixtures/integrity/** -text
