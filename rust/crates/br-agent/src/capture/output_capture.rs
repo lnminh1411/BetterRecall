@@ -194,7 +194,7 @@ impl FramePacer {
     }
 }
 
-type GrabCallback = Arc<dyn Fn(KeyframeGrab) + Send + Sync>;
+pub type GrabCallback = Arc<dyn Fn(KeyframeGrab) + Send + Sync>;
 
 struct SharedCapture {
     info: OutputInfo,
@@ -354,6 +354,22 @@ impl OutputCapture {
 
     pub fn grab_count(&self) -> u64 {
         self.shared.grab_count.load(Ordering::Acquire)
+    }
+
+    pub fn acquire_count(&self) -> u64 {
+        self.shared.acquire_count.load(Ordering::Acquire)
+    }
+
+    pub fn grab_ticks(&self) -> u64 {
+        self.shared.grab_ticks.load(Ordering::Acquire)
+    }
+
+    pub fn set_grab_override(&self, cb: Option<GrabCallback>) {
+        *self
+            .shared
+            .grab_override
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = cb;
     }
 
     pub fn skipped_no_change(&self) -> u64 {

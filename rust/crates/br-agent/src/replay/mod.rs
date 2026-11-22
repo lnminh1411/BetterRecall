@@ -27,7 +27,7 @@ pub use encoder_watchdog::EncoderWatchdog;
 pub use fmp4_writer::{BoxBuilder, Fmp4Writer, MuxTrack, TrackKind, VideoFormat};
 pub use mf_video_encoder::{MediaFoundationRuntime, MfVideoEncoder};
 pub use packet_ring::{PacketRing, RingPacket, RingSnapshot};
-pub use replay_engine::{ReplayEngine, ReplayEngineConfig};
+pub use replay_engine::{PipelineDiagStats, ReplayEngine, ReplayEngineConfig};
 pub use replay_layout::{
     CanvasLayout, DirtyMapper, FramePacer, MonitorDest, MonitorPlacement, ReplayRate,
     ReplayScaling, dirty_to_dest,
