@@ -7,4 +7,10 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <RootNamespace>BetterRecall.Contracts</RootNamespace>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(BetterRecallReleasePubKey)' != ''">
+    <DefineConstants>$(DefineConstants);BR_RELEASE</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(BetterRecallReleasePubKey)' != ''">
+    <EmbeddedResource Include="$(BetterRecallReleasePubKey)" LogicalName="BetterRecall.Contracts.release_pubkey.pem" />
+  </ItemGroup>
 </Project>

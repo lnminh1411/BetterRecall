@@ -1,0 +1,16 @@
+[package]
+name = "br-sign"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license = "AGPL-3.0-only"
+
+[[bin]]
+name = "br-sign"
+path = "src/main.rs"
+
+[dependencies]
+br-integrity = { path = "../br-integrity" }
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "pem", "sha256", "std"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+sha2 = "0.11"

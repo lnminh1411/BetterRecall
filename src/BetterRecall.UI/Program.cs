@@ -16,6 +16,10 @@ public static class Program
     [STAThread]
     public static int Main(string[] args)
     {
+        var uiDir = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var installRoot = Path.GetDirectoryName(uiDir) ?? uiDir;
+        BetterRecall.Contracts.IntegrityCheck.EnforceOrExit(installRoot, gui: true);
+
         WinRT.ComWrappersSupport.InitializeComWrappers();
         var parsed = AppArgs.Parse(args);
         // One UI per data folder: a UI of another folder (dev build, second home) never takes this one's activations.

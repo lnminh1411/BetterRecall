@@ -17,6 +17,7 @@ path = "src/main.rs"
 br-contracts = { path = "../br-contracts" }
 br-core = { path = "../br-core" }
 br-fetch = { path = "../br-fetch" }
+br-integrity = { path = "../br-integrity" }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 fancy-regex = "0.14"
 libloading = "0.9"
