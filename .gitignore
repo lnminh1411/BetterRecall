@@ -6,6 +6,7 @@ obj/
 /models/
 *.onnx
 *.bin
+!tests/fixtures/integrity/layout/data.bin
 *.safetensors
 __pycache__/
 
