@@ -39,6 +39,43 @@ public class UpdateTests
     }
 
     [Fact]
+    public async Task UpdateDownloadStreamAsync_parses_progress_and_handles_bad_response()
+    {
+        int call = 0;
+        await using var server = new FakeLineServer(line =>
+        {
+            if (line != "update download") return [Envelope.Error("unexpected")];
+            return Interlocked.Increment(ref call) == 1
+                ?
+                [
+                    Envelope.Ok("""{"phase":"downloading","doneBytes":52428800,"totalBytes":125829120}"""),
+                    Envelope.Ok("""{"phase":"done","doneBytes":125829120,"totalBytes":125829120}"""),
+                ]
+                : [Envelope.Ok("123")];
+        });
+
+        var progress = new List<UpdateProgress>();
+        await using (var run = new AgentClient(server.Name, MockHarness.OwnProcessTrust()))
+        {
+            var r = await AgentApi.UpdateDownloadStreamAsync(run, progress.Add);
+            Assert.True(r.Ok, r.Error);
+        }
+        Assert.Equal(["downloading", "done"], progress.Select(p => p.Phase));
+        Assert.Equal(52_428_800L, progress[0].DoneBytes);
+        Assert.Equal(125_829_120L, progress[1].DoneBytes);
+
+        var bad = new List<UpdateProgress>();
+        await using (var run = new AgentClient(server.Name, MockHarness.OwnProcessTrust()))
+        {
+            var r = await AgentApi.UpdateDownloadStreamAsync(run, bad.Add);
+            Assert.True(r.Ok, r.Error);
+        }
+        var err = Assert.Single(bad);
+        Assert.Equal("failed", err.Phase);
+        Assert.Equal("Bad response.", err.Error);
+    }
+
+    [Fact]
     public void Classify_Selects_Expected_Status_Kinds()
     {
         Assert.Equal(UpdateStatusKind.NotChecked, UpdateLogic.Classify(null));

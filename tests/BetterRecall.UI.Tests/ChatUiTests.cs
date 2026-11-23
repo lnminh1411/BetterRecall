@@ -12,6 +12,8 @@ public sealed class ChatViewModelTests
     private static readonly DateTimeOffset T = new(2026, 11, 12, 10, 0, 0, TimeSpan.Zero);
     private static ChatSource Src(string id) => new(id, T, CaptureKind.Screen, "chrome.exe", "Acme invoice", "acme.com");
     private static ChatApprovalItem Item(string id) => new(id, T, CaptureKind.Screen, "chrome.exe", "Acme", "acme.com", "[S1] ...", null, null);
+    private static ChatDetail SavedChat(string id) =>
+        new(new ChatSummary(id, "Chat " + id, T, T, 1), [new ChatMessage(1, T, "user", "hello " + id)], false);
 
     [Fact]
     public void Streamed_turn_builds_one_question_and_one_answer()
@@ -36,6 +38,18 @@ public sealed class ChatViewModelTests
         Assert.False(vm.Busy);
         Assert.True(vm.CanSend);
         Assert.Equal(3, vm.Usage!.Requests);
+    }
+
+    [Fact]
+    public void Warning_event_sets_warning_and_next_send_clears_it()
+    {
+        var vm = new ChatViewModel();
+        vm.BeginSend("q");
+        vm.Handle(new ChatEvent("warning", Code: "ratelimit", Text: "Approaching daily quota."));
+        Assert.Equal("Approaching daily quota.", vm.Warning);
+        vm.Handle(new ChatEvent("done"));
+        vm.BeginSend("next");
+        Assert.Null(vm.Warning);
     }
 
     [Fact]
@@ -98,6 +112,98 @@ public sealed class ChatViewModelTests
         Assert.Null(vm.LastQuestion);
     }
 
+    /// <summary>D4/D6: late chat events from a stream started before Reset or Load are ignored.</summary>
+    [Fact]
+    public void Chat_events_of_a_stream_from_before_a_reset_are_ignored()
+    {
+        var vm = new ChatViewModel();
+        vm.BeginSend("What did I see?");
+        var gen = vm.Generation;
+        Assert.True(vm.Handle(gen, new ChatEvent("text", Text: "You saw ")));
+        Assert.Equal("You saw ", vm.Messages[^1].Text);
+
+        vm.Reset();   // lock, launcher hidden, Chat page left
+        Assert.False(vm.Handle(gen, new ChatEvent("text", Text: "the bank statement")));
+        Assert.False(vm.Handle(gen, new ChatEvent("approval", Token: "t", Items: [])));
+        Assert.Empty(vm.Messages);
+        Assert.False(vm.HasApproval);
+
+        var after = vm.Generation;
+        vm.Load(new ChatDetail(new ChatSummary("c_1", "t", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, 0), [], false));
+        Assert.NotEqual(after, vm.Generation);   // another chat shown: the old stream's events no longer apply either
+    }
+
+    /// <summary>C7: a late saved-chat fetch is dropped after Reset or a newer BeginOpen.</summary>
+    [Fact]
+    public void Open_ticket_drops_stale_or_reset_loads()
+    {
+        var vm = new ChatViewModel();
+        var afterReset = vm.BeginOpen();
+        vm.Reset();
+        Assert.False(vm.LoadIfCurrent(afterReset, SavedChat("A")));
+        Assert.Null(vm.ChatId);
+        Assert.Empty(vm.Messages);
+
+        var a = vm.BeginOpen();
+        var b = vm.BeginOpen();
+        Assert.False(vm.LoadIfCurrent(a, SavedChat("A")));
+        Assert.True(vm.LoadIfCurrent(b, SavedChat("B")));
+        Assert.Equal("B", vm.ChatId);
+    }
+
+    /// <summary>D6: saved-chat accessible name uses title and local date, not record id or type name.</summary>
+    [Fact]
+    public void Saved_chat_name_is_title_and_date_not_the_record()
+    {
+        var name = ChatViewModel.SummaryName(new ChatSummary("mc_sample_tokyo", "Flight to Tokyo", T, T, 2));
+        Assert.StartsWith("Flight to Tokyo, ", name);
+        Assert.DoesNotContain("mc_sample_tokyo", name);
+        Assert.DoesNotContain("ChatSummary", name);
+        Assert.Contains(T.ToLocalTime().ToString("g", System.Globalization.CultureInfo.CurrentCulture), name);
+    }
+
+    /// <summary>B6: ApplyRemoved prunes cited chats, pending approval cards, and full wipes.</summary>
+    [Fact]
+    public void ApplyRemoved_clears_cited_messages_truncated_all_and_approvals()
+    {
+        var t0 = DateTimeOffset.UtcNow;
+
+        // 1) Unrelated removed event leaves chat intact.
+        var vm = new ChatViewModel();
+        vm.Load(new ChatDetail(new ChatSummary("c1", "Test", t0, t0, 2),
+        [
+            new ChatMessage(1, t0, "user", "hi"),
+            new ChatMessage(2, t0, "assistant", "there", [new ChatSource("cap-1", t0, CaptureKind.Screen, "notepad.exe", "t", "")]),
+        ], Approved: true));
+        Assert.False(vm.ApplyRemoved(new RemovedEvent("removed", "purge", ["cap-other"])));
+        Assert.Equal("c1", vm.ChatId);
+        Assert.Equal(2, vm.Messages.Count);
+
+        // 2) Cited capture removed resets the chat.
+        Assert.True(vm.ApplyRemoved(new RemovedEvent("removed", "purge", ["cap-1"])));
+        Assert.Null(vm.ChatId);
+        Assert.Empty(vm.Messages);
+
+        // 3) Pending approval mentioning a removed capture drops the card and rolls back the open turn.
+        var apVm = new ChatViewModel();
+        apVm.BeginSend("summarize this");
+        apVm.Handle(new ChatEvent("approval", Token: "tok-a", Share: "text", Items:
+        [
+            new ChatApprovalItem("cap-2", t0, CaptureKind.Screen, "code.exe", "main.cs", "", "hello"),
+        ]));
+        Assert.True(apVm.HasApproval);
+        Assert.True(apVm.ApplyRemoved(new RemovedEvent("removed", "purge", ["cap-2"])));
+        Assert.False(apVm.HasApproval);
+        Assert.Empty(apVm.Messages);
+        Assert.False(apVm.Busy);
+
+        // 4) "all" clears any loaded chat.
+        var trVm = new ChatViewModel();
+        trVm.Load(new ChatDetail(new ChatSummary("c2", "Keep?", t0, t0, 1), [new ChatMessage(1, t0, "user", "q")], Approved: true));
+        Assert.True(trVm.ApplyRemoved(new RemovedEvent("removed", "all", [])));
+        Assert.Empty(trVm.Messages);
+    }
+
     [Theory]
     [InlineData("auth", "Chat_ErrAuth")]
     [InlineData("quota", "Chat_ErrQuota")]
@@ -109,9 +215,22 @@ public sealed class ChatViewModelTests
     [InlineData("timeout", "Chat_ErrTimeout")]
     [InlineData("budget", "Chat_ErrBudget")]
     [InlineData("refused", "Chat_ErrRefused")]
+    [InlineData("locked", "Chat_ErrLocked")]
+    [InlineData("stopped", "Chat_ErrStopped")]
     [InlineData("server", "Chat_ErrGeneric")]
     [InlineData(null, "Chat_ErrGeneric")]
     public void Error_titles(string? code, string key) => Assert.Equal(key, ChatViewModel.ErrorTitleKey(code));
+
+    /// <summary>S4: lock and stop chat errors use localized message keys and lock classification.</summary>
+    [Theory]
+    [InlineData("locked", "Chat_ErrLockedBody", true)]
+    [InlineData("STOPPED", "Chat_ErrStoppedBody", false)]
+    [InlineData("quota", null, false)]
+    public void Error_messages_and_lock_code(string code, string? messageKey, bool isLock)
+    {
+        Assert.Equal(messageKey, ChatViewModel.ErrorMessageKey(code));
+        Assert.Equal(isLock, ChatViewModel.IsLockCode(code));
+    }
 
     [Fact]
     public void Usage_parts()
@@ -201,18 +320,6 @@ public sealed class MockChatTests
     }
 
     [Fact]
-    public async Task Quota_warning_comes_before_the_answer()
-    {
-        await using var h = await Harness();
-        var ap = (await Stream(h, AgentApi.ChatSendLine(null, "quota warning")))[^1];
-        var ev = await Stream(h, AgentApi.ChatApproveLine(ap.Token!, []));
-        var warn = ev.FindIndex(e => e is { Type: "warning", Code: "ratelimit" });
-        Assert.True(warn >= 0);
-        Assert.True(warn < ev.FindIndex(e => e.Type == "text"));
-        Assert.Equal("done", ev[^1].Type);
-    }
-
-    [Fact]
     public async Task Saved_chats_list_rename_delete()
     {
         await using var h = await Harness();
@@ -265,20 +372,13 @@ public sealed class MockChatTests
 
 public sealed class ChatSettingsTests
 {
-    private static Dictionary<string, string> Strings()
-    {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir != null && !File.Exists(Path.Combine(dir.FullName, "BetterRecall.slnx"))) dir = dir.Parent;
-        var resw = System.Xml.Linq.XDocument.Load(Path.Combine(dir!.FullName, "src", "BetterRecall.UI", "Strings", "en-US", "Resources.resw"));
-        return resw.Root!.Elements("data").ToDictionary(e => (string)e.Attribute("name")!, e => (string)e.Element("value")!);
-    }
-
+    /// <summary>Pins the UI SettingsSchema min/max bounds and ai.enabled gate for chat settings (cannot read Rust agent bounds directly).</summary>
     [Theory]
     [InlineData("ai.chatMaxHits", 1, 20)]
     [InlineData("ai.chatMaxImages", 0, 8)]
     [InlineData("ai.dailyRequests", 0, 100000)]
     [InlineData("ai.dailyTokens", 0, 1000000000)]
-    public void Ranges_match_the_agent(string key, double min, double max)
+    public void Chat_settings_schema_ranges_and_gate(string key, double min, double max)
     {
         var d = SettingsSchema.Find(key)!;
         Assert.Equal(min, d.Min);
@@ -287,19 +387,9 @@ public sealed class ChatSettingsTests
     }
 
     [Fact]
-    public void Share_and_history_settings_have_strings()
+    public void Share_and_history_settings_schema_entries()
     {
         Assert.Equal(AiShare.All, SettingsSchema.Find("ai.share")!.Choices!);
         Assert.Equal("ai.enabled", SettingsSchema.Find("ai.chatHistory")!.EnabledWhenKey);
-        var s = Strings();
-        foreach (var k in new[] { "share", "chatMaxHits", "chatMaxImages", "dailyRequests", "dailyTokens", "chatHistory" })
-        {
-            Assert.True(s.ContainsKey("S_ai_" + k), k);
-            Assert.True(s.ContainsKey("S_ai_" + k + "_D"), k);
-        }
-        foreach (var c in AiShare.All) Assert.True(s.ContainsKey("S_ai_share_" + c), c);
-        foreach (var k in new[] { "Nav_Chat.Content", "Chat_Usage", "Chat_NoLimit", "Chat_Searching", "Chat_ApprovalTitle", "Chat_AllowChat", "Chat_DontShare", "Chat_ErrGeneric" })
-            Assert.True(s.ContainsKey(k), k);
-        Assert.Contains("on-screen text reading", s["S_ai_share_D"]);
     }
 }

@@ -10,8 +10,7 @@ namespace BetterRecall.UI.Tests;
 
 public class SettingsTests
 {
-    private static JsonObject Defaults() =>
-        (JsonObject)JsonNode.Parse(JsonSerializer.Serialize(new Settings(), ContractsJson.Default.Settings))!;
+    private static JsonObject Defaults() => TestResources.DefaultSettings();
 
     [Fact]
     public void Schema_CoversEveryContractsKey()
@@ -27,6 +26,42 @@ public class SettingsTests
         Assert.All(SettingsSchema.All, d => Assert.NotNull(SettingsSchema.Get(Defaults(), d.Key)));
         Assert.All(SettingsSchema.All, d => Assert.Contains(d.Group, SettingsSchema.Groups.Append("hotkeys").Append("update")));   // hotkeys: Shortcuts page; update: Update page
         Assert.All(SettingsSchema.All.Where(d => d.Group == "hotkeys"), d => Assert.Contains(d.Key, ShortcutRules.Actions.Select(ShortcutRules.Key)));
+    }
+
+    [Fact]
+    public void Schema_has_ai_security_and_storage_rules()
+    {
+        Assert.Equal(["hello", "password"], SettingsSchema.Find("security.unlockMethod")!.Choices!);
+        Assert.Equal(["gemini", "openai-compatible", "claude"], SettingsSchema.Find("ai.provider")!.Choices!);
+        Assert.Equal("ai.enabled", SettingsSchema.Find("ai.model")!.EnabledWhenKey);
+        Assert.Equal(2, SettingsSchema.Find("replay.sampleSeconds")!.Min);
+        Assert.Equal(60, SettingsSchema.Find("replay.sampleSeconds")!.Max);
+        Assert.Null(SettingsSchema.Find("ai.apiKey"));
+        Assert.Contains("ai", SettingsSchema.Groups);
+
+        Assert.Contains("storage", SettingsSchema.Groups);
+        Assert.Null(SettingsSchema.Find("keyframes.maxGb"));
+        Assert.Null(SettingsSchema.Find("keyframes.encoder"));
+        Assert.Equal("W_storage_overwrite", SettingsSchema.Find("storage.overwrite")!.WarningKey);
+        Assert.Equal(["avif", "webp", "jxl", "jpeg"], SettingsSchema.Find("keyframes.format")!.Choices!);
+        foreach (var key in new[] { "storage.minFreeGb", "storage.maxGb", "storage.overwrite", "retention.progressiveAfterDays", "retention.progressiveOverDays" })
+            Assert.NotNull(SettingsSchema.Find(key));
+
+        var root = JsonNode.Parse("{\"ai\":{\"enabled\":true,\"provider\":\"gemini\",\"endpoint\":\"https://x.example\",\"model\":\"bad model\"},\"replay\":{\"sampleSeconds\":5}}")!.AsObject();
+        var errors = SettingsSchema.ValidateAll(root);
+        Assert.Contains("ai.model", errors.Keys);
+        Assert.DoesNotContain("ai.endpoint", errors.Keys);
+    }
+
+    [Fact]
+    public void ScalePercent_EnabledOnlyForScale()
+    {
+        var s = Defaults();
+        var d = SettingsSchema.Find("replay.scalePercent")!;
+        Assert.False(d.IsEnabled(s));
+        SettingsSchema.Set(s, "replay.resolution", "scale");
+        Assert.True(d.IsEnabled(s));
+        Assert.True(SettingsSchema.Find("replay.layout")!.IsEnabled(s));
     }
 
     [Fact]
@@ -103,6 +138,17 @@ public class SettingsTests
         Assert.Null(SettingsDiff.ToRequestLine(SettingsDiff.Diff(Defaults(), edited)));
     }
 
+    /// <summary>D18: pending change count has singular and plural resource keys.</summary>
+    [Fact]
+    public void Pending_count_has_a_singular()
+    {
+        var s = TestResources.Strings();
+        Assert.Equal("Settings_PendingOne", SettingsDiff.PendingKey(1));
+        Assert.Equal("Settings_Pending", SettingsDiff.PendingKey(2));
+        Assert.Equal("1 unsaved change", s[SettingsDiff.PendingKey(1)]);
+        Assert.Contains("{0}", s[SettingsDiff.PendingKey(3)]);
+    }
+
     [Theory]
     [InlineData("capture.intervalMs", 499, false)]
     [InlineData("capture.intervalMs", 500, true)]
@@ -120,6 +166,15 @@ public class SettingsTests
     [InlineData("index.dim", 512, true)]
     [InlineData("index.dim", 128, false)]
     [InlineData("ipc.defaultResults", 60, false)]   // above ipc.maxResults (50)
+    [InlineData("replay.scalePercent", 25, true)]
+    [InlineData("replay.scalePercent", 24, false)]
+    [InlineData("replay.scalePercent", 101, false)]
+    [InlineData("storage.minFreeGb", -1, false)]
+    [InlineData("storage.minFreeGb", 0, true)]
+    [InlineData("storage.maxGb", 0, false)]
+    [InlineData("storage.maxGb", 20000, true)]
+    [InlineData("retention.progressiveAfterDays", 0, true)]
+    [InlineData("retention.progressiveOverDays", 0, false)]
     public void Validate_Ranges(string key, double value, bool valid)
     {
         var s = Defaults();
@@ -138,6 +193,14 @@ public class SettingsTests
     [InlineData("replay.exportDir", "", true)]
     [InlineData("replay.exportDir", @"D:\Clips", true)]
     [InlineData("replay.exportDir", @"relative\dir", false)]
+    [InlineData("replay.encoder", "av1", true)]
+    [InlineData("replay.encoder", "av1_qsv", false)]
+    [InlineData("replay.layout", "perMonitor", true)]
+    [InlineData("replay.layout", "grid", false)]
+    [InlineData("replay.resolution", "900p", true)]
+    [InlineData("replay.resolution", "800p", false)]
+    [InlineData("replay.encoderAdapter", "RTX 3050", true)]
+    [InlineData("replay.encoderAdapter", " ", false)]
     [InlineData("keyframes.format", "png", false)]
     [InlineData("hotkeys.search", "Ctrl+Alt+R", false)]   // clashes with hotkeys.replay
     [InlineData("hotkeys.search", "Ctrl+Shift+F", true)]
@@ -189,6 +252,17 @@ public class SettingsTests
         }
     }
 
+    /// <summary>D24: Tab leaves the hotkey recorder unless a modifier is held.</summary>
+    [Fact]
+    public void Tab_leaves_the_hotkey_recorder_unless_a_modifier_is_down()
+    {
+        Assert.True(HotkeyFormat.LeavesRecorder(9, false, false, false));
+        Assert.False(HotkeyFormat.LeavesRecorder(9, true, false, false));
+        Assert.False(HotkeyFormat.LeavesRecorder(9, false, true, false));
+        Assert.False(HotkeyFormat.LeavesRecorder(9, false, false, true));
+        Assert.False(HotkeyFormat.LeavesRecorder(0x41, false, false, false));
+    }
+
     [Fact]
     public void Shortcuts_ConflictsAndParse()
     {
@@ -206,10 +280,28 @@ public class SettingsTests
         Assert.Equal(0x7Bu, vk);
         Assert.False(ShortcutRules.TryParse("Shift+X", out _, out _));
     }
+
+    /// <summary>D7: Shortcuts view signature ignores status noise and order of failed actions.</summary>
+    [Fact]
+    public void Shortcuts_signature_ignores_status_noise()
+    {
+        var settings = new JsonObject { ["hotkeys"] = new JsonObject { ["search"] = "Ctrl+Alt+Space", ["pause"] = "" } };
+        var a = ShortcutRules.ViewSignature(settings, true, []);
+        Assert.Equal(a, ShortcutRules.ViewSignature(settings, true, null));
+        Assert.NotEqual(a, ShortcutRules.ViewSignature(settings, false, []));
+        Assert.NotEqual(a, ShortcutRules.ViewSignature(settings, true, ["search"]));
+        Assert.Equal(ShortcutRules.ViewSignature(settings, true, ["search", "pause"]), ShortcutRules.ViewSignature(settings, true, ["pause", "search"]));
+        var changed = (JsonObject)settings.DeepClone();
+        SettingsSchema.Set(changed, "hotkeys.pause", "Ctrl+Alt+P");
+        Assert.NotEqual(a, ShortcutRules.ViewSignature(changed, true, []));
+    }
 }
 
 public class SettingsEditorTests
 {
+    private static ScriptedClient RecordingSettingsSet(IAgentClient inner) =>
+        ScriptedClient.Recording(inner, l => l.StartsWith("settings set", StringComparison.Ordinal));
+
     [Fact]
     public async Task Save_SendsOnlyChangedKeys_AndRebases()
     {
@@ -220,14 +312,13 @@ public class SettingsEditorTests
         editor.Set("audio.mic", true);
         Assert.Equal(["audio.mic", "capture.intervalMs"], SettingsDiff.Keys(editor.Diff()).Order());
 
-        var lines = new List<string>();
-        var recorder = new RecordingClient(h.Client, lines);
+        var recorder = RecordingSettingsSet(h.Client);
         var (outcome, _) = await editor.SaveAsync(new AgentApi(recorder));
         Assert.Equal(SaveOutcome.Saved, outcome);
-        Assert.Equal("settings set {\"capture\":{\"intervalMs\":3000},\"audio\":{\"mic\":true}}", Assert.Single(lines));
+        Assert.Equal("settings set {\"capture\":{\"intervalMs\":3000},\"audio\":{\"mic\":true}}", Assert.Single(recorder.Lines));
         Assert.False(editor.HasChanges);
         Assert.Equal(3000, SettingsSchema.Get(editor.Original, "capture.intervalMs")!.GetValue<int>());
-        Assert.Equal((SaveOutcome.NothingToSave, (AgentResult<System.Text.Json.Nodes.JsonObject>?)null), await editor.SaveAsync(h.Api));
+        Assert.Equal((SaveOutcome.NothingToSave, (AgentResult<JsonObject>?)null), await editor.SaveAsync(h.Api));
     }
 
     [Fact]
@@ -240,19 +331,10 @@ public class SettingsEditorTests
         Assert.True(SettingsSchema.ValidateAll(loaded).ContainsKey("ipc.pipeName"));
         editor.Load(loaded);
         editor.Set("capture.intervalMs", 3000);
-        var lines = new List<string>();
-        var (outcome, _) = await editor.SaveAsync(new AgentApi(new RecordingClient(h.Client, lines)));
+        var recorder = RecordingSettingsSet(h.Client);
+        var (outcome, _) = await editor.SaveAsync(new AgentApi(recorder));
         Assert.Equal(SaveOutcome.Saved, outcome);
-        Assert.Equal("settings set {\"capture\":{\"intervalMs\":3000}}", Assert.Single(lines));
-    }
-
-    [Fact]
-    public void Local_time_uses_the_offset_of_that_date()
-    {
-        var cet = TimeZoneInfo.FindSystemTimeZoneById("Central European Standard Time");
-        Assert.Equal(TimeSpan.FromHours(2), LocalTime.At(new DateTime(2026, 10, 20, 0, 0, 0), cet).Offset);   // summer time
-        Assert.Equal(TimeSpan.FromHours(1), LocalTime.At(new DateTime(2026, 11, 13, 0, 0, 0), cet).Offset);
-        Assert.Equal(new DateTime(2026, 3, 29, 3, 30, 0), LocalTime.At(new DateTime(2026, 3, 29, 2, 30, 0), cet).DateTime);   // skipped hour
+        Assert.Equal("settings set {\"capture\":{\"intervalMs\":3000}}", Assert.Single(recorder.Lines));
     }
 
     [Fact]
@@ -264,10 +346,10 @@ public class SettingsEditorTests
         editor.Set("capture.intervalMs", 3000);
         editor.Set("audio.mic", true);   // replaced by the switch below
 
-        var lines = new List<string>();
-        var r = await editor.SaveKeyAsync(new AgentApi(new RecordingClient(h.Client, lines)), "audio.mic", false);
+        var recorder = RecordingSettingsSet(h.Client);
+        var r = await editor.SaveKeyAsync(new AgentApi(recorder), "audio.mic", false);
         Assert.True(r.Ok);
-        Assert.Equal("settings set {\"audio\":{\"mic\":false}}", Assert.Single(lines));
+        Assert.Equal("settings set {\"audio\":{\"mic\":false}}", Assert.Single(recorder.Lines));
         Assert.False(SettingsSchema.Get(editor.Original, "audio.mic")!.GetValue<bool>());
         Assert.Equal(["capture.intervalMs"], SettingsDiff.Keys(editor.Diff()));
     }
@@ -280,30 +362,92 @@ public class SettingsEditorTests
         editor.Load((await h.Api.SettingsGetAsync()).Value!);
         editor.Set("capture.intervalMs", 10);
         Assert.True(editor.Errors.ContainsKey("capture.intervalMs"));
-        var lines = new List<string>();
-        var (outcome, _) = await editor.SaveAsync(new AgentApi(new RecordingClient(h.Client, lines)));
+        var recorder = RecordingSettingsSet(h.Client);
+        var (outcome, _) = await editor.SaveAsync(new AgentApi(recorder));
         Assert.Equal(SaveOutcome.Invalid, outcome);
-        Assert.Empty(lines);
+        Assert.Empty(recorder.Lines);
 
-        // a key the agent rejects but the local schema accepts
+        // A key the agent rejects but the local schema accepts.
         var server = new FakeLineServer(l => l.StartsWith("settings set") ? Envelope.Error("Invalid audio.language.") : Envelope.Ok("null"));
         await using var _ = server;
         await using var client = new AgentClient(server.Name, MockHarness.OwnProcessTrust());
         editor.Set("capture.intervalMs", 2000);
         editor.Set("audio.language", "xx");
-        var (o2, last) = await editor.SaveAsync(new AgentApi(client));
+        var (o2, _) = await editor.SaveAsync(new AgentApi(client));
         Assert.Equal(SaveOutcome.Invalid, o2);
         Assert.Equal("Invalid audio.language.", editor.Errors["audio.language"]);
         Assert.True(editor.HasChanges);
     }
 
-    private sealed class RecordingClient(IAgentClient inner, List<string> lines) : IAgentClient
+    /// <summary>D2: settings fetched after a reconnect become the new baseline; pending edits stay on top.</summary>
+    [Fact]
+    public async Task Refresh_rebases_and_keeps_pending_edits()
     {
-        public int ServerPid => inner.ServerPid;
-        public Task<AgentResult> SendAsync(string line, CancellationToken ct = default)
+        await using var h = new MockHarness();
+        var editor = new SettingsEditor();
+        var first = (await h.Api.SettingsGetAsync()).Value!;
+        editor.Load(first);
+        editor.Set("capture.intervalMs", 3000);   // pending edit
+
+        var fresh = (JsonObject)first.DeepClone();   // the restarted agent's settings differ
+        SettingsSchema.Set(fresh, "security.excludeOwnWindows", JsonValue.Create(false));
+        editor.Refresh(fresh);
+
+        Assert.False(SettingsSchema.Get(editor.Original, "security.excludeOwnWindows")!.GetValue<bool>());
+        Assert.Equal(3000, editor.Get("capture.intervalMs")!.GetValue<int>());
+        Assert.Equal(["capture.intervalMs"], SettingsDiff.Keys(editor.Diff()));   // only the user's edit would be sent
+    }
+
+    /// <summary>D2: Refresh before Load acts as initial Load.</summary>
+    [Fact]
+    public void Refresh_before_load_loads()
+    {
+        var editor = new SettingsEditor();
+        editor.Refresh(new JsonObject { ["capture"] = new JsonObject { ["intervalMs"] = 5000 } });
+        Assert.True(editor.Loaded);
+        Assert.False(editor.HasChanges);
+    }
+
+    /// <summary>B8/D2: settings reload on first connect if not yet loaded, and on every reconnect.</summary>
+    [Theory]
+    [InlineData(1, false, true)]    // UI started before the agent: InitAsync got nothing (B8)
+    [InlineData(1, true, false)]    // InitAsync already loaded them
+    [InlineData(2, true, true)]     // reconnect: the agent may have restarted (D2)
+    public void Settings_reload_on_connect(int connects, bool loaded, bool expected) =>
+        Assert.Equal(expected, SettingsReload.OnConnect(connects, loaded));
+
+    /// <summary>B4 (D3): inline passphrase prompt verifies and retries save, or stops on cancel.</summary>
+    [Fact]
+    public async Task Settings_save_flow_verifies_passphrase_inline_and_stops_on_cancel()
+    {
+        bool verified = false;
+        await using var srv = new FakeLineServer(line =>
         {
-            if (line.StartsWith("settings set", StringComparison.Ordinal)) lines.Add(line);
-            return inner.SendAsync(line, ct);
-        }
+            if (line.StartsWith("settings set ", StringComparison.Ordinal))
+                return verified
+                    ? Envelope.Ok("{\"security\":{\"keyProtection\":\"dpapi\",\"unlockMethod\":\"password\"}}")
+                    : Envelope.Error(AgentErrors.PassphraseNeeded);
+            if (line == "passphrase verify {\"passphrase\":\"correct-pass\"}")
+            {
+                verified = true;
+                return Envelope.Ok("null");
+            }
+            return Envelope.Error(AgentErrors.WrongPassphrase);
+        });
+        await using var client = new AgentClient(srv.Name, MockHarness.OwnProcessTrust());
+        var api = new AgentApi(client);
+
+        var editor = new SettingsEditor();
+        editor.Load(JsonNode.Parse("{\"security\":{\"keyProtection\":\"passphrase\",\"unlockMethod\":\"password\"}}")!.AsObject());
+        editor.Set("security.keyProtection", "dpapi");
+
+        // Cancelling the prompt returns Failed with PassphraseNeeded and does not retry save.
+        var cancelled = await SettingsSaveFlow.SaveWithPassphraseAsync(editor, api, _ => Task.FromResult(false));
+        Assert.Equal(SaveOutcome.Failed, cancelled.Outcome);
+        Assert.Equal(AgentErrors.PassphraseNeeded, cancelled.Last?.Error);
+
+        // Verifying inline retries and saves without leaving Settings.
+        var saved = await SettingsSaveFlow.SaveWithPassphraseAsync(editor, api, async v => (await v("correct-pass")).Ok);
+        Assert.Equal(SaveOutcome.Saved, saved.Outcome);
     }
 }

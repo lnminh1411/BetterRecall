@@ -5,8 +5,8 @@ using BetterRecall.UI.Logic;
 
 namespace BetterRecall.UI.Tests;
 
-/// <summary>Bug sweep 3, batch I: D1 (a style based on a key WinUI does not have broke every list editor).</summary>
-public class Sweep3IUiTests
+/// <summary>XAML resource key integrity and unhandled UI error logging (D1).</summary>
+public sealed class XamlResourceTests
 {
     /// <summary>WinUI 3 style keys a BasedOn may name: found in Microsoft.UI.Xaml.Controls.pri and the
     /// Microsoft.ui.xaml.resources dlls (D1 byte search), or already used by pages that render. "DefaultListViewStyle"
@@ -17,17 +17,10 @@ public class Sweep3IUiTests
         "TitleTextBlockStyle", "BodyTextBlockStyle", "CaptionTextBlockStyle", "BodyStrongTextBlockStyle",
     ];
 
-    private static string UiDir()
-    {
-        for (var d = new DirectoryInfo(AppContext.BaseDirectory); d is not null; d = d.Parent)
-            if (File.Exists(Path.Combine(d.FullName, "BetterRecall.slnx"))) return Path.Combine(d.FullName, "src", "BetterRecall.UI");
-        throw new DirectoryNotFoundException("repo root not found");
-    }
-
     [Fact]
     public void D1_every_BasedOn_names_a_key_that_exists()
     {
-        var files = Directory.GetFiles(UiDir(), "*.xaml", SearchOption.AllDirectories);
+        var files = Directory.GetFiles(TestResources.UiDir(), "*.xaml", SearchOption.AllDirectories);
         var defined = new HashSet<string>(files.SelectMany(f => Regex.Matches(File.ReadAllText(f), "x:Key=\"([^\"]+)\"").Select(m => m.Groups[1].Value)));
         var bad = files
             .SelectMany(f => Regex.Matches(File.ReadAllText(f), "BasedOn=\"\\{StaticResource ([^}\\s]+)\\}\"").Select(m => (File: Path.GetFileName(f), Key: m.Groups[1].Value)))
@@ -39,8 +32,9 @@ public class Sweep3IUiTests
     [Fact]
     public void D1_styles_the_editors_look_up_in_code_are_defined()
     {
-        var app = File.ReadAllText(Path.Combine(UiDir(), "App.xaml"));
-        var code = string.Concat(Directory.GetFiles(Path.Combine(UiDir(), "Views"), "*.cs").Select(File.ReadAllText));
+        var uiDir = TestResources.UiDir();
+        var app = File.ReadAllText(Path.Combine(uiDir, "App.xaml"));
+        var code = string.Concat(Directory.GetFiles(Path.Combine(uiDir, "Views"), "*.cs").Select(File.ReadAllText));
         var used = Regex.Matches(code, "Application\\.Current\\.Resources\\[\"([^\"]+)\"\\]").Select(m => m.Groups[1].Value).Distinct().ToList();
         Assert.Contains("OutlinedListViewStyle", used);
         Assert.All(used, k => Assert.True(app.Contains("x:Key=\"" + k + "\"") || WinUiStyleKeys.Contains(k), k));
