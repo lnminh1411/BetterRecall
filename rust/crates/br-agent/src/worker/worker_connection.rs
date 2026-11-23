@@ -432,20 +432,6 @@ impl ConnInner {
             return;
         }
         self.write_gate.close();
-        {
-            let mut q = self.writer_queue.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(mut jobs) = q.take() {
-                for job in jobs.drain(..) {
-                    let msg = if self.by_agent() {
-                        STOPPED_MESSAGE
-                    } else {
-                        NOT_SENT_MESSAGE
-                    };
-                    job.done.complete(Err(WorkerError::Transport(msg.to_string())));
-                }
-            }
-            self.writer_cv.notify_all();
-        }
         let by_agent = self.by_agent();
         let blamed = if self.aborted.load(Ordering::Acquire)
             || self.shutting_down.load(Ordering::Acquire)
@@ -459,16 +445,8 @@ impl ConnInner {
             p.drain().collect()
         };
         let pending_at_close = drained.len();
-        for (id, slot) in drained {
-            let msg = if Some(id) == blamed {
-                PIPE_CLOSED_MESSAGE
-            } else if by_agent {
-                STOPPED_MESSAGE
-            } else {
-                CRASHED_ELSEWHERE_MESSAGE
-            };
-            slot.set(Err(WorkerError::Transport(msg.to_string())));
-        }
+        // The close callback records the failure and its restart backoff. Run it before any
+        // waiting caller wakes, so a caller that retries at once sees the backoff (sweep 6 F1).
         let cb = self
             .closed_cb
             .lock()
@@ -478,6 +456,30 @@ impl ConnInner {
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 cb(error, pending_at_close);
             }));
+        }
+        {
+            let mut q = self.writer_queue.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(mut jobs) = q.take() {
+                for job in jobs.drain(..) {
+                    let msg = if by_agent {
+                        STOPPED_MESSAGE
+                    } else {
+                        NOT_SENT_MESSAGE
+                    };
+                    job.done.complete(Err(WorkerError::Transport(msg.to_string())));
+                }
+            }
+            self.writer_cv.notify_all();
+        }
+        for (id, slot) in drained {
+            let msg = if Some(id) == blamed {
+                PIPE_CLOSED_MESSAGE
+            } else if by_agent {
+                STOPPED_MESSAGE
+            } else {
+                CRASHED_ELSEWHERE_MESSAGE
+            };
+            slot.set(Err(WorkerError::Transport(msg.to_string())));
         }
     }
 

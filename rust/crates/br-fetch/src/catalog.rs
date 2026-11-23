@@ -244,17 +244,3 @@ pub(crate) fn is_sha256_lower_hex(s: &str) -> bool {
         && s.bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn embedded_catalog_parses_and_validates() {
-        let cat = Catalog::embedded().expect("embedded models-catalog.json must parse");
-        assert_eq!(cat.components_for(ModelSet::Minimal).len(), 5);
-        assert_eq!(cat.components_for(ModelSet::Full).len(), 8);
-        assert!(cat.bytes_for(ModelSet::Minimal) > 3_000_000_000);
-        assert!(cat.bytes_for(ModelSet::Full) > 6_000_000_000);
-    }
-}

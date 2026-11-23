@@ -109,6 +109,11 @@ public sealed class IntegrityCheckTests : IDisposable
     [Fact]
     public void CheckInstall_SkipsWithoutReleaseKey()
     {
+        if (typeof(IntegrityCheck).Assembly.GetManifestResourceStream("BetterRecall.Contracts.release_pubkey.pem") is not null)
+        {
+            Console.WriteLine("Skipping CheckInstall_SkipsWithoutReleaseKey: BetterRecall.Contracts embeds a release public key.");
+            return;
+        }
         var result = IntegrityCheck.CheckInstall(_tempRoot);
         Assert.Equal(IntegrityOutcome.Skipped, result.Outcome);
     }

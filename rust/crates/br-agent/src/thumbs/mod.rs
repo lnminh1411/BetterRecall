@@ -96,13 +96,22 @@ impl<K: Eq + Hash + Clone> ByteLruCache<K> {
     }
 
     pub fn clear(&self) {
+        let _ = self.clear_for_test();
+    }
+
+    /// Clears the cache, zeroizing all cached byte buffers and returning each zeroized
+    /// buffer paired with its original length before drop (for tests).
+    pub fn clear_for_test(&self) -> Vec<(Vec<u8>, usize)> {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        for v in g.map.values_mut() {
+        let mut out = Vec::with_capacity(g.map.len());
+        for (_, mut v) in g.map.drain() {
+            let orig_len = v.bytes.len();
             v.bytes.zeroize();
+            out.push((v.bytes, orig_len));
         }
         g.order.clear();
-        g.map.clear();
         g.bytes = 0;
+        out
     }
 
     fn trim_locked(g: &mut LruInner<K>) {

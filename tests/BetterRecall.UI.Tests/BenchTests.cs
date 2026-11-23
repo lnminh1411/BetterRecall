@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) BetterRecall contributors
-using System.Text.Json.Nodes;
 using BetterRecall.Contracts;
 using BetterRecall.UI.Logic;
 using BetterRecall.UI.Logic.Mock;
@@ -74,9 +73,8 @@ public class BenchTests
     public async Task Apply_SendsOnlySelectedKeys_InOneRequest()
     {
         await using var h = new MockHarness();
-        var lines = new List<string>();
-        var api = new AgentApi(new Recording(h.Client, lines));
-        var vm = new BenchViewModel(api, () => h.Client);
+        var recorder = ScriptedClient.Recording(h.Client);
+        var vm = new BenchViewModel(new AgentApi(recorder), () => h.Client);
         await vm.LoadLastAsync();
         var keys = vm.Recommendations.Select(r => r.Key).ToList();
         Assert.Contains("replay.fps", keys);
@@ -84,7 +82,7 @@ public class BenchTests
 
         var r = await vm.ApplyAsync();
         Assert.True(r!.Value.Ok, r.Value.Error);
-        var line = Assert.Single(lines, l => l.StartsWith("settings set", StringComparison.Ordinal));
+        var line = Assert.Single(recorder.Lines, l => l.StartsWith("settings set", StringComparison.Ordinal));
         Assert.Equal("settings set {\"replay\":{\"encoder\":\"av1\",\"fps\":60}}", line);
         Assert.DoesNotContain(vm.Recommendations, x => x.Key is "replay.fps" or "replay.encoder");
         var s = (await h.Api.SettingsGetAsync()).Value!;
@@ -98,7 +96,7 @@ public class BenchTests
         await using var server = new FakeLineServer(l => l.StartsWith("settings set") ? Envelope.Error("Invalid replay.fps.") : Envelope.Ok("null"));
         await using var client = new AgentClient(server.Name, MockHarness.OwnProcessTrust());
         var vm = new BenchViewModel(new AgentApi(client), () => client);
-        vm.SetReport(MockBench.Build((JsonObject)JsonNode.Parse(System.Text.Json.JsonSerializer.Serialize(new Settings(), ContractsJson.Default.Settings))!, DateTimeOffset.UtcNow, 10));
+        vm.SetReport(MockBench.Build(TestResources.DefaultSettings(), DateTimeOffset.UtcNow, 10));
         await vm.ApplyAsync();
         Assert.Equal("Invalid replay.fps.", vm.Recommendations.Single(x => x.Key == "replay.fps").Error);
         Assert.Null(vm.Recommendations.First(x => x.Key != "replay.fps").Error);
@@ -106,22 +104,18 @@ public class BenchTests
     }
 
     [Fact]
-    public void Apply_NothingSelected_SendsNothing()
+    public async Task Apply_NothingSelected_SendsNothing()
     {
-        var vm = new BenchViewModel(new AgentApi(new Recording(null!, [])), () => null!);
-        vm.SetReport(MockBench.Build((JsonObject)JsonNode.Parse(System.Text.Json.JsonSerializer.Serialize(new Settings(), ContractsJson.Default.Settings))!, DateTimeOffset.UtcNow, 10));
+        var client = new ScriptedClient(_ => Task.FromResult(AgentResult.Fail(AgentErrorKind.Server, "should not send")));
+        var vm = new BenchViewModel(new AgentApi(client), () => client);
+        vm.SetReport(MockBench.Build(TestResources.DefaultSettings(), DateTimeOffset.UtcNow, 10));
         foreach (var r in vm.Recommendations) r.Selected = false;
         Assert.Empty(vm.BuildPatch());
-    }
 
-    [Fact]
-    public void Recommendations_OnlyWhenDifferent()
-    {
-        var s = (JsonObject)JsonNode.Parse(System.Text.Json.JsonSerializer.Serialize(new Settings(), ContractsJson.Default.Settings))!;
-        SettingsSchema.Set(s, "replay.fps", 60);
-        var rep = MockBench.Build(s, DateTimeOffset.UtcNow, 1);
-        Assert.DoesNotContain(rep.Recommendations, r => r.Key == "replay.fps");
-        Assert.All(rep.Recommendations, r => Assert.NotEqual(r.Current, r.Value));
+        var res = await vm.ApplyAsync();
+        Assert.Null(res);
+        Assert.Equal("BenchPage_ApplyNone", vm.Message.Key);
+        Assert.Empty(client.Lines);
     }
 
     [Theory]
@@ -131,51 +125,15 @@ public class BenchTests
     public void Fill_NeverThrows(string template, string[] args, string expected) =>
         Assert.Equal(expected, TextFormat.Fill(template, args, System.Globalization.CultureInfo.InvariantCulture));
 
+    /// <summary>D21: R_layout maps the layout id argument to its localized label key.</summary>
     [Fact]
-    public void ScalePercent_EnabledOnlyForScale()
+    public void Recommendation_layout_reason_uses_the_label()
     {
-        var s = (JsonObject)JsonNode.Parse(System.Text.Json.JsonSerializer.Serialize(new Settings(), ContractsJson.Default.Settings))!;
-        var d = SettingsSchema.Find("replay.scalePercent")!;
-        Assert.False(d.IsEnabled(s));
-        SettingsSchema.Set(s, "replay.resolution", "scale");
-        Assert.True(d.IsEnabled(s));
-        Assert.True(SettingsSchema.Find("replay.layout")!.IsEnabled(s));
-    }
-
-    [Theory]
-    [InlineData("replay.encoder", "av1", true)]
-    [InlineData("replay.encoder", "av1_qsv", false)]
-    [InlineData("replay.layout", "perMonitor", true)]
-    [InlineData("replay.layout", "grid", false)]
-    [InlineData("replay.resolution", "900p", true)]
-    [InlineData("replay.resolution", "800p", false)]
-    [InlineData("replay.encoderAdapter", "RTX 3050", true)]
-    [InlineData("replay.encoderAdapter", " ", false)]
-    public void ReplayKeys_Validate(string key, string value, bool ok)
-    {
-        var s = (JsonObject)JsonNode.Parse(System.Text.Json.JsonSerializer.Serialize(new Settings(), ContractsJson.Default.Settings))!;
-        SettingsSchema.Set(s, key, value);
-        Assert.Equal(ok, SettingsSchema.Validate(SettingsSchema.Find(key)!, s) is null);
-    }
-
-    [Theory]
-    [InlineData(25, true)]
-    [InlineData(24, false)]
-    [InlineData(101, false)]
-    public void ScalePercent_Range(int v, bool ok)
-    {
-        var s = (JsonObject)JsonNode.Parse(System.Text.Json.JsonSerializer.Serialize(new Settings(), ContractsJson.Default.Settings))!;
-        SettingsSchema.Set(s, "replay.scalePercent", v);
-        Assert.Equal(ok, SettingsSchema.Validate(SettingsSchema.Find("replay.scalePercent")!, s) is null);
-    }
-
-    private sealed class Recording(IAgentClient inner, List<string> lines) : IAgentClient
-    {
-        public int ServerPid => 1;
-        public Task<AgentResult> SendAsync(string line, CancellationToken ct = default)
-        {
-            lock (lines) lines.Add(line);
-            return inner.SendAsync(line, ct);
-        }
+        var t = RecommendationRow.ReasonText("R_layout", ["composited", "1080p"]);
+        var label = Assert.IsType<LocalizedText>(t.Args[0]);
+        Assert.Equal("S_replay_layout_composited", label.Key);
+        Assert.Equal("1080p", t.Args[1]);
+        var other = RecommendationRow.ReasonText("R_fps_headroom", ["30", "12"]);
+        Assert.Equal(new object[] { "30", "12" }, other.Args);
     }
 }

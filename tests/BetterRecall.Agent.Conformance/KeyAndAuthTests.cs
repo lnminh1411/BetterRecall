@@ -10,11 +10,12 @@ namespace BetterRecall.Agent.Conformance;
 public sealed class KeyAndAuthTests(InstallFixture install)
 {
     [Fact]
-    public async Task First_run_status_reports_locked_waiting_for_passphrase_and_no_password()
+    public async Task First_run_status_and_passphrase_setup_validate_and_unlock_store()
     {
         await using var h = new AgentHarness(install);
         await h.StartAndConnectUiAsync();
 
+        // was: First_run_status_reports_locked_waiting_for_passphrase_and_no_password
         var (ok, d, err) = await h.Ui.RequestAsync("ui", "status");
         Assert.True(ok, err);
         var st = d.Deserialize(ContractsJson.Default.AgentStatus)!;
@@ -36,36 +37,31 @@ public sealed class KeyAndAuthTests(InstallFixture install)
         var (sOk, _, sErr) = await h.Ui.RequestAsync("ui", "search acme");
         Assert.False(sOk);
         Assert.Equal("Store is locked.", sErr);
-    }
 
-    [Fact]
-    public async Task Setup_passphrase_rejects_short_value_and_accepts_valid_passphrase()
-    {
-        await using var h = new AgentHarness(install);
-        await h.StartAndConnectUiAsync();
-
+        // was: Setup_passphrase_rejects_short_value_and_accepts_valid_passphrase
         var (badOk, _, badErr) = await h.Ui.RequestAsync("ui", "unlock short");
         Assert.False(badOk);
         Assert.Equal("A new passphrase must be 8 to 1024 characters.", badErr);
 
         await h.SetupPassphraseAndWaitStoreAsync();
 
-        var (ok, d, err) = await h.Ui.RequestAsync("ui", "status");
-        Assert.True(ok, err);
-        var st = d.Deserialize(ContractsJson.Default.AgentStatus)!;
-        Assert.False(st.Locked);
-        Assert.NotNull(st.UnlockedUntil);
-        Assert.Equal("none", st.UnlockNeeds);
+        var (okAfter, dAfter, errAfter) = await h.Ui.RequestAsync("ui", "status");
+        Assert.True(okAfter, errAfter);
+        var stAfter = dAfter.Deserialize(ContractsJson.Default.AgentStatus)!;
+        Assert.False(stAfter.Locked);
+        Assert.NotNull(stAfter.UnlockedUntil);
+        Assert.Equal("none", stAfter.UnlockNeeds);
         Assert.True(File.Exists(DataPaths.KeyFile(h.Home)));
     }
 
     [Fact]
-    public async Task Set_unlock_password_validates_length_and_updates_password_status()
+    public async Task Unlock_password_setup_lock_gate_and_password_unlock()
     {
         await using var h = new AgentHarness(install);
         await h.StartAndConnectUiAsync();
         await h.SetupPassphraseAndWaitStoreAsync();
 
+        // was: Set_unlock_password_validates_length_and_updates_password_status
         var (shortOk, _, shortErr) = await h.Ui.RequestAsync("ui", "password set " + JsonSerializer.Serialize(new { @new = "12345" }));
         Assert.False(shortOk);
         Assert.Equal("Password must be 6 to 256 characters.", shortErr);
@@ -78,16 +74,8 @@ public sealed class KeyAndAuthTests(InstallFixture install)
         Assert.True(pw.Set);
         Assert.Equal(0, pw.RetryAfterS);
         Assert.True(File.Exists(DataPaths.UnlockPasswordFile(h.Home)));
-    }
 
-    [Fact]
-    public async Task Lock_closes_read_gate_and_requires_password_to_unlock()
-    {
-        await using var h = new AgentHarness(install);
-        await h.StartAndConnectUiAsync();
-        await h.SetupPassphraseAndWaitStoreAsync();
-        await h.SetUnlockPasswordAsync();
-
+        // was: Lock_closes_read_gate_and_requires_password_to_unlock
         var (lockOk, _, lockErr) = await h.Ui.RequestAsync("ui", "lock");
         Assert.True(lockOk, lockErr);
 

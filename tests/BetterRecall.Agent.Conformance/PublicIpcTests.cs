@@ -3,7 +3,6 @@
 using System.Text.Json;
 using BetterRecall.Agent.Conformance.Harness;
 using BetterRecall.Contracts;
-using BetterRecall.Core.Ipc;
 
 namespace BetterRecall.Agent.Conformance;
 
@@ -59,7 +58,6 @@ public sealed class PublicIpcTests(InstallFixture install)
         await h.SetupPassphraseAndWaitStoreAsync();
 
         Assert.True((await h.Ui.RequestAsync("ui", "settings set {\"ipc\":{\"allowClients\":[\"C:\\\\Tools\\\\other.exe\"]}}")).Ok);
-        await Task.Delay(150);
 
         await using (var blocked = await h.WaitForPublicConnectAsync())
         {
@@ -70,7 +68,6 @@ public sealed class PublicIpcTests(InstallFixture install)
 
         var self = Environment.ProcessPath!;
         Assert.True((await h.Ui.RequestAsync("ui", "settings set " + JsonSerializer.Serialize(new { ipc = new { allowClients = new[] { self } } }))).Ok);
-        await Task.Delay(150);
 
         await using var allowed = await h.WaitForPublicConnectAsync();
         var (ok, d, err) = Envelope.Parse((await allowed.RequestAsync("ping"))!);
@@ -121,7 +118,6 @@ public sealed class PublicIpcTests(InstallFixture install)
         await using var h = new AgentHarness(install, s => s.Ipc.Enabled = true);
         await h.StartAndConnectUiAsync();
         await h.SetupPassphraseAndWaitStoreAsync();
-        await h.WaitForWorkerWarmAsync();
 
         await using var pub = await h.WaitForPublicConnectAsync();
 

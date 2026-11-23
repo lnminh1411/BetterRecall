@@ -170,6 +170,8 @@ pub struct CommandProcessor {
     last_no_hello_purge: Mutex<DateTime<Utc>>,
     now: Mutex<ClockFn>,
     status_heartbeat_ms: AtomicI64,
+    idle_timeout_override_ms: AtomicI64,
+    cold_embed_wait_ms: AtomicI64,
     chat: Option<Arc<ChatService>>,
     public_searches: Mutex<VecDeque<DateTime<Utc>>>,
     mcp_searches: Mutex<VecDeque<DateTime<Utc>>>,
@@ -361,6 +363,8 @@ impl CommandProcessor {
             last_no_hello_purge: Mutex::new(DateTime::<Utc>::MIN_UTC),
             now: Mutex::new(Arc::new(Utc::now)),
             status_heartbeat_ms: AtomicI64::new(60_000),
+            idle_timeout_override_ms: AtomicI64::new(0),
+            cold_embed_wait_ms: AtomicI64::new(Self::COLD_EMBED_WAIT.as_millis() as i64),
             chat,
             public_searches: Mutex::new(VecDeque::new()),
             mcp_searches: Mutex::new(VecDeque::new()),
@@ -385,6 +389,18 @@ impl CommandProcessor {
     pub fn set_status_heartbeat_for_test(&self, dur: Duration) {
         self.status_heartbeat_ms
             .store(dur.as_millis() as i64, Ordering::Release);
+    }
+
+    /// For tests: override the non-UI pipe idle-connection timeout (`None` uses `ipc.idleTimeoutS`).
+    pub fn set_idle_timeout_for_test(&self, dur: Option<Duration>) {
+        let ms = dur.map(|d| d.as_millis().max(1) as i64).unwrap_or(0);
+        self.idle_timeout_override_ms.store(ms, Ordering::Release);
+    }
+
+    /// For tests: override `COLD_EMBED_WAIT` when waiting on a cold query embedder.
+    pub fn set_cold_embed_wait_for_test(&self, dur: Duration) {
+        self.cold_embed_wait_ms
+            .store(dur.as_millis().max(1) as i64, Ordering::Release);
     }
 
     fn now(&self) -> DateTime<Utc> {
@@ -509,9 +525,14 @@ impl CommandProcessor {
 
         while !ct.is_cancelled() && !stream.is_closed() {
             let idle_timeout = if conn.kind != PipeKind::Ui {
-                Some(Duration::from_secs(
-                    self.settings().ipc.idle_timeout_s.max(1) as u64,
-                ))
+                let override_ms = self.idle_timeout_override_ms.load(Ordering::Acquire);
+                if override_ms > 0 {
+                    Some(Duration::from_millis(override_ms as u64))
+                } else {
+                    Some(Duration::from_secs(
+                        self.settings().ipc.idle_timeout_s.max(1) as u64,
+                    ))
+                }
             } else {
                 None
             };
@@ -1350,7 +1371,7 @@ impl CommandProcessor {
             let worker_cold = !self.d.embedder.warm();
             let cold = worker_cold && req.mode != SearchMode::Vector;
             let wait_dur = if cold {
-                Self::COLD_EMBED_WAIT
+                Duration::from_millis(self.cold_embed_wait_ms.load(Ordering::Acquire).max(1) as u64)
             } else {
                 Duration::from_secs(15)
             };

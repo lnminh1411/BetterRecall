@@ -357,14 +357,6 @@ public sealed class SearchViewModel : ObservableObject
         await _api.HistoryClearAsync(ct);
     }
 
-    /// <summary>New index after an arrow key in a grid of the given column count. Clamped, -1 stays -1 unless moving forward.</summary>
-    public static int Move(int current, int count, int delta)
-    {
-        if (count == 0) return -1;
-        if (current < 0) return delta > 0 ? 0 : -1;
-        return Math.Clamp(current + delta, 0, count - 1);
-    }
-
     public static LocalizedText ErrorText(AgentErrorKind kind, string? error) => kind switch
     {
         AgentErrorKind.NotRunning => new LocalizedText("Err_NotRunning"),

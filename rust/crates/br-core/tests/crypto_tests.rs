@@ -1,67 +1,25 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) BetterRecall contributors
 
+mod common;
+
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::Duration;
 
-use br_contracts::{DataPaths, Settings};
+use br_contracts::{AiDefaults, AiSettings, DataPaths, Settings};
+use br_core::ApiKeyStore;
 use br_core::crypto::{BlobCipher, CryptoError, HelloInterop, KeyVault, PasswordCheck, UnlockPassword};
 use br_core::win32;
 use chrono::{Duration as ChronoDuration, Utc};
+use common::TempHome;
 use windows::core::GUID;
 use zeroize::Zeroizing;
 
-fn test_tmp_root() -> PathBuf {
-    if let Some(t) = std::env::var_os("BR_TEST_TMP")
-        && !t.is_empty()
-    {
-        return PathBuf::from(t);
-    }
-    if let Some(t) = std::env::var_os("CARGO_TARGET_DIR")
-        && !t.is_empty()
-    {
-        return PathBuf::from(t).join("test-tmp");
-    }
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().and_then(|d| d.parent()).map(|d| d.join("test-tmp")))
-        .expect("unable to determine cargo target dir for test temp folder")
-}
-
-struct TempHome {
-    path: PathBuf,
-}
-
-impl TempHome {
-    fn new() -> Self {
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let id = SEQ.fetch_add(1, Ordering::Relaxed);
-        let path = test_tmp_root()
-            .join("br-core-crypto")
-            .join(format!("h-{}-{id}", std::process::id()));
-        fs::create_dir_all(&path).expect("create temp home");
-        Self { path }
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for TempHome {
-    fn drop(&mut self) {
-        for _ in 0..5 {
-            if !self.path.exists() || fs::remove_dir_all(&self.path).is_ok() {
-                return;
-            }
-            thread::sleep(Duration::from_millis(50));
-        }
-    }
+fn new_home() -> TempHome {
+    TempHome::new(None)
 }
 
 fn rand_bytes(n: usize) -> Vec<u8> {
@@ -111,7 +69,7 @@ fn settings_fn(s: &Arc<Mutex<Settings>>) -> impl Fn() -> Settings + Send + Sync 
 
 #[test]
 fn round_trip() {
-    let h = TempHome::new();
+    let h = new_home();
     for size in [0usize, 1, 65_535, 65_536, 65_537, 3 * 65_536, 200_001] {
         let key = rand_bytes(32);
         let data = rand_bytes(size);
@@ -128,7 +86,7 @@ fn round_trip() {
 
 #[test]
 fn ciphertext_does_not_contain_plaintext() {
-    let h = TempHome::new();
+    let h = new_home();
     let data = "SECRET-PLAINTEXT ".repeat(1000).into_bytes();
     let p = write_blob(&cipher(rand_bytes(32)), h.path(), &data);
     let raw = fs::read(&p).unwrap();
@@ -137,7 +95,7 @@ fn ciphertext_does_not_contain_plaintext() {
 
 #[test]
 fn tamper_throws() {
-    let h = TempHome::new();
+    let h = new_home();
     for offset in [5isize, 25, 65_536 + 20 + 3, -1] {
         let key = rand_bytes(32);
         let p = write_blob(&cipher(key.clone()), h.path(), &rand_bytes(150_000));
@@ -155,7 +113,7 @@ fn tamper_throws() {
 
 #[test]
 fn truncation_at_chunk_boundary_throws() {
-    let h = TempHome::new();
+    let h = new_home();
     let key = rand_bytes(32);
     let p = write_blob(&cipher(key.clone()), h.path(), &rand_bytes(3 * 65_536 + 100));
     let bytes = fs::read(&p).unwrap();
@@ -165,7 +123,7 @@ fn truncation_at_chunk_boundary_throws() {
 
 #[test]
 fn truncation_mid_chunk_and_wrong_key_throw() {
-    let h = TempHome::new();
+    let h = new_home();
     let key = rand_bytes(32);
     let p = write_blob(&cipher(key.clone()), h.path(), &rand_bytes(100_000));
     assert!(read_blob(&cipher(rand_bytes(32)), &p).is_err());
@@ -176,7 +134,7 @@ fn truncation_mid_chunk_and_wrong_key_throw() {
 
 #[test]
 fn chunk_swap_throws() {
-    let h = TempHome::new();
+    let h = new_home();
     let key = rand_bytes(32);
     let p = write_blob(&cipher(key.clone()), h.path(), &rand_bytes(3 * 65_536 + 5));
     let mut b = fs::read(&p).unwrap();
@@ -192,7 +150,7 @@ fn chunk_swap_throws() {
 
 #[test]
 fn dpapi_creates_and_reloads_same_key() {
-    let h = TempHome::new();
+    let h = new_home();
     let s = with_mode("dpapi");
     let a = {
         let v = KeyVault::new(h.path(), settings_fn(&s), None, false);
@@ -216,7 +174,7 @@ fn dpapi_creates_and_reloads_same_key() {
 
 #[test]
 fn passphrase_mode_waits_then_unlocks_and_rejects_wrong_passphrase() {
-    let h = TempHome::new();
+    let h = new_home();
     let s = with_mode("passphrase");
     let a = {
         let v = KeyVault::new(h.path(), settings_fn(&s), None, false);
@@ -240,7 +198,7 @@ fn passphrase_mode_waits_then_unlocks_and_rejects_wrong_passphrase() {
 
 #[test]
 fn switching_dpapi_to_passphrase_keeps_the_key() {
-    let h = TempHome::new();
+    let h = new_home();
     let s = with_mode("dpapi");
     let v = KeyVault::new(h.path(), settings_fn(&s), None, false);
     assert!(v.try_load_silent().unwrap());
@@ -255,7 +213,7 @@ fn switching_dpapi_to_passphrase_keeps_the_key() {
 
 #[test]
 fn destroy_removes_key_file_and_memory() {
-    let h = TempHome::new();
+    let h = new_home();
     let s = with_mode("dpapi");
     let v = KeyVault::new(h.path(), settings_fn(&s), None, false);
     assert!(v.try_load_silent().unwrap());
@@ -267,17 +225,31 @@ fn destroy_removes_key_file_and_memory() {
 
 #[test]
 fn damaged_key_file_reports_key_lost_and_purge_replaces_it() {
-    let h = TempHome::new();
-    let s = with_mode("dpapi");
-    let kf = DataPaths::key_file(h.path());
-    fs::create_dir_all(kf.parent().unwrap()).unwrap();
-    fs::write(&kf, [1u8, 2, 3]).unwrap();
-    let v = KeyVault::new(h.path(), settings_fn(&s), None, false);
-    assert!(matches!(v.try_load_silent(), Err(CryptoError::KeyLost(_))));
-    assert!(!v.needs_passphrase());
-    v.destroy_key().unwrap();
-    assert!(v.try_load_silent().unwrap());
-    assert_eq!("dpapi", v.protection());
+    for keep in [3usize, 6, 20] {
+        let h = new_home();
+        let s = with_mode("dpapi");
+        let kf = DataPaths::key_file(h.path());
+        if keep == 3 {
+            fs::create_dir_all(kf.parent().unwrap()).unwrap();
+            fs::write(&kf, [1u8, 2, 3]).unwrap();
+        } else {
+            {
+                let v = KeyVault::new(h.path(), settings_fn(&s), None, false);
+                assert!(v.try_load_silent().unwrap());
+            }
+            let bytes = fs::read(&kf).unwrap();
+            fs::write(&kf, &bytes[..keep]).unwrap();
+        }
+        let v = KeyVault::new(h.path(), settings_fn(&s), None, false);
+        assert!(
+            matches!(v.try_load_silent(), Err(CryptoError::KeyLost(_))),
+            "keep={keep}"
+        );
+        assert!(!v.needs_passphrase(), "keep={keep}");
+        v.destroy_key().unwrap();
+        assert!(v.try_load_silent().unwrap(), "keep={keep}");
+        assert_eq!("dpapi", v.protection(), "keep={keep}");
+    }
 }
 
 /// C5: a key file held open without read sharing (AV scan, backup tool at logon) is a
@@ -285,7 +257,7 @@ fn damaged_key_file_reports_key_lost_and_purge_replaces_it() {
 #[test]
 fn locked_key_file_is_io_error_then_loads_after_release() {
     use std::os::windows::fs::OpenOptionsExt;
-    let h = TempHome::new();
+    let h = new_home();
     let s = with_mode("dpapi");
     let a = {
         let v = KeyVault::new(h.path(), settings_fn(&s), None, false);
@@ -308,11 +280,21 @@ fn locked_key_file_is_io_error_then_loads_after_release() {
 #[test]
 fn argon2id_matches_rfc9106_shape_and_is_deterministic() {
     let salt = [0u8; 16];
+    let salt2 = [1u8; 16];
     let a = KeyVault::argon("pw", &salt, 8192, 1, 1).unwrap();
     let b = KeyVault::argon("pw", &salt, 8192, 1, 1).unwrap();
     assert_eq!(*a, *b);
     assert_ne!(*a, *KeyVault::argon("pw2", &salt, 8192, 1, 1).unwrap());
+    assert_ne!(*a, *KeyVault::argon("pw", &salt2, 8192, 1, 1).unwrap());
+    assert_ne!(*a, *KeyVault::argon("pw", &salt, 8192, 2, 1).unwrap());
     assert_eq!(32, a.len());
+    // Known answer (Argon2id v0x13, "pw", 16 zero bytes, 8192 KiB, 1 pass, 1 lane, 32 bytes),
+    // computed independently with argon2-cffi.
+    let hex: String = a.iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(
+        "5eac64aaaa7e1585a5159ab311bb2070591a10337cb4c0a5165bacecc6a67635",
+        hex
+    );
 }
 
 #[test]
@@ -371,15 +353,12 @@ fn tpm_name_is_read_from_a_tpm_key_file_only() {
     assert_eq!(None, KeyVault::tpm_name_in_file(&[1, 2]));
 }
 
-/// Opt in with `BR_TEST_TPM=1`.
 #[test]
+#[ignore = "needs TPM hardware"]
 fn dpapi_destroy_leaves_a_tpm_key_it_does_not_own() {
-    if std::env::var("BR_TEST_TPM").ok().as_deref() != Some("1") {
-        return;
-    }
     let other = format!("BetterRecall.Test.{:08x}", std::process::id());
     win32::tpm_ensure_key(&other).expect("create test tpm key");
-    let h = TempHome::new();
+    let h = new_home();
     let s = with_mode("dpapi");
     let v = KeyVault::new(h.path(), settings_fn(&s), None, false);
     v.try_load_silent().unwrap();
@@ -389,13 +368,10 @@ fn dpapi_destroy_leaves_a_tpm_key_it_does_not_own() {
     assert!(still_exists);
 }
 
-/// Opt in with `BR_TEST_TPM=1`.
 #[test]
+#[ignore = "needs TPM hardware"]
 fn tpm_wrap_round_trip_when_enabled() {
-    if std::env::var("BR_TEST_TPM").ok().as_deref() != Some("1") {
-        return;
-    }
-    let h = TempHome::new();
+    let h = new_home();
     let s = with_mode("tpm");
     let name = format!("BetterRecall.Test.rt.{:08x}", std::process::id());
     let a = {
@@ -417,7 +393,7 @@ fn tpm_wrap_round_trip_when_enabled() {
 
 #[test]
 fn set_verify_and_clear() {
-    let h = TempHome::new();
+    let h = new_home();
     let now = Arc::new(Mutex::new(Utc::now()));
     let now_c = now.clone();
     let pw = UnlockPassword::with_options(
@@ -441,7 +417,7 @@ fn set_verify_and_clear() {
 
 #[test]
 fn file_holds_no_password_and_new_salt_each_time() {
-    let h = TempHome::new();
+    let h = new_home();
     let pw = UnlockPassword::with_options(h.path(), Arc::new(Utc::now), 1024, 1, 1);
     pw.set("correct horse").unwrap();
     let a = fs::read(DataPaths::unlock_password_file(h.path())).unwrap();
@@ -458,7 +434,7 @@ fn file_holds_no_password_and_new_salt_each_time() {
 
 #[test]
 fn rate_limit_after_five_wrong_tries_survives_restart_and_doubles() {
-    let h = TempHome::new();
+    let h = new_home();
     let now = Arc::new(Mutex::new(Utc::now()));
     let mk = || {
         let c = now.clone();
@@ -486,7 +462,7 @@ fn rate_limit_after_five_wrong_tries_survives_restart_and_doubles() {
 
 #[test]
 fn damaged_file_counts_as_not_set() {
-    let h = TempHome::new();
+    let h = new_home();
     let path = DataPaths::unlock_password_file(h.path());
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(&path, [1u8, 2, 3]).unwrap();
@@ -505,7 +481,7 @@ fn new_password_rule() {
 
 #[test]
 fn passphrase_tries_are_throttled_like_the_unlock_password() {
-    let h = TempHome::new();
+    let h = new_home();
     let s = with_mode("passphrase");
     {
         let v = KeyVault::new(h.path(), settings_fn(&s), None, false);
@@ -527,24 +503,11 @@ fn passphrase_tries_are_throttled_like_the_unlock_password() {
     assert_eq!(0, vault.passphrase_retry_after_seconds());
 }
 
-#[test]
-fn durable_move_replaces_the_target() {
-    let h = TempHome::new();
-    let a = h.path().join("a.tmp");
-    let b = h.path().join("b.bin");
-    fs::write(&b, "old").unwrap();
-    fs::write(&a, "new").unwrap();
-    win32::move_durable(&a, &b).unwrap();
-    assert!(!a.exists());
-    assert_eq!("new", fs::read_to_string(&b).unwrap());
-    assert!(win32::move_durable(&a, &b).is_err());
-}
-
 // ---- Sweep2Tests.cs ----
 
 #[test]
 fn missing_key_file_next_to_data_is_lost_and_no_new_key_is_written() {
-    let h = TempHome::new();
+    let h = new_home();
     let s = with_mode("dpapi");
     let v = KeyVault::new(h.path(), settings_fn(&s), None, false);
     fs::write(DataPaths::store_db(h.path()), [1u8, 2, 3]).unwrap();
@@ -564,26 +527,8 @@ fn missing_key_file_next_to_data_is_lost_and_no_new_key_is_written() {
 }
 
 #[test]
-fn truncated_dpapi_key_file_is_lost() {
-    for keep in [6usize, 20] {
-        let h = TempHome::new();
-        let s = with_mode("dpapi");
-        {
-            let v = KeyVault::new(h.path(), settings_fn(&s), None, false);
-            assert!(v.try_load_silent().unwrap());
-        }
-        let kf = DataPaths::key_file(h.path());
-        let bytes = fs::read(&kf).unwrap();
-        fs::write(&kf, &bytes[..keep]).unwrap();
-        let v = KeyVault::new(h.path(), settings_fn(&s), None, false);
-        assert!(matches!(v.try_load_silent(), Err(CryptoError::KeyLost(_))));
-        assert!(!v.needs_passphrase());
-    }
-}
-
-#[test]
 fn truncated_passphrase_key_file_is_lost_not_locked() {
-    let h = TempHome::new();
+    let h = new_home();
     let s = with_mode("passphrase");
     {
         let v = KeyVault::new(h.path(), settings_fn(&s), None, false);
@@ -634,9 +579,10 @@ fn payload_checks_per_mode() {
 
 // ---- Sweep3ICoreTests.cs ----
 
+/// Regression B15.
 #[test]
-fn b15_lockout_survives_no_clock_step_back() {
-    let h = TempHome::new();
+fn lockout_survives_no_clock_step_back() {
+    let h = new_home();
     let now = Arc::new(Mutex::new(Utc::now()));
     let now_c = now.clone();
     let pw = UnlockPassword::with_options(
@@ -662,9 +608,10 @@ fn b15_lockout_survives_no_clock_step_back() {
 
 // ---- Sweep3JCoreTests.cs ----
 
+/// Regression B14.
 #[test]
-fn b14_short_passphrase_neither_creates_nor_rewraps_the_key() {
-    let h = TempHome::new();
+fn short_passphrase_neither_creates_nor_rewraps_the_key() {
+    let h = new_home();
     let s = with_mode("passphrase");
     {
         let v = KeyVault::new(h.path(), settings_fn(&s), None, false);
@@ -674,7 +621,7 @@ fn b14_short_passphrase_neither_creates_nor_rewraps_the_key() {
         assert!(!v.key_loaded());
         assert!(v.unlock_with_passphrase("a longer passphrase"));
     }
-    let h2 = TempHome::new();
+    let h2 = new_home();
     let s2 = with_mode("dpapi");
     let v2 = KeyVault::new(h2.path(), settings_fn(&s2), None, false);
     assert!(v2.try_load_silent().unwrap());
@@ -703,4 +650,38 @@ fn hmac_sha256_matches_rfc_4231() {
             b"Test Using Larger Than Block-Size Key - Hash Key First"
         ))
     );
+}
+
+#[test]
+fn api_key_store_and_legacy_provider_binding() {
+    let h = TempHome::new(Some("dpapi"));
+    let ks = ApiKeyStore::new(h.path());
+    let ai = AiSettings {
+        provider: AiDefaults::GEMINI.to_string(),
+        ..Default::default()
+    };
+
+    assert_eq!(Some(AiDefaults::CLAUDE), ApiKeyStore::legacy_provider("sk-ant-abc"));
+    assert_eq!(Some(AiDefaults::GEMINI), ApiKeyStore::legacy_provider("AIzaSyTest"));
+    assert_eq!(Some(AiDefaults::OPEN_AI), ApiKeyStore::legacy_provider("sk-proj-123"));
+    assert_eq!(None, ApiKeyStore::legacy_provider("other-key"));
+
+    ks.set("AIza-fake-test-key", &ai).unwrap();
+    assert_eq!(Some("AIza-fake-test-key".to_string()), ks.read(&ai));
+
+    // Changing provider invalidates read.
+    let mut claude_ai = ai.clone();
+    claude_ai.provider = AiDefaults::CLAUDE.to_string();
+    assert!(ks.read(&claude_ai).is_none());
+
+    // Legacy BRA1 file only matches matching prefix on default endpoint.
+    let blob = ApiKeyStore::protect(b"AIzaLegacyTestKey").unwrap();
+    let mut raw = b"BRA1".to_vec();
+    raw.extend_from_slice(&blob);
+    fs::write(DataPaths::ai_key_file(h.path()), raw).unwrap();
+    assert_eq!(Some("AIzaLegacyTestKey".to_string()), ks.read(&ai));
+    assert!(ks.read(&claude_ai).is_none());
+    let mut custom_ep = ai.clone();
+    custom_ep.endpoint = "https://example.com".to_string();
+    assert!(ks.read(&custom_ep).is_none());
 }

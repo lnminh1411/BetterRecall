@@ -207,7 +207,7 @@ public interface IQueryEmbedder
     bool Warm => true;
 }
 
-/// <summary>Everything Core gives the agent. Core implements it as BetterRecall.Core.CoreHost.Create(CoreHostOptions).</summary>
+/// <summary>Everything Core gives the agent. The Rust `br-core` crate implements it as `CoreHost`.</summary>
 public interface ICoreHost : IAsyncDisposable
 {
     ISettingsStore Settings { get; }

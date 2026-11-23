@@ -107,8 +107,10 @@ fn wraps_and_evicts_by_space_without_corruption() {
 fn clear_zeroes_and_forgets() {
     let ring = PacketRing::new(1 << 20, Duration::from_secs(10), false).unwrap();
     ring.write(&packet(500, 0xAB), 0, true, 0);
+    assert!(!ring.committed_bytes_all_zero_for_test());
     ring.clear();
     assert_eq!(0, ring.count());
+    assert!(ring.committed_bytes_all_zero_for_test());
     let snap = ring.snapshot(0);
     assert!(snap.packets().is_empty());
 }
@@ -506,6 +508,23 @@ fn canvas_layout_computations() {
     assert_eq!(720, layout_e.height);
     assert_eq!(Rect::new(0, 0, 1280, 720), layout_e.for_monitor(0).unwrap().rect);
 
+    // Merged from bench_tests::canvas_layout_per_monitor_scaling:
+    let layout_scale =
+        CanvasLayout::compute(&[m(0, 0, 0, 2560, 1440)], Some("scale"), 75, 7680, 4320).unwrap();
+    assert_eq!(1920, layout_scale.width);
+    assert_eq!(1080, layout_scale.height);
+
+    let layout_pair = CanvasLayout::compute(
+        &[m(0, 0, 0, 1920, 1080), m(1, 1920, 0, 1280, 1024)],
+        Some("720p"),
+        100,
+        7680,
+        4320,
+    )
+    .unwrap();
+    assert_eq!(2132, layout_pair.width);
+    assert_eq!(720, layout_pair.height);
+
     assert!(layout_e.for_monitor(999).is_none());
     assert!(CanvasLayout::compute(&[], Some("native"), 100, 1920, 1080).is_err());
 }
@@ -755,7 +774,15 @@ fn add_copies_bytes_and_clear_zeroes() {
     s.bytes = vec![7, 7];
     r.add(s, 60);
     assert_eq!(7, r.take(now, now, 5)[0].bytes[0]);
-    r.clear();
+    let cleared = r.clear_for_test();
+    assert_eq!(1, cleared.len());
+    let (buf, orig_len) = &cleared[0];
+    assert_eq!(2, *orig_len);
+    assert!(buf.is_empty());
+    assert!(buf.capacity() >= *orig_len);
+    unsafe {
+        assert_eq!(&[0u8, 0u8], std::slice::from_raw_parts(buf.as_ptr(), *orig_len));
+    }
     assert_eq!(0, r.count());
     assert!(r.due(0, 5));
 }
@@ -1364,6 +1391,10 @@ fn c1_bc_s1_replay_save_during_purge_all_leaves_no_clip() {
             )
             .expect_err("expected purge error");
         assert!(matches!(err, AgentError::InvalidOperation(_)));
+        assert_eq!(
+            "A purge ran during the replay save; the clip was discarded.",
+            err.to_string()
+        );
         assert!(!path.exists());
         assert!(!path.with_extension(if encrypted { "enc.partial" } else { "mp4.partial" }).exists());
 
@@ -1509,6 +1540,7 @@ fn c1_purge_all_through_the_agent_stops_a_replay_export_and_empties_replays() {
         .unwrap_or(0);
     assert_eq!(0, replays_left);
     assert_eq!(0, host.last_purge_all_undeleted());
+    agent.shutdown();
     host.shutdown();
 }
 
@@ -1530,6 +1562,7 @@ fn c1_save_and_export_are_refused_while_purge_all_runs() {
         .write_clip(&clip, true, |_| Ok(1000), &CancelToken::none())
         .expect_err("expected refusal");
     assert!(matches!(err, AgentError::InvalidOperation(_)));
+    assert_eq!("Purge all is running.", err.to_string());
     assert!(!clip.exists());
 
     let target = dir.path().join("out").join("refused.mp4");
@@ -1649,45 +1682,8 @@ fn app_purge_and_panic_discard_a_replay_save_in_flight() {
     assert!(matches!(err, AgentError::InvalidOperation(_)));
     assert!(!panic_path.exists());
     assert!(!replays_dir.join("20261117T140001000Z.mp4.partial").exists());
+    agent.shutdown();
     host.shutdown();
-}
-
-#[test]
-fn s5_replay_purge_refusals_keep_the_messages_core_matches() {
-    let dir = TempDir::new("s5msg");
-    let purging = Arc::new(AtomicBool::new(true));
-    let lib = Arc::new(ReplayLibrary::new(
-        dir.path().to_path_buf(),
-        Arc::new(Settings::default),
-        None,
-    ));
-    let p_cb = purging.clone();
-    lib.set_purging_all(Some(Arc::new(move || p_cb.load(Ordering::Acquire))));
-    let path = dir.path().join("clip.mp4");
-
-    let err = lib
-        .write_clip(&path, false, |_| Ok(1), &CancelToken::none())
-        .expect_err("expected refusal");
-    assert_eq!("Purge all is running.", err.to_string());
-
-    purging.store(false, Ordering::Release);
-    let lib2 = lib.clone();
-    let err = lib
-        .write_clip(
-            &path,
-            false,
-            move |_| {
-                lib2.on_purge_all();
-                Ok(1)
-            },
-            &CancelToken::none(),
-        )
-        .expect_err("expected discard");
-    assert_eq!(
-        "A purge ran during the replay save; the clip was discarded.",
-        err.to_string()
-    );
-    assert!(!path.exists());
 }
 
 struct FlippingStream {
@@ -1827,125 +1823,185 @@ fn encoder_plan_orders_codecs_apis_and_adapters() {
     assert_eq!(vec![nvidia, intel], named);
 }
 
-// =========================================================================
-// Sweep2FTests: Purge ring reachability & SmartCaptureTests: Storage pause
-// =========================================================================
-
 #[test]
-fn user_purge_reaching_the_replay_window_clears_the_rings() {
-    let now = t0();
-    // "Delete the last 15 minutes": its window ends now.
-    assert!(AgentHost::reaches_ring(
-        &PurgeNotice {
-            reason: "purge".to_string(),
-            ids: Vec::new(),
-            from: Some(now - ChronoDuration::minutes(15)),
-            to: Some(now),
-            newest: None,
-            scope: None,
-        },
-        now,
-        120,
-    ));
-    // purge app / id whose newest deleted row is from a minute ago.
-    assert!(AgentHost::reaches_ring(
-        &PurgeNotice {
-            reason: "purge".to_string(),
-            ids: vec!["s_1".to_string()],
-            from: None,
-            to: None,
-            newest: Some(now - ChronoDuration::minutes(1)),
-            scope: None,
-        },
-        now,
-        120,
-    ));
-    // Purge all always.
-    assert!(AgentHost::reaches_ring(
-        &PurgeNotice {
-            reason: "all".to_string(),
-            ids: Vec::new(),
-            from: Some(DateTime::<Utc>::MIN_UTC),
-            to: Some(now),
-            newest: None,
-            scope: None,
-        },
-        now,
-        120,
-    ));
-}
+fn encoder_plan_candidates_selection_order() {
+    let make_output =
+        |index: i32, name: &str, luid: i64, vendor_id: u32, adapter_name: &str, left: i32| {
+            OutputInfo {
+                index,
+                device_name: name.to_string(),
+                adapter_luid: luid,
+                vendor_id,
+                adapter_name: adapter_name.to_string(),
+                left,
+                top: 0,
+                width: 1920,
+                height: 1080,
+                monitor: 0,
+                refresh_hz: 60,
+            }
+        };
 
-#[test]
-fn old_purges_and_non_user_deletes_leave_the_rings() {
-    let now = t0();
-    assert!(!AgentHost::reaches_ring(
-        &PurgeNotice {
-            reason: "purge".to_string(),
-            ids: vec!["s_1".to_string()],
-            from: Some(now - ChronoDuration::days(2)),
-            to: Some(now - ChronoDuration::days(1)),
-            newest: Some(now - ChronoDuration::days(1)),
-            scope: None,
-        },
-        now,
-        120,
-    ));
-    assert!(!AgentHost::reaches_ring(
-        &PurgeNotice {
-            reason: "purge".to_string(),
-            ids: vec!["s_1".to_string()],
-            from: None,
-            to: None,
-            newest: Some(now - ChronoDuration::hours(1)),
-            scope: None,
-        },
-        now,
-        120,
-    ));
-    assert!(!AgentHost::reaches_ring(
-        &PurgeNotice {
-            reason: "retention".to_string(),
-            ids: vec!["s_1".to_string()],
-            from: None,
-            to: None,
-            newest: Some(now - ChronoDuration::seconds(1)),
-            scope: None,
-        },
-        now,
-        120,
-    ));
-    assert!(!AgentHost::reaches_ring(
-        &PurgeNotice {
-            reason: "drop".to_string(),
-            ids: vec!["s_1".to_string()],
-            from: None,
-            to: None,
-            newest: Some(now - ChronoDuration::seconds(1)),
-            scope: None,
-        },
-        now,
-        120,
-    ));
-    assert!(!AgentHost::reaches_ring(
-        &PurgeNotice {
-            reason: "replay".to_string(),
-            ids: vec!["r_1".to_string()],
-            from: None,
-            to: None,
-            newest: Some(now - ChronoDuration::seconds(1)),
-            scope: None,
-        },
-        now,
-        120,
-    ));
-}
+    let intel = AdapterInfo {
+        luid: 1,
+        vendor_id: GpuDevices::VENDOR_INTEL,
+        name: "Intel Iris Xe".to_string(),
+        software: false,
+        integrated: true,
+        vram_mb: 0,
+        device_id: 0,
+    };
+    let nvidia = AdapterInfo {
+        luid: 2,
+        vendor_id: GpuDevices::VENDOR_NVIDIA,
+        name: "NVIDIA GeForce RTX 4080".to_string(),
+        software: false,
+        integrated: false,
+        vram_mb: 16384,
+        device_id: 0,
+    };
+    let amd = AdapterInfo {
+        luid: 3,
+        vendor_id: GpuDevices::VENDOR_AMD,
+        name: "AMD Radeon RX 7900".to_string(),
+        software: false,
+        integrated: false,
+        vram_mb: 24576,
+        device_id: 0,
+    };
+    let adapters = [intel.clone(), nvidia.clone(), amd.clone()];
+    let outputs = [
+        make_output(0, "Display1", 3, GpuDevices::VENDOR_AMD, "AMD Radeon RX 7900", 0),
+        make_output(1, "Display2", 2, GpuDevices::VENDOR_NVIDIA, "NVIDIA GeForce RTX 4080", 1920),
+        make_output(2, "Display3", 2, GpuDevices::VENDOR_NVIDIA, "NVIDIA GeForce RTX 4080", 3840),
+    ];
 
-#[test]
-fn storage_pause_stops_keyframes_but_not_the_replay_ring() {
-    let p = br_agent::host::PauseController::new();
-    p.set("storage", None);
-    assert!(p.keyframes_paused());
-    assert!(!p.continuous_paused(true));
-    p.set("user", None);
-    assert_eq!(Some("storage".to_string()), p.current().0);
+    let available_a = |a: &AdapterInfo, c: VideoCodec, api: &str| {
+        matches!(
+            (a.luid, c, api),
+            (1, VideoCodec::Av1, "vpl")
+                | (1, VideoCodec::Hevc, "mf")
+                | (1, VideoCodec::H264, "mf")
+                | (2, VideoCodec::Hevc, "mf")
+                | (2, VideoCodec::H264, "mf")
+                | (3, VideoCodec::Hevc, "mf")
+                | (3, VideoCodec::H264, "mf")
+        )
+    };
+
+    let candidates_a =
+        EncoderPlan::candidates(&adapters, &outputs, Some("auto"), Some("auto"), available_a);
+    let expected_a = [
+        (1i64, VideoCodec::Av1, "vpl"),
+        (1, VideoCodec::Hevc, "mf"),
+        (1, VideoCodec::H264, "mf"),
+        (2, VideoCodec::Hevc, "mf"),
+        (2, VideoCodec::H264, "mf"),
+        (3, VideoCodec::Hevc, "mf"),
+        (3, VideoCodec::H264, "mf"),
+    ];
+    assert_eq!(expected_a.len(), candidates_a.len());
+    for (i, &(luid, codec, api)) in expected_a.iter().enumerate() {
+        assert_eq!(luid, candidates_a[i].adapter.luid);
+        assert_eq!(codec, candidates_a[i].codec);
+        assert_eq!(api, candidates_a[i].api);
+    }
+
+    let outputs_b = [make_output(
+        0,
+        "Display1",
+        2,
+        GpuDevices::VENDOR_NVIDIA,
+        "NVIDIA GeForce RTX 4080",
+        0,
+    )];
+    let available_b = |a: &AdapterInfo, c: VideoCodec, api: &str| {
+        matches!(
+            (a.luid, c, api),
+            (2, VideoCodec::Hevc, "mf") | (2, VideoCodec::H264, "mf")
+        )
+    };
+    let candidates_b = EncoderPlan::candidates(
+        std::slice::from_ref(&nvidia),
+        &outputs_b,
+        Some("auto"),
+        Some("auto"),
+        available_b,
+    );
+    let expected_b = [(2i64, VideoCodec::Hevc, "mf"), (2, VideoCodec::H264, "mf")];
+    assert_eq!(expected_b.len(), candidates_b.len());
+    for (i, &(luid, codec, api)) in expected_b.iter().enumerate() {
+        assert_eq!(luid, candidates_b[i].adapter.luid);
+        assert_eq!(codec, candidates_b[i].codec);
+        assert_eq!(api, candidates_b[i].api);
+    }
+
+    let outputs_c = [make_output(
+        0,
+        "Display1",
+        3,
+        GpuDevices::VENDOR_AMD,
+        "AMD Radeon RX 7900",
+        0,
+    )];
+    let available_c = |a: &AdapterInfo, c: VideoCodec, api: &str| {
+        matches!(
+            (a.luid, c, api),
+            (3, VideoCodec::Av1, "mf") | (3, VideoCodec::Hevc, "mf") | (3, VideoCodec::H264, "mf")
+        )
+    };
+    let candidates_c = EncoderPlan::candidates(
+        std::slice::from_ref(&amd),
+        &outputs_c,
+        Some("auto"),
+        Some("auto"),
+        available_c,
+    );
+    let expected_c = [
+        (3i64, VideoCodec::Av1, "mf"),
+        (3, VideoCodec::Hevc, "mf"),
+        (3, VideoCodec::H264, "mf"),
+    ];
+    assert_eq!(expected_c.len(), candidates_c.len());
+    for (i, &(luid, codec, api)) in expected_c.iter().enumerate() {
+        assert_eq!(luid, candidates_c[i].adapter.luid);
+        assert_eq!(codec, candidates_c[i].codec);
+        assert_eq!(api, candidates_c[i].api);
+    }
+
+    let candidates_d =
+        EncoderPlan::candidates(&adapters, &outputs, Some("auto"), Some("auto"), |_, _, _| false);
+    assert!(candidates_d.is_empty());
+
+    let candidates_e1 =
+        EncoderPlan::candidates(&adapters, &outputs, Some("geforce"), Some("auto"), available_a);
+    let expected_e1 = [
+        (2i64, VideoCodec::Hevc, "mf"),
+        (2, VideoCodec::H264, "mf"),
+        (1, VideoCodec::Av1, "vpl"),
+        (1, VideoCodec::Hevc, "mf"),
+        (1, VideoCodec::H264, "mf"),
+        (3, VideoCodec::Hevc, "mf"),
+        (3, VideoCodec::H264, "mf"),
+    ];
+    assert_eq!(expected_e1.len(), candidates_e1.len());
+    for (i, &(luid, codec, api)) in expected_e1.iter().enumerate() {
+        assert_eq!(luid, candidates_e1[i].adapter.luid);
+        assert_eq!(codec, candidates_e1[i].codec);
+        assert_eq!(api, candidates_e1[i].api);
+    }
+
+    let candidates_e2 =
+        EncoderPlan::candidates(&adapters, &outputs, Some("auto"), Some("h264"), available_a);
+    let expected_e2 = [
+        (1i64, VideoCodec::H264, "mf"),
+        (2, VideoCodec::H264, "mf"),
+        (3, VideoCodec::H264, "mf"),
+    ];
+    assert_eq!(expected_e2.len(), candidates_e2.len());
+    for (i, &(luid, codec, api)) in expected_e2.iter().enumerate() {
+        assert_eq!(luid, candidates_e2[i].adapter.luid);
+        assert_eq!(codec, candidates_e2[i].codec);
+        assert_eq!(api, candidates_e2[i].api);
+    }
 }

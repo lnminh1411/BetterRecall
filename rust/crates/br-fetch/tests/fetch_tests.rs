@@ -259,6 +259,7 @@ fn handle_conn(mut stream: TcpStream, config: &Arc<Mutex<ServerConfig>>) {
 struct RecordingProgress {
     total: AtomicU64,
     sum: AtomicU64,
+    files: Mutex<Vec<String>>,
 }
 
 impl RecordingProgress {
@@ -266,6 +267,7 @@ impl RecordingProgress {
         Self {
             total: AtomicU64::new(0),
             sum: AtomicU64::new(0),
+            files: Mutex::new(Vec::new()),
         }
     }
 }
@@ -276,6 +278,9 @@ impl FetchProgress for RecordingProgress {
     }
     fn bytes(&self, delta: u64) {
         self.sum.fetch_add(delta, Ordering::SeqCst);
+    }
+    fn file(&self, rel_path: &str) {
+        self.files.lock().unwrap().push(rel_path.to_string());
     }
 }
 
@@ -752,6 +757,13 @@ fn install_components_skips_good_writes_manifest_last_checks_space_and_progress(
 
     let req_paths: Vec<String> = server.requests().into_iter().map(|r| r.path).collect();
     assert_eq!(req_paths, vec!["/comp-a/new.bin", "/comp-a/manifest.json"]);
+    assert_eq!(
+        *progress.files.lock().unwrap(),
+        vec![
+            "comp-a/new.bin".to_string(),
+            "comp-a/manifest.json".to_string(),
+        ]
+    );
 }
 
 // 9. remove_components refuses an id outside the catalog and only deletes catalog folders.
@@ -850,60 +862,6 @@ fn installed_state_reports_missing_partial_and_complete() {
             ("comp-missing".to_string(), ComponentState::Missing),
             ("comp-partial".to_string(), ComponentState::Partial),
             ("comp-complete".to_string(), ComponentState::Complete),
-        ]
-    );
-}
-
-#[test]
-fn progress_reports_each_file_with_manifest_last() {
-    let dir = TestDir::new("file-progress");
-    let models_dir = dir.path().join("models");
-    let weights = b"weights-payload".to_vec();
-    let manifest = br#"{"id":"comp-p"}"#.to_vec();
-
-    let mut files = HashMap::new();
-    files.insert("/comp-p/weights.bin".to_string(), weights.clone());
-    files.insert("/comp-p/manifest.json".to_string(), manifest.clone());
-    let server = LocalHttpServer::start(files);
-
-    let catalog = make_test_catalog(
-        &server.base_url(),
-        vec![Component {
-            id: "comp-p".to_string(),
-            sets: vec!["full".to_string()],
-            bytes: (weights.len() + manifest.len()) as u64,
-            files: vec![
-                catalog_file("manifest.json", &manifest),
-                catalog_file("weights.bin", &weights),
-            ],
-        }],
-    );
-
-    struct FileRecorder {
-        files: Mutex<Vec<String>>,
-    }
-
-    impl FetchProgress for FileRecorder {
-        fn total(&self, _bytes: u64) {}
-        fn bytes(&self, _delta: u64) {}
-        fn file(&self, rel_path: &str) {
-            self.files.lock().unwrap().push(rel_path.to_string());
-        }
-    }
-
-    let recorder = FileRecorder {
-        files: Mutex::new(Vec::new()),
-    };
-    let opts = InstallOptions::for_catalog(&catalog)
-        .with_downloader(Downloader::new().with_retry_delays(vec![]));
-    let comps = catalog.components_for(ModelSet::Full);
-    install_components(&models_dir, &comps, &opts, &recorder, &|| false).expect("install ok");
-
-    assert_eq!(
-        *recorder.files.lock().unwrap(),
-        vec![
-            "comp-p/weights.bin".to_string(),
-            "comp-p/manifest.json".to_string(),
         ]
     );
 }

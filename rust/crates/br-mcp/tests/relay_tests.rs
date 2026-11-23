@@ -4,7 +4,7 @@
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
@@ -340,6 +340,11 @@ fn restart_waits_while_setup_mutex_exists() {
 
     let mutex_held = Arc::new(AtomicBool::new(false));
     let mutex_check = Arc::clone(&mutex_held);
+    let child1_exited = Arc::new(AtomicBool::new(false));
+    let child1_exited_check = Arc::clone(&child1_exited);
+    let child1_exited_child = Arc::clone(&child1_exited);
+    let wait_polls = Arc::new(AtomicUsize::new(0));
+    let wait_polls_bg = Arc::clone(&wait_polls);
     let started_count = Arc::new(Mutex::new(0usize));
     let started_ref = Arc::clone(&started_count);
 
@@ -350,12 +355,22 @@ fn restart_waits_while_setup_mutex_exists() {
             client_out: relay_out,
             stderr: &mut stderr,
             install_dir: PathBuf::from(r"C:\fake\install"),
-            mutex_exists: move || mutex_check.load(Ordering::Acquire),
+            mutex_exists: move || {
+                let held = mutex_check.load(Ordering::Acquire);
+                if held && child1_exited_check.load(Ordering::Acquire) {
+                    wait_polls_bg.fetch_add(1, Ordering::AcqRel);
+                }
+                held
+            },
             start_child: move |_: &Path| {
                 let mut c = started_ref.lock().unwrap();
                 *c += 1;
                 if *c == 1 {
-                    Ok(script_child(|_| (None, Some(InstallLayout::MCP_RESTART_EXIT_CODE))))
+                    let exited = Arc::clone(&child1_exited_child);
+                    Ok(script_child(move |_| {
+                        exited.store(true, Ordering::Release);
+                        (None, Some(InstallLayout::MCP_RESTART_EXIT_CODE))
+                    }))
                 } else {
                     Ok(script_child(|line| {
                         let v: Value = serde_json::from_str(line).unwrap();
@@ -375,11 +390,20 @@ fn restart_waits_while_setup_mutex_exists() {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while *started_count.lock().unwrap() == 0 {
         assert!(std::time::Instant::now() < deadline, "first server never started");
-        thread::sleep(Duration::from_millis(5));
+        thread::sleep(Duration::from_millis(10));
     }
     mutex_held.store(true, Ordering::Release);
     writeln!(client_w, r#"{{"jsonrpc":"2.0","id":10,"method":"ping"}}"#).unwrap();
-    thread::sleep(Duration::from_millis(120));
+
+    // Wait until the relay has polled mutex_exists at least twice after child 1 exited.
+    let poll_deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while wait_polls.load(Ordering::Acquire) < 2 {
+        assert!(
+            std::time::Instant::now() < poll_deadline,
+            "relay never entered mutex wait loop"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
     // Still waiting for mutex to clear: second server has not started yet.
     assert_eq!(*started_count.lock().unwrap(), 1);
 
@@ -437,6 +461,9 @@ fn non_75_exit_restarts_when_mutex_appeared_recently() {
     let mutex_held = Arc::new(AtomicBool::new(false));
     let mutex_check = Arc::clone(&mutex_held);
     let mutex_in_child = Arc::clone(&mutex_held);
+    let mutex_observed = Arc::new(AtomicBool::new(false));
+    let mutex_observed_bg = Arc::clone(&mutex_observed);
+    let mutex_observed_child = Arc::clone(&mutex_observed);
     let generation = Arc::new(Mutex::new(0usize));
 
     let relay_thread = thread::spawn(move || {
@@ -446,16 +473,31 @@ fn non_75_exit_restarts_when_mutex_appeared_recently() {
             client_out: relay_out,
             stderr: &mut stderr,
             install_dir: PathBuf::from(r"C:\fake\install"),
-            mutex_exists: move || mutex_check.load(Ordering::Acquire),
+            mutex_exists: move || {
+                let held = mutex_check.load(Ordering::Acquire);
+                if held {
+                    mutex_observed_bg.store(true, Ordering::Release);
+                }
+                held
+            },
             start_child: move |_: &Path| {
                 let mut g = generation.lock().unwrap();
                 *g += 1;
                 if *g == 1 {
                     let mf = Arc::clone(&mutex_in_child);
+                    let obs = Arc::clone(&mutex_observed_child);
                     Ok(script_child(move |_| {
-                        // Simulate installer holding mutex and terminating server with non-75 code.
+                        // Simulate installer holding mutex until the relay observes it,
+                        // then terminating the server with a non-75 exit code.
                         mf.store(true, Ordering::Release);
-                        thread::sleep(Duration::from_millis(40));
+                        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                        while !obs.load(Ordering::Acquire) {
+                            assert!(
+                                std::time::Instant::now() < deadline,
+                                "relay never observed setup mutex"
+                            );
+                            thread::sleep(Duration::from_millis(10));
+                        }
                         mf.store(false, Ordering::Release);
                         (None, Some(1))
                     }))

@@ -1,73 +1,21 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) BetterRecall contributors
 
+mod common;
+
 use std::fs::{self, OpenOptions};
 use std::os::windows::fs::OpenOptionsExt;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use br_contracts::{DataPaths, Settings};
 use br_core::SettingsStore;
+use common::TempHome;
 use serde_json::Value;
 use windows::Win32::Storage::FileSystem::{FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE};
-
-fn test_tmp_root() -> PathBuf {
-    if let Some(t) = std::env::var_os("BR_TEST_TMP")
-        && !t.is_empty()
-    {
-        return PathBuf::from(t);
-    }
-    if let Some(t) = std::env::var_os("CARGO_TARGET_DIR")
-        && !t.is_empty()
-    {
-        return PathBuf::from(t).join("test-tmp");
-    }
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().and_then(|d| d.parent()).map(|d| d.join("test-tmp")))
-        .expect("unable to determine cargo target dir for test temp folder")
-}
-
-struct TempHome {
-    path: PathBuf,
-}
-
-impl TempHome {
-    fn new(key_protection: Option<&str>) -> Self {
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let id = SEQ.fetch_add(1, Ordering::Relaxed);
-        let path = test_tmp_root()
-            .join("br-core-settings")
-            .join(format!("h-{}-{id}", std::process::id()));
-        fs::create_dir_all(&path).expect("create temp home");
-        if let Some(kp) = key_protection {
-            fs::write(
-                DataPaths::settings_file(&path),
-                format!(r#"{{"security":{{"keyProtection":"{kp}"}}}}"#),
-            )
-            .expect("write settings");
-        }
-        Self { path }
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for TempHome {
-    fn drop(&mut self) {
-        for _ in 0..5 {
-            if !self.path.exists() || fs::remove_dir_all(&self.path).is_ok() {
-                return;
-            }
-            thread::sleep(Duration::from_millis(50));
-        }
-    }
-}
 
 fn j(json: &str) -> Value {
     serde_json::from_str(json).expect("valid test json")
@@ -166,6 +114,8 @@ fn try_update_rejects_bad_values_and_saves_nothing() {
         (r#"{"hotkeys":{"timeline":"ctrl+alt+p"}}"#, "Invalid hotkeys.pause."),
         (r#"{"hotkeys":{"lock":"Lock"}}"#, "Invalid hotkeys.lock."),
         (r#"{"ipc":{"pipeName":"bad name"}}"#, "Invalid ipc.pipeName."),
+        (r#"{"ipc":{"pipeName":"BetterRecall.ui"}}"#, "Invalid ipc.pipeName."),
+        (r#"{"ipc":{"pipeName":"BetterRecall.mcp"}}"#, "Invalid ipc.pipeName."),
         (r#"{"ipc":{"maxResults":201}}"#, "Invalid ipc.maxResults."),
         (r#"{"ipc":{"maxResults":5}}"#, "Invalid ipc.maxResults."),
         (r#"{"ipc":{"defaultResults":51}}"#, "Invalid ipc.defaultResults."),
@@ -174,6 +124,19 @@ fn try_update_rejects_bad_values_and_saves_nothing() {
         (r#"{"ipc":{"maxPauseS":59}}"#, "Invalid ipc.maxPauseS."),
         (r#"{"ipc":{"idleTimeoutS":3601}}"#, "Invalid ipc.idleTimeoutS."),
         (r#"{"ipc":{"allowClients":["notabs.exe"]}}"#, "Invalid ipc.allowClients."),
+        (r#"{"keyframes":{"maxGb":20}}"#, "Invalid keyframes.maxGb."),
+        (r#"{"keyframes":{"format":"heic"}}"#, "Invalid keyframes.format."),
+        (r#"{"storage":{"minFreeGb":-1}}"#, "Invalid storage.minFreeGb."),
+        (r#"{"storage":{"maxGb":0}}"#, "Invalid storage.maxGb."),
+        (r#"{"storage":{"overwrite":1}}"#, "Invalid storage.overwrite."),
+        (
+            r#"{"retention":{"progressiveAfterDays":-1}}"#,
+            "Invalid retention.progressiveAfterDays.",
+        ),
+        (
+            r#"{"retention":{"progressiveOverDays":0}}"#,
+            "Invalid retention.progressiveOverDays.",
+        ),
         (r#"{"log":{"level":"trace"}}"#, "Invalid log.level."),
         (r#"{"capture":{"nope":1}}"#, "Invalid capture.nope."),
         (r#"{"nosection":{}}"#, "Invalid nosection."),
@@ -248,16 +211,6 @@ fn replay_keys_accept_spec_values() {
             r#"{"replay":{"encoder":"hevc","encoderAdapter":"Intel(R) Graphics","layout":"perMonitor","resolution":"scale","scalePercent":25,"fps":144}}"#
         ))
     );
-    let a128 = "a".repeat(128);
-    let a129 = "a".repeat(129);
-    assert_eq!(
-        None,
-        s.try_update(&j(&format!(r#"{{"replay":{{"encoderAdapter":"{a128}"}}}}"#)))
-    );
-    assert_eq!(
-        Some("Invalid replay.encoderAdapter.".to_string()),
-        s.try_update(&j(&format!(r#"{{"replay":{{"encoderAdapter":"{a129}"}}}}"#)))
-    );
 }
 
 #[test]
@@ -287,16 +240,11 @@ fn nsfw_gate_keys_accept_spec_values() {
             r#"{"privacy":{"nsfwDetectorThreshold":0.99,"nsfwThreshold":0.99}}"#
         ))
     );
-    let a129 = "a".repeat(129);
-    assert_eq!(
-        Some("Invalid privacy.nsfwGpuAdapter.".to_string()),
-        s.try_update(&j(&format!(r#"{{"privacy":{{"nsfwGpuAdapter":"{a129}"}}}}"#)))
-    );
     assert_eq!("RTX 3050", s.current().privacy.nsfw_gpu_adapter);
 }
 
 #[test]
-fn inference_gpu_adapter_accepts_names_up_to_128_chars() {
+fn adapter_names_accept_up_to_128_chars() {
     let h = TempHome::new(None);
     let s = SettingsStore::load(h.path());
     assert_eq!("auto", s.current().inference.gpu_adapter);
@@ -308,14 +256,22 @@ fn inference_gpu_adapter_accepts_names_up_to_128_chars() {
     );
     let a128 = "a".repeat(128);
     let a129 = "a".repeat(129);
-    assert_eq!(
-        None,
-        s.try_update(&j(&format!(r#"{{"inference":{{"gpuAdapter":"{a128}"}}}}"#)))
-    );
-    assert_eq!(
-        Some("Invalid inference.gpuAdapter.".to_string()),
-        s.try_update(&j(&format!(r#"{{"inference":{{"gpuAdapter":"{a129}"}}}}"#)))
-    );
+    for (section, key) in [
+        ("replay", "encoderAdapter"),
+        ("privacy", "nsfwGpuAdapter"),
+        ("inference", "gpuAdapter"),
+    ] {
+        assert_eq!(
+            None,
+            s.try_update(&j(&format!(r#"{{"{section}":{{"{key}":"{a128}"}}}}"#))),
+            "{section}.{key} len 128"
+        );
+        assert_eq!(
+            Some(format!("Invalid {section}.{key}.")),
+            s.try_update(&j(&format!(r#"{{"{section}":{{"{key}":"{a129}"}}}}"#))),
+            "{section}.{key} len 129"
+        );
+    }
     assert_eq!(a128, s.current().inference.gpu_adapter);
     assert_eq!("gpu", s.current().inference.device);
 }
@@ -375,11 +331,6 @@ fn ocr_and_redaction_settings_validate() {
 }
 
 #[test]
-fn defaults_are_valid() {
-    assert_eq!(None, SettingsStore::validate(&Settings::default()));
-}
-
-#[test]
 fn load_resets_bad_keys_and_keeps_good_ones() {
     let h = TempHome::new(None);
     fs::write(
@@ -391,17 +342,6 @@ fn load_resets_bad_keys_and_keeps_good_ones() {
     assert_eq!(2000, s.current().capture.interval_ms);
     assert_eq!(1920, s.current().capture.max_width);
     assert_eq!(90, s.current().retention.days);
-}
-
-#[test]
-fn corrupt_file_falls_back_to_defaults_and_keeps_a_copy() {
-    let h = TempHome::new(None);
-    fs::write(DataPaths::settings_file(h.path()), "{ not json").unwrap();
-    let s = SettingsStore::load(h.path());
-    assert_eq!(30, s.current().retention.days);
-    let mut bad = DataPaths::settings_file(h.path()).into_os_string();
-    bad.push(".bad");
-    assert!(PathBuf::from(bad).exists());
 }
 
 // ---- StorageTests.cs (StorageSettingsTests) ----
@@ -416,6 +356,10 @@ fn defaults_of_batch_2() {
     assert!(!s.storage.overwrite);
     assert_eq!(7, s.retention.progressive_after_days);
     assert_eq!(30, s.retention.progressive_over_days);
+    assert!(!s.ai.enabled);
+    assert_eq!("hello", s.security.unlock_method);
+    assert!(s.replay.searchable);
+    assert_eq!(5, s.replay.sample_seconds);
     assert_eq!(None, SettingsStore::validate(&s));
 }
 
@@ -453,43 +397,6 @@ fn old_file_keeps_values_the_user_changed() {
     assert_eq!(20, s.storage.max_gb);
 }
 
-#[test]
-fn invalid_storage_keys_are_rejected() {
-    let cases = [
-        (r#"{"keyframes":{"maxGb":20}}"#, "Invalid keyframes.maxGb."),
-        (r#"{"keyframes":{"format":"heic"}}"#, "Invalid keyframes.format."),
-        (r#"{"storage":{"minFreeGb":-1}}"#, "Invalid storage.minFreeGb."),
-        (r#"{"storage":{"maxGb":0}}"#, "Invalid storage.maxGb."),
-        (r#"{"storage":{"overwrite":1}}"#, "Invalid storage.overwrite."),
-        (
-            r#"{"retention":{"progressiveAfterDays":-1}}"#,
-            "Invalid retention.progressiveAfterDays.",
-        ),
-        (
-            r#"{"retention":{"progressiveOverDays":0}}"#,
-            "Invalid retention.progressiveOverDays.",
-        ),
-    ];
-    let h = TempHome::new(None);
-    let s = SettingsStore::load(h.path());
-    for (json, err) in cases {
-        assert_eq!(Some(err.to_string()), s.try_update(&j(json)), "json={json}");
-    }
-}
-
-#[test]
-fn valid_storage_keys_are_accepted() {
-    let cases = [
-        r#"{"keyframes":{"format":"jxl"}}"#,
-        r#"{"storage":{"minFreeGb":0,"maxGb":500,"overwrite":true}}"#,
-        r#"{"retention":{"progressiveAfterDays":0,"progressiveOverDays":3650}}"#,
-    ];
-    for json in cases {
-        let h = TempHome::new(None);
-        assert_eq!(None, SettingsStore::load(h.path()).try_update(&j(json)));
-    }
-}
-
 // ---- Batch4Tests.cs (settings cases) ----
 
 #[test]
@@ -500,6 +407,9 @@ fn good_settings_accepted() {
         r#"{"ai":{"endpoint":"http://localhost:1234"}}"#,
         r#"{"ai":{"provider":"openai-compatible","model":"models/gemini-3.8-flash"}}"#,
         r#"{"replay":{"searchable":false,"sampleSeconds":60}}"#,
+        r#"{"keyframes":{"format":"jxl"}}"#,
+        r#"{"storage":{"minFreeGb":0,"maxGb":500,"overwrite":true}}"#,
+        r#"{"retention":{"progressiveAfterDays":0,"progressiveOverDays":3650}}"#,
     ];
     for json in cases {
         let h = TempHome::new(None);
@@ -511,14 +421,27 @@ fn good_settings_accepted() {
     }
 }
 
+/// Batch4Tests.Bad_settings_rejected: cleartext remote endpoints, credentials in the endpoint
+/// and an API key in the settings file are refused, with the exact error the UI shows.
 #[test]
-fn defaults_are_off_and_private() {
-    let s = Settings::default();
-    assert!(!s.ai.enabled);
-    assert_eq!("hello", s.security.unlock_method);
-    assert!(s.replay.searchable);
-    assert_eq!(5, s.replay.sample_seconds);
-    assert_eq!(None, SettingsStore::validate(&s));
+fn bad_settings_rejected() {
+    let cases = [
+        (r#"{"ai":{"endpoint":"http://example.com"}}"#, "Invalid ai.endpoint."),
+        (r#"{"ai":{"endpoint":"https://user:pw@example.com"}}"#, "Invalid ai.endpoint."),
+        (r#"{"ai":{"endpoint":"https://example.com/v1?key=1"}}"#, "Invalid ai.endpoint."),
+        (r#"{"ai":{"provider":"mistral"}}"#, "Invalid ai.provider."),
+        (r#"{"ai":{"model":"bad model"}}"#, "Invalid ai.model."),
+        (r#"{"security":{"unlockMethod":"pin"}}"#, "Invalid security.unlockMethod."),
+        (r#"{"replay":{"sampleSeconds":1}}"#, "Invalid replay.sampleSeconds."),
+        (r#"{"ai":{"apiKey":"x"}}"#, "Invalid ai.apiKey."),
+    ];
+    for (json, want) in cases {
+        let h = TempHome::new(None);
+        let store = SettingsStore::load(h.path());
+        let before = store.current().ai.endpoint.clone();
+        assert_eq!(Some(want.to_string()), store.try_update(&j(json)), "json={json}");
+        assert_eq!(before, store.current().ai.endpoint, "json={json}");
+    }
 }
 
 // ---- Sweep2GTests.cs ----
@@ -558,6 +481,7 @@ fn settings_file_with_an_unknown_language_keeps_auto() {
 
 // ---- Sweep3KTests.cs ----
 
+/// Regression B3: unreadable settings refuse saves until reset, preserve `.bad`, and second reset returns false.
 #[test]
 fn unparsable_file_is_kept_until_the_next_save() {
     let h = TempHome::new(None);
@@ -578,9 +502,10 @@ fn unparsable_file_is_kept_until_the_next_save() {
     );
     assert_eq!(bad, fs::read_to_string(&path).unwrap());
     assert!(s.reset_unreadable().unwrap());
-    assert_eq!(None, s.try_update(&j(r#"{"retention":{"days":60}}"#)));
     assert!(s.load_error().is_none());
+    assert_eq!(None, s.try_update(&j(r#"{"retention":{"days":60}}"#)));
     assert_eq!(60, SettingsStore::read_only(h.path()).retention.days);
+    assert!(!s.reset_unreadable().unwrap());
 }
 
 #[test]
@@ -592,34 +517,9 @@ fn readable_and_missing_files_have_no_load_error() {
 
 // ---- Sweep4UCoreTests.cs ----
 
+/// Regression S6.
 #[test]
-fn b3_unreadable_settings_refuse_saves_until_reset() {
-    let h = TempHome::new(None);
-    let path = DataPaths::settings_file(h.path());
-    fs::write(
-        &path,
-        r#"{"capture":{"consented":true},"privacy":{"redactEmails":true,"denyProcesses":["notepad"]},"retention":{"days":7}} x"#,
-    )
-    .unwrap();
-    let s = SettingsStore::load(h.path());
-    assert!(s.load_error().is_some());
-    assert_eq!(
-        Some(SettingsStore::ERR_UNREADABLE.to_string()),
-        s.try_update(&j(r#"{"ui":{"theme":"dark"}}"#))
-    );
-    assert!(fs::read_to_string(&path).unwrap().ends_with(" x"));
-
-    assert!(s.reset_unreadable().unwrap());
-    assert!(s.load_error().is_none());
-    let mut bad_file = path.as_os_str().to_os_string();
-    bad_file.push(".bad");
-    assert!(fs::read_to_string(PathBuf::from(bad_file)).unwrap().contains("redactEmails"));
-    assert_eq!(None, s.try_update(&j(r#"{"ui":{"theme":"dark"}}"#)));
-    assert!(!s.reset_unreadable().unwrap());
-}
-
-#[test]
-fn s6_settings_reset_keeps_the_latest_bad_file() {
+fn settings_reset_keeps_the_latest_bad_file() {
     let h = TempHome::new(None);
     let path = DataPaths::settings_file(h.path());
     fs::write(&path, r#"{"retention":{"days":7}} x"#).unwrap();
@@ -640,8 +540,9 @@ fn s6_settings_reset_keeps_the_latest_bad_file() {
     );
 }
 
+/// Regressions S4 and C9.
 #[test]
-fn s4_readonly_during_saves_never_returns_defaults() {
+fn readonly_during_saves_never_returns_defaults() {
     let h = TempHome::new(Some("dpapi"));
     let s = Arc::new(SettingsStore::load(h.path()));
     assert_eq!(None, s.try_update(&j(r#"{"ui":{"theme":"dark"}}"#)));
@@ -677,8 +578,9 @@ fn s4_readonly_during_saves_never_returns_defaults() {
     assert!(vals.iter().all(|t| t == "dark" || t == "light"));
 }
 
+/// Regression C9.
 #[test]
-fn c9_save_succeeds_while_a_reader_holds_the_file() {
+fn save_succeeds_while_a_reader_holds_the_file() {
     let h = TempHome::new(Some("dpapi"));
     let s = SettingsStore::load(h.path());
     let path = DataPaths::settings_file(h.path());
@@ -706,34 +608,4 @@ fn c9_save_succeeds_while_a_reader_holds_the_file() {
     assert_eq!(None, s.try_update(&j(r#"{"ui":{"theme":"light"}}"#)));
     release.join().unwrap();
     assert_eq!("light", SettingsStore::read_only(h.path()).ui.theme);
-}
-
-#[test]
-fn c9_readonly_does_not_block_the_agents_replace() {
-    let h = TempHome::new(Some("dpapi"));
-    let s = SettingsStore::load(h.path());
-    let path = DataPaths::settings_file(h.path());
-    let stop = Arc::new(AtomicBool::new(false));
-    let mut readers = Vec::new();
-    for _ in 0..4 {
-        let stop_c = stop.clone();
-        let home = h.path().to_path_buf();
-        readers.push(thread::spawn(move || {
-            while !stop_c.load(Ordering::Relaxed) {
-                let _ = SettingsStore::read_only(&home);
-            }
-        }));
-    }
-    for i in 0..40usize {
-        let theme = if i.is_multiple_of(2) { "dark" } else { "light" };
-        assert_eq!(
-            None,
-            s.try_update(&j(&format!(r#"{{"ui":{{"theme":"{theme}"}}}}"#)))
-        );
-    }
-    stop.store(true, Ordering::Relaxed);
-    for r in readers {
-        r.join().unwrap();
-    }
-    assert!(path.exists());
 }

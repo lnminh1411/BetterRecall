@@ -9,7 +9,7 @@ BetterRecall uses two licences. Every source file starts with an `SPDX-License-I
 
 `BetterRecall.Contracts` holds the IPC records, settings and pipe names. It is MIT because the UI compiles it in. The backend links it too, which MIT allows.
 
-`tests/BetterRecall.UI.Tests` references no backend project. The seam tests that run the UI's client logic against the real agent code are in `tests/BetterRecall.Core.Tests`, which compiles the MIT UI logic into an AGPL test project; MIT allows that.
+`tests/BetterRecall.UI.Tests` references no backend project. The seam tests that run the UI's own pipe client against the real agent are in `tests/BetterRecall.Agent.Conformance`, which compiles the MIT UI client code into an AGPL test project; MIT allows that.
 
 The UI talks to the agent only over a named pipe, so the two run as separate programs. You can reuse the UI and contracts under MIT terms. The backend stays under AGPL-3.0: if you change it and let people use it over a network, you must offer them your source.
 

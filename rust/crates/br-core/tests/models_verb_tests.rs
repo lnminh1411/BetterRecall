@@ -1,86 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) BetterRecall contributors
 
-//! CommandProcessor tests for the UI-only `models` verb (R7, stage I4).
+//! CommandProcessor tests for UI-only `models` (and shared UI-only / streaming verb tables).
 
 mod common;
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
-use std::thread;
-use std::time::Duration;
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 
-use br_contracts::{Envelope, ModelComponent, ModelsList, ModelsProgress};
-use br_core::{
-    AgentError, CancelSource, CancelToken, ClientSession, CommandDeps, CommandProcessor, KeyVault,
-    PipeKind, SettingsStore,
-};
+use br_contracts::{Envelope, ModelComponent, ModelsList, ModelsProgress, UpdateProgress};
+use br_core::{AgentError, CancelSource, CancelToken, CommandProcessor, PipeKind};
 
-use common::a3::{FakeAgent, FakeEmbedder, FakeThumbs};
-use common::{TempHome, TempStore};
-
-struct ModelsFixture {
-    _t: TempStore,
-    _home: TempHome,
-    agent: Arc<FakeAgent>,
-    p: CommandProcessor,
-}
-
-impl ModelsFixture {
-    fn new() -> Self {
-        let mut t = TempStore::new();
-        let store = Arc::new(t.store.take().unwrap());
-        let home = TempHome::new(Some("dpapi"));
-        let settings = Arc::new(SettingsStore::load(home.path()));
-        let s_for_vault = settings.clone();
-        let vault = Arc::new(KeyVault::new(
-            home.path(),
-            move || s_for_vault.current(),
-            None,
-            false,
-        ));
-        let agent = Arc::new(FakeAgent::new());
-        let embedder = Arc::new(FakeEmbedder::new());
-        let thumbs = Arc::new(FakeThumbs::new());
-        let st_clone = store.clone();
-        let p = CommandProcessor::new(CommandDeps {
-            settings,
-            store: Arc::new(move || Some(st_clone.clone())),
-            keys: vault,
-            agent: agent.clone(),
-            embedder,
-            thumbnailer: thumbs,
-            purge_all: Arc::new(|_| 0),
-            purge_all_undeleted: None,
-            blobs: None,
-            home: Some(home.path().to_path_buf()),
-            password: None,
-            ai_key: None,
-            describer: None,
-            redactor: None,
-            chat_http: None,
-            chat_providers: None,
-        });
-        Self {
-            _t: t,
-            _home: home,
-            agent,
-            p,
-        }
-    }
-
-    fn ui_sess() -> ClientSession {
-        ClientSession::new(PipeKind::Ui, 101, r"C:\app\ui\BetterRecall.UI.exe")
-    }
-
-    fn pub_sess() -> ClientSession {
-        ClientSession::new(PipeKind::Public, 100, r"C:\tools\client.exe")
-    }
-
-    fn mcp_sess() -> ClientSession {
-        ClientSession::new(PipeKind::Mcp, 102, r"C:\app\betterrecall-mcp.exe")
-    }
-}
+use common::a3::VerbFixture;
 
 fn sample_models_list() -> ModelsList {
     ModelsList {
@@ -102,49 +33,56 @@ fn sample_models_list() -> ModelsList {
     }
 }
 
+/// Covers `models`, `update`, and `bench full` UI-only enforcement, help listing, and long-running detection.
 #[test]
 fn models_is_ui_only_and_listed_in_ui_help() {
-    let f = ModelsFixture::new();
-
-    let mut pub_s = ModelsFixture::pub_sess();
-    let r_pub = f.p.handle(&mut pub_s, "models list", &CancelToken::none());
-    let (ok, _, err) = Envelope::parse(&r_pub.line).unwrap();
-    assert!(!ok);
-    assert_eq!(err.as_deref(), Some("Unknown command 'models'."));
-
-    let mut mcp_s = ModelsFixture::mcp_sess();
-    let r_mcp = f.p.handle(&mut mcp_s, "models list", &CancelToken::none());
-    let (ok, _, err) = Envelope::parse(&r_mcp.line).unwrap();
-    assert!(!ok);
-    assert_eq!(err.as_deref(), Some("Unknown command 'models'."));
-
-    let mut ui_s = ModelsFixture::ui_sess();
+    let f = VerbFixture::new();
+    let mut ui_s = VerbFixture::ui();
     let r_help = f.p.handle(&mut ui_s, "help", &CancelToken::none());
     let (ok, data, _) = Envelope::parse(&r_help.line).unwrap();
     assert!(ok);
-    let verbs: Vec<String> = serde_json::from_value(data.unwrap()["verbs"].clone()).unwrap();
-    assert!(verbs.iter().any(|v| v == "models"));
+    let ui_verbs: Vec<String> = serde_json::from_value(data.unwrap()["verbs"].clone()).unwrap();
+    let pub_verbs = f.p.help_verbs(PipeKind::Public);
+    let mcp_verbs = f.p.help_verbs(PipeKind::Mcp);
 
-    assert!(!f.p.help_verbs(PipeKind::Public).iter().any(|v| v == "models"));
-    assert!(!f.p.help_verbs(PipeKind::Mcp).iter().any(|v| v == "models"));
-    assert!(CommandProcessor::is_long_running(
-        PipeKind::Ui,
-        "models download minimal"
-    ));
-    assert!(!CommandProcessor::is_long_running(
-        PipeKind::Public,
-        "models download minimal"
-    ));
+    for (verb, sample_cmd, long_running_cmd) in [
+        ("models", "models list", "models download minimal"),
+        ("update", "update status", "update download"),
+        ("bench full", "bench full", "bench full"),
+    ] {
+        let mut pub_s = VerbFixture::pub_sess();
+        let r_pub = f.p.handle(&mut pub_s, sample_cmd, &CancelToken::none());
+        let (ok_pub, _, err_pub) = Envelope::parse(&r_pub.line).unwrap();
+        assert!(!ok_pub, "public must reject {sample_cmd}");
+        if verb != "bench full" {
+            assert_eq!(err_pub, Some(format!("Unknown command '{verb}'.")));
+        }
+
+        let mut mcp_s = VerbFixture::mcp();
+        let r_mcp = f.p.handle(&mut mcp_s, sample_cmd, &CancelToken::none());
+        let (ok_mcp, _, err_mcp) = Envelope::parse(&r_mcp.line).unwrap();
+        assert!(!ok_mcp, "mcp must reject {sample_cmd}");
+        if verb != "bench full" {
+            assert_eq!(err_mcp, Some(format!("Unknown command '{verb}'.")));
+        }
+
+        assert!(ui_verbs.iter().any(|v| v == verb), "ui help missing {verb}");
+        assert!(!pub_verbs.iter().any(|v| v == verb), "public help has {verb}");
+        assert!(!mcp_verbs.iter().any(|v| v == verb), "mcp help has {verb}");
+        assert!(CommandProcessor::is_long_running(PipeKind::Ui, long_running_cmd));
+        assert!(!CommandProcessor::is_long_running(PipeKind::Public, long_running_cmd));
+    }
+    assert!(!*f.agent.full_bench_started.0.lock().unwrap());
 }
 
 #[test]
 fn models_list_returns_fake_data_even_when_locked() {
-    let f = ModelsFixture::new();
+    let f = VerbFixture::new();
     let expected = sample_models_list();
     *f.agent.models_list_reply.lock().unwrap() = Some(expected.clone());
     f.agent.unlocked.store(false, Ordering::Release);
 
-    let mut ui_s = ModelsFixture::ui_sess();
+    let mut ui_s = VerbFixture::ui();
     let r = f.p.handle(&mut ui_s, "models list", &CancelToken::none());
     let (ok, data, err) = Envelope::parse(&r.line).unwrap();
     assert!(ok, "err={err:?}");
@@ -152,9 +90,10 @@ fn models_list_returns_fake_data_even_when_locked() {
     assert_eq!(got, expected);
 }
 
+/// Streams progress events for both `models download` and `update download`.
 #[test]
 fn models_download_streams_progress_and_ends() {
-    let f = ModelsFixture::new();
+    let f = VerbFixture::new();
     *f.agent.on_models_download.lock().unwrap() = Some(Arc::new(|target, emit, _ct| {
         assert_eq!(target, "minimal");
         emit(ModelsProgress {
@@ -180,15 +119,40 @@ fn models_download_streams_progress_and_ends() {
         });
         Ok(())
     }));
+    *f.agent.on_update_download.lock().unwrap() = Some(Arc::new(|emit, _ct| {
+        emit(UpdateProgress {
+            phase: "checking".to_string(),
+            done_bytes: 0,
+            total_bytes: 0,
+            error: None,
+        });
+        emit(UpdateProgress {
+            phase: "downloading".to_string(),
+            done_bytes: 500,
+            total_bytes: 1000,
+            error: None,
+        });
+        emit(UpdateProgress {
+            phase: "verifying".to_string(),
+            done_bytes: 1000,
+            total_bytes: 1000,
+            error: None,
+        });
+        emit(UpdateProgress {
+            phase: "done".to_string(),
+            done_bytes: 1000,
+            total_bytes: 1000,
+            error: None,
+        });
+        Ok(())
+    }));
 
-    let mut ui_s = ModelsFixture::ui_sess();
+    let mut ui_s = VerbFixture::ui();
     let r = f
         .p
         .handle(&mut ui_s, "models download minimal", &CancelToken::none());
-    let producer = r.stream.expect("download returns stream");
     let mut lines = Vec::new();
-    producer(&mut |l| lines.push(l));
-
+    r.stream.expect("models stream")(&mut |l| lines.push(l));
     assert_eq!(lines.len(), 3);
     let parsed: Vec<ModelsProgress> = lines
         .iter()
@@ -202,115 +166,67 @@ fn models_download_streams_progress_and_ends() {
     assert_eq!(parsed[1].phase, "downloading");
     assert_eq!(parsed[1].file.as_deref(), Some("ocr/det.onnx"));
     assert_eq!(parsed[2].phase, "done");
+
+    let r_up = f.p.handle(&mut ui_s, "update download", &CancelToken::none());
+    let mut up_lines = Vec::new();
+    r_up.stream.expect("update stream")(&mut |l| up_lines.push(l));
+    assert_eq!(up_lines.len(), 4);
+    let up_parsed: Vec<UpdateProgress> = up_lines
+        .iter()
+        .map(|l| {
+            let (ok, data, _) = Envelope::parse(l).unwrap();
+            assert!(ok);
+            serde_json::from_value(data.unwrap()).unwrap()
+        })
+        .collect();
+    assert_eq!(up_parsed[0].phase, "checking");
+    assert_eq!(up_parsed[1].phase, "downloading");
+    assert_eq!(up_parsed[1].done_bytes, 500);
+    assert_eq!(up_parsed[2].phase, "verifying");
+    assert_eq!(up_parsed[3].phase, "done");
 }
 
 #[test]
-fn models_download_refuses_second_concurrent_download() {
-    let f = ModelsFixture::new();
-    let busy = Arc::new(AtomicBool::new(false));
-    let started = Arc::new((Mutex::new(false), Condvar::new()));
-    let release = Arc::new((Mutex::new(false), Condvar::new()));
-
-    let busy_c = busy.clone();
-    let started_c = started.clone();
-    let release_c = release.clone();
-    *f.agent.on_models_download.lock().unwrap() = Some(Arc::new(move |_target, emit, _ct| {
-        if busy_c
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return Err(AgentError::InvalidOperation(
-                CommandProcessor::ERR_MODELS_BUSY.to_string(),
-            ));
-        }
-        {
-            let (lock, cv) = &*started_c;
-            *lock.lock().unwrap() = true;
-            cv.notify_all();
-        }
-        {
-            let (lock, cv) = &*release_c;
-            let g = lock.lock().unwrap();
-            let _ = cv.wait_timeout_while(g, Duration::from_secs(5), |done| !*done);
-        }
-        emit(ModelsProgress {
-            phase: "done".to_string(),
-            done_bytes: 10,
-            total_bytes: 10,
-            file: None,
-            error: None,
-        });
-        busy_c.store(false, Ordering::Release);
-        Ok(())
+fn models_download_passes_through_agent_errors() {
+    let f = VerbFixture::new();
+    let seen_target = Arc::new(Mutex::new(String::new()));
+    let seen_c = seen_target.clone();
+    *f.agent.on_models_download.lock().unwrap() = Some(Arc::new(move |target, _emit, _ct| {
+        *seen_c.lock().unwrap() = target.to_string();
+        Err(AgentError::InvalidOperation(
+            CommandProcessor::ERR_MODELS_BUSY.to_string(),
+        ))
     }));
 
-    let mut ui_s1 = ModelsFixture::ui_sess();
-    let r1 = f
+    let mut ui_s = VerbFixture::ui();
+    let r = f
         .p
-        .handle(&mut ui_s1, "models download full", &CancelToken::none());
-    let prod1 = r1.stream.expect("first stream");
-
-    let t1 = thread::spawn(move || {
-        let mut out = Vec::new();
-        prod1(&mut |l| out.push(l));
-        out
-    });
-
-    {
-        let (lock, cv) = &*started;
-        let g = lock.lock().unwrap();
-        let (g2, _) = cv
-            .wait_timeout_while(g, Duration::from_secs(5), |s| !*s)
-            .unwrap();
-        assert!(*g2, "first download did not start");
-    }
-
-    let mut ui_s2 = ModelsFixture::ui_sess();
-    let r2 = f
-        .p
-        .handle(&mut ui_s2, "models download minimal", &CancelToken::none());
-    let prod2 = r2.stream.expect("second stream");
-    let mut out2 = Vec::new();
-    prod2(&mut |l| out2.push(l));
-    assert_eq!(out2.len(), 1);
-    let (ok, _, err) = Envelope::parse(&out2[0]).unwrap();
+        .handle(&mut ui_s, "models download minimal", &CancelToken::none());
+    let mut out = Vec::new();
+    r.stream.expect("stream")(&mut |l| out.push(l));
+    assert_eq!(*seen_target.lock().unwrap(), "minimal");
+    assert_eq!(out.len(), 1);
+    let (ok, _, err) = Envelope::parse(&out[0]).unwrap();
     assert!(!ok);
     assert_eq!(err.as_deref(), Some(CommandProcessor::ERR_MODELS_BUSY));
-
-    {
-        let (lock, cv) = &*release;
-        *lock.lock().unwrap() = true;
-        cv.notify_all();
-    }
-    let out1 = t1.join().unwrap();
-    assert_eq!(out1.len(), 1);
 }
 
 #[test]
-fn models_download_cancel_and_unknown_target() {
-    let f = ModelsFixture::new();
-    *f.agent.on_models_download.lock().unwrap() = Some(Arc::new(|target, emit, ct| {
-        if target != "minimal" {
-            return Err(AgentError::InvalidOperation(
-                CommandProcessor::USAGE_MODELS.to_string(),
-            ));
-        }
+fn models_download_maps_cancelled_and_rejects_bad_usage() {
+    let f = VerbFixture::new();
+    *f.agent.on_models_download.lock().unwrap() = Some(Arc::new(|target, _emit, ct| {
         if ct.is_cancelled() {
-            emit(ModelsProgress {
-                phase: "cancelled".to_string(),
-                done_bytes: 0,
-                total_bytes: 100,
-                file: None,
-                error: None,
-            });
-            return Ok(());
+            return Err(AgentError::Cancelled);
+        }
+        if target == "bogus" {
+            return Err(AgentError::NotFound);
         }
         Ok(())
     }));
 
-    let mut ui_s = ModelsFixture::ui_sess();
+    let mut ui_s = VerbFixture::ui();
 
-    // Cancelled token -> cancelled phase.
+    // AgentError::Cancelled is mapped by CommandProcessor to a `cancelled` progress line.
     let cts = CancelSource::new();
     cts.cancel();
     let r = f
@@ -324,7 +240,7 @@ fn models_download_cancel_and_unknown_target() {
     let p: ModelsProgress = serde_json::from_value(data.unwrap()).unwrap();
     assert_eq!(p.phase, "cancelled");
 
-    // Unknown target -> usage error.
+    // Non-InvalidOperation error maps to ERR_INTERNAL.
     let r_bad = f
         .p
         .handle(&mut ui_s, "models download bogus", &CancelToken::none());
@@ -333,12 +249,14 @@ fn models_download_cancel_and_unknown_target() {
     assert_eq!(bad_lines.len(), 1);
     let (ok, _, err) = Envelope::parse(&bad_lines[0]).unwrap();
     assert!(!ok);
-    assert_eq!(err.as_deref(), Some(CommandProcessor::USAGE_MODELS));
+    assert_eq!(err.as_deref(), Some(CommandProcessor::ERR_INTERNAL));
 
-    // Missing subcommand -> immediate usage error.
-    let r_empty = f.p.handle(&mut ui_s, "models", &CancelToken::none());
-    assert!(r_empty.stream.is_none());
-    let (ok, _, err) = Envelope::parse(&r_empty.line).unwrap();
-    assert!(!ok);
-    assert_eq!(err.as_deref(), Some(CommandProcessor::USAGE_MODELS));
+    // Missing or extra subcommand -> immediate usage error.
+    for cmd in ["models", "models bogus", "models list extra"] {
+        let r_empty = f.p.handle(&mut ui_s, cmd, &CancelToken::none());
+        assert!(r_empty.stream.is_none(), "cmd={cmd}");
+        let (ok, _, err) = Envelope::parse(&r_empty.line).unwrap();
+        assert!(!ok, "cmd={cmd}");
+        assert_eq!(err.as_deref(), Some(CommandProcessor::USAGE_MODELS), "cmd={cmd}");
+    }
 }

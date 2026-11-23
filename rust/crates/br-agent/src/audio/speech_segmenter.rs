@@ -374,4 +374,21 @@ impl SpeechSegmenter {
         Pcm::wipe(&mut self.pending);
         self.clear_pre_roll();
     }
+
+    /// For tests: runs `clear()`, then returns true if nothing is buffered and the pending
+    /// buffer's whole allocation is zero. Clearing first matters: `Pcm::wipe` writes zeros over
+    /// the full capacity, so only then is every byte read here initialized.
+    pub fn buffered_pcm_zeroed_for_test(&mut self) -> bool {
+        self.clear();
+        if self.seg.is_some() || !self.pending.is_empty() || !self.pre_roll.is_empty() {
+            return false;
+        }
+        let cap = self.pending.capacity();
+        if cap == 0 {
+            return true;
+        }
+        unsafe { std::slice::from_raw_parts(self.pending.as_ptr(), cap) }
+            .iter()
+            .all(|&x| x == 0.0)
+    }
 }

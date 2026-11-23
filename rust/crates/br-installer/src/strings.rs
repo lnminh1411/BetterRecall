@@ -159,7 +159,38 @@ pub fn finish_installed(version: &str) -> String {
     format!("BetterRecall {version} is installed.")
 }
 
+/// N10 (sweep 6 retest): the download error names the full model URL (too long to wrap on the
+/// Finish page) and repeats its cause through the error chain. Show the URL's host only and
+/// each part of the chain once.
+pub fn short_failure_reason(reason: &str) -> String {
+    let words: Vec<String> = reason
+        .split(' ')
+        .map(|w| {
+            let rest = w
+                .strip_prefix("https://")
+                .or_else(|| w.strip_prefix("http://"));
+            match rest {
+                Some(r) => {
+                    let host = r.split('/').next().unwrap_or(r);
+                    let tail = if w.ends_with(':') && !host.ends_with(':') { ":" } else { "" };
+                    format!("{host}{tail}")
+                }
+                None => w.to_string(),
+            }
+        })
+        .collect();
+    let joined = words.join(" ");
+    let mut seen: Vec<&str> = Vec::new();
+    for part in joined.split(": ") {
+        if !seen.contains(&part) {
+            seen.push(part);
+        }
+    }
+    seen.join(": ")
+}
+
 pub fn finish_models_failed(reason: &str) -> String {
+    let reason = short_failure_reason(reason);
     format!(
         "Model download did not finish ({reason}). BetterRecall is installed; run Setup again (Apps > Installed apps > Modify) or open the Models page in the app to try again."
     )

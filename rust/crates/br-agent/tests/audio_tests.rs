@@ -274,15 +274,30 @@ fn a16_segments_evicted_by_drop_oldest_are_zeroed() {
         Arc::new(AudioVerdict::allowed),
     )
     .unwrap();
+    let mut evicted = None;
     for i in 0..9i64 {
-        src.enqueue_segment(SpeechSegment {
+        let ev = src.enqueue_segment_for_test(SpeechSegment {
             samples: vec![0.25f32; 16000],
             start_qpc_100ns: i,
             duration_ms: 1000,
             app: String::new(),
         });
+        if i < 8 {
+            assert!(ev.is_none());
+        } else {
+            evicted = ev;
+        }
     }
     assert_eq!(1, src.evicted());
+    let (old, orig_len) = evicted.expect("9th enqueue must evict oldest segment");
+    assert_eq!(0, old.start_qpc_100ns);
+    assert_eq!(16000, orig_len);
+    assert!(old.samples.is_empty());
+    assert!(old.samples.capacity() >= orig_len);
+    unsafe {
+        let raw = std::slice::from_raw_parts(old.samples.as_ptr(), orig_len);
+        assert!(raw.iter().all(|&x| x == 0.0), "evicted PCM was not zeroed");
+    }
     let first_remaining = src.try_recv().unwrap();
     assert_eq!(1, first_remaining.start_qpc_100ns);
     assert!(first_remaining.samples.iter().any(|&x| x != 0.0));
@@ -318,11 +333,13 @@ fn ca_s2_emitted_and_cleared_segments_leave_no_pcm() {
     seg.push(&vec![0.0f32; 16000], 10_000_000, &mut out);
     assert_eq!(1, out.len());
     assert!(!seg.active());
+    // Trailing frames stay as pre-roll while idle (by design); only clear() must wipe them.
 
     seg.push(&sine(16000), 20_000_000, &mut out);
     assert!(seg.active());
     seg.clear();
     assert!(!seg.active());
+    assert!(seg.buffered_pcm_zeroed_for_test());
 }
 
 // =========================================================================
@@ -470,91 +487,6 @@ fn a_h1_transcript_in_flight_during_purge_all_is_not_stored_in_the_new_store() {
 // =========================================================================
 // Sweep4R: AH2, AM5, AM7, M3, S4
 // =========================================================================
-
-#[test]
-fn ah2_audio_verdict_follows_the_guard_snapshot() {
-    let fg = WindowInfo {
-        hwnd: 42,
-        pid: 1,
-        exe_path: r"C:\Windows\System32\mstsc.exe".to_string(),
-        title: "Remote Desktop".to_string(),
-        class_name: "Cls".to_string(),
-    };
-    let snap = |d: GuardDecision, epoch: i64| GuardSnapshot {
-        taken_at_ms: tick_count64(),
-        foreground: Some(fg.clone()),
-        decision: d,
-        badge: BadgeResult::NotBrowser,
-        any_affinity: false,
-        mask_rects: Vec::new(),
-        per_monitor: Default::default(),
-        site: String::new(),
-        secrets: None,
-        fg_epoch: epoch,
-        is_closed_sentinel: false,
-    };
-
-    assert_eq!(
-        AudioVerdict {
-            gate: AudioGate::Blocked,
-            app: "mstsc".to_string(),
-            epoch: 3
-        },
-        GuardrailService::audio_now_pure(&snap(GuardDecision::deny(GuardReason::DenyProcess), 3), 3)
-    );
-    assert_eq!(
-        AudioGate::Blocked,
-        GuardrailService::audio_now_pure(
-            &snap(GuardDecision::deny(GuardReason::PrivateBadge), 3),
-            3
-        )
-        .gate
-    );
-    assert_eq!(
-        AudioGate::Blocked,
-        GuardrailService::audio_now_pure(
-            &snap(GuardDecision::deny(GuardReason::DisplayAffinity), 3),
-            3
-        )
-        .gate
-    );
-    assert_eq!(
-        AudioGate::Blocked,
-        GuardrailService::audio_now_pure(&GuardSnapshot::closed(), 3).gate
-    );
-    assert_eq!(
-        AudioVerdict {
-            gate: AudioGate::Allowed,
-            app: "mstsc".to_string(),
-            epoch: 3
-        },
-        GuardrailService::audio_now_pure(&snap(GuardDecision::ALLOWED, 3), 3)
-    );
-    assert_eq!(
-        AudioGate::Allowed,
-        GuardrailService::audio_now_pure(
-            &snap(GuardDecision::deny(GuardReason::NoForeground), 3),
-            3
-        )
-        .gate
-    );
-    assert_eq!(
-        AudioVerdict {
-            gate: AudioGate::Unknown,
-            app: "mstsc".to_string(),
-            epoch: 4
-        },
-        GuardrailService::audio_now_pure(&snap(GuardDecision::ALLOWED, 3), 4)
-    );
-    assert_eq!(
-        AudioVerdict {
-            gate: AudioGate::Unknown,
-            app: "mstsc".to_string(),
-            epoch: 5
-        },
-        GuardrailService::audio_now_pure(&snap(GuardDecision::ALLOWED, 3), 5)
-    );
-}
 
 #[test]
 fn ah2_timeline_judges_a_segment_by_when_it_was_spoken() {
@@ -924,6 +856,7 @@ fn am5_segment_survives_a_worker_crash_and_the_restart_backoff() {
 #[test]
 fn am5_retries_end_on_panic_and_error_replies_are_not_retried() {
     let store = FakeStore::new();
+    let reply_calls = Arc::new(AtomicI32::new(0));
     let backend = FakeBackend::new(|_, _, _, _| {
         Err(WorkerError::Transport("worker crashed".to_string()))
     });
@@ -960,17 +893,27 @@ fn am5_retries_end_on_panic_and_error_replies_are_not_retried() {
     spk.play(false, 800);
     assert!(until(|| tr.retried() >= 1, Duration::from_secs(5)));
     src.clear();
-    backend.set(|_, _, _, _| Err(WorkerError::Reply("Model not installed: whisper.".to_string())));
-    thread::sleep(Duration::from_millis(400));
+    let rc = reply_calls.clone();
+    backend.set(move |_, _, _, _| {
+        rc.fetch_add(1, Ordering::AcqRel);
+        Err(WorkerError::Reply("Model not installed: whisper.".to_string()))
+    });
+    thread::sleep(Duration::from_millis(250));
     assert!(store.inner.lock().unwrap().audio.is_empty());
     assert_eq!(0, tr.gave_up());
+    assert_eq!(0, reply_calls.load(Ordering::Acquire));
 
     let retried = tr.retried();
     spk.play(true, 1000);
     spk.play(false, 800);
-    thread::sleep(Duration::from_millis(400));
+    assert!(
+        until(|| reply_calls.load(Ordering::Acquire) >= 1, Duration::from_secs(5)),
+        "transcriber never called backend for second segment"
+    );
+    thread::sleep(Duration::from_millis(250));
     cts.cancel();
     handle.join().unwrap();
+    assert_eq!(1, reply_calls.load(Ordering::Acquire));
     assert_eq!(retried, tr.retried());
     assert!(store.inner.lock().unwrap().audio.is_empty());
 }
@@ -1437,6 +1380,7 @@ fn a4_agent_host_pause_and_session_lock_flush_transcript_sources() {
     assert_eq!(2, src.segments());
     let seg2 = src.try_recv().unwrap();
     assert_eq!(AudioGate::Allowed, src.guard_for(&seg2).gate);
+    agent.shutdown();
     core.shutdown();
 }
 
@@ -1558,20 +1502,6 @@ fn loopback_without_subscribers_is_not_restarted() {
     })));
     assert!(!hub.check_health(10_000));
     assert_eq!(0, opens.load(Ordering::Acquire));
-}
-
-#[test]
-fn audio_sources_are_retried_while_wanted_and_missing() {
-    let cases = [
-        (false, false, true, false, false, true),
-        (false, false, true, true, true, true),
-        (false, false, true, true, false, false),
-        (true, false, false, false, false, true),
-        (false, false, false, false, false, false),
-    ];
-    for (ws, so, wm, mo, ml, expected) in cases {
-        assert_eq!(expected, AgentHost::audio_needs_sync(ws, so, wm, mo, ml));
-    }
 }
 
 // =========================================================================

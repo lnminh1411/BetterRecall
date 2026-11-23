@@ -1,8 +1,5 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) BetterRecall contributors
-using System.Text.Json;
-using System.Text.Json.Nodes;
-using System.Xml.Linq;
 using BetterRecall.Contracts;
 using BetterRecall.UI.Logic;
 
@@ -11,9 +8,6 @@ namespace BetterRecall.UI.Tests;
 /// <summary>inference.gpuAdapter in the settings schema, its strings, the adapter list and the per-GPU bench rows.</summary>
 public class GpuAdapterTests
 {
-    private static JsonObject Defaults() =>
-        (JsonObject)JsonNode.Parse(JsonSerializer.Serialize(new Settings(), ContractsJson.Default.Settings))!;
-
     [Fact]
     public void Schema_entry_follows_inference_device_and_is_gated_on_gpu()
     {
@@ -24,7 +18,7 @@ public class GpuAdapterTests
         var d = all[i];
         Assert.Equal(("inference", SettingType.Adapter, "inference.device", "gpu"), (d.Group, d.Type, d.EnabledWhenKey, d.EnabledWhenValue));
 
-        var s = Defaults();
+        var s = TestResources.DefaultSettings();
         Assert.Equal("auto", SettingsSchema.Get(s, "inference.gpuAdapter")!.GetValue<string>());
         Assert.False(d.IsEnabled(s));
         SettingsSchema.Set(s, "inference.device", "gpu");
@@ -35,19 +29,10 @@ public class GpuAdapterTests
         Assert.Equal("Invalid inference.gpuAdapter.", SettingsSchema.Validate(d, s));
     }
 
-    private static Dictionary<string, string> Strings()
-    {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "BetterRecall.slnx"))) dir = dir.Parent;
-        Assert.NotNull(dir);
-        var resw = XDocument.Load(Path.Combine(dir!.FullName, "src", "BetterRecall.UI", "Strings", "en-US", "Resources.resw"));
-        return resw.Root!.Elements("data").ToDictionary(e => (string)e.Attribute("name")!, e => (string)e.Element("value")!);
-    }
-
     [Fact]
     public void Strings_exist_for_the_setting_its_auto_label_and_the_reason()
     {
-        var s = Strings();
+        var s = TestResources.Strings();
         var d = SettingsSchema.Find("inference.gpuAdapter")!;
         Assert.Equal("Graphics card", s[d.LabelKey]);
         Assert.Equal("Which GPU to use when Device is GPU. Automatic uses the integrated GPU through OpenVINO when there is one, else the first graphics card.",

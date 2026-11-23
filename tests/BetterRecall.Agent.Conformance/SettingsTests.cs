@@ -10,11 +10,12 @@ namespace BetterRecall.Agent.Conformance;
 public sealed class SettingsTests(InstallFixture install)
 {
     [Fact]
-    public async Task Settings_get_returns_full_configuration_shape()
+    public async Task Settings_get_locked_guards_and_reset_when_valid()
     {
         await using var h = new AgentHarness(install);
         await h.StartAndConnectUiAsync();
 
+        // was: Settings_get_returns_full_configuration_shape
         var (ok, d, err) = await h.Ui.RequestAsync("ui", "settings get");
         Assert.True(ok, err);
         var s = d.Deserialize(ContractsJson.Default.Settings)!;
@@ -26,6 +27,26 @@ public sealed class SettingsTests(InstallFixture install)
         Assert.Equal("password", s.Security.UnlockMethod);
         Assert.False(s.Ipc.Enabled);
         Assert.False(s.Mcp.Enabled);
+
+        // was: Settings_set_guards_protected_groups_while_locked
+        var (guardedOk, _, guardedErr) = await h.Ui.RequestAsync("ui", "settings set {\"retention\":{\"days\":45}}");
+        Assert.False(guardedOk);
+        Assert.Equal("Store is locked.", guardedErr);
+
+        var (uiOk, uiData, uiErr) = await h.Ui.RequestAsync("ui", "settings set {\"ui\":{\"theme\":\"dark\"}}");
+        Assert.True(uiOk, uiErr);
+        Assert.Equal("dark", uiData.Deserialize(ContractsJson.Default.Settings)!.Ui.Theme);
+
+        // was: Settings_reset_reports_nothing_to_reset_when_file_is_valid
+        var (lockedOk, _, lockedErr) = await h.Ui.RequestAsync("ui", "settings reset");
+        Assert.False(lockedOk);
+        Assert.Equal("Store is locked.", lockedErr);
+
+        await h.SetupPassphraseAndWaitStoreAsync();
+
+        var (resetOk, _, resetErr) = await h.Ui.RequestAsync("ui", "settings reset");
+        Assert.False(resetOk);
+        Assert.Equal("settings.json loaded; there is nothing to reset.", resetErr);
     }
 
     [Fact]
@@ -52,27 +73,13 @@ public sealed class SettingsTests(InstallFixture install)
     }
 
     [Fact]
-    public async Task Settings_set_guards_protected_groups_while_locked()
-    {
-        await using var h = new AgentHarness(install);
-        await h.StartAndConnectUiAsync();
-
-        var (guardedOk, _, guardedErr) = await h.Ui.RequestAsync("ui", "settings set {\"retention\":{\"days\":45}}");
-        Assert.False(guardedOk);
-        Assert.Equal("Store is locked.", guardedErr);
-
-        var (uiOk, uiData, uiErr) = await h.Ui.RequestAsync("ui", "settings set {\"ui\":{\"theme\":\"dark\"}}");
-        Assert.True(uiOk, uiErr);
-        Assert.Equal("dark", uiData.Deserialize(ContractsJson.Default.Settings)!.Ui.Theme);
-    }
-
-    [Fact]
-    public async Task Settings_set_rejects_out_of_range_values()
+    public async Task Settings_set_rejects_out_of_range_unknown_keys_and_bad_json()
     {
         await using var h = new AgentHarness(install);
         await h.StartAndConnectUiAsync();
         await h.SetupPassphraseAndWaitStoreAsync();
 
+        // was: Settings_set_rejects_out_of_range_values
         var (rOk, _, rErr) = await h.Ui.RequestAsync("ui", "settings set {\"retention\":{\"days\":0}}");
         Assert.False(rOk);
         Assert.Equal("Invalid retention.days.", rErr);
@@ -91,15 +98,8 @@ public sealed class SettingsTests(InstallFixture install)
         Assert.Equal(30, current.Retention.Days);
         Assert.Equal(2000, current.Capture.IntervalMs);
         Assert.Equal("BetterRecall", current.Ipc.PipeName);
-    }
 
-    [Fact]
-    public async Task Settings_set_rejects_unknown_keys_sections_and_bad_json()
-    {
-        await using var h = new AgentHarness(install);
-        await h.StartAndConnectUiAsync();
-        await h.SetupPassphraseAndWaitStoreAsync();
-
+        // was: Settings_set_rejects_unknown_keys_sections_and_bad_json
         var (kOk, _, kErr) = await h.Ui.RequestAsync("ui", "settings set {\"retention\":{\"noSuchKey\":1}}");
         Assert.False(kOk);
         Assert.Equal("Invalid retention.noSuchKey.", kErr);
@@ -115,22 +115,5 @@ public sealed class SettingsTests(InstallFixture install)
         var (uOk, _, uErr) = await h.Ui.RequestAsync("ui", "settings");
         Assert.False(uOk);
         Assert.Equal("Usage: settings get | settings set <json> | settings reset", uErr);
-    }
-
-    [Fact]
-    public async Task Settings_reset_reports_nothing_to_reset_when_file_is_valid()
-    {
-        await using var h = new AgentHarness(install);
-        await h.StartAndConnectUiAsync();
-
-        var (lockedOk, _, lockedErr) = await h.Ui.RequestAsync("ui", "settings reset");
-        Assert.False(lockedOk);
-        Assert.Equal("Store is locked.", lockedErr);
-
-        await h.SetupPassphraseAndWaitStoreAsync();
-
-        var (ok, _, err) = await h.Ui.RequestAsync("ui", "settings reset");
-        Assert.False(ok);
-        Assert.Equal("settings.json loaded; there is nothing to reset.", err);
     }
 }

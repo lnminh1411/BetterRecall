@@ -276,6 +276,8 @@ pub struct SupervisorOptions {
     pub liveness_clock: Option<ClockFn>,
     pub check_clock: Option<ClockFn>,
     pub start_timer: bool,
+    /// Base restart backoff in milliseconds (default 1000; overridable for tests).
+    pub backoff_base_ms: i64,
 }
 
 impl Default for SupervisorOptions {
@@ -288,6 +290,7 @@ impl Default for SupervisorOptions {
             liveness_clock: None,
             check_clock: None,
             start_timer: true,
+            backoff_base_ms: 1000,
         }
     }
 }
@@ -561,7 +564,8 @@ impl WorkerSupervisor {
     fn note_failure(&self) {
         let f = self.inner.failures.fetch_add(1, Ordering::AcqRel) + 1;
         let shift = (f - 1).clamp(0, 6) as u32;
-        let delay = 60_000i64.min(1000i64 << shift);
+        let base = self.inner.opts.backoff_base_ms.max(1);
+        let delay = 60_000i64.min(base << shift);
         self.inner
             .next_attempt_ticks
             .store(tick_count64() + delay, Ordering::Release);

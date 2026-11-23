@@ -11,11 +11,15 @@ use std::os::windows::fs::OpenOptionsExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use br_contracts::{CoreHostOptions, DataPaths, PurgeNotice, PurgeScope};
-use br_core::{CancelToken, CoreHost, PipeKind, StoreError};
-use chrono::{Duration as ChronoDuration, Utc};
+use br_core::{
+    Log,
+    CancelSource, CancelToken, CoreHost, PipeClient, PipeConnectResult, PipeKind, ProcessInfo,
+    StoreError,
+};
+use chrono::Utc;
 
 use common::a3::{FakeAgent, FakeEmbedder, FakeThumbs, test_pipe_name};
 use common::{TempHome, audio};
@@ -82,39 +86,6 @@ fn open_store_then_purge_all_starts_empty_with_a_new_key() {
 }
 
 #[test]
-fn purge_last_refuses_captures_stamped_inside_the_purged_window() {
-    let h = TempHome::new(Some("dpapi"));
-    let host = CoreHost::create_with_hello_probe(
-        CoreHostOptions {
-            home: h.path().to_path_buf(),
-            install_dir: h.path().to_path_buf(),
-        },
-        false,
-    );
-    host.open_store(&CancelToken::none()).expect("open");
-    let store = host.store().unwrap();
-    let before = Utc::now() - ChronoDuration::seconds(5);
-    store
-        .purge(&PurgeScope::last(ChronoDuration::minutes(5)))
-        .expect("purge");
-    let err = store
-        .add_audio_capture(&audio(before, "late transcript", "teams.exe"))
-        .expect_err("expected PurgedWindow");
-    assert!(matches!(err, StoreError::PurgedWindow(_)));
-    assert_eq!(0, store.stats().unwrap().rows);
-    assert!(
-        store
-            .add_audio_capture(&audio(
-                Utc::now() + ChronoDuration::seconds(1),
-                "after the purge",
-                "teams.exe",
-            ))
-            .is_ok()
-    );
-    host.shutdown();
-}
-
-#[test]
 fn purge_all_when_the_store_never_opened_deletes_its_files_and_starts_fresh() {
     let h = TempHome::new(Some("dpapi"));
     let db = DataPaths::store_db(h.path());
@@ -175,9 +146,32 @@ fn store_purges_and_purge_all_reach_core_host_listeners() {
     host.shutdown();
 }
 
+/// Regression B1: purge-all runs without deadlocking while `open_store` waits on a forgotten passphrase.
 #[test]
-fn b1_purge_all_runs_while_the_store_waits_for_a_forgotten_passphrase() {
+fn purge_all_runs_while_the_store_waits_for_a_forgotten_passphrase() {
     let h = TempHome::new(Some("passphrase"));
+    // Seed a real passphrase-protected key and one capture row so a passphrase is genuinely forgotten.
+    {
+        let seed_host = CoreHost::create_with_hello_probe(
+            CoreHostOptions {
+                home: h.path().to_path_buf(),
+                install_dir: h.path().to_path_buf(),
+            },
+            false,
+        );
+        assert!(seed_host.keys().unlock_with_passphrase("forgotten-passphrase-123"));
+        seed_host.open_store(&CancelToken::none()).expect("seed open");
+        seed_host
+            .store()
+            .unwrap()
+            .add_audio_capture(&audio(Utc::now(), "secret before forget", "teams.exe"))
+            .expect("seed row");
+        seed_host.shutdown();
+    }
+
+    // The log is process-wide; point it at this test's folder to see the wait line.
+    let logs = h.path().join("probe-logs");
+    Log::init(&logs, "core");
     let host = CoreHost::create_with_hello_probe(
         CoreHostOptions {
             home: h.path().to_path_buf(),
@@ -185,69 +179,65 @@ fn b1_purge_all_runs_while_the_store_waits_for_a_forgotten_passphrase() {
         },
         false,
     );
+    let open_cancel = CancelSource::new();
+    let open_ct = open_cancel.token();
     let host_bg = host.clone();
+    let entered = Arc::new(AtomicBool::new(false));
+    let entered_bg = entered.clone();
     let done = Arc::new(AtomicBool::new(false));
     let done_bg = done.clone();
     let open_thread = thread::spawn(move || {
-        let res = host_bg.open_store(&CancelToken::none());
+        entered_bg.store(true, Ordering::Release);
+        let res = host_bg.open_store(&open_ct);
         if res.is_ok() {
             done_bg.store(true, Ordering::Release);
         }
     });
 
-    thread::sleep(Duration::from_millis(150));
+    // Wait until open_store is really inside its passphrase wait: it logs this line right before
+    // the wait loop (needs_passphrase() alone is true before open_store even starts).
+    let wait_deadline = Instant::now() + Duration::from_secs(10);
+    let waiting_logged = || {
+        fs::read_dir(&logs)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .filter_map(|e| fs::read_to_string(e.path()).ok())
+            .any(|t| t.contains("data key needs the passphrase; waiting for unlock"))
+    };
+    while !(entered.load(Ordering::Acquire) && waiting_logged()) {
+        assert!(
+            Instant::now() < wait_deadline,
+            "open_store never entered passphrase wait state"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
     assert!(host.store().is_none());
-    // Purge all must not deadlock while open_store waits on passphrase.
+    // Purge all must not deadlock while open_store waits on the forgotten passphrase.
     assert_eq!(0, host.purge_all(&CancelToken::none()));
+    assert!(!done.load(Ordering::Acquire));
+    assert!(host.store().is_none());
 
-    // Unlock with a new passphrase so open_store finishes.
+    // Unlock with a new passphrase so open_store finishes and opens an empty store.
     assert!(host.keys().unlock_with_passphrase("fresh-passphrase-123"));
-    for _ in 0..50 {
-        if done.load(Ordering::Acquire) {
+    let finish_deadline = Instant::now() + Duration::from_secs(5);
+    while !done.load(Ordering::Acquire) {
+        if Instant::now() >= finish_deadline {
+            open_cancel.cancel();
             break;
         }
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(15));
     }
-    assert!(done.load(Ordering::Acquire));
-    assert!(host.store().is_some());
     let _ = open_thread.join();
-    host.shutdown();
-}
-
-#[test]
-fn a_h1_purge_all_notice_comes_before_the_new_store_opens() {
-    let h = TempHome::new(Some("dpapi"));
-    let host = CoreHost::create_with_hello_probe(
-        CoreHostOptions {
-            home: h.path().to_path_buf(),
-            install_dir: h.path().to_path_buf(),
-        },
-        false,
-    );
-    host.open_store(&CancelToken::none()).expect("open");
-    let saw_null_store = Arc::new(AtomicBool::new(false));
-    let saw_purging = Arc::new(AtomicBool::new(false));
-    let s1 = saw_null_store.clone();
-    let s2 = saw_purging.clone();
-    let host_weak = Arc::downgrade(&host);
-    let _g = host.on_purged(move |n| {
-        if n.reason == "all"
-            && let Some(h) = host_weak.upgrade()
-        {
-            s1.store(h.store().is_none(), Ordering::Release);
-            s2.store(h.purging_all(), Ordering::Release);
-        }
-    });
-    host.purge_all(&CancelToken::none());
-    assert!(saw_null_store.load(Ordering::Acquire));
-    assert!(saw_purging.load(Ordering::Acquire));
-    assert!(!host.purging_all());
+    assert!(done.load(Ordering::Acquire), "open_store did not complete after new passphrase");
     assert!(host.store().is_some());
+    assert_eq!(0, host.store().unwrap().stats().unwrap().rows);
     host.shutdown();
 }
 
+/// Regression A-H1: purge-all closes the old store and notifies listeners before opening the new store.
 #[test]
-fn purge_all_closes_the_old_store_before_the_agent_hears_it() {
+fn purge_all_notice_comes_before_the_new_store_opens() {
     let h = TempHome::new(Some("dpapi"));
     let host = CoreHost::create_with_hello_probe(
         CoreHostOptions {
@@ -258,18 +248,30 @@ fn purge_all_closes_the_old_store_before_the_agent_hears_it() {
     );
     host.open_store(&CancelToken::none()).expect("open");
     let old = host.store().unwrap();
+    let saw_null_store = Arc::new(AtomicBool::new(false));
+    let saw_purging = Arc::new(AtomicBool::new(false));
     let old_disposed_in_notice = Arc::new(AtomicBool::new(false));
-    let flag = old_disposed_in_notice.clone();
+    let s1 = saw_null_store.clone();
+    let s2 = saw_purging.clone();
+    let s3 = old_disposed_in_notice.clone();
+    let host_weak = Arc::downgrade(&host);
     let _g = host.on_purged(move |n| {
         if n.reason == "all" {
-            let err = old.stats().expect_err("old store should be closed");
-            if matches!(err, StoreError::Disposed) {
-                flag.store(true, Ordering::Release);
+            if let Some(h) = host_weak.upgrade() {
+                s1.store(h.store().is_none(), Ordering::Release);
+                s2.store(h.purging_all(), Ordering::Release);
+            }
+            if matches!(old.stats(), Err(StoreError::Disposed)) {
+                s3.store(true, Ordering::Release);
             }
         }
     });
     host.purge_all(&CancelToken::none());
+    assert!(saw_null_store.load(Ordering::Acquire));
+    assert!(saw_purging.load(Ordering::Acquire));
     assert!(old_disposed_in_notice.load(Ordering::Acquire));
+    assert!(!host.purging_all());
+    assert!(host.store().is_some());
     host.shutdown();
 }
 
@@ -315,25 +317,9 @@ fn purge_all_reports_a_replay_file_it_could_not_delete_and_the_next_start_delete
     host2.shutdown();
 }
 
+/// Regression C4.
 #[test]
-fn c3_leftover_export_partial_is_deleted_at_host_start() {
-    let h = TempHome::new(Some("dpapi"));
-    let partial = h.path().join("leftover.zip.partial");
-    fs::write(&partial, b"partial-data").unwrap();
-    br_core::ExportJournal::add(Some(h.path()), &partial);
-    let host = CoreHost::create_with_hello_probe(
-        CoreHostOptions {
-            home: h.path().to_path_buf(),
-            install_dir: h.path().to_path_buf(),
-        },
-        false,
-    );
-    assert!(!partial.exists());
-    host.shutdown();
-}
-
-#[test]
-fn c4_pipe_manager_stops_all_three_pipes_and_core_host_dedupes_in_flight_stop() {
+fn pipe_manager_stops_all_three_pipes_and_core_host_dedupes_in_flight_stop() {
     let h = TempHome::new(Some("dpapi"));
     let host = CoreHost::create_with_hello_probe(
         CoreHostOptions {
@@ -359,9 +345,10 @@ fn c4_pipe_manager_stops_all_three_pipes_and_core_host_dedupes_in_flight_stop() 
         Arc::new(FakeThumbs::new()),
     );
     let pm = host.pipe_manager().unwrap();
-    assert!(pm.ui().is_some());
-    assert!(pm.public().is_some());
-    assert!(pm.mcp().is_some());
+    let ui_name = pm.ui().expect("ui pipe").name().to_string();
+    let pub_name = pm.public().expect("public pipe").name().to_string();
+    let mcp_name = pm.mcp().expect("mcp pipe").name().to_string();
+    drop(pm);
 
     // Two concurrent stop_pipes calls deduplicate cleanly.
     let h1 = host.clone();
@@ -371,5 +358,13 @@ fn c4_pipe_manager_stops_all_three_pipes_and_core_host_dedupes_in_flight_stop() 
     t1.join().unwrap();
     t2.join().unwrap();
     assert!(host.pipe_manager().is_none());
+    let self_exe = ProcessInfo::current_image().expect("current image");
+    for name in [ui_name, pub_name, mcp_name] {
+        assert_eq!(
+            PipeConnectResult::NotRunning,
+            PipeClient::connect(&name, &self_exe, 200, &CancelToken::none()).0,
+            "pipe {name} still serving after stop_pipes"
+        );
+    }
     host.shutdown();
 }

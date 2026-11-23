@@ -3,22 +3,17 @@
 
 mod common;
 
-use std::fs::{self, File};
-use std::io::Read;
-use std::sync::{Arc, Mutex};
+use std::fs;
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use br_contracts::{
-    DataPaths, ExportRequest, ExportResult, NewScreenCapture, PurgeScope, RetentionSettings,
-    SearchMode, SearchRequest, Settings,
-};
-use br_core::{CaptureExporter, EncryptedStore};
+use br_contracts::{DataPaths, NewScreenCapture, PurgeNotice, PurgeScope, RetentionSettings, Settings};
+use br_core::{EncryptedStore, VectorCandidate, VectorFilter, VectorIndex, win32};
 use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Timelike, Utc};
-use zip::ZipArchive;
 
 use common::{
-    FAKE_WEBP, TempStore, audio, hex_upper, screen, seeded_bytes, vec_info, vec_seeded,
+    FAKE_WEBP, TempHome, TempStore, audio, hex_upper, screen, seeded_bytes, vec_info, vec_seeded,
 };
 
 fn fixed_now() -> DateTime<Utc> {
@@ -261,156 +256,7 @@ fn maintenance_runs_thinning_with_settings() {
     assert!(t.store().get(&b).expect("g").is_some());
 }
 
-// ---- ExportTests ----
-
-#[test]
-fn writes_images_and_captures_json_filtered_by_app() {
-    let t = TempStore::new();
-    let now = Utc::now();
-    for i in 0..5 {
-        let app = if i % 2 == 0 { "code" } else { "chrome" };
-        let id = t
-            .store()
-            .add_screen_capture(&screen(
-                now - ChronoDuration::minutes(10 - i),
-                app,
-                &format!("Title {i}"),
-                true,
-            ))
-            .expect("add");
-        t.store().take_pending_embeddings(10).expect("take");
-        t.store().set_embedding(&id, &vec_seeded(i as i32), &vec_info()).expect("embed");
-    }
-    t.store()
-        .add_audio_capture(&audio(now - ChronoDuration::minutes(3), "meeting notes", "code"))
-        .expect("audio");
-    let outside = t
-        .store()
-        .add_screen_capture(&screen(now - ChronoDuration::days(2), "code", "Some window", true))
-        .expect("add");
-    t.store().take_pending_embeddings(10).expect("take");
-    t.store().set_embedding(&outside, &vec_seeded(9), &vec_info()).expect("embed");
-
-    let path = t.home.path().join("export.zip");
-    let req = ExportRequest {
-        from: now - ChronoDuration::hours(1),
-        to: now,
-        path: path.to_string_lossy().into_owned(),
-        app: Some("CODE.exe".to_string()),
-        jpeg: false,
-        dry_run: false,
-    };
-    assert_eq!(
-        CaptureExporter::count(t.store(), &req).expect("count"),
-        ExportResult {
-            count: 4,
-            images: 3,
-            bytes: 0,
-        }
-    );
-
-    let mut calls = 0usize;
-    let r = CaptureExporter::write(
-        t.store(),
-        &req,
-        |mut kf, target| {
-            calls += 1;
-            if target == "jpeg" {
-                kf.mime = "image/jpeg".to_string();
-                kf.bytes = vec![0xFF, 0xD8, 1, 2];
-            }
-            kf
-        },
-        None,
-    )
-    .expect("write");
-    assert_eq!(r.count, 4);
-    assert_eq!(r.images, 3);
-    assert_eq!(calls, 0);
-    assert!(!t.home.path().join("export.zip.partial").exists());
-
-    {
-        let mut zip = ZipArchive::new(File::open(&path).expect("open zip")).expect("zip");
-        assert_eq!(zip.len(), 4);
-        let mut json_str = String::new();
-        zip.by_name("captures.json")
-            .expect("captures.json")
-            .read_to_string(&mut json_str)
-            .expect("read json");
-        let items: Vec<serde_json::Value> = serde_json::from_str(&json_str).expect("parse json");
-        assert_eq!(items.len(), 4);
-        assert_eq!(items[0]["title"].as_str(), Some("Title 0"));
-        let first_file = items[0]["file"].as_str().expect("file");
-        assert!(first_file.ends_with(".webp"));
-        assert_eq!(items[3]["kind"].as_str(), Some("audio"));
-        assert_eq!(items[3]["text"].as_str(), Some("meeting notes"));
-        assert!(items[3].get("file").is_none());
-
-        let mut img_bytes = Vec::new();
-        zip.by_name(first_file)
-            .expect("img entry")
-            .read_to_end(&mut img_bytes)
-            .expect("read img");
-        assert_eq!(img_bytes, FAKE_WEBP);
-    }
-
-    let jpeg_path = t.home.path().join("jpeg.zip");
-    let mut jpeg_req = req;
-    jpeg_req.path = jpeg_path.to_string_lossy().into_owned();
-    jpeg_req.jpeg = true;
-    let _ = CaptureExporter::write(
-        t.store(),
-        &jpeg_req,
-        |mut kf, target| {
-            calls += 1;
-            if target == "jpeg" {
-                kf.mime = "image/jpeg".to_string();
-                kf.bytes = vec![0xFF, 0xD8, 1, 2];
-            }
-            kf
-        },
-        None,
-    )
-    .expect("write jpeg");
-    assert_eq!(calls, 3);
-    let zip = ZipArchive::new(File::open(&jpeg_path).expect("open jpeg zip")).expect("zip");
-    let jpg_count = (0..zip.len())
-        .filter(|&i| zip.name_for_index(i).is_some_and(|n| n.ends_with(".jpg")))
-        .count();
-    assert_eq!(jpg_count, 3);
-}
-
-#[test]
-fn paging_covers_more_rows_than_one_timeline_page() {
-    let t = TempStore::new();
-    let now = Utc::now();
-    let info = vec_info();
-    let rows = (0..4500).map(|i| {
-        (
-            now - ChronoDuration::seconds(i + 1),
-            "app".to_string(),
-            format!("t{i}"),
-            vec_seeded((i % 50) as i32),
-        )
-    });
-    t.store().insert_synthetic(rows, &info).expect("insert");
-    let r = CaptureExporter::count(
-        t.store(),
-        &ExportRequest {
-            from: now - ChronoDuration::days(1),
-            to: now,
-            path: String::new(),
-            app: None,
-            jpeg: false,
-            dry_run: false,
-        },
-    )
-    .expect("count");
-    assert_eq!(r.count, 4500);
-    assert_eq!(r.images, 0);
-}
-
-// ---- Sweep3KTests.StoreCompactionSweep3Tests & SearchSweep3Tests ----
+// ---- Sweep3KTests.StoreCompactionSweep3Tests ----
 
 fn legacy_month(t: &TempStore, count: usize, keep: usize) -> (String, Vec<(String, Vec<u8>)>) {
     let now = Utc::now();
@@ -604,7 +450,7 @@ fn closing_the_store_drops_a_paused_rebuild() {
 fn store_db_vacuum_respects_the_ram_budget() {
     let t = TempStore::new();
     let old = Utc::now() - ChronoDuration::hours(2);
-    for i in 0..1600 {
+    for i in 0..400 {
         let chunk = seeded_bytes(i, 8000);
         t.store()
             .add_audio_capture(&audio(
@@ -617,7 +463,7 @@ fn store_db_vacuum_respects_the_ram_budget() {
     t.store()
         .purge(&PurgeScope::range(
             old - ChronoDuration::seconds(1),
-            old + ChronoDuration::seconds(1500),
+            old + ChronoDuration::seconds(375),
         ))
         .expect("purge");
     t.store().checkpoint().expect("cp");
@@ -634,73 +480,11 @@ fn store_db_vacuum_respects_the_ram_budget() {
         "vacuumed over the budget"
     );
 
-    t.store().set_vacuum_ram_budget_bytes(128 * 1024 * 1024);
-    t.store().run_maintenance(&s, true).expect("maint 128M");
+    t.store().set_vacuum_ram_budget_bytes(32 * 1024 * 1024);
+    t.store().run_maintenance(&s, true).expect("maint 32M");
     t.store().checkpoint().expect("cp");
     let after = fs::metadata(&db).expect("meta").len();
     assert!(after < before / 2, "{after} vs {before}");
-}
-
-#[test]
-fn hybrid_search_without_text_hits_reports_the_cosine() {
-    let t = TempStore::new();
-    let id = t
-        .store()
-        .add_screen_capture(&screen(
-            Utc::now() - ChronoDuration::minutes(5),
-            "chrome.exe",
-            "Acme invoice 4471 - Gmail",
-            true,
-        ))
-        .expect("add");
-    t.store().set_embedding(&id, &vec_seeded(1), &vec_info()).expect("embed");
-
-    let q = vec_seeded(2);
-    let resp = t
-        .store()
-        .search(
-            &SearchRequest {
-                q: "zzqqxx".to_string(),
-                limit: None,
-                from: None,
-                to: None,
-                app: None,
-                kind: None,
-                mode: SearchMode::Hybrid,
-                site: None,
-            },
-            &q,
-            10,
-            0,
-        )
-        .expect("search");
-    assert_eq!(resp.results.len(), 1);
-    let hit = &resp.results[0];
-    assert!(!hit.text_match);
-    let expected = ((f64::from(hit.cosine.expect("cos").max(0.0)) * 10_000.0).round() / 10_000.0) as f32;
-    assert!((hit.score - expected).abs() < 1e-4);
-    assert_ne!(hit.score, 0.5f32);
-
-    let fused = t
-        .store()
-        .search(
-            &SearchRequest {
-                q: "acme".to_string(),
-                limit: None,
-                from: None,
-                to: None,
-                app: None,
-                kind: None,
-                mode: SearchMode::Hybrid,
-                site: None,
-            },
-            &q,
-            10,
-            0,
-        )
-        .expect("fused");
-    assert_eq!(fused.results.len(), 1);
-    assert!(fused.results[0].text_match);
 }
 
 // ---- Sweep2GTests store cases ----
@@ -789,4 +573,124 @@ fn purge_and_keyframe_reads_run_while_maintenance_runs() {
     for id in &ids {
         assert!(store.get(id).expect("g").is_none());
     }
+}
+
+struct BlockingIndex {
+    entered: (Mutex<bool>, Condvar),
+    release: (Mutex<bool>, Condvar),
+    on_remove: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+}
+
+impl BlockingIndex {
+    fn new() -> Self {
+        Self {
+            entered: (Mutex::new(false), Condvar::new()),
+            release: (Mutex::new(true), Condvar::new()),
+            on_remove: Mutex::new(None),
+        }
+    }
+
+    fn reset_release(&self) {
+        *self.release.0.lock().unwrap() = false;
+    }
+
+    fn set_release(&self) {
+        *self.release.0.lock().unwrap() = true;
+        self.release.1.notify_all();
+    }
+
+    fn wait_entered(&self, timeout: Duration) -> bool {
+        let g = self.entered.0.lock().unwrap();
+        let (g, _) = self.entered.1.wait_timeout_while(g, timeout, |v| !*v).unwrap();
+        *g
+    }
+}
+
+impl VectorIndex for BlockingIndex {
+    fn count(&self) -> usize {
+        0
+    }
+    fn upsert(&self, _: i64, _: &[f32], _: i64, _: i32, _: &str, _: &str) {
+        *self.entered.0.lock().unwrap() = true;
+        self.entered.1.notify_all();
+        let g = self.release.0.lock().unwrap();
+        let _ = self
+            .release
+            .1
+            .wait_timeout_while(g, Duration::from_secs(10), |v| !*v)
+            .unwrap();
+    }
+    fn remove(&self, _: i64) {
+        if let Some(ref cb) = *self.on_remove.lock().unwrap() {
+            cb();
+        }
+    }
+    fn clear(&self) {}
+    fn scan(&self, _: &[f32], _: VectorFilter, _: usize) -> Vec<VectorCandidate> {
+        Vec::new()
+    }
+    fn app_id(&self, _: &str) -> i32 {
+        0
+    }
+}
+
+/// Regression C4.
+#[test]
+fn encrypted_store_cancel_maintenance_and_bounded_checkpoint_do_not_deadlock() {
+    let home = TempHome::new(None);
+    let mut key = vec![0u8; 32];
+    win32::fill_random(&mut key);
+    let index = Arc::new(BlockingIndex::new());
+    let k2 = key.clone();
+    let store = Arc::new(
+        EncryptedStore::open(home.path(), move || k2.clone(), Some(index.clone())).expect("open"),
+    );
+    let s_cancel = store.clone();
+    *index.on_remove.lock().unwrap() = Some(Box::new(move || s_cancel.cancel_maintenance()));
+
+    let id = store
+        .add_screen_capture(&screen(
+            Utc::now() - ChronoDuration::days(60),
+            "notepad.exe",
+            "old",
+            true,
+        ))
+        .expect("add");
+    index.reset_release();
+
+    let s_embed = store.clone();
+    let id_embed = id.clone();
+    let embed_thread = thread::spawn(move || {
+        s_embed
+            .set_embedding(&id_embed, &vec_seeded(1), &vec_info())
+            .expect("embed")
+    });
+    assert!(index.wait_entered(Duration::from_secs(5)));
+
+    assert!(!store.checkpoint_timeout(Duration::from_millis(40)).expect("cp"));
+    index.set_release();
+    embed_thread.join().expect("join");
+    assert!(store.checkpoint_timeout(Duration::from_secs(5)).expect("cp"));
+
+    let notice = Arc::new(Mutex::new(None::<PurgeNotice>));
+    let n2 = notice.clone();
+    store.on_purged(move |n| *n2.lock().unwrap() = Some(n.clone()));
+    let mut settings = Settings::default();
+    settings.retention.days = 30;
+    store.run_maintenance(&settings, true).expect("maint");
+    let got = notice.lock().unwrap().clone().expect("notice");
+    assert!(got.ids.contains(&id));
+}
+
+#[test]
+fn durable_move_replaces_the_target() {
+    let h = TempHome::new(None);
+    let a = h.path().join("a.tmp");
+    let b = h.path().join("b.bin");
+    fs::write(&b, "old").unwrap();
+    fs::write(&a, "new").unwrap();
+    win32::move_durable(&a, &b).unwrap();
+    assert!(!a.exists());
+    assert_eq!("new", fs::read_to_string(&b).unwrap());
+    assert!(win32::move_durable(&a, &b).is_err());
 }

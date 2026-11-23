@@ -49,12 +49,13 @@ public sealed class PurgeTests(InstallFixture install)
     }
 
     [Fact]
-    public async Task Purge_scoped_on_empty_store_returns_zero_and_enforces_token_rules()
+    public async Task Purge_scoped_on_empty_store_enforces_token_rules_and_argument_errors()
     {
         await using var h = new AgentHarness(install);
         await h.StartAndConnectUiAsync("ui1");
         await h.SetupPassphraseAndWaitStoreAsync("ui1");
 
+        // was: Purge_scoped_on_empty_store_returns_zero_and_enforces_token_rules
         var (conn2Ok, _, _) = await h.Ui.ConnectAsync("ui2", h.Home);
         Assert.True(conn2Ok);
 
@@ -79,19 +80,12 @@ public sealed class PurgeTests(InstallFixture install)
         var (reuseOk, _, reuseErr) = await h.Ui.RequestAsync("ui1", "purge confirm " + confirm.Confirm);
         Assert.False(reuseOk);
         Assert.Equal("Invalid or expired token.", reuseErr);
-    }
 
-    [Fact]
-    public async Task Purge_usage_and_argument_errors_match_documented_strings()
-    {
-        await using var h = new AgentHarness(install);
-        await h.StartAndConnectUiAsync();
-        await h.SetupPassphraseAndWaitStoreAsync();
-
+        // was: Purge_usage_and_argument_errors_match_documented_strings
         const string usage = "Usage: purge last <seconds> | purge range <from> <to> | purge app <name> | purge site <host> | purge id <id> | purge all | purge confirm <token>";
-        Assert.Equal(usage, (await h.Ui.RequestAsync("ui", "purge")).Error);
-        Assert.Equal(usage, (await h.Ui.RequestAsync("ui", "purge range bad1 bad2")).Error);
-        Assert.Equal("Invalid seconds.", (await h.Ui.RequestAsync("ui", "purge last 0")).Error);
-        Assert.Equal("Invalid from.", (await h.Ui.RequestAsync("ui", "purge range 2026-11-10T00:00:00Z 2026-11-09T00:00:00Z")).Error);
+        Assert.Equal(usage, (await h.Ui.RequestAsync("ui1", "purge")).Error);
+        Assert.Equal(usage, (await h.Ui.RequestAsync("ui1", "purge range bad1 bad2")).Error);
+        Assert.Equal("Invalid seconds.", (await h.Ui.RequestAsync("ui1", "purge last 0")).Error);
+        Assert.Equal("Invalid from.", (await h.Ui.RequestAsync("ui1", "purge range 2026-11-10T00:00:00Z 2026-11-09T00:00:00Z")).Error);
     }
 }

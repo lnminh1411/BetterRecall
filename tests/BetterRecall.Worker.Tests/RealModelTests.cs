@@ -46,7 +46,7 @@ public class RealModelTests(ITestOutputHelper output)
         return home;
     }
 
-    [Fact]
+    [RequiresEnvFact("BR_REAL_MODELS", "BR_REAL_WORKER_DIR")]
     public void Real_published_worker_exe_under_fake_agent()
     {
         var models = Environment.GetEnvironmentVariable("BR_REAL_MODELS");
@@ -110,5 +110,23 @@ public class RealModelTests(ITestOutputHelper output)
         Assert.DoesNotContain(lines, l => l.StartsWith("agent error", StringComparison.OrdinalIgnoreCase));
         var helloLine = lines.FirstOrDefault(l => l.Contains("\"missing\":", StringComparison.OrdinalIgnoreCase)) ?? lines[0];
         Assert.Contains("\"missing\":[]", helloLine);
+    }
+}
+
+/// <summary>A fact that is reported as skipped (not passed) unless each named environment variable points at an
+/// existing folder.</summary>
+public sealed class RequiresEnvFactAttribute : FactAttribute
+{
+    public RequiresEnvFactAttribute(params string[] variables)
+    {
+        foreach (var v in variables)
+        {
+            var value = Environment.GetEnvironmentVariable(v);
+            if (string.IsNullOrWhiteSpace(value) || !Directory.Exists(value))
+            {
+                Skip = $"{v} is not set to an existing folder";
+                return;
+            }
+        }
     }
 }

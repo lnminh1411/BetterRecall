@@ -3,16 +3,22 @@
 
 //! Ported `ChatProviderTests.cs` + Sweep3K linear-time stream test + BatchH B7 SSE/error-cap/retry-hint tests.
 
-use std::io::Cursor;
-use std::time::Instant;
+mod common;
 
-use br_contracts::dotnet_base64;
+use std::io::Cursor;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::time::{Duration, Instant};
+
+use br_contracts::{AiUsage, dotnet_base64};
 use br_core::{
-    CancelToken, ChatProvider, ChatProviders, ChatRequest, ClaudeChat, CloudDescriber, GeminiChat,
-    OpenAiChat, OutgoingImage, ProviderErrors, ProviderHttp, ProviderTurn, SseReadError, SseReader,
-    ToolOutput, ToolSpec,
+    AiBudget, CancelToken, ChatProvider, ChatProviders, ChatRequest, ClaudeChat, CloudDescriber,
+    GeminiChat, HttpRequest, OpenAiChat, OutgoingImage, ProviderErrors, ProviderHttp,
+    ProviderStreamError, ProviderTurn, SseReadError, SseReader, ToolOutput, ToolSpec,
+    TransportError,
 };
 use chrono::Utc;
+use common::a3::MockTransport;
 use serde_json::{Map, Value, json};
 
 fn history_tool() -> ToolSpec {
@@ -512,39 +518,38 @@ fn chat_providers_for_returns_correct_instances_and_errors_on_unknown() {
     assert!(err.contains("mistral"));
 }
 
+/// Regression B7: SSE reader handles comments, multi-line data, CRLF/CR endings, and trailing events.
 #[test]
 fn sse_reader_multi_line_comments_trailing_event_without_blank_line() {
-    let sse = ": leading comment\n: another comment\nevent: update\ndata: line 1\ndata: line 2\n\n: middle comment\ndata: trailing event data";
-    let mut cur = Cursor::new(sse.as_bytes());
-    let mut events = Vec::new();
-    SseReader::read(&mut cur, &CancelToken::none(), |ev, data| {
-        events.push((ev.to_string(), data.to_string()));
-        Ok(true)
-    })
-    .unwrap();
-    assert_eq!(2, events.len());
-    assert_eq!(("update".to_string(), "line 1\nline 2".to_string()), events[0]);
-    assert_eq!(
-        ("".to_string(), "trailing event data".to_string()),
-        events[1]
-    );
+    let cases: [(&str, Vec<(&str, &str)>); 2] = [
+        (
+            ": leading comment\n: another comment\nevent: update\ndata: line 1\ndata: line 2\n\n: middle comment\ndata: trailing event data",
+            vec![("update", "line 1\nline 2"), ("", "trailing event data")],
+        ),
+        (
+            "data: a\r\ndata: b\r\r\ndata: c\r",
+            vec![("", "a\nb"), ("", "c")],
+        ),
+    ];
+    for (sse, expected) in cases {
+        let mut cur = Cursor::new(sse.as_bytes());
+        let mut events = Vec::new();
+        SseReader::read(&mut cur, &CancelToken::none(), |ev, data| {
+            events.push((ev.to_string(), data.to_string()));
+            Ok(true)
+        })
+        .unwrap();
+        let expected_owned: Vec<(String, String)> = expected
+            .into_iter()
+            .map(|(e, d)| (e.to_string(), d.to_string()))
+            .collect();
+        assert_eq!(expected_owned, events);
+    }
 }
 
+/// Regression B7.
 #[test]
-fn b7_sse_reader_keeps_line_endings_and_multi_line_data() {
-    let sse = "data: a\r\ndata: b\r\r\ndata: c\r";
-    let mut cur = Cursor::new(sse.as_bytes());
-    let mut events = Vec::new();
-    SseReader::read(&mut cur, &CancelToken::none(), |_, d| {
-        events.push(d.to_string());
-        Ok(true)
-    })
-    .unwrap();
-    assert_eq!(vec!["a\nb", "c"], events);
-}
-
-#[test]
-fn b7_sse_reader_refuses_an_endless_line_and_an_endless_event() {
+fn sse_reader_refuses_an_endless_line_and_an_endless_event() {
     let long_line = format!("data: {}\n\n", "a".repeat(SseReader::MAX_LINE_CHARS + 10));
     let mut cur = Cursor::new(long_line.as_bytes());
     let err = SseReader::read(&mut cur, &CancelToken::none(), |_, _| Ok(true))
@@ -565,16 +570,18 @@ fn b7_sse_reader_refuses_an_endless_line_and_an_endless_event() {
     assert!(matches!(err2, SseReadError::Stream(_)));
 }
 
+/// Regression B7.
 #[test]
-fn b7_error_bodies_are_read_capped() {
+fn error_bodies_are_read_capped() {
     let big = "x".repeat(200_000);
     let mut cur = Cursor::new(big.as_bytes());
     let capped = ProviderHttp::read_capped(&mut cur, ProviderHttp::MAX_ERROR_BODY_BYTES).unwrap();
     assert_eq!(ProviderHttp::MAX_ERROR_BODY_BYTES, capped.len());
 }
 
+/// Regression B7.
 #[test]
-fn b7_huge_retry_hints_do_not_overflow() {
+fn huge_retry_hints_do_not_overflow() {
     let now = Utc::now();
     let body = "{\"error\":{\"status\":\"RESOURCE_EXHAUSTED\",\"details\":[{\"retryDelay\":\"999999999999999s\"}]}}";
     let f = ProviderErrors::from_http(429, body, &[], "m", now, None);
@@ -583,25 +590,207 @@ fn b7_huge_retry_hints_do_not_overflow() {
     assert!(f.retry_at.unwrap().signed_duration_since(now).num_hours() <= 24);
 }
 
+/// Regression B10: ~4 MiB of 100-byte deltas (with a thinking block and no stop on the text block)
+/// must parse in linear time well under 4 s; quadratic string concatenation would blow the bound.
 #[test]
 fn long_streams_parse_in_linear_time_with_the_same_content() {
     let provider = ClaudeChat;
-    let mut sse = String::from(
-        "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+    let chunk = "a".repeat(100);
+    let delta_count = 40_000usize;
+    let mut sse = String::with_capacity(delta_count * 190 + 512);
+    sse.push_str(
+        "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n",
     );
-    for _ in 0..4000 {
-        sse.push_str("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"abcdefghij\"}}\n\n");
-    }
+    sse.push_str(
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"plan\"}}\n\n",
+    );
     sse.push_str("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n");
+    sse.push_str(
+        "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+    );
+    let delta_line = format!(
+        "event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":1,\"delta\":{{\"type\":\"text_delta\",\"text\":\"{chunk}\"}}}}\n\n"
+    );
+    for _ in 0..delta_count {
+        sse.push_str(&delta_line);
+    }
     let start = Instant::now();
     let mut cur = Cursor::new(sse.as_bytes());
     let turn = provider
         .read_stream(&mut cur, &mut |_| {}, &CancelToken::none())
         .unwrap();
-    assert_eq!(40_000, turn.text.len());
-    assert_eq!(
-        40_000,
-        turn.assistant["content"][0]["text"].as_str().unwrap().len()
+    let elapsed = start.elapsed();
+    let expected_len = delta_count * chunk.len();
+    assert_eq!(expected_len, turn.text.len());
+    let text_block = turn.assistant["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["type"].as_str() == Some("text"))
+        .expect("text block");
+    assert_eq!(expected_len, text_block["text"].as_str().unwrap().len());
+    assert!(
+        elapsed < Duration::from_secs(4),
+        "long stream parse took {elapsed:?} (expected < 4s)"
     );
-    assert!(start.elapsed().as_secs() < 5);
+}
+
+#[test]
+fn maps_status_and_body_and_scrubs_key() {
+    let now = Utc::now();
+    assert_eq!("auth", ProviderErrors::from_http(401, "{}", &[], "m", now, None).code);
+    assert_eq!("forbidden", ProviderErrors::from_http(403, "{}", &[], "m", now, None).code);
+    assert_eq!("model", ProviderErrors::from_http(404, "{}", &[], "m", now, None).code);
+    assert_eq!("rate", ProviderErrors::from_http(429, "{}", &[], "m", now, None).code);
+    assert_eq!("overloaded", ProviderErrors::from_http(529, "{}", &[], "m", now, None).code);
+    assert_eq!("server", ProviderErrors::from_http(500, "{}", &[], "m", now, None).code);
+    assert_eq!(
+        "quota",
+        ProviderErrors::from_http(
+            402,
+            r#"{"error":{"type":"billing_error","message":"no credit"}}"#,
+            &[],
+            "m",
+            now,
+            None
+        )
+        .code
+    );
+    assert_eq!(
+        "context",
+        ProviderErrors::from_http(
+            400,
+            r#"{"error":{"code":"context_length_exceeded","message":"too long"}}"#,
+            &[],
+            "m",
+            now,
+            None
+        )
+        .code
+    );
+
+    // Key never appears in error message.
+    let f = ProviderErrors::from_http(
+        401,
+        r#"{"error":{"message":"invalid key sk-test-secret-999"}}"#,
+        &[],
+        "m",
+        now,
+        Some("sk-test-secret-999"),
+    );
+    assert!(!f.message.contains("sk-test-secret-999"));
+    assert!(f.message.contains("***"));
+
+    // Stream errors map like HTTP.
+    let sf = ProviderErrors::from_stream(
+        &ProviderStreamError::new("overloaded_error", "busy"),
+        "m",
+        now,
+        None,
+    );
+    assert_eq!("overloaded", sf.code);
+
+    // Low quota warning below 10%.
+    let hdrs = vec![
+        ("anthropic-ratelimit-requests-remaining".into(), "5".into()),
+        ("anthropic-ratelimit-requests-limit".into(), "100".into()),
+    ];
+    assert!(ProviderErrors::low_quota_warning(&hdrs).is_some());
+
+    // B17: CloudDescriber error never shows a key prefix.
+    let long_key = "SECRET-KEY-1234567890-ABCDEF";
+    let err_body = format!(r#"{{"error":{{"message":"{} {long_key} bad"}}}}"#, "x".repeat(190));
+    let msg = CloudDescriber::error_text(401, &err_body, Some(long_key));
+    assert!(!msg.contains("SECRET-KEY"));
+    assert!(msg.contains("***"));
+}
+
+#[test]
+fn ai_budget_warns_and_blocks_at_limit() {
+    let u = AiUsage {
+        day: "2026-11-10".into(),
+        requests: 85,
+        tokens: 0,
+        request_limit: 100,
+        token_limit: 0,
+    };
+    assert!(AiBudget::check(&u).is_none());
+    assert!(AiBudget::warning(&u).is_some());
+    let over = AiUsage { requests: 100, ..u };
+    assert_eq!("budget", AiBudget::check(&over).unwrap().code);
+}
+
+#[test]
+fn provider_http_retries_twice_then_fails_and_no_retry_for_auth_or_long_wait() {
+    let calls = Arc::new(AtomicI32::new(0));
+    let calls_cb = calls.clone();
+    let transport = Arc::new(MockTransport::new(move |_, _, _| {
+        calls_cb.fetch_add(1, Ordering::AcqRel);
+        Ok(MockTransport::status_text(
+            429,
+            "{}",
+            vec![("Retry-After".into(), "1".into())],
+        ))
+    }));
+    let http = ProviderHttp::with_transport(
+        transport,
+        None,
+        Some(Arc::new(|_, _| true)),
+    );
+    let err = http
+        .send(
+            || HttpRequest::post_json("http://127.0.0.1/test", Vec::new()),
+            "http://127.0.0.1",
+            "m",
+            None,
+            None,
+            &CancelToken::none(),
+        )
+        .expect_err("should fail after retries");
+    assert_eq!("rate", err.0.code);
+    assert_eq!(3, calls.load(Ordering::Acquire));
+
+    // Auth error does not retry.
+    let calls2 = Arc::new(AtomicI32::new(0));
+    let c2 = calls2.clone();
+    let t2 = Arc::new(MockTransport::new(move |_, _, _| {
+        c2.fetch_add(1, Ordering::AcqRel);
+        Ok(MockTransport::status_text(401, "{}", vec![]))
+    }));
+    let http2 = ProviderHttp::with_transport(t2, None, Some(Arc::new(|_, _| true)));
+    let err2 = http2
+        .send(
+            || HttpRequest::post_json("http://127.0.0.1/test", Vec::new()),
+            "http://127.0.0.1",
+            "m",
+            None,
+            None,
+            &CancelToken::none(),
+        )
+        .expect_err("auth fail");
+    assert_eq!("auth", err2.0.code);
+    assert_eq!(1, calls2.load(Ordering::Acquire));
+
+    // Offline reported.
+    let t3 = Arc::new(MockTransport::new(|_, _, _| {
+        Err(TransportError::Offline("conn refused".into()))
+    }));
+    let http3 = ProviderHttp::with_transport(t3, None, None);
+    let err3 = http3
+        .send(
+            || HttpRequest::post_json("http://127.0.0.1/test", Vec::new()),
+            "http://127.0.0.1",
+            "m",
+            None,
+            None,
+            &CancelToken::none(),
+        )
+        .expect_err("offline");
+    assert_eq!("offline", err3.0.code);
+
+    // Loopback endpoints.
+    assert!(ProviderHttp::is_loopback("http://127.0.0.1:8080/v1"));
+    assert!(ProviderHttp::is_loopback("http://localhost:11434/v1"));
+    assert!(ProviderHttp::is_loopback("http://[::1]:8080/v1"));
+    assert!(!ProviderHttp::is_loopback("https://api.openai.com/v1"));
 }

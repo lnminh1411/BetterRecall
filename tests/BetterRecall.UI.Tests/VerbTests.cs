@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) BetterRecall contributors
-using System.Text.Json.Nodes;
+using System.Text.Json;
 using BetterRecall.Contracts;
 using BetterRecall.UI.Logic;
 using BetterRecall.UI.Logic.Mock;
@@ -22,17 +22,6 @@ public class VerbTests
         Assert.False(s.Value!.Locked);
         Assert.True(s.Value.Store.Rows > 100);
         Assert.Equal("NPU", s.Value.Device);
-    }
-
-    [Fact]
-    public async Task Screen_ocr_text_is_a_text_match_with_its_snippet()
-    {
-        await using var h = new MockHarness();
-        var r = await h.Api.SearchAsync(new SearchQuery("blockers", 20));
-        Assert.True(r.Ok, r.Error);
-        var hit = r.Value!.Results.First(x => x.TextMatch);
-        Assert.Equal("Daily standup | Microsoft Teams", hit.Title);
-        Assert.Contains("Blockers: none", hit.Snippet);
     }
 
     [Fact]
@@ -63,30 +52,13 @@ public class VerbTests
     }
 
     [Fact]
-    public async Task Search_Filters_KindAndApp()
+    public void Search_parses_audio_duration()
     {
-        await using var h = new MockHarness();
-        var audio = await h.Api.SearchAsync(new SearchQuery("the", 50, Kind: CaptureKind.Audio));
-        Assert.True(audio.Ok);
-        Assert.NotEmpty(audio.Value!.Results);
-        Assert.All(audio.Value.Results, x => Assert.Equal(CaptureKind.Audio, x.Kind));
-        Assert.All(audio.Value.Results, x => Assert.NotNull(x.DurationS));
-
-        var app = await h.Api.SearchAsync(new SearchQuery("code", 50, App: "Code.exe"));
-        Assert.All(app.Value!.Results, x => Assert.Equal("Code.exe", x.App));
-    }
-
-    [Fact]
-    public async Task Timeline_NewestFirst_WithinRange()
-    {
-        await using var h = new MockHarness();
-        var to = DateTimeOffset.UtcNow;
-        var from = to.AddDays(-1);
-        var r = await h.Api.TimelineAsync(from, to, 100);
-        Assert.True(r.Ok, r.Error);
-        Assert.InRange(r.Value!.Count, 1, 100);
-        Assert.All(r.Value, m => Assert.InRange(m.Ts, from, to));
-        for (int i = 1; i < r.Value.Count; i++) Assert.True(r.Value[i - 1].Ts >= r.Value[i].Ts);
+        const string json = """{"count":1,"truncated":false,"tookMs":1,"results":[{"id":"a_1","ts":"2026-11-12T10:00:00Z","kind":"audio","app":"teams.exe","title":"Standup","score":0.9,"snippet":"hello","hasThumb":false,"durationS":42}]}""";
+        var r = Responses.Search(JsonDocument.Parse(json).RootElement)!;
+        var hit = Assert.Single(r.Results);
+        Assert.Equal(CaptureKind.Audio, hit.Kind);
+        Assert.Equal(42, hit.DurationS);
     }
 
     [Fact]
@@ -98,6 +70,7 @@ public class VerbTests
         Assert.True((await h.Api.AuditAsync()).IsLocked);
         Assert.True((await h.Api.ReplayListAsync()).IsLocked);
         Assert.True((await h.Api.ThumbAsync("f_000001")).IsLocked);
+        Assert.True((await h.Api.ExportAsync(new ExportRequest(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow, "", DryRun: true))).IsLocked);
         Assert.True((await h.Api.StatusAsync()).Ok);          // not a data verb
         Assert.True((await h.Api.SettingsGetAsync()).Ok);     // not a data verb
 
@@ -124,6 +97,34 @@ public class VerbTests
     }
 
     [Fact]
+    public async Task Password_set_clear_and_status_verbs()
+    {
+        await using var h = new MockHarness();
+        Assert.Equal(AgentErrors.WrongPassword, (await h.Api.PasswordSetAsync("wrong", "new-password")).Error);
+        Assert.Equal(AgentErrors.PasswordRule, (await h.Api.PasswordSetAsync("old", "short")).Error);
+        Assert.True((await h.Api.PasswordSetAsync("old", "new-password")).Ok);
+        Assert.True((await h.Api.PasswordClearAsync("new-password")).Ok);
+        Assert.False((await h.Api.PasswordStatusAsync()).Value!.Set);
+    }
+
+    /// <summary>B2: DescribeSession previews and sends on one connection, parsing bytes, provider, and text.</summary>
+    [Fact]
+    public async Task DescribeSession_previews_and_sends_on_one_connection()
+    {
+        await using var h = new MockHarness();
+        var id = (await h.Api.TimelineAsync(DateTimeOffset.UtcNow.AddDays(-30), DateTimeOffset.UtcNow, 50)).Value!
+            .First(m => m.HasThumb && m.Kind == CaptureKind.Screen).Id;
+        await using var session = new DescribeSession(new AgentClient(h.Server.PipeName, MockHarness.OwnProcessTrust()));
+        var p = await session.PreviewAsync(id);
+        Assert.True(p.Ok, p.Error);
+        Assert.NotEmpty(p.Value!.Bytes);
+        Assert.False(string.IsNullOrEmpty(p.Value.Provider));
+        var sent = await session.SendAsync();
+        Assert.True(sent.Ok, sent.Error);
+        Assert.False(string.IsNullOrWhiteSpace(sent.Value!.Text));
+    }
+
+    [Fact]
     public async Task Consent_SetsConsented()
     {
         await using var h = new MockHarness(new MockOptions(FirstRun: true));
@@ -133,25 +134,6 @@ public class VerbTests
         Assert.True((await h.Api.ConsentAsync()).Ok);
         var after = await h.Api.SettingsGetAsync();
         Assert.True(SettingsSchema.Get(after.Value!, "capture.consented")!.GetValue<bool>());
-    }
-
-    [Fact]
-    public async Task SettingsSet_MergesAndValidates()
-    {
-        await using var h = new MockHarness();
-        var ok = await h.Api.SettingsSetAsync(new JsonObject { ["capture"] = new JsonObject { ["intervalMs"] = 3000 } });
-        Assert.True(ok.Ok, ok.Error);
-        Assert.Equal(3000, SettingsSchema.Get(ok.Value!, "capture.intervalMs")!.GetValue<int>());
-        Assert.Equal(1280, SettingsSchema.Get(ok.Value!, "capture.maxWidth")!.GetValue<int>());
-
-        var bad = await h.Api.SettingsSetAsync(new JsonObject { ["capture"] = new JsonObject { ["intervalMs"] = 10 } });
-        Assert.Equal("Invalid capture.intervalMs.", bad.Error);
-        Assert.Equal("capture.intervalMs", AgentErrors.InvalidKey(bad.Error));
-        var unknown = await h.Api.SettingsSetAsync(new JsonObject { ["capture"] = new JsonObject { ["nope"] = 1 } });
-        Assert.Equal("Invalid capture.nope.", unknown.Error);
-
-        var now = await h.Api.SettingsGetAsync();
-        Assert.Equal(3000, SettingsSchema.Get(now.Value!, "capture.intervalMs")!.GetValue<int>());
     }
 
     [Fact]
@@ -201,9 +183,12 @@ public class VerbTests
         Assert.True((await h.Api.PauseAsync(60)).Ok);
         var s = (await h.Api.StatusAsync()).Value!;
         Assert.True(s.Paused);
+        Assert.True(s.UserPaused);
         Assert.NotNull(s.PausedUntil);
         Assert.True((await h.Api.ResumeAsync()).Ok);
-        Assert.False((await h.Api.StatusAsync()).Value!.Paused);
+        var resumed = (await h.Api.StatusAsync()).Value!;
+        Assert.False(resumed.Paused);
+        Assert.False(resumed.UserPaused);
 
         var audit = await h.Api.AuditAsync(10);
         Assert.True(audit.Ok);
@@ -224,17 +209,26 @@ public class VerbTests
         Assert.Equal("Unknown command 'frobnicate'.", r.Error);
     }
 
+    /// <summary>D2: subscription reports Connected, streams the initial unpaused status, and streams subsequent pause changes.</summary>
     [Fact]
-    public async Task Subscribe_StreamsStatusChanges()
+    public async Task Subscribe_ReportsConnectAndStreamsStatusChanges()
     {
         await using var h = new MockHarness();
         await using var sub = new StatusSubscription(h.Server.PipeName, MockHarness.OwnProcessTrust());
-        var got = new TaskCompletionSource<AgentStatus>(TaskCreationOptions.RunContinuationsAsynchronously);
-        sub.StatusReceived += s => { if (s.Paused) got.TrySetResult(s); };
+        var connected = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var initial = new TaskCompletionSource<AgentStatus>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var paused = new TaskCompletionSource<AgentStatus>(TaskCreationOptions.RunContinuationsAsynchronously);
+        sub.Connected += () => connected.TrySetResult();
+        sub.StatusReceived += s =>
+        {
+            if (!s.Paused) initial.TrySetResult(s);
+            else paused.TrySetResult(s);
+        };
         sub.Start();
-        await Task.Delay(300);
+        await connected.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await initial.Task.WaitAsync(TimeSpan.FromSeconds(5));
         await h.Api.PauseAsync();
-        var status = await got.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var status = await paused.Task.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Equal("user", status.PauseReason);
     }
 

@@ -34,7 +34,6 @@ LAYOUT = {
     "UI": "ui",
 }
 TESTS = [
-    "tests/BetterRecall.Core.Tests",
     "tests/BetterRecall.Worker.Tests",
     "tests/BetterRecall.UI.Tests",
     "tests/BetterRecall.Agent.Conformance",

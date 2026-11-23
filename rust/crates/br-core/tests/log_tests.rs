@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) BetterRecall contributors
 
+mod common;
+
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -11,23 +13,6 @@ use std::time::{Duration, SystemTime};
 use br_core::{Log, LogLevel, LogSink};
 use chrono::{DateTime, Duration as ChronoDuration, FixedOffset, NaiveDate, Utc};
 
-fn test_tmp_root() -> PathBuf {
-    if let Some(t) = std::env::var_os("BR_TEST_TMP")
-        && !t.is_empty()
-    {
-        return PathBuf::from(t);
-    }
-    if let Some(t) = std::env::var_os("CARGO_TARGET_DIR")
-        && !t.is_empty()
-    {
-        return PathBuf::from(t).join("test-tmp");
-    }
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().and_then(|d| d.parent()).map(|d| d.join("test-tmp")))
-        .expect("unable to determine cargo target dir for test temp folder")
-}
-
 struct ScopedDir {
     path: PathBuf,
 }
@@ -36,7 +21,7 @@ impl ScopedDir {
     fn new(tag: &str) -> Self {
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let id = SEQ.fetch_add(1, Ordering::Relaxed);
-        let path = test_tmp_root()
+        let path = common::test_tmp_root()
             .join("br-core-log")
             .join(format!("{tag}-{}-{id}", std::process::id()));
         fs::create_dir_all(&path).expect("create log test dir");

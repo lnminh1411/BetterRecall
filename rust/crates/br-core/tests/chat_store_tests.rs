@@ -97,43 +97,36 @@ fn list_rename_delete() {
 
 #[test]
 fn purging_a_capture_removes_chats_that_cite_it() {
-    let t = TempStore::new();
-    let start = Utc::now() - ChronoDuration::hours(2);
-    let id = t
-        .store()
-        .add_audio_capture(&audio(start, "acme invoice total", "teams.exe"))
-        .expect("audio");
-    let mut citing = rec("citing", 2, start, "[]");
-    citing.messages = vec![
-        ChatMessage {
-            seq: 0,
-            ts: start,
-            role: "user".to_string(),
-            text: "q".to_string(),
-            sources: None,
-        },
-        ChatMessage {
-            seq: 1,
-            ts: start,
-            role: "assistant".to_string(),
-            text: "acme".to_string(),
-            sources: Some(vec![ChatSource {
-                id: id.clone(),
-                ts: start,
-                kind: CaptureKind::Audio,
-                app: "a".to_string(),
-                title: "t".to_string(),
-                site: String::new(),
-                replay_id: None,
-                replay_offset_ms: None,
-            }]),
-        },
-    ];
-    t.store().save_chat(&citing).expect("save");
-    t.store().save_chat(&rec("other", 2, start, "[]")).expect("save");
-    assert_eq!(t.store().purge(&PurgeScope::for_id(&id)).expect("purge"), 1);
-    assert!(t.store().get_chat("citing").expect("g").is_none());
-    assert!(t.store().get_chat("other").expect("g").is_some());
+    for by_range in [false, true] {
+        let t = TempStore::new();
+        let old = Utc::now() - ChronoDuration::days(3);
+        let cap = if by_range {
+            add_ready(t.store(), old, "PIN letter", &vec_seeded(1), "chrome.exe", true)
+        } else {
+            t.store()
+                .add_audio_capture(&audio(old, "acme invoice total", "teams.exe"))
+                .expect("audio")
+        };
+        let other = add_ready(
+            t.store(),
+            Utc::now() - ChronoDuration::minutes(1),
+            "Other",
+            &vec_seeded(2),
+            "chrome.exe",
+            true,
+        );
+        // Chat timestamp is now (outside the purged range when by_range == true).
+        t.store().save_chat(&citing_chat("c_cite", &cap, Utc::now())).expect("save");
+        t.store().save_chat(&citing_chat("c_other", &other, Utc::now())).expect("save");
+        let scope = if by_range {
+            PurgeScope::range(old - ChronoDuration::hours(1), old + ChronoDuration::hours(1))
+        } else {
+            PurgeScope::for_id(&cap)
+        };
+        assert_eq!(t.store().purge(&scope).expect("purge"), 1);
+        assert!(t.store().get_chat("c_cite").expect("g").is_none());
+        assert!(t.store().get_chat("c_other").expect("g").is_some());
+    }
 }
 
 #[test]
@@ -344,34 +337,6 @@ fn existing_store_gets_secure_delete_and_loses_words_of_earlier_deletes() {
         find(t.store(), "something", &[], SearchMode::Text, 10, 1 << 20).results.len(),
         1
     );
-}
-
-#[test]
-fn range_purge_drops_chats_citing_the_range_even_when_the_chat_is_outside_it() {
-    let t = TempStore::new();
-    let old = Utc::now() - ChronoDuration::days(3);
-    let cap = add_ready(t.store(), old, "PIN letter", &vec_seeded(1), "chrome.exe", true);
-    let other = add_ready(
-        t.store(),
-        Utc::now() - ChronoDuration::minutes(1),
-        "Other",
-        &vec_seeded(2),
-        "chrome.exe",
-        true,
-    );
-    t.store().save_chat(&citing_chat("c_cite", &cap, Utc::now())).expect("s");
-    t.store().save_chat(&citing_chat("c_other", &other, Utc::now())).expect("s");
-    assert_eq!(
-        t.store()
-            .purge(&PurgeScope::range(
-                old - ChronoDuration::hours(1),
-                old + ChronoDuration::hours(1),
-            ))
-            .expect("p"),
-        1
-    );
-    assert!(t.store().get_chat("c_cite").expect("g").is_none());
-    assert!(t.store().get_chat("c_other").expect("g").is_some());
 }
 
 #[test]

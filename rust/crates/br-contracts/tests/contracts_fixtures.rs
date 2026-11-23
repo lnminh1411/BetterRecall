@@ -392,15 +392,16 @@ fn dev_build_refuses_the_default_home_without_the_flag() {
 
 // ---- Sweep5LTests ----
 
+/// Regression B8.
 #[test]
-fn b8_real_path_resolves_junctions() {
+fn real_path_resolves_junctions() {
     let mut dir = ScopedDir::new("s5l-b8");
     let real_app = dir.path().join("b8-real");
     let ver_real = real_app.join("0.2.4-bbbbbbbbbbbb");
     fs::create_dir_all(&ver_real).unwrap();
     let junc_app = dir.path().join("b8-junc");
 
-    let status = Command::new("cmd.exe")
+    let st = Command::new("cmd.exe")
         .args([
             "/c",
             "mklink",
@@ -408,11 +409,15 @@ fn b8_real_path_resolves_junctions() {
             &junc_app.to_string_lossy(),
             &real_app.to_string_lossy(),
         ])
-        .status();
-    let Ok(st) = status else { return };
-    if !st.success() || !junc_app.exists() {
-        return;
-    }
+        .status()
+        .expect("cmd.exe /c mklink /J failed to spawn");
+    assert!(
+        st.success() && junc_app.exists(),
+        "mklink /J failed to create junction {} -> {} (exit {:?})",
+        junc_app.display(),
+        real_app.display(),
+        st.code()
+    );
     dir.add_junction(junc_app.clone());
 
     let expected_real = InstallLayout::real_path(&real_app);

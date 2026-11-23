@@ -88,12 +88,19 @@ public class ModelsTests
             50_000_000_000L,
             false);
 
-        await using var listServer = new FakeLineServer(line =>
-            line == "models list"
-                ? Envelope.Ok(list, ContractsJson.Default.ModelsList)
-                : Envelope.Error("unexpected"));
-        await using var listClient = new AgentClient(listServer.Name, MockHarness.OwnProcessTrust());
-        var api = new AgentApi(listClient);
+        await using var server = new FakeLineServer(line => line switch
+        {
+            "models list" => [Envelope.Ok(list, ContractsJson.Default.ModelsList)],
+            "models download silero-vad" =>
+            [
+                Envelope.Ok("""{"phase":"downloading","doneBytes":1000,"totalBytes":2329089,"file":"silero-vad/model.onnx"}"""),
+                Envelope.Ok("""{"phase":"done","doneBytes":2329089,"totalBytes":2329089,"file":"silero-vad/model.onnx"}"""),
+            ],
+            "models download bad" => [Envelope.Ok("123")],
+            _ => [Envelope.Error("unexpected")],
+        });
+        await using var client = new AgentClient(server.Name, MockHarness.OwnProcessTrust());
+        var api = new AgentApi(client);
 
         var r = await api.ModelsListAsync();
         Assert.True(r.Ok, r.Error);
@@ -103,5 +110,25 @@ public class ModelsTests
         Assert.Equal(2_329_089L, ModelsFormat.DownloadSizeFor(r.Value, "silero-vad"));
         Assert.Equal(3_476_218_217L, ModelsFormat.DownloadSizeFor(r.Value, "minimal"));
         Assert.Equal(6_555_959_572L, ModelsFormat.DownloadSizeFor(r.Value, "full"));
+
+        var progress = new List<ModelsProgress>();
+        await using (var run = new AgentClient(server.Name, MockHarness.OwnProcessTrust()))
+        {
+            var dl = await AgentApi.ModelsDownloadStreamAsync(run, "silero-vad", progress.Add);
+            Assert.True(dl.Ok, dl.Error);
+        }
+        Assert.Equal(["downloading", "done"], progress.Select(p => p.Phase));
+        Assert.Equal(2_329_089L, progress[1].DoneBytes);
+        Assert.Equal("silero-vad/model.onnx", progress[0].File);
+
+        var bad = new List<ModelsProgress>();
+        await using (var run = new AgentClient(server.Name, MockHarness.OwnProcessTrust()))
+        {
+            var dl = await AgentApi.ModelsDownloadStreamAsync(run, "bad", bad.Add);
+            Assert.True(dl.Ok, dl.Error);
+        }
+        var err = Assert.Single(bad);
+        Assert.Equal("failed", err.Phase);
+        Assert.Equal("Bad response.", err.Error);
     }
 }

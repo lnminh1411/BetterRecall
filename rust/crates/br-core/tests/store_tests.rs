@@ -448,7 +448,11 @@ fn purge_scopes_and_wal_truncate() {
     let old = add_ready(t.store(), now - ChronoDuration::hours(3), "old one", &vec_seeded(1), "a.exe", true);
     let mid = add_ready(t.store(), now - ChronoDuration::hours(2), "mid one", &vec_seeded(2), "b.exe", true);
     let recent = add_ready(t.store(), now - ChronoDuration::minutes(5), "recent one", &vec_seeded(3), "a.exe", true);
+    let s1 = add_site(t.store(), now - ChronoDuration::hours(1), "site one", &vec_seeded(4), "github.com");
+    let s2 = add_site(t.store(), now - ChronoDuration::minutes(59), "site two", &vec_seeded(5), "github.com");
+    let s3 = add_site(t.store(), now - ChronoDuration::minutes(58), "site three", &vec_seeded(6), "gitlab.com");
 
+    // last + WAL truncate
     assert_eq!(t.store().count_purge(&PurgeScope::last(ChronoDuration::minutes(10))).expect("c"), 1);
     assert_eq!(t.store().purge(&PurgeScope::last(ChronoDuration::minutes(10))).expect("p"), 1);
     assert!(t.store().get(&recent).expect("g").is_none());
@@ -456,6 +460,17 @@ fn purge_scopes_and_wal_truncate() {
     wal.push("-wal");
     assert_eq!(fs::metadata(&wal).map(|m| m.len()).unwrap_or(0), 0);
 
+    // id + site + no-match
+    assert_eq!(t.store().count_purge(&PurgeScope::for_id(&s1)).expect("c"), 1);
+    assert_eq!(t.store().purge(&PurgeScope::for_id(&s1)).expect("p"), 1);
+    assert!(t.store().get(&s1).expect("g").is_none());
+    assert_eq!(t.store().purge(&PurgeScope::for_site("WWW.github.com")).expect("p"), 1);
+    assert!(t.store().get(&s2).expect("g").is_none());
+    assert!(t.store().get(&s3).expect("g").is_some());
+    assert_eq!(t.store().purge(&PurgeScope::for_id("s_nope")).expect("p"), 0);
+    assert_eq!(t.store().purge(&PurgeScope::for_id(&s3)).expect("p"), 1);
+
+    // app + range
     assert_eq!(t.store().purge(&PurgeScope::for_app("B.EXE")).expect("p"), 1);
     assert!(t.store().get(&mid).expect("g").is_none());
     assert_eq!(
@@ -772,23 +787,6 @@ fn facets_count_apps_and_sites_in_the_window() {
     let apps2: Vec<(&str, i32)> = f2.apps.iter().map(|a| (a.name.as_str(), a.count)).collect();
     assert_eq!(apps2, vec![("chrome.exe", 2), ("Code.exe", 1)]);
     assert_eq!(t.store().facets(None, None, 1).expect("f1").apps.len(), 1);
-}
-
-#[test]
-fn purge_by_id_and_site() {
-    let t = TempStore::new();
-    let t0 = Utc::now() - ChronoDuration::hours(2);
-    let a = add_site(t.store(), t0, "a", &vec_seeded(1), "github.com");
-    let b = add_site(t.store(), t0 + ChronoDuration::minutes(1), "b", &vec_seeded(2), "github.com");
-    let c = add_site(t.store(), t0 + ChronoDuration::minutes(2), "c", &vec_seeded(3), "gitlab.com");
-
-    assert_eq!(t.store().count_purge(&PurgeScope::for_id(&a)).expect("c"), 1);
-    assert_eq!(t.store().purge(&PurgeScope::for_id(&a)).expect("p"), 1);
-    assert!(t.store().get(&a).expect("g").is_none());
-    assert_eq!(t.store().purge(&PurgeScope::for_site("WWW.github.com")).expect("p"), 1);
-    assert!(t.store().get(&b).expect("g").is_none());
-    assert!(t.store().get(&c).expect("g").is_some());
-    assert_eq!(t.store().purge(&PurgeScope::for_id("s_nope")).expect("p"), 0);
 }
 
 #[test]
@@ -1145,4 +1143,147 @@ fn wrong_key_for_the_store_is_reported_as_lost() {
         assert!(matches!(err, br_core::CryptoError::KeyLost(_)));
         assert!(!DataPaths::key_file(home.path()).exists());
     }
+}
+
+/// Regression C7.
+#[test]
+fn purge_last_deletes_rows_stamped_in_the_future() {
+    let t = TempStore::new();
+    let future = t
+        .store()
+        .add_screen_capture(&screen(Utc::now() + ChronoDuration::hours(2), "chrome.exe", "f", true))
+        .expect("f");
+    t.store().set_embedding(&future, &vec_seeded(9), &vec_info()).expect("e1");
+    let old = t
+        .store()
+        .add_screen_capture(&screen(Utc::now() - ChronoDuration::hours(1), "chrome.exe", "o", true))
+        .expect("o");
+    t.store().set_embedding(&old, &vec_seeded(10), &vec_info()).expect("e2");
+
+    assert_eq!(t.store().count_purge(&PurgeScope::last(ChronoDuration::minutes(5))).expect("c"), 1);
+    assert_eq!(t.store().purge(&PurgeScope::last(ChronoDuration::minutes(5))).expect("p"), 1);
+    assert!(t.store().get(&future).expect("g").is_none());
+    assert!(t.store().get(&old).expect("g").is_some());
+    assert!(
+        t.store()
+            .add_screen_capture(&screen(Utc::now() + ChronoDuration::seconds(1), "chrome.exe", "n", true))
+            .is_ok()
+    );
+}
+
+/// Regression C7.
+#[test]
+fn panic_with_zero_minutes_still_deletes_nothing() {
+    let t = TempStore::new();
+    let future = t
+        .store()
+        .add_screen_capture(&screen(Utc::now() + ChronoDuration::hours(2), "chrome.exe", "f", true))
+        .expect("f");
+    t.store().set_embedding(&future, &vec_seeded(11), &vec_info()).expect("e");
+    assert_eq!(t.store().purge(&PurgeScope::last(ChronoDuration::zero())).expect("p"), 0);
+    assert!(t.store().get(&future).expect("g").is_some());
+}
+
+/// Regression B20.
+#[test]
+fn history_needles() {
+    assert_eq!(
+        EncryptedStore::history_needles(&PurgeScope::for_site("www.pornhub.com")),
+        vec!["pornhub.com", "pornhub"]
+    );
+    assert_eq!(
+        EncryptedStore::history_needles(&PurgeScope::for_site("news.bbc.co.uk")),
+        vec!["news.bbc.co.uk", "bbc"]
+    );
+    assert_eq!(
+        EncryptedStore::history_needles(&PurgeScope::for_app("chrome.exe")),
+        vec!["chrome.exe", "chrome"]
+    );
+    // N1: multi-byte app names must not panic (the `.exe` check cut inside a character).
+    assert!(EncryptedStore::history_needles(&PurgeScope::for_app("日日")).is_empty());
+    assert_eq!(
+        EncryptedStore::history_needles(&PurgeScope::for_app("日本語.exe")),
+        vec!["日本語.exe", "日本語"]
+    );
+}
+
+/// Regression B20.
+#[test]
+fn app_and_site_purges_forget_matching_saved_searches() {
+    let t = TempStore::new();
+    let now = Utc::now();
+    for q in ["pornhub", "PornHub videos", "chrome tips", "weather", "acme invoice"] {
+        t.store().add_history(q, now, 100).expect("add");
+    }
+    t.store().purge(&PurgeScope::for_site("www.pornhub.com")).expect("p");
+    let mut h: Vec<String> = t.store().history(100).expect("h").into_iter().map(|x| x.q).collect();
+    h.sort();
+    assert_eq!(h, vec!["acme invoice", "chrome tips", "weather"]);
+
+    t.store().purge(&PurgeScope::for_app("chrome.exe")).expect("p");
+    let mut h2: Vec<String> = t.store().history(100).expect("h").into_iter().map(|x| x.q).collect();
+    h2.sort();
+    assert_eq!(h2, vec!["acme invoice", "weather"]);
+}
+
+#[test]
+fn hybrid_search_without_text_hits_reports_the_cosine() {
+    let t = TempStore::new();
+    let id = t
+        .store()
+        .add_screen_capture(&screen(
+            Utc::now() - ChronoDuration::minutes(5),
+            "chrome.exe",
+            "Acme invoice 4471 - Gmail",
+            true,
+        ))
+        .expect("add");
+    t.store().set_embedding(&id, &vec_seeded(1), &vec_info()).expect("embed");
+
+    let q = vec_seeded(2);
+    let resp = t
+        .store()
+        .search(
+            &SearchRequest {
+                q: "zzqqxx".to_string(),
+                limit: None,
+                from: None,
+                to: None,
+                app: None,
+                kind: None,
+                mode: SearchMode::Hybrid,
+                site: None,
+            },
+            &q,
+            10,
+            0,
+        )
+        .expect("search");
+    assert_eq!(resp.results.len(), 1);
+    let hit = &resp.results[0];
+    assert!(!hit.text_match);
+    let expected = ((f64::from(hit.cosine.expect("cos").max(0.0)) * 10_000.0).round() / 10_000.0) as f32;
+    assert!((hit.score - expected).abs() < 1e-4);
+    assert_ne!(hit.score, 0.5f32);
+
+    let fused = t
+        .store()
+        .search(
+            &SearchRequest {
+                q: "acme".to_string(),
+                limit: None,
+                from: None,
+                to: None,
+                app: None,
+                kind: None,
+                mode: SearchMode::Hybrid,
+                site: None,
+            },
+            &q,
+            10,
+            0,
+        )
+        .expect("fused");
+    assert_eq!(fused.results.len(), 1);
+    assert!(fused.results[0].text_match);
 }

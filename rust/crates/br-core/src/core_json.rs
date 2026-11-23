@@ -5,7 +5,7 @@ use br_contracts::{CaptureKind, to_json_string, to_pretty_json_string, utc_times
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-// ---- Core-only wire shapes (src/BetterRecall.Core/CoreJson.cs) ----
+// ---- Core-only wire shapes (ported from the removed C# CoreJson.cs) ----
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -59,7 +59,7 @@ pub struct ExportEntry {
     pub duration_s: Option<i32>,
 }
 
-/// JSON serializer matching `BetterRecall.Core.CoreJson` and `PrettySettingsJson`.
+/// JSON serializer matching the removed C# `CoreJson` and `PrettySettingsJson` byte for byte.
 pub struct CoreJson;
 
 impl CoreJson {
