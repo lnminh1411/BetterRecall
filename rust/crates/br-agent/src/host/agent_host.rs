@@ -222,6 +222,7 @@ pub struct AgentHost {
     stop_writers: Mutex<StopWritersState>,
     stop_writers_cv: Condvar,
     on_stop_pipes_for_test: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    end_session_writer_budget_ms_for_test: AtomicU64,
     models_downloading: Arc<AtomicBool>,
     update_downloading: Arc<AtomicBool>,
     updater: Arc<UpdateManager>,
@@ -341,6 +342,7 @@ impl AgentHost {
             }),
             stop_writers_cv: Condvar::new(),
             on_stop_pipes_for_test: Mutex::new(None),
+            end_session_writer_budget_ms_for_test: AtomicU64::new(2500),
             models_downloading,
             update_downloading,
             updater,
@@ -1964,9 +1966,13 @@ impl AgentHost {
             st.cancel_maintenance();
         }
         let me = self.clone();
+        let writer_budget = Duration::from_millis(
+            self.end_session_writer_budget_ms_for_test
+                .load(Ordering::Acquire),
+        );
         run_bounded(
             "end session: stop writers",
-            Duration::from_millis(2500),
+            writer_budget,
             move || me.stop_session_writers(),
         );
         let me = self.clone();
@@ -1994,6 +2000,12 @@ impl AgentHost {
             .on_stop_pipes_for_test
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = hook;
+    }
+
+    /// Overrides the end-session writer stop budget (default 2500 ms; for tests).
+    pub fn set_end_session_writer_budget_for_test(&self, budget: Duration) {
+        self.end_session_writer_budget_ms_for_test
+            .store(budget.as_millis().max(1) as u64, Ordering::Release);
     }
 
     pub fn set_catalog_for_test(&self, catalog: Option<br_fetch::Catalog>) {

@@ -8,27 +8,23 @@
 mod common;
 
 use std::collections::HashMap;
-use std::fmt::Write as _;
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread::{self, JoinHandle};
+use std::thread;
 use std::time::Duration;
 
-use br_contracts::{CoreHostOptions, DataPaths, UpdateProgress};
-use br_core::{AgentControl, AgentError, CancelSource, CancelToken, CoreHost};
+use br_contracts::{DataPaths, UpdateProgress};
+use br_core::{AgentControl, AgentError, CancelSource, CancelToken, CommandProcessor};
+use br_fetch::{Catalog, CatalogFile, Component};
 use br_integrity::{UPDATE_JSON, UPDATE_SIG, UpdateManifest, sign_manifest, sign_update_manifest};
 use chrono::{TimeZone, Utc};
 use p256::ecdsa::SigningKey;
 use p256::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
 use rand_core::OsRng;
-use sha2::{Digest, Sha256};
 
-use br_agent::host::{AgentHost, AgentOptions, AutoStepOutcome, UpdateTestConfig};
-use common::TempDir;
+use br_agent::host::{AutoStepOutcome, UpdateTestConfig};
+use common::{LocalHttpServer, TempDir, make_test_host, sha256_hex, until};
 
 fn gen_keypair() -> (String, String) {
     let sk = SigningKey::random(&mut OsRng);
@@ -38,225 +34,6 @@ fn gen_keypair() -> (String, String) {
     (priv_pem, pub_pem)
 }
 
-fn sha256_hex(data: &[u8]) -> String {
-    let digest = Sha256::digest(data);
-    let mut s = String::with_capacity(64);
-    for b in digest {
-        let _ = write!(&mut s, "{b:02x}");
-    }
-    s
-}
-
-#[derive(Debug, Clone)]
-struct RecordedReq {
-    path: String,
-    range: Option<String>,
-}
-
-#[derive(Default)]
-struct ServerState {
-    files: HashMap<String, Vec<u8>>,
-    /// Optional slow-drip path: sends `first_chunk` bytes then sleeps `delay` before remaining bytes.
-    slow_path: Option<(String, usize, Duration)>,
-    requests: Vec<RecordedReq>,
-}
-
-struct FakeReleaseServer {
-    addr: String,
-    state: Arc<Mutex<ServerState>>,
-    stop: Arc<AtomicBool>,
-    handle: Option<JoinHandle<()>>,
-}
-
-impl FakeReleaseServer {
-    fn start(files: HashMap<String, Vec<u8>>) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-        let port = listener.local_addr().expect("local addr").port();
-        let addr = format!("127.0.0.1:{port}");
-        let state = Arc::new(Mutex::new(ServerState {
-            files,
-            slow_path: None,
-            requests: Vec::new(),
-        }));
-        let stop = Arc::new(AtomicBool::new(false));
-        let st_c = state.clone();
-        let stop_c = stop.clone();
-        let handle = thread::spawn(move || {
-            for incoming in listener.incoming() {
-                if stop_c.load(Ordering::SeqCst) {
-                    break;
-                }
-                if let Ok(stream) = incoming {
-                    let st_req = st_c.clone();
-                    thread::spawn(move || serve_one(stream, &st_req));
-                }
-            }
-        });
-        Self {
-            addr,
-            state,
-            stop,
-            handle: Some(handle),
-        }
-    }
-
-    fn base_url(&self) -> String {
-        format!("http://{}/", self.addr)
-    }
-
-    fn feed_url(&self) -> String {
-        format!("http://{}/releases", self.addr)
-    }
-
-    fn release_prefix(&self) -> String {
-        format!("http://{}/releases/", self.addr)
-    }
-
-    fn asset_url(&self, path: &str) -> String {
-        let clean = path.trim_start_matches('/');
-        format!("http://{}/{clean}", self.addr)
-    }
-
-    fn set_file(&self, path: &str, data: Vec<u8>) {
-        self.state
-            .lock()
-            .unwrap()
-            .files
-            .insert(path.to_string(), data);
-    }
-
-    fn set_slow(&self, path: &str, first_chunk: usize, delay: Duration) {
-        self.state.lock().unwrap().slow_path = Some((path.to_string(), first_chunk, delay));
-    }
-
-    fn clear_slow(&self) {
-        self.state.lock().unwrap().slow_path = None;
-    }
-
-    fn requests(&self) -> Vec<RecordedReq> {
-        self.state.lock().unwrap().requests.clone()
-    }
-}
-
-impl Drop for FakeReleaseServer {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-        let _ = TcpStream::connect(&self.addr);
-        if let Some(h) = self.handle.take() {
-            let _ = h.join();
-        }
-    }
-}
-
-fn serve_one(mut stream: TcpStream, state: &Arc<Mutex<ServerState>>) {
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-    let mut reader = BufReader::new(match stream.try_clone() {
-        Ok(s) => s,
-        Err(_) => return,
-    });
-    let mut req_line = String::new();
-    if reader.read_line(&mut req_line).unwrap_or(0) == 0 {
-        return;
-    }
-    let path = req_line
-        .split_whitespace()
-        .nth(1)
-        .unwrap_or("/")
-        .to_string();
-
-    let mut range: Option<String> = None;
-    loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line).unwrap_or(0) == 0 {
-            break;
-        }
-        let trimmed = line.trim_end_matches(['\r', '\n']);
-        if trimmed.is_empty() {
-            break;
-        }
-        if let Some((k, v)) = trimmed.split_once(':')
-            && k.eq_ignore_ascii_case("range")
-        {
-            range = Some(v.trim().to_string());
-        }
-    }
-
-    let (data_opt, slow) = {
-        let mut st = state.lock().unwrap();
-        st.requests.push(RecordedReq {
-            path: path.clone(),
-            range: range.clone(),
-        });
-        let slow = st
-            .slow_path
-            .as_ref()
-            .filter(|(p, _, _)| p == &path)
-            .map(|(_, chunk, delay)| (*chunk, *delay));
-        (st.files.get(&path).cloned(), slow)
-    };
-
-    let Some(data) = data_opt else {
-        let _ = write!(
-            stream,
-            "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-        );
-        return;
-    };
-
-    let (status_line, slice, extra) = if let Some(ref r) = range
-        && let Some(start_str) = r.strip_prefix("bytes=").and_then(|s| s.strip_suffix('-'))
-        && let Ok(start) = start_str.parse::<usize>()
-        && start < data.len()
-    {
-        let end = data.len() - 1;
-        (
-            "HTTP/1.1 206 Partial Content",
-            &data[start..],
-            format!("Content-Range: bytes {start}-{end}/{}\r\n", data.len()),
-        )
-    } else {
-        ("HTTP/1.1 200 OK", data.as_slice(), String::new())
-    };
-
-    let _ = write!(
-        stream,
-        "{status_line}\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n",
-        slice.len()
-    );
-    if let Some((first_chunk, delay)) = slow {
-        let split = first_chunk.min(slice.len());
-        let _ = stream.write_all(&slice[..split]);
-        let _ = stream.flush();
-        thread::sleep(delay);
-        let _ = stream.write_all(&slice[split..]);
-    } else {
-        let _ = stream.write_all(slice);
-    }
-    let _ = stream.flush();
-}
-
-fn make_test_host(dir: &TempDir) -> Arc<AgentHost> {
-    let home = dir.path().join("home");
-    let install = dir.path().join("install");
-    fs::create_dir_all(&home).unwrap();
-    fs::create_dir_all(&install).unwrap();
-    let core = CoreHost::create_with_hello_probe(
-        CoreHostOptions {
-            home: home.clone(),
-            install_dir: install.clone(),
-        },
-        false,
-    );
-    AgentHost::new(
-        core,
-        AgentOptions {
-            install_dir: install,
-            home,
-            autostart: false,
-        },
-    )
-}
-
 struct SignedReleaseFixture {
     installer_name: String,
     installer_bytes: Vec<u8>,
@@ -264,7 +41,12 @@ struct SignedReleaseFixture {
     sig_bytes: Vec<u8>,
 }
 
-fn make_signed_release(version: &str, installer_name: &str, payload: Vec<u8>, priv_pem: &str) -> SignedReleaseFixture {
+fn make_signed_release(
+    version: &str,
+    installer_name: &str,
+    payload: Vec<u8>,
+    priv_pem: &str,
+) -> SignedReleaseFixture {
     let manifest = UpdateManifest {
         format: br_integrity::MANIFEST_FORMAT,
         version: version.to_string(),
@@ -281,6 +63,7 @@ fn make_signed_release(version: &str, installer_name: &str, payload: Vec<u8>, pr
     }
 }
 
+#[derive(Default)]
 struct ReleaseOpts {
     draft: bool,
     prerelease: bool,
@@ -289,20 +72,17 @@ struct ReleaseOpts {
     installer_url_override: Option<String>,
 }
 
-impl Default for ReleaseOpts {
-    fn default() -> Self {
+impl ReleaseOpts {
+    fn signed() -> Self {
         Self {
-            draft: false,
-            prerelease: false,
             include_sig: true,
-            asset_size_override: None,
-            installer_url_override: None,
+            ..Default::default()
         }
     }
 }
 
 fn populate_release(
-    server: &FakeReleaseServer,
+    server: &LocalHttpServer,
     tag: &str,
     rel: &SignedReleaseFixture,
     opts: ReleaseOpts,
@@ -369,14 +149,14 @@ fn newer_signed_release_check_download_and_apply() {
     let dir = TempDir::new("upd-happy");
     let host = make_test_host(&dir);
     let (priv_pem, pub_pem) = gen_keypair();
-    let server = FakeReleaseServer::start(HashMap::new());
+    let server = LocalHttpServer::start(HashMap::new());
     let rel = make_signed_release(
         "0.3.0",
         "BetterRecall-Setup-0.3.0.exe",
         vec![0x5Au8; 8192],
         &priv_pem,
     );
-    let entry = populate_release(&server, "v0.3.0", &rel, ReleaseOpts::default());
+    let entry = populate_release(&server, "v0.3.0", &rel, ReleaseOpts::signed());
     server.set_file("/releases", serde_json::to_vec(&vec![entry]).unwrap());
 
     let (launches, hook) = make_launcher();
@@ -428,13 +208,12 @@ fn update_rejects_all_invalid_or_untrusted_releases() {
     let (priv_pem, pub_pem) = gen_keypair();
     let (other_priv, _) = gen_keypair();
 
-    // Helper: run download & verify failed/rejected, no installer stored, no launch.
     let assert_rejected = |label: &str,
                            current_ver: &str,
-                           build_feed: &dyn Fn(&FakeReleaseServer)| {
+                           build_feed: &dyn Fn(&LocalHttpServer)| {
         let dir = TempDir::new(&format!("upd-rej-{label}"));
         let host = make_test_host(&dir);
-        let server = FakeReleaseServer::start(HashMap::new());
+        let server = LocalHttpServer::start(HashMap::new());
         build_feed(&server);
         let (launches, hook) = make_launcher();
         host.set_update_test_config(Some(UpdateTestConfig {
@@ -446,7 +225,9 @@ fn update_rejects_all_invalid_or_untrusted_releases() {
             launcher: Some(hook),
         }));
 
-        let st = host.update_check(&CancelToken::none()).expect("check returns status");
+        let st = host
+            .update_check(&CancelToken::none())
+            .expect("check returns status");
         assert!(!st.available, "case={label}: available must be false");
 
         let mut events: Vec<UpdateProgress> = Vec::new();
@@ -461,7 +242,6 @@ fn update_rejects_all_invalid_or_untrusted_releases() {
         host.shutdown();
     };
 
-    // 2a. Missing update.sig -> candidate skipped -> no release.
     assert_rejected("missing-sig", "0.3.0-dev", &|server| {
         let rel = make_signed_release("0.3.0", "Setup.exe", b"abc".to_vec(), &priv_pem);
         let entry = populate_release(
@@ -470,49 +250,43 @@ fn update_rejects_all_invalid_or_untrusted_releases() {
             &rel,
             ReleaseOpts {
                 include_sig: false,
-                ..Default::default()
+                ..ReleaseOpts::signed()
             },
         );
         server.set_file("/releases", serde_json::to_vec(&vec![entry]).unwrap());
     });
 
-    // 2b. Flipped signature byte.
     assert_rejected("flipped-sig", "0.3.0-dev", &|server| {
         let mut rel = make_signed_release("0.3.0", "Setup.exe", b"abc".to_vec(), &priv_pem);
         rel.sig_bytes[0] ^= 0x01;
-        let entry = populate_release(server, "v0.3.0", &rel, ReleaseOpts::default());
+        let entry = populate_release(server, "v0.3.0", &rel, ReleaseOpts::signed());
         server.set_file("/releases", serde_json::to_vec(&vec![entry]).unwrap());
     });
 
-    // 2c. Signed by another key.
     assert_rejected("wrong-key", "0.3.0-dev", &|server| {
         let rel = make_signed_release("0.3.0", "Setup.exe", b"abc".to_vec(), &other_priv);
-        let entry = populate_release(server, "v0.3.0", &rel, ReleaseOpts::default());
+        let entry = populate_release(server, "v0.3.0", &rel, ReleaseOpts::signed());
         server.set_file("/releases", serde_json::to_vec(&vec![entry]).unwrap());
     });
 
-    // 2d. Replay: equal version.
     assert_rejected("replay-equal", "0.3.0", &|server| {
         let rel = make_signed_release("0.3.0", "Setup.exe", b"abc".to_vec(), &priv_pem);
-        let entry = populate_release(server, "v0.3.0", &rel, ReleaseOpts::default());
+        let entry = populate_release(server, "v0.3.0", &rel, ReleaseOpts::signed());
         server.set_file("/releases", serde_json::to_vec(&vec![entry]).unwrap());
     });
 
-    // 2e. Replay: older version.
     assert_rejected("replay-older", "0.4.0", &|server| {
         let rel = make_signed_release("0.3.0", "Setup.exe", b"abc".to_vec(), &priv_pem);
-        let entry = populate_release(server, "v0.3.0", &rel, ReleaseOpts::default());
+        let entry = populate_release(server, "v0.3.0", &rel, ReleaseOpts::signed());
         server.set_file("/releases", serde_json::to_vec(&vec![entry]).unwrap());
     });
 
-    // 2f. Manifest version differs from tag.
     assert_rejected("tag-mismatch", "0.3.0-dev", &|server| {
         let rel = make_signed_release("0.3.0", "Setup.exe", b"abc".to_vec(), &priv_pem);
-        let entry = populate_release(server, "v0.3.1", &rel, ReleaseOpts::default());
+        let entry = populate_release(server, "v0.3.1", &rel, ReleaseOpts::signed());
         server.set_file("/releases", serde_json::to_vec(&vec![entry]).unwrap());
     });
 
-    // 2g. Installer asset size differs from manifest.
     assert_rejected("size-mismatch", "0.3.0-dev", &|server| {
         let rel = make_signed_release("0.3.0", "Setup.exe", b"abcdef".to_vec(), &priv_pem);
         let entry = populate_release(
@@ -521,13 +295,12 @@ fn update_rejects_all_invalid_or_untrusted_releases() {
             &rel,
             ReleaseOpts {
                 asset_size_override: Some(999),
-                ..Default::default()
+                ..ReleaseOpts::signed()
             },
         );
         server.set_file("/releases", serde_json::to_vec(&vec![entry]).unwrap());
     });
 
-    // 2h. Asset URL outside allowed prefix.
     assert_rejected("bad-url", "0.3.0-dev", &|server| {
         let rel = make_signed_release("0.3.0", "Setup.exe", b"abcdef".to_vec(), &priv_pem);
         let entry = populate_release(
@@ -536,13 +309,12 @@ fn update_rejects_all_invalid_or_untrusted_releases() {
             &rel,
             ReleaseOpts {
                 installer_url_override: Some(format!("{}other/Setup.exe", server.base_url())),
-                ..Default::default()
+                ..ReleaseOpts::signed()
             },
         );
         server.set_file("/releases", serde_json::to_vec(&vec![entry]).unwrap());
     });
 
-    // 2i. Installer name with a path separator (manually crafted + signed JSON).
     assert_rejected("path-sep", "0.3.0-dev", &|server| {
         let payload = b"abcdef".to_vec();
         let bad_json = format!(
@@ -558,7 +330,7 @@ fn update_rejects_all_invalid_or_untrusted_releases() {
             manifest_bytes: bad_json,
             sig_bytes: sig,
         };
-        let entry = populate_release(server, "v0.3.0", &rel, ReleaseOpts::default());
+        let entry = populate_release(server, "v0.3.0", &rel, ReleaseOpts::signed());
         server.set_file("/releases", serde_json::to_vec(&vec![entry]).unwrap());
     });
 }
@@ -569,11 +341,18 @@ fn corrupted_installer_bytes_fail_and_leave_no_completed_file() {
     let dir = TempDir::new("upd-corrupt");
     let host = make_test_host(&dir);
     let (priv_pem, pub_pem) = gen_keypair();
-    let server = FakeReleaseServer::start(HashMap::new());
-    let rel = make_signed_release("0.3.0", "Setup.exe", b"good-installer-bytes".to_vec(), &priv_pem);
-    let entry = populate_release(&server, "v0.3.0", &rel, ReleaseOpts::default());
-    // Corrupt the served installer bytes (same length, different content).
-    server.set_file("/releases/download/v0.3.0/Setup.exe", b"BAD!-installer-bytes".to_vec());
+    let server = LocalHttpServer::start(HashMap::new());
+    let rel = make_signed_release(
+        "0.3.0",
+        "Setup.exe",
+        b"good-installer-bytes".to_vec(),
+        &priv_pem,
+    );
+    let entry = populate_release(&server, "v0.3.0", &rel, ReleaseOpts::signed());
+    server.set_file(
+        "/releases/download/v0.3.0/Setup.exe",
+        b"BAD!-installer-bytes".to_vec(),
+    );
     server.set_file("/releases", serde_json::to_vec(&vec![entry]).unwrap());
 
     let (launches, hook) = make_launcher();
@@ -606,9 +385,14 @@ fn installer_tampered_after_download_is_refused_by_apply() {
     let dir = TempDir::new("upd-tamper");
     let host = make_test_host(&dir);
     let (priv_pem, pub_pem) = gen_keypair();
-    let server = FakeReleaseServer::start(HashMap::new());
-    let rel = make_signed_release("0.3.0", "Setup.exe", b"clean-installer-data".to_vec(), &priv_pem);
-    let entry = populate_release(&server, "v0.3.0", &rel, ReleaseOpts::default());
+    let server = LocalHttpServer::start(HashMap::new());
+    let rel = make_signed_release(
+        "0.3.0",
+        "Setup.exe",
+        b"clean-installer-data".to_vec(),
+        &priv_pem,
+    );
+    let entry = populate_release(&server, "v0.3.0", &rel, ReleaseOpts::signed());
     server.set_file("/releases", serde_json::to_vec(&vec![entry]).unwrap());
 
     let (launches, hook) = make_launcher();
@@ -644,7 +428,7 @@ fn drafts_skipped_and_prerelease_only_for_prerelease_running_version() {
     let dir = TempDir::new("upd-pre");
     let host = make_test_host(&dir);
     let (priv_pem, pub_pem) = gen_keypair();
-    let server = FakeReleaseServer::start(HashMap::new());
+    let server = LocalHttpServer::start(HashMap::new());
 
     let draft_rel = make_signed_release("0.5.0", "Setup-0.5.0.exe", b"draft".to_vec(), &priv_pem);
     let pre_rel = make_signed_release("0.4.0-rc.1", "Setup-0.4.0-rc.1.exe", b"pre".to_vec(), &priv_pem);
@@ -657,7 +441,7 @@ fn drafts_skipped_and_prerelease_only_for_prerelease_running_version() {
             &draft_rel,
             ReleaseOpts {
                 draft: true,
-                ..Default::default()
+                ..ReleaseOpts::signed()
             },
         ),
         populate_release(
@@ -666,14 +450,13 @@ fn drafts_skipped_and_prerelease_only_for_prerelease_running_version() {
             &pre_rel,
             ReleaseOpts {
                 prerelease: true,
-                ..Default::default()
+                ..ReleaseOpts::signed()
             },
         ),
-        populate_release(&server, "v0.3.1", &stable_rel, ReleaseOpts::default()),
+        populate_release(&server, "v0.3.1", &stable_rel, ReleaseOpts::signed()),
     ];
     server.set_file("/releases", serde_json::to_vec(&feed).unwrap());
 
-    // Running stable 0.3.0 -> skips draft 0.5.0 and prerelease 0.4.0-rc.1, picks 0.3.1.
     host.set_update_test_config(Some(UpdateTestConfig {
         feed_url: server.feed_url(),
         allowed_prefix: server.release_prefix(),
@@ -686,7 +469,6 @@ fn drafts_skipped_and_prerelease_only_for_prerelease_running_version() {
     assert!(st_stable.available);
     assert_eq!(st_stable.latest_version.as_deref(), Some("0.3.1"));
 
-    // Running prerelease 0.3.0-dev -> skips draft 0.5.0, picks prerelease 0.4.0-rc.1.
     host.set_update_test_config(Some(UpdateTestConfig {
         feed_url: server.feed_url(),
         allowed_prefix: server.release_prefix(),
@@ -702,22 +484,19 @@ fn drafts_skipped_and_prerelease_only_for_prerelease_running_version() {
     host.shutdown();
 }
 
-// 6. Cancel mid-download keeps .part, and a second download resumes from it.
+// 6. Cancel mid-download keeps .part, and a second download resumes from it (CC P10).
 #[test]
 fn cancel_mid_download_keeps_part_and_second_download_resumes() {
     let dir = TempDir::new("upd-resume");
     let host = make_test_host(&dir);
     let (priv_pem, pub_pem) = gen_keypair();
-    let server = FakeReleaseServer::start(HashMap::new());
+    let server = LocalHttpServer::start(HashMap::new());
     let payload: Vec<u8> = (0..65536u32).map(|i| (i % 251) as u8).collect();
     let rel = make_signed_release("0.3.0", "Setup.exe", payload.clone(), &priv_pem);
-    let entry = populate_release(&server, "v0.3.0", &rel, ReleaseOpts::default());
+    let entry = populate_release(&server, "v0.3.0", &rel, ReleaseOpts::signed());
     server.set_file("/releases", serde_json::to_vec(&vec![entry]).unwrap());
-    server.set_slow(
-        "/releases/download/v0.3.0/Setup.exe",
-        4096,
-        Duration::from_millis(800),
-    );
+    let exe_path = "/releases/download/v0.3.0/Setup.exe";
+    server.set_slow(exe_path, 4096, Duration::from_millis(1500));
 
     host.set_update_test_config(Some(UpdateTestConfig {
         feed_url: server.feed_url(),
@@ -728,23 +507,28 @@ fn cancel_mid_download_keeps_part_and_second_download_resumes() {
         launcher: None,
     }));
 
+    let ver_dir = DataPaths::updates_dir(&dir.path().join("home")).join("0.3.0");
+    let part = ver_dir.join("Setup.exe.part");
+
     let cts = CancelSource::new();
     let token = cts.token();
     let mut events1 = Vec::new();
-    // Progress lines are throttled to one per 250 ms, so the first 4 KiB chunk may not be
-    // reported before the server's 800 ms pause; cancel from a timer while it is paused.
     thread::scope(|s| {
         s.spawn(|| {
-            thread::sleep(Duration::from_millis(300));
+            assert!(
+                until(
+                    || server.requests().iter().any(|r| r.path == exe_path)
+                        && fs::metadata(&part).is_ok_and(|m| m.len() > 0),
+                    Duration::from_secs(5),
+                ),
+                "installer request or .part file never appeared before cancel"
+            );
             cts.cancel();
         });
         host.update_download(&mut |p| events1.push(p), &token)
             .unwrap();
     });
     assert_eq!(events1.last().map(|e| e.phase.as_str()), Some("cancelled"));
-
-    let ver_dir = DataPaths::updates_dir(&dir.path().join("home")).join("0.3.0");
-    let part = ver_dir.join("Setup.exe.part");
     assert!(part.exists(), ".part file must remain after cancel");
     assert!(fs::metadata(&part).unwrap().len() > 0);
 
@@ -759,7 +543,7 @@ fn cancel_mid_download_keeps_part_and_second_download_resumes() {
         server
             .requests()
             .iter()
-            .any(|r| r.path == "/releases/download/v0.3.0/Setup.exe" && r.range.is_some()),
+            .any(|r| r.path == exe_path && r.range.is_some()),
         "second download should have sent a Range header to resume"
     );
 
@@ -772,9 +556,9 @@ fn no_key_build_reports_available_but_refuses_download_and_apply() {
     let dir = TempDir::new("upd-nokey");
     let host = make_test_host(&dir);
     let (priv_pem, _) = gen_keypair();
-    let server = FakeReleaseServer::start(HashMap::new());
+    let server = LocalHttpServer::start(HashMap::new());
     let rel = make_signed_release("0.3.0", "Setup.exe", b"payload".to_vec(), &priv_pem);
-    let entry = populate_release(&server, "v0.3.0", &rel, ReleaseOpts::default());
+    let entry = populate_release(&server, "v0.3.0", &rel, ReleaseOpts::signed());
     server.set_file("/releases", serde_json::to_vec(&vec![entry]).unwrap());
 
     host.set_update_test_config(Some(UpdateTestConfig {
@@ -819,9 +603,9 @@ fn auto_update_scheduler_respects_setting_and_idle_gate() {
     let dir = TempDir::new("upd-auto");
     let host = make_test_host(&dir);
     let (priv_pem, pub_pem) = gen_keypair();
-    let server = FakeReleaseServer::start(HashMap::new());
+    let server = LocalHttpServer::start(HashMap::new());
     let rel = make_signed_release("0.3.0", "Setup.exe", b"auto-installer".to_vec(), &priv_pem);
-    let entry = populate_release(&server, "v0.3.0", &rel, ReleaseOpts::default());
+    let entry = populate_release(&server, "v0.3.0", &rel, ReleaseOpts::signed());
     server.set_file("/releases", serde_json::to_vec(&vec![entry]).unwrap());
 
     let (launches, hook) = make_launcher();
@@ -836,7 +620,6 @@ fn auto_update_scheduler_respects_setting_and_idle_gate() {
 
     let now = Utc.with_ymd_and_hms(2026, 11, 22, 12, 0, 0).unwrap();
 
-    // auto=false -> zero requests, no launch.
     let out_off = host.updater().auto_step(
         now,
         br_agent::host::update::AUTO_IDLE_THRESHOLD_MS + 1000,
@@ -848,13 +631,13 @@ fn auto_update_scheduler_respects_setting_and_idle_gate() {
     assert!(server.requests().is_empty());
     assert!(launches.lock().unwrap().is_empty());
 
-    // auto=true, not idle (< 10 min) -> checks & downloads, does NOT launch.
-    let out_active = host.updater().auto_step(now, 60_000, false, true, &CancelToken::none());
+    let out_active = host
+        .updater()
+        .auto_step(now, 60_000, false, true, &CancelToken::none());
     assert_eq!(out_active, AutoStepOutcome::Downloaded);
     assert!(!server.requests().is_empty());
     assert!(launches.lock().unwrap().is_empty());
 
-    // auto=true, idle >= 10 min, busy -> deferred, no launch.
     let out_busy = host.updater().auto_step(
         now + chrono::Duration::minutes(15),
         br_agent::host::update::AUTO_IDLE_THRESHOLD_MS,
@@ -865,7 +648,6 @@ fn auto_update_scheduler_respects_setting_and_idle_gate() {
     assert_eq!(out_busy, AutoStepOutcome::Deferred);
     assert!(launches.lock().unwrap().is_empty());
 
-    // auto=true, idle >= 10 min, not busy -> applies and launches once.
     let out_idle = host.updater().auto_step(
         now + chrono::Duration::minutes(30),
         br_agent::host::update::AUTO_IDLE_THRESHOLD_MS,
@@ -910,5 +692,118 @@ fn cleanup_on_start_removes_stale_downloaded_folder() {
     assert_eq!(st.downloaded_version, None);
     assert_eq!(st.state, "idle");
 
+    host.shutdown();
+}
+
+// 10. F2: update download rejects concurrent update (ERR_UPDATE_BUSY) and refuses while models
+//     download is running (ERR_MODELS_RUNNING_FOR_UPDATE) in src\host\update.rs (~358-375).
+#[test]
+fn update_download_rejects_concurrent_update_and_models_running() {
+    let dir = TempDir::new("upd-busy");
+    let host = make_test_host(&dir);
+    let (priv_pem, pub_pem) = gen_keypair();
+    let server = LocalHttpServer::start(HashMap::new());
+    let payload = vec![0x5Au8; 16384];
+    let rel = make_signed_release("0.3.0", "Setup.exe", payload, &priv_pem);
+    let entry = populate_release(&server, "v0.3.0", &rel, ReleaseOpts::signed());
+    server.set_file("/releases", serde_json::to_vec(&vec![entry]).unwrap());
+    let exe_path = "/releases/download/v0.3.0/Setup.exe";
+    server.set_slow(exe_path, 512, Duration::from_millis(2000));
+
+    host.set_update_test_config(Some(UpdateTestConfig {
+        feed_url: server.feed_url(),
+        allowed_prefix: server.release_prefix(),
+        public_key_pem: Some(pub_pem),
+        current_version: Some("0.3.0-dev".to_string()),
+        fast_retries: true,
+        launcher: None,
+    }));
+
+    // (a) Concurrent update_download -> ERR_UPDATE_BUSY, and is_busy_for_auto_update() == true.
+    let cts1 = CancelSource::new();
+    let tok1 = cts1.token();
+    let host_bg = host.clone();
+    let upd = thread::spawn(move || host_bg.update_download(&mut |_| {}, &tok1));
+
+    assert!(
+        until(
+            || server.request_paths().iter().any(|p| p == exe_path),
+            Duration::from_secs(5),
+        ),
+        "first update download never reached server"
+    );
+    assert!(host.is_busy_for_auto_update());
+    let busy_err = host
+        .update_download(&mut |_| {}, &CancelToken::none())
+        .expect_err("concurrent update_download must fail");
+    match busy_err {
+        AgentError::InvalidOperation(msg) => assert_eq!(msg, CommandProcessor::ERR_UPDATE_BUSY),
+        other => panic!("expected InvalidOperation ERR_UPDATE_BUSY, got {other:?}"),
+    }
+    cts1.cancel();
+    upd.join().unwrap().expect("cancelled update returns Ok");
+    assert!(!host.is_busy_for_auto_update());
+
+    // (b) update_download while models_download is running -> ERR_MODELS_RUNNING_FOR_UPDATE.
+    let weights = vec![0xABu8; 8192];
+    let manifest = br#"{"id":"silero-vad","version":1}"#.to_vec();
+    server.set_file("/silero-vad/silero_vad.onnx", weights.clone());
+    server.set_file("/silero-vad/manifest.json", manifest.clone());
+    server.set_slow("/silero-vad/silero_vad.onnx", 512, Duration::from_millis(2000));
+    let rev = "0123456789abcdef0123456789abcdef01234567";
+    let cat = Catalog {
+        repo: "test/models".to_string(),
+        revision: rev.to_string(),
+        base_url: format!("https://huggingface.co/test/models/resolve/{rev}/"),
+        components: vec![Component {
+            id: "silero-vad".to_string(),
+            sets: vec!["full".to_string()],
+            bytes: (weights.len() + manifest.len()) as u64,
+            files: vec![
+                CatalogFile {
+                    path: "manifest.json".to_string(),
+                    size: manifest.len() as u64,
+                    sha256: sha256_hex(&manifest),
+                },
+                CatalogFile {
+                    path: "silero_vad.onnx".to_string(),
+                    size: weights.len() as u64,
+                    sha256: sha256_hex(&weights),
+                },
+            ],
+        }],
+    };
+    cat.validate().unwrap();
+    host.set_catalog_for_test(Some(cat.with_base_url_for_test(&server.base_url())));
+
+    let cts2 = CancelSource::new();
+    let tok2 = cts2.token();
+    let host_bg2 = host.clone();
+    let mdl = thread::spawn(move || {
+        host_bg2.models_download("silero-vad", &mut |_| {}, &tok2)
+    });
+
+    assert!(
+        until(
+            || server
+                .request_paths()
+                .iter()
+                .any(|p| p == "/silero-vad/silero_vad.onnx"),
+            Duration::from_secs(5),
+        ),
+        "model download never reached server"
+    );
+    let excl_err = host
+        .update_download(&mut |_| {}, &CancelToken::none())
+        .expect_err("update_download must refuse while models_download runs");
+    match excl_err {
+        AgentError::InvalidOperation(msg) => {
+            assert_eq!(msg, CommandProcessor::ERR_MODELS_RUNNING_FOR_UPDATE);
+        }
+        other => panic!("expected InvalidOperation ERR_MODELS_RUNNING_FOR_UPDATE, got {other:?}"),
+    }
+
+    cts2.cancel();
+    mdl.join().unwrap().expect("cancelled models returns Ok");
     host.shutdown();
 }

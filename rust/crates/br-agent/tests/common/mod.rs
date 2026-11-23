@@ -4,21 +4,24 @@
 #![allow(dead_code)]
 
 use std::collections::{HashMap, VecDeque};
+use std::fmt::Write as _;
 use std::fs;
-use std::io;
+use std::io::{self, BufRead, BufReader, Write as _};
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use br_contracts::{
-    BinaryFrame, CaptureKind, EmbeddingInfo, NewAudioCapture, NewScreenCapture, OcrResult,
-    PendingJob, StorageUse, TranscribeResult, WorkerHello, WorkerRequest, WorkerResponse,
-    to_json_string,
+    BinaryFrame, CaptureKind, CoreHostOptions, EmbeddingInfo, NewAudioCapture, NewScreenCapture,
+    OcrResult, PendingJob, StorageUse, TranscribeResult, WorkerHello, WorkerRequest,
+    WorkerResponse, to_json_string,
 };
-use br_core::{CancelSource, CancelToken, EncryptedStore, PipeStream};
+use br_core::{CancelSource, CancelToken, CoreHost, EncryptedStore, PipeStream};
 use chrono::Utc;
+use sha2::{Digest, Sha256};
 use windows::Win32::Foundation::ERROR_PIPE_BUSY;
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OVERLAPPED, FILE_GENERIC_READ,
@@ -28,7 +31,7 @@ use windows::Win32::System::Pipes::WaitNamedPipeW;
 use windows::core::PCWSTR;
 
 use br_agent::audio::{AudioStore, AudioStoreError};
-use br_agent::host::StorageStore;
+use br_agent::host::{AgentHost, AgentOptions, StorageStore};
 use br_agent::native::{current_process_id, tick_count64, to_wide_z};
 use br_agent::scheduling::{EmbeddingStore, GovernanceInputs, UserNotificationState};
 use br_agent::worker::{WorkerError, WorkerLauncher, WorkerStream};
@@ -515,8 +518,11 @@ pub struct FakeWorkerState {
     pub crash_when: Mutex<Option<ReqPred>>,
     pub keepalive_every: Mutex<Option<Duration>>,
     pub keepalive_max: Mutex<Duration>,
+    /// Recorded `(op, text)` for every request received by the fake worker (CC P4).
+    pub seen: Mutex<Vec<(String, Option<String>)>>,
     current_cts: Mutex<Option<Arc<CancelSource>>>,
     current_done: Mutex<Option<Arc<AtomicBool>>>,
+    current_stream: Mutex<Option<PipeStream>>,
 }
 
 pub struct FakeWorker {
@@ -536,10 +542,41 @@ impl FakeWorker {
                 crash_when: Mutex::new(None),
                 keepalive_every: Mutex::new(None),
                 keepalive_max: Mutex::new(Duration::from_secs(900)),
+                seen: Mutex::new(Vec::new()),
                 current_cts: Mutex::new(None),
                 current_done: Mutex::new(None),
+                current_stream: Mutex::new(None),
             }),
         })
+    }
+
+    pub fn seen_count(&self, op: &str, text: Option<&str>) -> usize {
+        self.state
+            .seen
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|(o, t)| o == op && (text.is_none() || t.as_deref() == text))
+            .count()
+    }
+
+    pub fn wait_seen(&self, op: &str, text: Option<&str>, timeout: Duration) -> bool {
+        until(|| self.seen_count(op, text) > 0, timeout)
+    }
+
+    /// Sends one keepalive frame (`id = 0`) over the active pipe stream (for deterministic liveness tests).
+    pub fn send_keepalive(&self) -> bool {
+        let stream = self
+            .state
+            .current_stream
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let Some(stream) = stream else {
+            return false;
+        };
+        let ka = to_json_string(&resp_ok(0)).unwrap().into_bytes();
+        write_pipe_frame(&stream, &ka, &[]).is_ok()
     }
 
     pub fn set_handler(
@@ -621,6 +658,9 @@ impl WorkerLauncher for FakeWorker {
         let _ = thread::spawn(move || {
             let ct = cts.token();
             if let Ok(stream) = connect_named_pipe(&pipe, Duration::from_secs(5)) {
+                *st.current_stream
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = Some(stream.clone());
                 let stream_close = stream.clone();
                 let _reg = ct.on_cancel(move || stream_close.close());
                 while !ct.is_cancelled() {
@@ -630,6 +670,10 @@ impl WorkerLauncher for FakeWorker {
                     let Ok(req) = serde_json::from_slice::<WorkerRequest>(&hdr) else {
                         break;
                     };
+                    st.seen
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push((req.op.clone(), req.text.clone()));
                     if st.crash_on_next.swap(false, Ordering::AcqRel) {
                         break;
                     }
@@ -700,6 +744,9 @@ impl WorkerLauncher for FakeWorker {
                         break;
                     }
                 }
+                *st.current_stream
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = None;
                 stream.close();
             }
             done.store(true, Ordering::Release);
@@ -827,6 +874,7 @@ pub struct SlowWorkerLauncher {
     pub garbage_on_ocr: bool,
     pub started: Arc<Mutex<Vec<u32>>>,
     pub killed: Arc<Mutex<Vec<u32>>>,
+    pub transcribe_seen: Arc<AtomicUsize>,
 }
 
 impl SlowWorkerLauncher {
@@ -837,6 +885,7 @@ impl SlowWorkerLauncher {
             garbage_on_ocr,
             started: Arc::new(Mutex::new(Vec::new())),
             killed: Arc::new(Mutex::new(Vec::new())),
+            transcribe_seen: Arc::new(AtomicUsize::new(0)),
         })
     }
 }
@@ -851,6 +900,7 @@ impl WorkerLauncher for SlowWorkerLauncher {
         let pipe = pipe_name.to_string();
         let tr_ms = self.transcribe_ms;
         let garbage = self.garbage_on_ocr;
+        let tr_seen = self.transcribe_seen.clone();
         let _ = thread::spawn(move || {
             if let Ok(stream) = connect_named_pipe(&pipe, Duration::from_secs(5)) {
                 while let Ok(Some((hdr, _))) = read_pipe_frame(&stream, &CancelToken::none()) {
@@ -858,6 +908,7 @@ impl WorkerLauncher for SlowWorkerLauncher {
                         break;
                     };
                     if req.op == "transcribe" {
+                        tr_seen.fetch_add(1, Ordering::AcqRel);
                         thread::sleep(Duration::from_millis(tr_ms));
                     }
                     if req.op == "ocr" && garbage {
@@ -1363,5 +1414,282 @@ pub fn ocr_line(text: &str, x: i32, y: i32, h: i32, entities: Option<Vec<OcrEnti
         confidence: 0.95,
         cuts,
         entities,
+    }
+}
+
+// ---------------- Shared HTTP server, AgentHost fixture, and WrongPidLauncher ----------------
+
+pub fn sha256_hex(data: &[u8]) -> String {
+    let digest = Sha256::digest(data);
+    let mut s = String::with_capacity(64);
+    for b in digest {
+        let _ = write!(&mut s, "{b:02x}");
+    }
+    s
+}
+
+#[derive(Debug, Clone)]
+pub struct RecordedReq {
+    pub path: String,
+    pub range: Option<String>,
+}
+
+#[derive(Default)]
+struct HttpServerState {
+    files: HashMap<String, Vec<u8>>,
+    slow_path: Option<(String, usize, Duration)>,
+    requests: Vec<RecordedReq>,
+}
+
+/// Loopback HTTP test server supporting Range resume and optional slow-drip responses.
+pub struct LocalHttpServer {
+    addr: String,
+    state: Arc<Mutex<HttpServerState>>,
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl LocalHttpServer {
+    pub fn start(files: HashMap<String, Vec<u8>>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let port = listener.local_addr().expect("local addr").port();
+        let addr = format!("127.0.0.1:{port}");
+        let state = Arc::new(Mutex::new(HttpServerState {
+            files,
+            slow_path: None,
+            requests: Vec::new(),
+        }));
+        let stop = Arc::new(AtomicBool::new(false));
+        let st_c = state.clone();
+        let stop_c = stop.clone();
+        let handle = thread::spawn(move || {
+            for incoming in listener.incoming() {
+                if stop_c.load(Ordering::SeqCst) {
+                    break;
+                }
+                if let Ok(stream) = incoming {
+                    let st_req = st_c.clone();
+                    thread::spawn(move || serve_http_one(stream, &st_req));
+                }
+            }
+        });
+        Self {
+            addr,
+            state,
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    pub fn base_url(&self) -> String {
+        format!("http://{}/", self.addr)
+    }
+
+    pub fn feed_url(&self) -> String {
+        format!("http://{}/releases", self.addr)
+    }
+
+    pub fn release_prefix(&self) -> String {
+        format!("http://{}/releases/", self.addr)
+    }
+
+    pub fn asset_url(&self, path: &str) -> String {
+        let clean = path.trim_start_matches('/');
+        format!("http://{}/{clean}", self.addr)
+    }
+
+    pub fn set_file(&self, path: &str, data: Vec<u8>) {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .files
+            .insert(path.to_string(), data);
+    }
+
+    pub fn set_slow(&self, path: &str, first_chunk: usize, delay: Duration) {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .slow_path = Some((path.to_string(), first_chunk, delay));
+    }
+
+    pub fn clear_slow(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .slow_path = None;
+    }
+
+    pub fn requests(&self) -> Vec<RecordedReq> {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .requests
+            .clone()
+    }
+
+    pub fn request_paths(&self) -> Vec<String> {
+        self.requests().into_iter().map(|r| r.path).collect()
+    }
+}
+
+impl Drop for LocalHttpServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        let _ = TcpStream::connect(&self.addr);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+fn serve_http_one(mut stream: TcpStream, state: &Arc<Mutex<HttpServerState>>) {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let mut reader = BufReader::new(match stream.try_clone() {
+        Ok(s) => s,
+        Err(_) => return,
+    });
+    let mut req_line = String::new();
+    if reader.read_line(&mut req_line).unwrap_or(0) == 0 {
+        return;
+    }
+    let path = req_line
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or("/")
+        .to_string();
+
+    let mut range: Option<String> = None;
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+            break;
+        }
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        if trimmed.is_empty() {
+            break;
+        }
+        if let Some((k, v)) = trimmed.split_once(':')
+            && k.eq_ignore_ascii_case("range")
+        {
+            range = Some(v.trim().to_string());
+        }
+    }
+
+    let (data_opt, slow) = {
+        let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+        st.requests.push(RecordedReq {
+            path: path.clone(),
+            range: range.clone(),
+        });
+        let slow = st
+            .slow_path
+            .as_ref()
+            .filter(|(p, _, _)| p == &path)
+            .map(|(_, chunk, delay)| (*chunk, *delay));
+        (st.files.get(&path).cloned(), slow)
+    };
+
+    let Some(data) = data_opt else {
+        let _ = write!(
+            stream,
+            "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        return;
+    };
+
+    let (status_line, slice, extra) = if let Some(ref r) = range
+        && let Some(start_str) = r.strip_prefix("bytes=").and_then(|s| s.strip_suffix('-'))
+        && let Ok(start) = start_str.parse::<usize>()
+        && start < data.len()
+    {
+        let end = data.len() - 1;
+        (
+            "HTTP/1.1 206 Partial Content",
+            &data[start..],
+            format!("Content-Range: bytes {start}-{end}/{}\r\n", data.len()),
+        )
+    } else {
+        ("HTTP/1.1 200 OK", data.as_slice(), String::new())
+    };
+
+    let _ = write!(
+        stream,
+        "{status_line}\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n",
+        slice.len()
+    );
+    if let Some((first_chunk, delay)) = slow {
+        let split = first_chunk.min(slice.len());
+        let _ = stream.write_all(&slice[..split]);
+        let _ = stream.flush();
+        thread::sleep(delay);
+        let _ = stream.write_all(&slice[split..]);
+    } else {
+        let _ = stream.write_all(slice);
+    }
+    let _ = stream.flush();
+}
+
+/// Builds an isolated `AgentHost` + `CoreHost` in `dir` with hello probing disabled.
+pub fn make_test_host(dir: &TempDir) -> Arc<AgentHost> {
+    let home = dir.path().join("home");
+    let install = dir.path().join("install");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&install).unwrap();
+    let core = CoreHost::create_with_hello_probe(
+        CoreHostOptions {
+            home: home.clone(),
+            install_dir: install.clone(),
+        },
+        false,
+    );
+    AgentHost::new(
+        core,
+        AgentOptions {
+            install_dir: install,
+            home,
+            autostart: false,
+        },
+    )
+}
+
+/// Launcher that connects from the current process while reporting a different PID,
+/// exercising `WorkerSupervisor`'s `verify_client_pid` rejection path.
+pub struct WrongPidLauncher {
+    pub reported_pid: u32,
+    pub killed: Mutex<Vec<u32>>,
+}
+
+impl WrongPidLauncher {
+    pub fn new() -> Arc<Self> {
+        let reported_pid = current_process_id().wrapping_add(1).max(1);
+        Arc::new(Self {
+            reported_pid,
+            killed: Mutex::new(Vec::new()),
+        })
+    }
+}
+
+impl WorkerLauncher for WrongPidLauncher {
+    fn start(&self, pipe_name: &str, _home: &Path) -> Result<u32, WorkerError> {
+        let pipe = pipe_name.to_string();
+        let _ = thread::spawn(move || {
+            if let Ok(stream) = connect_named_pipe(&pipe, Duration::from_secs(5)) {
+                let _ = read_pipe_frame(&stream, &CancelToken::none());
+                stream.close();
+            }
+        });
+        Ok(self.reported_pid)
+    }
+
+    fn kill(&self, pid: u32) {
+        self.killed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(pid);
+    }
+
+    fn has_exited(&self, _pid: u32) -> bool {
+        true
     }
 }

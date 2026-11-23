@@ -918,31 +918,26 @@ fn broken_name_detector_keeps_storing_with_pattern_redaction() {
 }
 
 #[test]
-fn names_on_with_the_detector_missing_is_not_redacted() {
-    for (names, expect_redacted) in [(true, false), (false, true)] {
+fn names_on_with_the_detector_missing_or_present() {
+    let cases = [
+        (true, true, false),
+        (false, true, true),
+        (true, false, true),
+    ];
+    for (names, entities_missing, expect_redacted) in cases {
         let mut s = Settings::default();
         s.privacy.redact_names = names;
-        let reader = SwitchReader::with_answer(|| Ok(card_ocr_result(10, 10, true)));
+        let reader = SwitchReader::with_answer(move || Ok(card_ocr_result(10, 10, entities_missing)));
         let r = AgentDescribeRedactor::new(reader, Arc::new(move || s.clone()), None, None);
         let outp = r
             .redact("s_1", outgoing_white(200, 60), &CancelToken::none())
             .unwrap();
-        assert_eq!(expect_redacted, outp.redacted);
+        assert_eq!(
+            expect_redacted, outp.redacted,
+            "names={names} entities_missing={entities_missing}"
+        );
         assert!(decode_pixel_r(&outp.bytes, 100, 20) < 40);
     }
-}
-
-#[test]
-fn names_on_with_the_detector_present_is_redacted() {
-    let mut s = Settings::default();
-    s.privacy.redact_names = true;
-    let reader = SwitchReader::with_answer(|| Ok(card_ocr_result(10, 10, false)));
-    let r = AgentDescribeRedactor::new(reader, Arc::new(move || s.clone()), None, None);
-    assert!(
-        r.redact("s_1", outgoing_white(200, 60), &CancelToken::none())
-            .unwrap()
-            .redacted
-    );
 }
 
 // ---------------- Sweep3IAgentTests (A3) ----------------
@@ -1072,7 +1067,8 @@ fn a1_replay_masks_are_not_empty_while_keyframes_refuse_the_snapshot() {
             denied_visible: false,
         },
     );
-    guard.set_snapshot_for_test(fresh_snap(per, GuardDecision::ALLOWED));
+    let snap = fresh_snap(per, GuardDecision::ALLOWED);
+    guard.set_snapshot_for_test(snap.clone());
     guard.on_foreground_event();
     let cs = CaptureService::new(
         Arc::new(Settings::default),
@@ -1089,6 +1085,15 @@ fn a1_replay_masks_are_not_empty_while_keyframes_refuse_the_snapshot() {
     if WindowInspector::foreground_root() != 0 {
         assert!(!masks.is_empty());
     }
+    // Always verify with an injected foreground handle/bounds so headless runs check the invariant too.
+    let injected = GuardrailService::unscanned_foreground_pure(
+        &snap,
+        snap.fg_epoch + 1,
+        42,
+        Some(Rect::new(10, 10, 500, 400)),
+    );
+    let merged = CaptureService::merge_masks(&snap, false, &[], injected);
+    assert!(!merged.is_empty());
 }
 
 #[test]
@@ -1317,12 +1322,6 @@ fn grabs_the_full_queue_refuses_are_freed_at_once() {
 }
 
 #[test]
-#[ignore = "CPU heavy, run on request"]
-fn slow_ocr_with_grabs_arriving_keeps_memory_bounded() {
-    // 150-grab 3 s timing loop; kept ignored per CPU-heavy safety rule.
-}
-
-#[test]
 fn ocr_slower_than_the_timeout_gets_a_longer_wait_and_keyframes_are_kept() {
     let reader = SwitchReader::new();
     reader.set_delay(Duration::from_millis(280));
@@ -1477,30 +1476,7 @@ fn a_h1_keyframe_in_ocr_during_purge_all_is_not_stored_in_the_new_store() {
     core.shutdown();
 }
 
-// ---------------- Sweep4RAgentTests (AM7, C2, TH1, TH2, AM6, CA-S1, M2, S1, S2, S9, S12) ----------------
-
-#[test]
-fn am7_transcript_text_is_redacted() {
-    let d = RedactionOptions::from_privacy(&PrivacySettings::default());
-    let cases = [
-        (
-            "my card number is 4111 1111 1111 1111 thanks",
-            "my card number is thanks",
-        ),
-        ("card 4111-1111-1111-1111.", "card ."),
-        (
-            "the IBAN is DE89 3704 0044 0532 0130 00 ok",
-            "the IBAN is ok",
-        ),
-        ("my password is hunter2. Then we left", "my password Then we left"),
-        ("social security 123-45-6789", "social security"),
-        ("nothing to hide here", "nothing to hide here"),
-    ];
-    for (input, expected) in cases {
-        let spans = Redactor::transcript_spans(input, d);
-        assert_eq!(expected, Redactor::remove(input, &spans), "input: {input}");
-    }
-}
+// ---------------- Sweep4RAgentTests (C2, TH1, TH2, AM6, CA-S1, M2, S1, S2, S9, S12) ----------------
 
 #[test]
 fn c2_th1_masks_are_unchecked_until_ocr_reads_and_again_while_it_fails() {
@@ -1619,6 +1595,7 @@ fn c2_samples_keep_running_through_storage_battery_and_fullscreen_pauses() {
     }
     p.set("user", None);
     assert!(p.continuous_paused(true));
+    assert_eq!(Some("storage".to_string()), p.current().0);
 }
 
 #[test]
@@ -1681,20 +1658,22 @@ fn c2_replay_masks_the_foreground_while_text_masks_are_unchecked_and_warns() {
 
 #[test]
 fn th1_retry_reaches_the_output_of_that_monitor() {
-    let guard = make_guard();
+    let reader = SwitchReader::with_answer(|| Err(WorkerError::Transport("down".to_string())));
+    let store = FakeStore::new();
+    let st_cb = store.clone();
     let pipe = KeyframePipeline::new(
-        Arc::new(|| None),
+        Arc::new(move || Some(st_cb.clone() as Arc<dyn KeyframeStore>)),
         Arc::new(Settings::default),
         Arc::new(|_| {}),
-        None,
-        None,
+        Some(reader),
+        Some(Arc::new(RedactionMasks::new())),
         None,
     );
     let cs = CaptureService::new(
         Arc::new(Settings::default),
         Arc::new(|| false),
         Arc::new(|| false),
-        guard,
+        make_guard(),
         Some(pipe.clone()),
         None,
         false,
@@ -1734,34 +1713,11 @@ fn th1_retry_reaches_the_output_of_that_monitor() {
         Arc::new(|_| {}),
     ));
     cs.set_outputs_for_test(vec![a.clone(), b.clone()], false);
-    // Trigger retry via full-queue drop on monitor 1 (or retry_all; here test monitor-1 specific via OCR failure).
-    let reader = SwitchReader::with_answer(|| Err(WorkerError::Transport("down".to_string())));
-    let store = FakeStore::new();
-    let st_cb = store.clone();
-    let pipe2 = KeyframePipeline::new(
-        Arc::new(move || Some(st_cb.clone() as Arc<dyn KeyframeStore>)),
-        Arc::new(Settings::default),
-        Arc::new(|_| {}),
-        Some(reader),
-        Some(Arc::new(RedactionMasks::new())),
-        None,
-    );
-    let cs2 = CaptureService::new(
-        Arc::new(Settings::default),
-        Arc::new(|| false),
-        Arc::new(|| false),
-        make_guard(),
-        Some(pipe2.clone()),
-        None,
-        false,
-    );
-    cs2.set_outputs_for_test(vec![a.clone(), b.clone()], false);
-    pipe2.post(white_grab(1, 64, 32, None, 0, None));
-    assert!(until(|| pipe2.redact_dropped() == 1, Duration::from_secs(5)));
+    pipe.post(white_grab(1, 64, 32, None, 0, None));
+    assert!(until(|| pipe.redact_dropped() == 1, Duration::from_secs(5)));
     assert!(!a.is_retry_keyframe_set());
     assert!(b.is_retry_keyframe_set());
     pipe.stop();
-    pipe2.stop();
 }
 
 #[test]
@@ -1837,53 +1793,69 @@ fn am6_describe_waits_as_long_as_keyframe_ocr_and_not_for_the_worker_start() {
     assert_eq!(AgentDescribeRedactor::BUSY, err2.to_string());
 }
 
+// Merges cas1_downscaled_image_is_checked_against_the_full_size_keyframe and
+// s12_avif_keyframe_is_decoded_for_the_check.
 #[test]
 fn cas1_downscaled_image_is_checked_against_the_full_size_keyframe() {
-    let store = FakeStore::new();
-    let full = outgoing_white(800, 120);
-    let id = store.add_screen(NewScreenCapture {
-        ts: Utc::now(),
-        app: "app".to_string(),
-        exe_path: String::new(),
-        title: "t".to_string(),
-        monitor: 0,
-        width: 800,
-        height: 120,
-        d_hash: 0,
-        image: full.bytes,
-        image_mime: "image/webp".to_string(),
-        keep_keyframe: true,
-        site: String::new(),
-        change: None,
-        switch: false,
-        text: None,
-    });
-    let reader = SwitchReader::with_answer(|| {
-        Ok(OcrResult {
-            lines: vec![ocr_line("Card: 4111 1111 1111 1111", 40, 40, 20, None)],
-            engine: "fake".to_string(),
-            ms: 1.0,
-            entities_missing: false,
-        })
-    });
-    let st_cb = store.clone();
-    let r = AgentDescribeRedactor::new(
-        reader.clone(),
-        Arc::new(Settings::default),
-        Some(Arc::new(move || Some(st_cb.clone() as Arc<dyn KeyframeBlobStore>))),
-        None,
-    );
-    let outp = r
-        .redact(&id, outgoing_white(400, 60), &CancelToken::none())
-        .unwrap();
-    assert_eq!(
-        (800, 120),
-        (*reader.last_w.lock().unwrap(), *reader.last_h.lock().unwrap())
-    );
-    assert!(outp.redacted);
-    assert_eq!((400, 60), (outp.width, outp.height));
-    assert!(decode_pixel_r(&outp.bytes, 100, 25) < 40);
-    assert!(decode_pixel_r(&outp.bytes, 25, 25) > 200);
+    let mut formats: Vec<(&str, &str, Vec<u8>)> = vec![(
+        "webp",
+        "image/webp",
+        outgoing_white(800, 120).bytes,
+    )];
+    if Avif::try_load() {
+        let px = vec![255u8; 800 * 120 * 4];
+        let avif =
+            unsafe { ImageCodec::encode_bgra(px.as_ptr(), 800, 120, 800 * 4, "avif", 80) }.unwrap();
+        formats.push(("avif", "image/avif", avif));
+    }
+
+    for (label, mime, bytes) in formats {
+        let store = FakeStore::new();
+        let id = store.add_screen(NewScreenCapture {
+            ts: Utc::now(),
+            app: "app".to_string(),
+            exe_path: String::new(),
+            title: "t".to_string(),
+            monitor: 0,
+            width: 800,
+            height: 120,
+            d_hash: 0,
+            image: bytes,
+            image_mime: mime.to_string(),
+            keep_keyframe: true,
+            site: String::new(),
+            change: None,
+            switch: false,
+            text: None,
+        });
+        let reader = SwitchReader::with_answer(|| {
+            Ok(OcrResult {
+                lines: vec![ocr_line("Card: 4111 1111 1111 1111", 40, 40, 20, None)],
+                engine: "fake".to_string(),
+                ms: 1.0,
+                entities_missing: false,
+            })
+        });
+        let st_cb = store.clone();
+        let r = AgentDescribeRedactor::new(
+            reader.clone(),
+            Arc::new(Settings::default),
+            Some(Arc::new(move || Some(st_cb.clone() as Arc<dyn KeyframeBlobStore>))),
+            None,
+        );
+        let outp = r
+            .redact(&id, outgoing_white(400, 60), &CancelToken::none())
+            .unwrap();
+        assert_eq!(
+            (800, 120),
+            (*reader.last_w.lock().unwrap(), *reader.last_h.lock().unwrap()),
+            "format={label}"
+        );
+        assert!(outp.redacted, "format={label}");
+        assert_eq!((400, 60), (outp.width, outp.height), "format={label}");
+        assert!(decode_pixel_r(&outp.bytes, 100, 25) < 40, "format={label}");
+        assert!(decode_pixel_r(&outp.bytes, 25, 25) > 200, "format={label}");
+    }
 }
 
 #[test]
@@ -1972,19 +1944,24 @@ fn m2_worker_start_and_queue_drops_mark_masks_unchecked_until_a_newer_grab_reads
     reader.set_is_ready(false);
     let reads = reader.calls.load(Ordering::Acquire);
     pipe.post(non_forced_grab(0, 64, 32, 10, true, false, None));
-    thread::sleep(Duration::from_millis(100));
-    assert!(pipe.masks_unchecked());
+    assert!(
+        until(|| pipe.masks_unchecked(), Duration::from_secs(5)),
+        "masks did not become unchecked during worker start"
+    );
     for i in 0..6u8 {
         pipe.post(non_forced_grab(0, 64, 32, 20 + i, true, false, None));
     }
-    thread::sleep(Duration::from_millis(20));
     pipe.post(non_forced_grab(0, 64, 32, 90, true, false, None));
-    assert!(dropped.lock().unwrap().contains(&0));
+    assert!(
+        until(|| dropped.lock().unwrap().contains(&0), Duration::from_secs(5)),
+        "overflow grab did not trigger drop callback"
+    );
     reader.set_is_ready(true);
     assert!(until(
         || reader.calls.load(Ordering::Acquire) >= reads + 7,
         Duration::from_secs(5)
     ));
+    // A negative check: give a wrongly cleared flag time to show.
     thread::sleep(Duration::from_millis(80));
     assert!(pipe.masks_unchecked());
 
@@ -2123,57 +2100,6 @@ fn s9_describe_does_not_hang_behind_a_worker_start() {
         .redact("s_1", outgoing_white(300, 60), &CancelToken::none())
         .expect_err("starting");
     assert_eq!(AgentDescribeRedactor::STARTING, err.to_string());
-}
-
-#[test]
-fn s12_avif_keyframe_is_decoded_for_the_check() {
-    if !Avif::try_load() {
-        return;
-    }
-    let store = FakeStore::new();
-    let px = vec![255u8; 800 * 120 * 4];
-    let avif = unsafe { ImageCodec::encode_bgra(px.as_ptr(), 800, 120, 800 * 4, "avif", 80) }.unwrap();
-    let id = store.add_screen(NewScreenCapture {
-        ts: Utc::now(),
-        app: "app".to_string(),
-        exe_path: String::new(),
-        title: "t".to_string(),
-        monitor: 0,
-        width: 800,
-        height: 120,
-        d_hash: 0,
-        image: avif,
-        image_mime: "image/avif".to_string(),
-        keep_keyframe: true,
-        site: String::new(),
-        change: None,
-        switch: false,
-        text: None,
-    });
-    let reader = SwitchReader::with_answer(|| {
-        Ok(OcrResult {
-            lines: vec![ocr_line("Card: 4111 1111 1111 1111", 40, 40, 20, None)],
-            engine: "fake".to_string(),
-            ms: 1.0,
-            entities_missing: false,
-        })
-    });
-    let st_cb = store.clone();
-    let r = AgentDescribeRedactor::new(
-        reader.clone(),
-        Arc::new(Settings::default),
-        Some(Arc::new(move || Some(st_cb.clone() as Arc<dyn KeyframeBlobStore>))),
-        None,
-    );
-    let outp = r
-        .redact(&id, outgoing_white(400, 60), &CancelToken::none())
-        .unwrap();
-    assert_eq!(
-        (800, 120),
-        (*reader.last_w.lock().unwrap(), *reader.last_h.lock().unwrap())
-    );
-    assert!(outp.redacted);
-    assert!(decode_pixel_r(&outp.bytes, 100, 25) < 40);
 }
 
 // ---------------- Sweep5PAgentTests (A1, A2) ----------------

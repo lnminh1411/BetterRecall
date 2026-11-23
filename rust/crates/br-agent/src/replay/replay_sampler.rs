@@ -161,12 +161,21 @@ impl ReplaySampler {
     }
 
     pub fn clear(&self) {
+        let _ = self.clear_for_test();
+    }
+
+    /// Clears the sampler, zeroizing all sample byte buffers and returning each zeroized
+    /// buffer paired with its original length before drop (for tests).
+    pub fn clear_for_test(&self) -> Vec<(Vec<u8>, usize)> {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        for s in &mut g.ring {
+        let mut out = Vec::with_capacity(g.ring.len());
+        for mut s in g.ring.drain(..) {
+            let orig_len = s.bytes.len();
             s.bytes.zeroize();
+            out.push((s.bytes, orig_len));
         }
-        g.ring.clear();
         g.last.clear();
+        out
     }
 
     /// Converts samples to store frames: offset from `start`, clamped to `[0, duration_ms]`.

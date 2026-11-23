@@ -7,31 +7,22 @@
 mod common;
 
 use std::collections::HashMap;
-use std::fmt::Write as _;
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-use std::thread::{self, JoinHandle};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
 use std::time::Duration;
 
-use br_contracts::{CoreHostOptions, DataPaths, ModelsProgress};
-use br_core::{AgentControl, AgentError, CancelSource, CancelToken, CommandProcessor, CoreHost};
+use br_contracts::{DataPaths, ModelsProgress};
+use br_core::{AgentControl, AgentError, CancelSource, CancelToken, CommandProcessor};
 use br_fetch::{Catalog, CatalogFile, Component};
-use sha2::{Digest, Sha256};
+use br_integrity::{UPDATE_JSON, UPDATE_SIG, UpdateManifest, sign_update_manifest};
+use p256::ecdsa::SigningKey;
+use p256::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
+use rand_core::OsRng;
 
-use br_agent::host::{AgentHost, AgentOptions};
-use common::TempDir;
-
-fn sha256_hex(data: &[u8]) -> String {
-    let digest = Sha256::digest(data);
-    let mut s = String::with_capacity(64);
-    for b in digest {
-        let _ = write!(&mut s, "{b:02x}");
-    }
-    s
-}
+use br_agent::host::UpdateTestConfig;
+use common::{LocalHttpServer, TempDir, cancel_after, make_test_host, sha256_hex, until};
 
 fn catalog_file(path: &str, data: &[u8]) -> CatalogFile {
     CatalogFile {
@@ -51,141 +42,6 @@ fn make_test_catalog(base_url: &str, components: Vec<Component>) -> Catalog {
     };
     cat.validate().expect("test catalog must validate");
     cat.with_base_url_for_test(base_url)
-}
-
-#[derive(Default)]
-struct ServerConfig {
-    files: HashMap<String, Vec<u8>>,
-    requests: Vec<String>,
-}
-
-struct LocalHttpServer {
-    addr: String,
-    config: Arc<Mutex<ServerConfig>>,
-    stop: Arc<AtomicBool>,
-    handle: Option<JoinHandle<()>>,
-}
-
-impl LocalHttpServer {
-    fn start(files: HashMap<String, Vec<u8>>) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-        let port = listener.local_addr().expect("local addr").port();
-        let addr = format!("127.0.0.1:{port}");
-        let config = Arc::new(Mutex::new(ServerConfig {
-            files,
-            requests: Vec::new(),
-        }));
-        let stop = Arc::new(AtomicBool::new(false));
-
-        let cfg_clone = Arc::clone(&config);
-        let stop_clone = Arc::clone(&stop);
-        let handle = thread::spawn(move || {
-            for incoming in listener.incoming() {
-                if stop_clone.load(Ordering::SeqCst) {
-                    break;
-                }
-                if let Ok(stream) = incoming {
-                    handle_conn(stream, &cfg_clone);
-                }
-            }
-        });
-
-        Self {
-            addr,
-            config,
-            stop,
-            handle: Some(handle),
-        }
-    }
-
-    fn base_url(&self) -> String {
-        format!("http://{}/", self.addr)
-    }
-
-    fn requests(&self) -> Vec<String> {
-        self.config.lock().unwrap().requests.clone()
-    }
-}
-
-impl Drop for LocalHttpServer {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-        let _ = TcpStream::connect(&self.addr);
-        if let Some(h) = self.handle.take() {
-            let _ = h.join();
-        }
-    }
-}
-
-fn handle_conn(mut stream: TcpStream, config: &Arc<Mutex<ServerConfig>>) {
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-    let mut reader = BufReader::new(match stream.try_clone() {
-        Ok(s) => s,
-        Err(_) => return,
-    });
-    let mut req_line = String::new();
-    if reader.read_line(&mut req_line).unwrap_or(0) == 0 {
-        return;
-    }
-    let path = req_line
-        .split_whitespace()
-        .nth(1)
-        .unwrap_or("/")
-        .to_string();
-
-    loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line).unwrap_or(0) == 0 {
-            break;
-        }
-        if line.trim_end_matches(['\r', '\n']).is_empty() {
-            break;
-        }
-    }
-
-    let file_data = {
-        let mut cfg = config.lock().unwrap();
-        cfg.requests.push(path.clone());
-        cfg.files.get(&path).cloned()
-    };
-
-    let Some(data) = file_data else {
-        let _ = write!(
-            stream,
-            "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-        );
-        return;
-    };
-
-    let _ = write!(
-        stream,
-        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        data.len()
-    );
-    let _ = stream.write_all(&data);
-    let _ = stream.flush();
-}
-
-fn make_test_host(dir: &TempDir) -> Arc<AgentHost> {
-    let home = dir.path().join("home");
-    let install = dir.path().join("install");
-    fs::create_dir_all(&home).unwrap();
-    fs::create_dir_all(&install).unwrap();
-    let core = CoreHost::create_with_hello_probe(
-        CoreHostOptions {
-            home: home.clone(),
-            install_dir: install.clone(),
-        },
-        false,
-    );
-    AgentHost::new(
-        core,
-        AgentOptions {
-            install_dir: install,
-            home,
-            autostart: false,
-        },
-    )
 }
 
 #[test]
@@ -299,7 +155,7 @@ fn models_download_writes_manifest_last_and_restarts_worker_only_when_fetched() 
     assert_eq!(events.last().map(|e| e.phase.as_str()), Some("done"));
     assert_eq!(restarts.load(Ordering::Acquire), 1);
 
-    let reqs = server.requests();
+    let reqs = server.request_paths();
     assert_eq!(
         reqs,
         vec![
@@ -343,5 +199,162 @@ fn models_download_writes_manifest_last_and_restarts_worker_only_when_fetched() 
     assert_eq!(events3.last().map(|e| e.phase.as_str()), Some("cancelled"));
     assert_eq!(restarts.load(Ordering::Acquire), 1);
 
+    host.shutdown();
+}
+
+// F2: single-download guard in src\host\models.rs (~line 234) and mid-download cancel.
+#[test]
+fn models_download_rejects_concurrent_download_with_busy_error() {
+    let dir = TempDir::new("models-busy");
+    let host = make_test_host(&dir);
+
+    let weights = vec![0xCDu8; 8192];
+    let manifest = br#"{"id":"silero-vad","version":1}"#.to_vec();
+    let mut files = HashMap::new();
+    files.insert("/silero-vad/silero_vad.onnx".to_string(), weights.clone());
+    files.insert("/silero-vad/manifest.json".to_string(), manifest.clone());
+    let server = LocalHttpServer::start(files);
+    server.set_slow("/silero-vad/silero_vad.onnx", 512, Duration::from_millis(2000));
+
+    let catalog = make_test_catalog(
+        &server.base_url(),
+        vec![Component {
+            id: "silero-vad".to_string(),
+            sets: vec!["full".to_string()],
+            bytes: (weights.len() + manifest.len()) as u64,
+            files: vec![
+                catalog_file("manifest.json", &manifest),
+                catalog_file("silero_vad.onnx", &weights),
+            ],
+        }],
+    );
+    host.set_catalog_for_test(Some(catalog));
+
+    let cts = CancelSource::new();
+    let tok = cts.token();
+    let host_bg = host.clone();
+    let first = thread::spawn(move || {
+        let mut events = Vec::new();
+        let res = host_bg.models_download("silero-vad", &mut |p| events.push(p), &tok);
+        (res, events)
+    });
+
+    assert!(
+        until(
+            || server
+                .request_paths()
+                .iter()
+                .any(|p| p == "/silero-vad/silero_vad.onnx"),
+            Duration::from_secs(5),
+        ),
+        "first model download never started fetching"
+    );
+    assert!(host.is_busy_for_auto_update());
+
+    // Second concurrent download must be refused with ERR_MODELS_BUSY.
+    let err = host
+        .models_download("silero-vad", &mut |_| {}, &CancelToken::none())
+        .expect_err("concurrent models_download must fail");
+    match err {
+        AgentError::InvalidOperation(msg) => assert_eq!(msg, CommandProcessor::ERR_MODELS_BUSY),
+        other => panic!("expected InvalidOperation ERR_MODELS_BUSY, got {other:?}"),
+    }
+
+    cts.cancel();
+    let (res, events) = first.join().unwrap();
+    res.expect("cancelled download returns Ok");
+    assert_eq!(events.last().map(|e| e.phase.as_str()), Some("cancelled"));
+    assert!(!host.is_busy_for_auto_update());
+
+    host.shutdown();
+}
+
+// F2: models_download refuses while an update download is running (src\host\agent_host.rs ~line 2473).
+#[test]
+fn models_download_refuses_while_update_download_is_running() {
+    let dir = TempDir::new("models-vs-upd");
+    let host = make_test_host(&dir);
+
+    let sk = SigningKey::random(&mut OsRng);
+    let priv_pem = sk.to_pkcs8_pem(LineEnding::LF).unwrap().to_string();
+    let pub_pem = sk.verifying_key().to_public_key_pem(LineEnding::LF).unwrap();
+
+    let payload = vec![0x5Au8; 16384];
+    let manifest = UpdateManifest {
+        format: br_integrity::MANIFEST_FORMAT,
+        version: "0.3.0".to_string(),
+        installer: "Setup.exe".to_string(),
+        size: payload.len() as u64,
+        sha256: sha256_hex(&payload),
+    };
+    let (manifest_bytes, sig) = sign_update_manifest(&manifest, &priv_pem).unwrap();
+
+    let server = LocalHttpServer::start(HashMap::new());
+    let json_path = format!("/releases/download/v0.3.0/{UPDATE_JSON}");
+    let sig_path = format!("/releases/download/v0.3.0/{UPDATE_SIG}");
+    let exe_path = "/releases/download/v0.3.0/Setup.exe";
+    server.set_file(&json_path, manifest_bytes.clone());
+    server.set_file(&sig_path, sig.to_vec());
+    server.set_file(exe_path, payload.clone());
+    server.set_slow(exe_path, 512, Duration::from_millis(2000));
+
+    let feed = vec![serde_json::json!({
+        "tag_name": "v0.3.0",
+        "draft": false,
+        "prerelease": false,
+        "html_url": format!("{}tag/v0.3.0", server.release_prefix()),
+        "published_at": "2026-11-22T10:00:00Z",
+        "assets": [
+            { "name": UPDATE_JSON, "size": manifest_bytes.len(), "browser_download_url": server.asset_url(&json_path) },
+            { "name": UPDATE_SIG, "size": sig.len(), "browser_download_url": server.asset_url(&sig_path) },
+            { "name": "Setup.exe", "size": payload.len(), "browser_download_url": server.asset_url(exe_path) },
+        ],
+    })];
+    server.set_file("/releases", serde_json::to_vec(&feed).unwrap());
+
+    host.set_update_test_config(Some(UpdateTestConfig {
+        feed_url: server.feed_url(),
+        allowed_prefix: server.release_prefix(),
+        public_key_pem: Some(pub_pem),
+        current_version: Some("0.3.0-dev".to_string()),
+        fast_retries: true,
+        launcher: None,
+    }));
+    // If the guard broke, the download must hit this local server, never the built-in catalog.
+    host.set_catalog_for_test(Some(make_test_catalog(
+        &server.base_url(),
+        vec![Component {
+            id: "silero-vad".to_string(),
+            sets: vec!["full".to_string()],
+            bytes: 1,
+            files: vec![catalog_file("manifest.json", b"{}")],
+        }],
+    )));
+
+    let cts = CancelSource::new();
+    let tok = cts.token();
+    let host_bg = host.clone();
+    let upd = thread::spawn(move || host_bg.update_download(&mut |_| {}, &tok));
+
+    assert!(
+        until(
+            || server.request_paths().iter().any(|p| p == exe_path),
+            Duration::from_secs(5),
+        ),
+        "update download never started fetching installer"
+    );
+
+    let err = host
+        .models_download("silero-vad", &mut |_| {}, &cancel_after(Duration::from_secs(30)).token())
+        .expect_err("models_download must refuse while update download runs");
+    match err {
+        AgentError::InvalidOperation(msg) => {
+            assert_eq!(msg, CommandProcessor::ERR_UPDATE_RUNNING_FOR_MODELS);
+        }
+        other => panic!("expected InvalidOperation ERR_UPDATE_RUNNING_FOR_MODELS, got {other:?}"),
+    }
+
+    cts.cancel();
+    upd.join().unwrap().expect("cancelled update returns Ok");
     host.shutdown();
 }

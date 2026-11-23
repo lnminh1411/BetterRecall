@@ -17,8 +17,8 @@ use br_agent::capture::{
     KeyframeEncoder, KeyframeRequest, MonitorPin, MonitorSelection, OutputCapture, OutputInfo,
     OutputRotation, VideoScaler, VideoScalerError, VideoScalerParams,
 };
-use br_agent::codecs::{Avif, Jxl};
-use br_agent::native::{Rect, current_thread_cpu_ms};
+use br_agent::codecs::Avif;
+use br_agent::native::Rect;
 use br_agent::privacy::{PixelBox, RedactionMasks};
 use br_agent::thumbs::{AgentThumbnailer, ByteLruCache, KeyframeBlobStore};
 use br_agent::util::RetryBackoff;
@@ -69,20 +69,12 @@ fn dhash_gradient(w: i32, h: i32, left_to_right: bool, noise_seed: u64) -> Vec<u
 }
 
 #[test]
-fn identical_images_hash_equal() {
-    let a = dhash_gradient(320, 200, true, 0);
-    assert_eq!(
-        DHash::compute(&a, 320, 200, 320 * 4).unwrap(),
-        DHash::compute(&a, 320, 200, 320 * 4).unwrap()
-    );
-}
-
-#[test]
 fn small_noise_stays_within_threshold_and_inverse_is_far() {
     let a = dhash_gradient(320, 200, true, 0);
     let noisy = dhash_gradient(320, 200, true, 7);
     let inverse = dhash_gradient(320, 200, false, 0);
     let ha = DHash::compute(&a, 320, 200, 1280).unwrap();
+    assert_eq!(ha, DHash::compute(&a, 320, 200, 1280).unwrap());
     let hn = DHash::compute(&noisy, 320, 200, 1280).unwrap();
     let hi = DHash::compute(&inverse, 320, 200, 1280).unwrap();
     assert!(DHash::distance(ha, hn) < 6);
@@ -920,18 +912,6 @@ fn thumbnailer_transcodes_avif_for_the_ui_and_jpeg_for_export() {
     assert_eq!(0xFF, jpeg.bytes[0]);
 }
 
-#[test]
-#[ignore = "CPU heavy, run on request"]
-fn spike_on_real_screenshots() {
-    // Manual benchmark driven by BR_CODEC_SPIKE; kept ignored in automated runs.
-}
-
-#[test]
-#[ignore = "CPU heavy, run on request"]
-fn keyframe_cost_spike() {
-    // Manual benchmark driven by BR_KF_SPIKE; kept ignored in automated runs.
-}
-
 // ---------------- AvifWriterTests ----------------
 
 fn mdat_payload(file: &[u8]) -> &[u8] {
@@ -1191,7 +1171,18 @@ fn clear_zeroes_cached_bytes() {
             bytes: vec![1, 2, 3],
         },
     );
-    c.clear();
+    let cleared = c.clear_for_test();
+    assert_eq!(1, cleared.len());
+    let (buf, orig_len) = &cleared[0];
+    assert_eq!(3, *orig_len);
+    assert!(buf.is_empty());
+    assert!(buf.capacity() >= *orig_len);
+    unsafe {
+        assert_eq!(
+            &[0u8, 0u8, 0u8],
+            std::slice::from_raw_parts(buf.as_ptr(), *orig_len)
+        );
+    }
     assert_eq!(0, c.count());
     assert_eq!(0, c.bytes());
 }
@@ -1288,24 +1279,6 @@ fn relax_only_lowers_estimates_of_unused_levels_toward_their_initial_value() {
     *clock.lock().unwrap() += 10 * EncodeGovernor::<()>::RELAX_AFTER_MS;
     let _ = g.choose();
     assert_eq!(learned, g.estimate(EncodeLevel::Normal));
-}
-
-#[test]
-#[ignore = "CPU heavy, run on request"]
-fn jxl_encode_cpu_is_on_the_calling_thread() {
-    if !Jxl::try_load() {
-        return;
-    }
-    let (w, h) = (1280, 720);
-    let mut px = screen_flat(w, h, 128);
-    screen_text(&mut px, w, 20, 20, 1200, 680, 1);
-    let _ = unsafe { Jxl::encode(px.as_ptr(), w, h, w * 4, 75, 3) }.unwrap();
-    let t0 = current_thread_cpu_ms();
-    for _ in 0..5 {
-        let _ = unsafe { Jxl::encode(px.as_ptr(), w, h, w * 4, 75, 3) }.unwrap();
-    }
-    let thread_ms = current_thread_cpu_ms() - t0;
-    assert!(thread_ms > 0.0);
 }
 
 #[test]

@@ -750,13 +750,19 @@ impl TranscriptSource {
 
     /// Enqueues a segment directly (used by `on_pcm`, `flush`, and tests).
     pub fn enqueue_segment(&self, seg: SpeechSegment) {
+        let _ = self.enqueue_segment_for_test(seg);
+    }
+
+    /// Enqueues a segment and, if an oldest segment was evicted, returns it after zeroization
+    /// along with its original sample count (for tests).
+    pub fn enqueue_segment_for_test(&self, seg: SpeechSegment) -> Option<(SpeechSegment, usize)> {
         self.segments_count.fetch_add(1, Ordering::AcqRel);
         let evicted = {
             let mut q = self.queue.lock().unwrap_or_else(|e| e.into_inner());
             if q.closed {
                 let mut s = seg;
                 s.zeroize_samples();
-                return;
+                return None;
             }
             let ev = if q.items.len() >= Self::QUEUE_SEGMENTS {
                 q.items.pop_front()
@@ -768,6 +774,7 @@ impl TranscriptSource {
             ev
         };
         if let Some(mut old) = evicted {
+            let orig_len = old.samples.len();
             old.zeroize_samples();
             let n = self.evicted.fetch_add(1, Ordering::AcqRel) + 1;
             let now = tick_count64();
@@ -787,7 +794,9 @@ impl TranscriptSource {
                     Self::QUEUE_SEGMENTS
                 ));
             }
+            return Some((old, orig_len));
         }
+        None
     }
 
     /// Waits up to `timeout` for a segment; returns `Ok(Some(seg))`, `Ok(None)` on timeout,

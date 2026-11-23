@@ -308,6 +308,17 @@ impl PacketRing {
         g.packets.clear();
         g.head = 0;
     }
+
+    /// Returns true if all committed bytes in the ring are zero (for tests).
+    pub fn committed_bytes_all_zero_for_test(&self) -> bool {
+        let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if g.base.is_null() || g.committed == 0 {
+            return true;
+        }
+        unsafe { std::slice::from_raw_parts(g.base, g.committed) }
+            .iter()
+            .all(|&b| b == 0)
+    }
 }
 
 impl Drop for PacketRing {
