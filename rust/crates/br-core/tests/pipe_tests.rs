@@ -801,31 +801,6 @@ fn c3_step_clock_preserves_until_across_multiple_backward_steps_and_sub_toleranc
     assert!(b2 >= b1);
 }
 
-#[test]
-fn b12_same_install_file() {
-    let install = Path::new(r"C:\Apps\BR\0.2.0-abcdef012345");
-    assert!(PipeManager::same_install_file(
-        install,
-        Some(r"C:\Apps\BR\0.2.0-abcdef012345\betterrecall.exe"),
-        r"C:\Apps\BR\0.1.9-1234567890ab\betterrecall.exe"
-    ));
-    assert!(PipeManager::same_install_file(
-        install,
-        Some(r"C:\Apps\BR\0.2.0-abcdef012345\betterrecall.exe"),
-        r"C:\Apps\BR\bin\betterrecall.cmd"
-    ));
-    assert!(!PipeManager::same_install_file(
-        install,
-        Some(r"C:\Apps\BR\0.2.0-abcdef012345\betterrecall.exe"),
-        r"C:\Other\0.1.9-1234567890ab\betterrecall.exe"
-    ));
-    assert!(!PipeManager::same_install_file(
-        install,
-        Some(r"C:\Apps\BR\0.2.0-abcdef012345\other.exe"),
-        r"C:\Apps\BR\bin\betterrecall.cmd"
-    ));
-}
-
 /// B12 with the 0.3 layout: fixed install folder, shim in `<home>\app\bin`, and 0.2.x
 /// versioned entries under `<home>\app\<version>` still name the bundled CLI.
 #[test]

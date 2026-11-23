@@ -149,9 +149,10 @@ impl PipeManager {
         image_allowed_inner(&self.inner, kind, image)
     }
 
-    /// B12 (D6): an `ipc.allowClients` entry inside any version folder of the agent's install root,
-    /// or the stable `bin\betterrecall.cmd` shim, matches the same install-relative file in the
-    /// agent's own install folder.
+    /// B12 (D6): an `ipc.allowClients` entry naming the CLI shim `<home>\app\bin\betterrecall.cmd`,
+    /// or a 0.2.x version folder entry `<home>\app\<version>\<file>`, matches the same
+    /// install-relative file in the agent's own install folder. The launcher-era rule for entries
+    /// beside the install folder was dropped in sweep 6: 0.3 installs to a fixed folder.
     pub fn same_install_file(install_dir: &Path, image: Option<&str>, entry: &str) -> bool {
         let Some(image) = image else {
             return false;
@@ -178,34 +179,7 @@ impl PipeManager {
             return false;
         }
         let rel = &img[install_prefix.len()..];
-        if Self::home_app_entry_matches(&ent, rel) {
-            return true;
-        }
-        let Some(root) = Path::new(&install).parent() else {
-            return false;
-        };
-        let root_str = root.to_string_lossy();
-        let root_prefix = format!("{}\\", root_str.trim_end_matches('\\'));
-        if ent.len() < root_prefix.len()
-            || !ent.is_char_boundary(root_prefix.len())
-            || !ent[..root_prefix.len()].eq_ignore_ascii_case(&root_prefix)
-        {
-            return false;
-        }
-        let in_root = &ent[root_prefix.len()..];
-        let Some(cut) = in_root.find('\\') else {
-            return false;
-        };
-        if cut == 0 {
-            return false;
-        }
-        let folder = &in_root[..cut];
-        let ent_rel = &in_root[cut + 1..];
-        if folder.eq_ignore_ascii_case("bin") {
-            return ent_rel.eq_ignore_ascii_case(InstallLayout::CLI_SHIM)
-                && rel.eq_ignore_ascii_case(InstallLayout::CLI_EXE);
-        }
-        InstallLayout::is_version_folder(folder) && ent_rel.eq_ignore_ascii_case(rel)
+        Self::home_app_entry_matches(&ent, rel)
     }
 
     /// B12 (0.3 layout): the install folder is fixed and the CLI shim lives in

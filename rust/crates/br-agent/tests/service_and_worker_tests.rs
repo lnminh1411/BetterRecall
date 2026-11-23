@@ -254,8 +254,12 @@ fn crash_fails_pending_then_restarts_after_backoff() {
     launcher.state.crash_on_next.store(true, Ordering::Release);
     assert!(client.embed_text("x", "query", &CancelToken::none()).is_err());
     assert_eq!(1, sup.failures());
-    // Inside backoff window.
-    assert!(client.embed_text("x", "query", &CancelToken::none()).is_err());
+    // Inside backoff window: an instant retry must not start a new worker (sweep 6 F1).
+    let e = client
+        .embed_text("x", "query", &CancelToken::none())
+        .expect_err("retry inside backoff");
+    assert!(e.message().contains("backoff"), "{}", e.message());
+    assert_eq!(1, launcher.starts());
     thread::sleep(Duration::from_millis(1100));
     let v = client.embed_text("abc", "query", &CancelToken::none()).unwrap();
     assert_eq!(3.0, v[0]);
