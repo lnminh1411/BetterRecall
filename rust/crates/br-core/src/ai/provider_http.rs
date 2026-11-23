@@ -154,6 +154,7 @@ impl UreqTransport {
             .timeout_connect(Some(header_timeout))
             .timeout_send_request(Some(header_timeout))
             .timeout_recv_response(Some(header_timeout))
+            .timeout_recv_body(Some(Duration::from_secs(360))) // E1: socket timeout for body reads so orphan reader threads end
             .tls_config(
                 ureq::tls::TlsConfig::builder()
                     .provider(ureq::tls::TlsProvider::NativeTls)

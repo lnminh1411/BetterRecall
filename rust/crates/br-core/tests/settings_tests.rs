@@ -609,3 +609,34 @@ fn save_succeeds_while_a_reader_holds_the_file() {
     release.join().unwrap();
     assert_eq!("light", SettingsStore::read_only(h.path()).ui.theme);
 }
+
+#[test]
+fn concurrent_settings_updates_do_not_notify_out_of_order_e4() {
+    let h = TempHome::new(Some("dpapi"));
+    let store = Arc::new(SettingsStore::load(h.path()));
+
+    let last_seen = Arc::new(Mutex::new(String::new()));
+    let last_seen_cb = last_seen.clone();
+    store.on_changed(move |s| {
+        *last_seen_cb.lock().unwrap() = s.ai.provider.clone();
+    });
+
+    // Two writers that update concurrently
+    for _ in 0..10 {
+        let s1 = store.clone();
+        let s2 = store.clone();
+
+        let t1 = thread::spawn(move || {
+            s1.try_update(&j(r#"{"ai":{"provider":"openai"}}"#));
+        });
+        let t2 = thread::spawn(move || {
+            s2.try_update(&j(r#"{"ai":{"provider":"claude"}}"#));
+        });
+
+        t1.join().unwrap();
+        t2.join().unwrap();
+
+        let final_provider = store.current().ai.provider;
+        assert_eq!(final_provider, *last_seen.lock().unwrap());
+    }
+}

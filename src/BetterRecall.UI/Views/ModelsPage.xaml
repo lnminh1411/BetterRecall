@@ -53,6 +53,7 @@
                                 </StackPanel>
                                 <Button Grid.Column="1" VerticalAlignment="Center"
                                         Content="{x:Bind DownloadLabel}"
+                                        AutomationProperties.Name="{x:Bind DownloadAutomationName}"
                                         Tag="{x:Bind Id}"
                                         Visibility="{x:Bind DownloadVisibility}"
                                         IsEnabled="{x:Bind CanDownload}"

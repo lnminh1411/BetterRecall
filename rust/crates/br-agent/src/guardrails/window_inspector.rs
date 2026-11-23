@@ -19,7 +19,7 @@ use windows::core::BOOL;
 
 use crate::guardrails::policy::{BadgeResult, GuardDecision, GuardReason, GuardrailPolicy, WindowInfo};
 use crate::native::{
-    Rect, get_class_name, get_process_image_path, get_window_text, is_cloaked, tick_count64,
+    Rect, get_class_name, get_window_text, is_cloaked, tick_count64,
 };
 
 #[derive(Debug, Clone)]
@@ -79,7 +79,9 @@ pub struct ScanResult {
     pub per_monitor: HashMap<i32, MonitorTop>,
 }
 
-static PATH_CACHE: LazyLock<Mutex<HashMap<u32, (String, i64)>>> =
+// D1: key by (pid, process creation time); value is (image path, cached-at tick).
+type PathCache = HashMap<(u32, u64), (String, i64)>;
+static PATH_CACHE: LazyLock<Mutex<PathCache>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 const SHELL_CLASSES: &[&str] = &[
@@ -134,22 +136,51 @@ impl WindowInspector {
     }
 
     pub fn process_path(pid: u32) -> String {
+        Self::process_path_with(
+            pid,
+            crate::native::get_process_creation_time,
+            crate::native::get_process_image_path,
+        )
+    }
+
+    /// D1: the cache key is (pid, process creation time), so a reused PID misses it. Only the
+    /// creation time is read on a hit; the image path is queried on a miss. A failed open or an
+    /// unreadable creation time is never cached.
+    pub fn process_path_with<C, P>(pid: u32, creation_of: C, path_of: P) -> String
+    where
+        C: Fn(u32) -> Option<u64>,
+        P: Fn(u32) -> Option<String>,
+    {
+        if pid == 0 {
+            return String::new();
+        }
+        let Some(creation) = creation_of(pid) else {
+            return path_of(pid).unwrap_or_default();
+        };
         let now = tick_count64();
         {
             let cache = PATH_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some((path, at)) = cache.get(&pid)
+            if let Some((cached_path, at)) = cache.get(&(pid, creation))
                 && now.saturating_sub(*at) < 30_000
             {
-                return path.clone();
+                return cached_path.clone();
             }
         }
-        let path = get_process_image_path(pid).unwrap_or_default();
+        let path = path_of(pid).unwrap_or_default();
+        if path.is_empty() {
+            return path;
+        }
         let mut cache = PATH_CACHE.lock().unwrap_or_else(|e| e.into_inner());
         if cache.len() > 512 {
             cache.clear();
         }
-        cache.insert(pid, (path.clone(), now));
+        cache.insert((pid, creation), (path.clone(), now));
         path
+    }
+
+    #[doc(hidden)]
+    pub fn clear_path_cache() {
+        PATH_CACHE.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 
     pub fn top_level_windows() -> Vec<isize> {

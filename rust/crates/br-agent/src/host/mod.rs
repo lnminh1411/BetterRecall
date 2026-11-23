@@ -24,6 +24,7 @@ pub use hardware_probe::{HardwareProbe, OutputDesc};
 pub use hotkey_parser::{Hotkey, HotkeyParser};
 pub use keyframe_budget_run::KeyframeBudgetRun;
 pub use message_window::{MenuStateSnapshot, MessageWindow, TrayCommand};
+pub use models::{DownloadContext, download_models, list_models};
 pub use shell::{StartupRegistration, UiLauncher};
 pub use storage_guard::{StorageDecision, StorageGuard, StorageStore};
 pub use update::{AutoStepOutcome, InstallerLauncher, UpdateManager, UpdateTestConfig};

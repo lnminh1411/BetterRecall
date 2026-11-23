@@ -252,8 +252,26 @@ impl ReplayEngine {
         audio: Option<&AudioRingSource>,
         seconds: i32,
     ) -> Result<i32, String> {
-        let streams = self.streams();
+        let (streams, enabled) = {
+            let st = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+            let enabled = st.current_config.as_ref().is_some_and(|c| c.enabled);
+            (st.streams.values().cloned().collect::<Vec<_>>(), enabled)
+        };
+        // D2: refuse when replay is disabled
+        if !enabled {
+            return Err("Instant replay is off.".to_string());
+        }
         ReplayMux::save(output, &streams, audio, seconds)
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.shared
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .current_config
+            .as_ref()
+            .is_some_and(|c| c.enabled)
     }
 
     /// Bytes of one video ring for this bitrate and window.
@@ -441,8 +459,13 @@ fn apply_pending_config(
     };
 
     if let Some(cfg) = pending_opt {
+        let is_disabled = !cfg.enabled;
         {
             let mut st = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+            // D2: when the applied config has enabled=false, clear streams the same way stop does
+            if is_disabled {
+                st.streams.clear();
+            }
             st.current_config = Some(cfg);
         }
         pipelines.clear();

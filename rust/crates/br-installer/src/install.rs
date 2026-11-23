@@ -46,6 +46,8 @@ pub const SETUP_EXE: &str = "BetterRecall-Setup.exe";
 
 /// Base single-instance mutex name (scoped via `PipeNames::scoped` for non-default homes).
 pub const SETUP_MUTEX: &str = PipeNames::SETUP_MUTEX;
+/// Base single-instance setup lock name (B1: installer-vs-installer exclusion).
+pub const SETUP_LOCK: &str = PipeNames::SETUP_LOCK;
 
 /// Which AI models the user chose to install (recorded in HKCU; downloaded in I3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -182,6 +184,36 @@ pub fn install_with_progress<F>(
 where
     F: FnOnce(&Path) -> Result<u64, InstallError>,
 {
+    let outcome = install_with_progress_inner(ctx, exe, opts, free_space, progress);
+    let exit_code = match &outcome {
+        Ok(_) => crate::error::exit_code::OK,
+        Err(e) => e.exit_code(),
+    };
+    let version = match &outcome {
+        Ok(Outcome::Installed { version, .. }) => version.clone(),
+        _ => read_trailer(exe)
+            .and_then(|t| read_setup_manifest(exe, &t))
+            .map(|m| m.version)
+            .unwrap_or_default(),
+    };
+    // C1: report the result to the agent at the end of every install/upgrade run
+    report_last_install(&ctx.home, &version, exit_code);
+    outcome
+}
+
+fn install_with_progress_inner<F>(
+    ctx: &Ctx,
+    exe: &Path,
+    opts: &InstallOpts,
+    free_space: F,
+    progress: &dyn Progress,
+) -> Result<Outcome, InstallError>
+where
+    F: FnOnce(&Path) -> Result<u64, InstallError>,
+{
+    // B1: take SETUP_LOCK for installer-vs-installer exclusion
+    let _lock = acquire_setup_lock(&ctx.home)?;
+    // B1: take SETUP_MUTEX while app is replaced
     let _mutex = acquire_setup_mutex(&ctx.home)?;
     log_line(
         &ctx.home,
@@ -233,7 +265,19 @@ where
     };
     let extra_model_bytes = model_plan
         .as_ref()
-        .map_or(0, |(cat, set)| cat.bytes_for(*set));
+        .map_or(0, |(cat, set)| {
+            // F2: count only components of the set that are not already installed and complete
+            let models_dir = resolve_models_dir(&ctx.home);
+            let states = br_fetch::installed_state(&models_dir, cat);
+            cat.components_for(*set)
+                .into_iter()
+                .filter(|c| {
+                    !states
+                        .iter()
+                        .any(|(id, st)| id == &c.id && *st == br_fetch::ComponentState::Complete)
+                })
+                .fold(0u64, |acc, c| acc.saturating_add(c.bytes))
+        });
 
     let staged = extract_to_staging_with_progress_and_extra(
         ctx,
@@ -269,6 +313,7 @@ where
     let mut restart_on_exit = RestartAgentGuard {
         ctx,
         armed: agent_was_running,
+        op: "install",
     };
 
     if progress.cancelled() {
@@ -324,6 +369,7 @@ where
 struct RestartAgentGuard<'a> {
     ctx: &'a Ctx,
     armed: bool,
+    op: &'static str,
 }
 
 impl Drop for RestartAgentGuard<'_> {
@@ -333,10 +379,19 @@ impl Drop for RestartAgentGuard<'_> {
         }
         let agent = self.ctx.install_dir.join(InstallLayout::AGENT_EXE);
         if !agent.is_file() {
-            log_line(&self.ctx.home, "install did not finish; no agent to restart");
+            log_line(
+                &self.ctx.home,
+                &format!("{} did not finish; no agent to restart", self.op),
+            );
             return;
         }
-        log_line(&self.ctx.home, "install did not finish; restarting the agent that was running");
+        log_line(
+            &self.ctx.home,
+            &format!(
+                "{} did not finish; restarting the agent that was running",
+                self.op
+            ),
+        );
         if let Err(e) = start_agent(self.ctx) {
             log_line(&self.ctx.home, &format!("agent restart failed: {e}"));
         }
@@ -358,6 +413,9 @@ pub fn uninstall_with_progress(
         validate_delete_data_home(&ctx.home)?;
     }
 
+    // B1: take SETUP_LOCK for installer-vs-installer exclusion
+    let _lock = acquire_setup_lock(&ctx.home)?;
+    // B1: take SETUP_MUTEX while app is closed and removed
     let _mutex = acquire_setup_mutex(&ctx.home)?;
     log_line(
         &ctx.home,
@@ -378,11 +436,13 @@ pub fn uninstall_with_progress(
     }
 
     progress.step(Step::Closing);
-    close_running(ctx)?;
-
-    progress.step(Step::Unregistering);
-    registry::unregister(ctx)?;
-    shortcut::remove_shortcut(ctx)?;
+    let agent_was_running = close_running(ctx)?;
+    // C3: restart agent if rename fails
+    let mut restart_on_exit = RestartAgentGuard {
+        ctx,
+        armed: agent_was_running,
+        op: "uninstall",
+    };
 
     progress.step(Step::RemovingFiles);
     let mut reboot_required = false;
@@ -393,8 +453,12 @@ pub fn uninstall_with_progress(
         });
 
         if self_inside {
-            schedule_or_delete_tree(&ctx.install_dir, &ctx.home);
+            schedule_or_delete_tree(ctx, &ctx.install_dir);
             reboot_required = ctx.install_dir.exists();
+            restart_on_exit.armed = false;
+            progress.step(Step::Unregistering);
+            registry::unregister(ctx)?;
+            shortcut::remove_shortcut(ctx)?;
         } else {
             let parent = ctx.install_dir.parent().ok_or_else(|| {
                 InstallError::Other("install_dir has no parent directory".to_string())
@@ -412,6 +476,14 @@ pub fn uninstall_with_progress(
                     path: ctx.install_dir.clone(),
                 });
             }
+            // Folder moved aside successfully: disarm agent restart
+            restart_on_exit.armed = false;
+
+            // C3: unregister and remove shortcut AFTER rename succeeds
+            progress.step(Step::Unregistering);
+            registry::unregister(ctx)?;
+            shortcut::remove_shortcut(ctx)?;
+
             if let Err(e) = fs::remove_dir_all(&old_dir) {
                 log_line(
                     &ctx.home,
@@ -420,10 +492,15 @@ pub fn uninstall_with_progress(
                         old_dir.display()
                     ),
                 );
-                schedule_or_delete_tree(&old_dir, &ctx.home);
-                reboot_required = old_dir.exists();
+                // F4: schedule cleanup with RunOnce fallback
+                reboot_required = schedule_old_folder_cleanup(ctx, &old_dir);
             }
         }
+    } else {
+        restart_on_exit.armed = false;
+        progress.step(Step::Unregistering);
+        registry::unregister(ctx)?;
+        shortcut::remove_shortcut(ctx)?;
     }
 
     shims::remove_relay_and_shim(ctx);
@@ -458,7 +535,8 @@ pub fn modify_with_progress(
     opts: &ModifyOpts,
     progress: &dyn Progress,
 ) -> Result<Outcome, InstallError> {
-    let _mutex = acquire_setup_mutex(&ctx.home)?;
+    // B1: take SETUP_LOCK for installer-vs-installer exclusion (NOT SETUP_MUTEX)
+    let _lock = acquire_setup_lock(&ctx.home)?;
     let prev_mode = registry::read_model_mode(ctx);
     log_line(
         &ctx.home,
@@ -492,16 +570,18 @@ pub fn modify_with_progress(
             let cat = resolve_catalog(opts.catalog.as_ref())?;
             let models_dir = resolve_models_dir(&ctx.home);
 
-            if prev_mode == Some(ModelMode::Full) && opts.model_mode == ModelMode::Minimal {
+            // C6: Modify to Minimal removes full-only components present on disk regardless of prev_mode
+            if opts.model_mode == ModelMode::Minimal {
                 let full_only: Vec<&str> = cat
                     .components_for(ModelSet::Full)
                     .into_iter()
                     .filter(|c| !c.sets.iter().any(|s| s == ModelSet::Minimal.as_str()))
                     .map(|c| c.id.as_str())
+                    .filter(|id| models_dir.join(id).exists())
                     .collect();
                 if !full_only.is_empty() {
-                    // The worker may hold these models open: close the app before deleting them
-                    // and start it again at the end.
+                    // B1: hold SETUP_MUTEX only around close_running, model removal and restart
+                    let _mutex = acquire_setup_mutex(&ctx.home)?;
                     if close_running(ctx)? {
                         restart_agent = true;
                     }
@@ -524,19 +604,29 @@ pub fn modify_with_progress(
                             models: ModelsResult::Failed(e.to_string()),
                         });
                     }
+                    if restart_agent && ctx.start_after {
+                        start_agent(ctx)?;
+                        restart_agent = false;
+                    }
                 }
             }
 
+            // B1: download_models_set runs WITHOUT holding SETUP_MUTEX
             progress.step(Step::DownloadingModels);
             let result = download_models_set(&ctx.home, &cat, set, progress);
             // A running worker loads models at start: restart the app so it picks up new ones.
             if result == ModelsResult::Complete && !restart_agent && agent_running(ctx) {
-                restart_agent = close_running(ctx)?;
+                // B1: hold SETUP_MUTEX around restart
+                let _mutex = acquire_setup_mutex(&ctx.home)?;
+                if close_running(ctx)? && ctx.start_after {
+                    start_agent(ctx)?;
+                }
             }
             result
         }
     };
     if restart_agent && ctx.start_after {
+        let _mutex = acquire_setup_mutex(&ctx.home)?;
         start_agent(ctx)?;
     }
 
@@ -722,10 +812,18 @@ fn delete_home_data(home: &Path) -> Result<(), InstallError> {
         home.join("store.db-wal"),
         home.join("store.db-shm"),
         DataPaths::settings_file(home),
+        home.join("settings.json.bad"), // C8
+        home.join("exports.pending"),   // C8
         DataPaths::agent_pid_file(home),
     ];
     for file in files {
         remove_file_if_exists(&file)?;
+    }
+
+    // C8: check DataPaths::updates_dir; skip if cache is already removed whole
+    let updates_dir = DataPaths::updates_dir(home);
+    if updates_dir.exists() {
+        remove_dir_all_if_exists(&updates_dir)?;
     }
 
     let dirs = [
@@ -747,6 +845,14 @@ fn delete_home_data(home: &Path) -> Result<(), InstallError> {
         {
             remove_dir_all_if_exists(&custom_models)?;
         }
+    }
+
+    // C8: remove <home>\app\bin\*.old-* relay copies (best effort; locked logged and skipped)
+    let bin_dir = home.join("app").join("bin");
+    if bin_dir.is_dir() {
+        shims::sweep_old_files(&bin_dir, home);
+        let _ = fs::remove_dir(&bin_dir);
+        let _ = fs::remove_dir(home.join("app"));
     }
 
     Ok(())
@@ -920,17 +1026,71 @@ fn copy_stub_exe(exe: &Path, len: u64, install_dir: &Path) -> Result<(), Install
     Ok(())
 }
 
-fn schedule_or_delete_tree(dir: &Path, home: &Path) {
+// F4: schedule cleanup for old install folder left behind, with RunOnce fallback
+pub fn schedule_old_folder_cleanup(ctx: &Ctx, old_dir: &Path) -> bool {
     let mut dirs_postorder = Vec::new();
-    collect_and_delete(dir, home, &mut dirs_postorder);
+    let all_scheduled = collect_and_delete(ctx, old_dir, &mut dirs_postorder);
+    let mut dirs_scheduled = true;
+    for d in dirs_postorder {
+        if fs::remove_dir(&d).is_err() && !schedule_delete_on_reboot(ctx, &d) {
+            dirs_scheduled = false;
+        }
+    }
+    if !old_dir.exists() {
+        return false;
+    }
+    if all_scheduled && dirs_scheduled {
+        return true;
+    }
+    // F4: MoveFileExW failed; fall back to HKCU RunOnce BetterRecallCleanup
+    let is_old_folder = old_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with(crate::swap::OLD_PREFIX));
+    let is_parent_match = old_dir.parent() == ctx.install_dir.parent();
+    if is_old_folder && is_parent_match {
+        let cmd = format!("cmd.exe /d /c rmdir /s /q \"{}\"", old_dir.display());
+        match registry::write_run_once_cleanup(ctx, &cmd) {
+            Ok(()) => {
+                log_line(
+                    &ctx.home,
+                    &format!(
+                        "uninstall: scheduled RunOnce cleanup for {}",
+                        old_dir.display()
+                    ),
+                );
+                return true;
+            }
+            Err(e) => {
+                log_line(
+                    &ctx.home,
+                    &format!("uninstall: failed to write RunOnce cleanup: {e}"),
+                );
+            }
+        }
+    }
+    log_line(
+        &ctx.home,
+        &format!(
+            "uninstall: folder {} left behind (could not schedule cleanup)",
+            old_dir.display()
+        ),
+    );
+    false
+}
+
+fn schedule_or_delete_tree(ctx: &Ctx, dir: &Path) {
+    let mut dirs_postorder = Vec::new();
+    collect_and_delete(ctx, dir, &mut dirs_postorder);
     for d in dirs_postorder {
         if fs::remove_dir(&d).is_err() {
-            schedule_delete_on_reboot(&d, home);
+            schedule_delete_on_reboot(ctx, &d);
         }
     }
 }
 
-fn collect_and_delete(dir: &Path, home: &Path, dirs_postorder: &mut Vec<PathBuf>) {
+fn collect_and_delete(ctx: &Ctx, dir: &Path, dirs_postorder: &mut Vec<PathBuf>) -> bool {
+    let mut all_ok = true;
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -938,30 +1098,63 @@ fn collect_and_delete(dir: &Path, home: &Path, dirs_postorder: &mut Vec<PathBuf>
                 continue;
             };
             if meta.is_dir() {
-                collect_and_delete(&path, home, dirs_postorder);
-            } else if fs::remove_file(&path).is_err() {
-                schedule_delete_on_reboot(&path, home);
+                if !collect_and_delete(ctx, &path, dirs_postorder) {
+                    all_ok = false;
+                }
+            } else if fs::remove_file(&path).is_err() && !schedule_delete_on_reboot(ctx, &path) {
+                all_ok = false;
             }
         }
     }
     dirs_postorder.push(dir.to_path_buf());
+    all_ok
 }
 
-fn schedule_delete_on_reboot(path: &Path, home: &Path) {
+fn schedule_delete_on_reboot(ctx: &Ctx, path: &Path) -> bool {
+    // In dev / test prefix runs, never touch real HKLM PendingFileRenameOperations.
+    if !ctx.reg_prefix.is_empty() {
+        return false;
+    }
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-    if let Err(e) = unsafe { MoveFileExW(PCWSTR(wide.as_ptr()), PCWSTR::null(), MOVEFILE_DELAY_UNTIL_REBOOT) } {
+    let res = unsafe { MoveFileExW(PCWSTR(wide.as_ptr()), PCWSTR::null(), MOVEFILE_DELAY_UNTIL_REBOOT) };
+    if let Err(e) = res {
         log_line(
-            home,
+            &ctx.home,
             &format!(
                 "MoveFileExW(DELAY_UNTIL_REBOOT) failed for {}: {e}",
                 path.display()
             ),
         );
+        false
+    } else {
+        true
     }
 }
 
+// B1: acquire_setup_lock for installer-vs-installer exclusion
+fn acquire_setup_lock(home: &Path) -> Result<OwnedMutex, InstallError> {
+    let name = PipeNames::setup_lock_for(home);
+    let wide: Vec<u16> = OsString::from(&name).encode_wide().chain(Some(0)).collect();
+    let handle = unsafe { CreateMutexW(None, false, PCWSTR(wide.as_ptr())) }.map_err(|e| {
+        InstallError::io(
+            format!("creating setup lock '{name}'"),
+            io::Error::from_raw_os_error(e.code().0),
+        )
+    })?;
+    let last = unsafe { GetLastError() };
+    if last == ERROR_ALREADY_EXISTS {
+        unsafe {
+            let _ = CloseHandle(handle);
+        }
+        // N4: setup.log line `setup already running (mutex held)`; make sure the log is opened before that check so the line lands.
+        log_line(home, "setup already running (mutex held)");
+        return Err(InstallError::AlreadyRunning);
+    }
+    Ok(OwnedMutex(handle))
+}
+
 fn acquire_setup_mutex(home: &Path) -> Result<OwnedMutex, InstallError> {
-    let name = PipeNames::scoped(SETUP_MUTEX, home);
+    let name = PipeNames::setup_mutex_for(home);
     let wide: Vec<u16> = OsString::from(&name).encode_wide().chain(Some(0)).collect();
     let handle = unsafe { CreateMutexW(None, false, PCWSTR(wide.as_ptr())) }.map_err(|e| {
         InstallError::io(
@@ -974,9 +1167,44 @@ fn acquire_setup_mutex(home: &Path) -> Result<OwnedMutex, InstallError> {
         unsafe {
             let _ = CloseHandle(handle);
         }
+        log_line(home, "setup already running (mutex held)");
         return Err(InstallError::AlreadyRunning);
     }
     Ok(OwnedMutex(handle))
+}
+
+// C1 installer half: report result to agent
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LastInstallReport<'a> {
+    version: &'a str,
+    exit_code: i32,
+    utc: String,
+}
+
+pub fn report_last_install(home: &Path, version: &str, exit_code: i32) {
+    let updates_dir = DataPaths::updates_dir(home);
+    if fs::create_dir_all(&updates_dir).is_err() {
+        return;
+    }
+    let target = updates_dir.join("last-install.json");
+    let tmp = updates_dir.join(format!("last-install-{}.tmp", std::process::id()));
+    let report = LastInstallReport {
+        version,
+        exit_code,
+        utc: crate::log::utc_now(),
+    };
+    let Ok(json) = serde_json::to_string(&report) else {
+        return;
+    };
+    if fs::write(&tmp, json.as_bytes()).is_err() {
+        return;
+    }
+    if fs::rename(&tmp, &target).is_err() {
+        let _ = fs::remove_file(&target);
+        let _ = fs::rename(&tmp, &target);
+    }
+    let _ = fs::remove_file(&tmp);
 }
 
 struct OwnedMutex(HANDLE);

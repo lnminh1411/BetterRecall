@@ -19,7 +19,10 @@ pub mod strings;
 pub mod swap;
 pub mod wizard;
 
-pub use cli::{Action, CliArgs, RELAUNCHED_FLAG, parse_args, run_main};
+pub use cli::{
+    Action, CliArgs, RELAUNCHED_FLAG, is_uninstall_temp_file_name, parse_args, run_main,
+    sweep_stale_uninstall_temp,
+};
 pub use ctx::{Ctx, TEST_REG_PREFIX};
 pub use error::{InstallError, exit_code};
 pub use extract::{
@@ -28,10 +31,10 @@ pub use extract::{
     read_install_marker,
 };
 pub use install::{
-    InstallOpts, ModelMode, ModelsResult, ModifyOpts, Outcome, SETUP_EXE, SETUP_MUTEX,
+    InstallOpts, ModelMode, ModelsResult, ModifyOpts, Outcome, SETUP_EXE, SETUP_LOCK, SETUP_MUTEX,
     UninstallOpts, compare_versions, install, install_with_progress, install_with_space,
-    modify_with_progress, resolve_models_dir, uninstall, uninstall_with_progress,
-    validate_delete_data_home,
+    modify_with_progress, report_last_install, resolve_models_dir, schedule_old_folder_cleanup,
+    uninstall, uninstall_with_progress, validate_delete_data_home,
 };
 pub use log::log_line;
 pub use payload::{
@@ -41,9 +44,10 @@ pub use payload::{
 };
 pub use progress::{NoProgress, Progress, Step};
 pub use registry::{
-    APP_SUBKEY, DISPLAY_NAME, MODEL_MODE_VALUE, PUBLISHER, RUN_SUBKEY, UNINSTALL_SUBKEY,
-    URL_INFO_ABOUT, delete_key_tree, read_model_mode, read_reg_dword, read_reg_sz, register,
-    unregister, write_model_mode, write_reg_sz,
+    APP_SUBKEY, CLEANUP_VALUE_NAME, DISPLAY_NAME, MODEL_MODE_VALUE, PUBLISHER, RUNONCE_SUBKEY,
+    RUN_SUBKEY, UNINSTALL_SUBKEY, URL_INFO_ABOUT, delete_key_if_empty, delete_key_tree,
+    read_model_mode, read_reg_dword, read_reg_sz, register, unregister, write_model_mode,
+    write_reg_sz, write_run_once_cleanup,
 };
 pub use running::{ProcInfo, close_running, pick_processes_to_end};
 pub use shims::{

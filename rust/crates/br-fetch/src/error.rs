@@ -24,6 +24,10 @@ pub enum FetchError {
     #[error("download cancelled")]
     Cancelled,
 
+    // C2: Another process holds the .part file
+    #[error("Another download is writing this file.")]
+    InUse,
+
     #[error("{context}: {source}")]
     Io {
         context: String,

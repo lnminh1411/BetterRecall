@@ -226,8 +226,12 @@ pub fn sweep_old_files(dir: &Path, home: &Path) {
                     home,
                     &format!("shims: swept stale file {}", path.display()),
                 ),
-                Err(_) => {
-                    // Still in use by an open relay session; leave for the next install.
+                Err(e) => {
+                    // C8: Still in use by an open relay session; log and leave for next run.
+                    log_line(
+                        home,
+                        &format!("shims: skipped locked relay file {}: {e}", path.display()),
+                    );
                 }
             }
         }

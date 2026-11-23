@@ -30,6 +30,8 @@ public sealed class ModelComponentView
         string sets = string.Join(", ", setLabels);
         MetaLine = string.IsNullOrEmpty(sets) ? $"{size}  ·  {state}" : $"{size}  ·  {state}  ·  {sets}";
         DownloadLabel = Loc.Get("ModelsPage_Download");
+        // F5: every button says "Download"; screen readers need the component name too.
+        DownloadAutomationName = $"{DownloadLabel}: {Title}";
         DownloadVisibility = component.State == "complete" ? Visibility.Collapsed : Visibility.Visible;
         CanDownload = !downloading && component.State != "complete";
     }
@@ -39,6 +41,7 @@ public sealed class ModelComponentView
     public string Description { get; }
     public string MetaLine { get; }
     public string DownloadLabel { get; }
+    public string DownloadAutomationName { get; }
     public Visibility DownloadVisibility { get; }
     public bool CanDownload { get; }
 }

@@ -459,3 +459,40 @@ fn no_ui_automation_hides_every_titled_browser_window_only() {
         Some(|_| BadgeResult::CheckFailed),
     ));
 }
+
+#[test]
+fn d1_path_cache_keyed_by_pid_and_creation_time() {
+    use br_agent::guardrails::WindowInspector;
+    use std::sync::atomic::{AtomicUsize, Ordering as O};
+    WindowInspector::clear_path_cache();
+    let pid = 99_999;
+    let path_calls = AtomicUsize::new(0);
+    let path_of = |p: &'static str| {
+        let calls = &path_calls;
+        move |_| {
+            calls.fetch_add(1, O::SeqCst);
+            Some(p.to_string())
+        }
+    };
+
+    // Miss: path queried and cached under (pid, 1000).
+    let p1 = WindowInspector::process_path_with(pid, |_| Some(1000), path_of(r"C:\App\allowed.exe"));
+    assert_eq!(r"C:\App\allowed.exe", p1);
+    assert_eq!(1, path_calls.load(O::SeqCst));
+
+    // Hit: same pid and creation time, path not queried again.
+    let p2 = WindowInspector::process_path_with(pid, |_| Some(1000), path_of(r"C:\App\wrong.exe"));
+    assert_eq!(r"C:\App\allowed.exe", p2);
+    assert_eq!(1, path_calls.load(O::SeqCst));
+
+    // Reused PID (new creation time): miss, the new image path is returned.
+    let p3 = WindowInspector::process_path_with(pid, |_| Some(2000), path_of(r"C:\App\denied.exe"));
+    assert_eq!(r"C:\App\denied.exe", p3);
+    assert_eq!(2, path_calls.load(O::SeqCst));
+
+    // A failed open is never cached.
+    let failed = WindowInspector::process_path_with(pid + 1, |_| Some(3000), |_| None);
+    assert_eq!("", failed);
+    let later = WindowInspector::process_path_with(pid + 1, |_| Some(3000), path_of(r"C:\App\x.exe"));
+    assert_eq!(r"C:\App\x.exe", later);
+}

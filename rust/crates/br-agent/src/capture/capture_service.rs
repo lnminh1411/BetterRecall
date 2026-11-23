@@ -425,6 +425,10 @@ impl CaptureService {
     /// Writes the last `replay.seconds` of every pipeline plus desktop audio as fragmented MP4.
     pub fn save_replay(&self, output: &mut dyn Write) -> Result<i32, String> {
         let s = (self.settings)();
+        // D2: refuse when replay is disabled
+        if !s.replay.enabled {
+            return Err("Instant replay is off.".to_string());
+        }
         let eng = self
             .engine()
             .ok_or_else(|| "Replay is not running.".to_string())?;

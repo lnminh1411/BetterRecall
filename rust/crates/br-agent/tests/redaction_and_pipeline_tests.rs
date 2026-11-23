@@ -300,6 +300,27 @@ fn entities_redact_names_and_addresses_by_setting() {
 }
 
 #[test]
+fn a1_ner_utf16_offsets_with_astral_characters() {
+    let d = RedactionOptions::from_privacy(&PrivacySettings::default());
+    let mut names = d;
+    names.names = true;
+    // Line: "😀😀 John Smith"
+    // "😀" is 2 UTF-16 code units. Two emojis = 4 code units, followed by a space = 5 code units.
+    // Entity "John Smith" starts at UTF-16 offset 5 with length 10.
+    let mut line = ocr_line("😀😀 John Smith", 0, 0, 20, None);
+    line.entities = Some(vec![OcrEntity {
+        start: 5,
+        length: 10,
+        label: "person".to_string(),
+        score: 0.95,
+    }]);
+
+    let res = Redactor::apply(std::slice::from_ref(&line), &[], names, "");
+    // The name is removed and the emoji kept (trailing space trimmed).
+    assert_eq!("😀😀", res.text);
+}
+
+#[test]
 fn password_fields_black_out_and_drop_the_characters_inside() {
     let d = RedactionOptions::from_privacy(&PrivacySettings::default());
     let field = PixelBox::new(118, 0, 62, 24);

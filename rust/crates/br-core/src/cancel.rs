@@ -65,6 +65,42 @@ static NEXT_CB_ID: AtomicU64 = AtomicU64::new(1);
 pub struct CancelSource {
     inner: Arc<CancelInner>,
     _links: Vec<CancelReg>,
+    timer_wake: Option<Arc<CancelInner>>,
+}
+
+#[cfg(test)]
+static ACTIVE_TIMER_THREADS: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+pub fn active_timer_threads() -> u64 {
+    ACTIVE_TIMER_THREADS.load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
+struct ThreadCounterGuard;
+
+#[cfg(test)]
+impl ThreadCounterGuard {
+    fn new() -> Self {
+        ACTIVE_TIMER_THREADS.fetch_add(1, Ordering::Relaxed);
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for ThreadCounterGuard {
+    fn drop(&mut self) {
+        ACTIVE_TIMER_THREADS.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+impl Drop for CancelSource {
+    fn drop(&mut self) {
+        // E3: wake timer thread on drop so it does not outlive this source
+        if let Some(wake) = self.timer_wake.take() {
+            cancel_inner(&wake);
+        }
+    }
 }
 
 impl Default for CancelSource {
@@ -84,6 +120,7 @@ impl CancelSource {
                 cv: Condvar::new(),
             }),
             _links: Vec::new(),
+            timer_wake: None,
         }
     }
 
@@ -96,37 +133,52 @@ impl CancelSource {
 
     /// Creates a child source that cancels whenever `parent` cancels.
     pub fn linked(parent: &CancelToken) -> Self {
-        let child = Self::new();
-        let child_inner = child.inner.clone();
-        let reg = parent.on_cancel(move || cancel_inner(&child_inner));
-        Self {
-            inner: child.inner,
-            _links: vec![reg],
-        }
+        let mut source = Self::new();
+        let inner = source.inner.clone();
+        let reg = parent.on_cancel(move || cancel_inner(&inner));
+        source._links.push(reg);
+        source
     }
 
     /// Creates a child source that cancels whenever either `a` or `b` cancels.
     pub fn linked2(a: &CancelToken, b: &CancelToken) -> Self {
-        let child = Self::new();
-        let inner_a = child.inner.clone();
-        let inner_b = child.inner.clone();
+        let mut source = Self::new();
+        let inner_a = source.inner.clone();
+        let inner_b = source.inner.clone();
         let reg_a = a.on_cancel(move || cancel_inner(&inner_a));
         let reg_b = b.on_cancel(move || cancel_inner(&inner_b));
-        Self {
-            inner: child.inner,
-            _links: vec![reg_a, reg_b],
-        }
+        source._links.push(reg_a);
+        source._links.push(reg_b);
+        source
     }
 
     /// Creates a child source that cancels when `parent` cancels or after `timeout` elapses.
     pub fn with_timeout(parent: &CancelToken, timeout: Duration) -> Self {
-        let child = Self::linked(parent);
+        let mut child = Self::linked(parent);
         let tok = child.token();
         let inner = child.inner.clone();
+        let wake = Arc::new(CancelInner {
+            cancelled: AtomicBool::new(false),
+            state: Mutex::new(CancelState {
+                callbacks: Vec::new(),
+            }),
+            cv: Condvar::new(),
+        });
+        child.timer_wake = Some(wake.clone());
+        let wake_tok = CancelToken { inner: wake };
+        // Wake the timer thread if the child itself cancels before timeout
+        let wake_reg = tok.on_cancel({
+            let wake = child.timer_wake.clone().unwrap();
+            move || cancel_inner(&wake)
+        });
+        child._links.push(wake_reg);
+
         let _ = std::thread::Builder::new()
             .name("BetterRecall.CancelTimer".to_string())
             .spawn(move || {
-                if !tok.wait_timeout(timeout) {
+                #[cfg(test)]
+                let _guard = ThreadCounterGuard::new();
+                if !wake_tok.wait_timeout(timeout) {
                     cancel_inner(&inner);
                 }
             });
@@ -233,5 +285,35 @@ impl CancelToken {
             }
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancel_source_timer_threads_exit_on_drop_e3() {
+        let parent = CancelToken::none();
+        let initial = active_timer_threads();
+        for _ in 0..50 {
+            let _ = CancelSource::with_timeout(&parent, Duration::from_secs(15));
+        }
+        let start = Instant::now();
+        while active_timer_threads() > initial && start.elapsed() < Duration::from_secs(1) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(active_timer_threads(), initial);
+    }
+
+    #[test]
+    fn cancel_source_drop_does_not_cancel_cloned_token_e3() {
+        let parent = CancelToken::none();
+        let source = CancelSource::with_timeout(&parent, Duration::from_secs(15));
+        let token = source.token();
+        let token_clone = token.clone();
+        drop(source);
+        assert!(!token.is_cancelled());
+        assert!(!token_clone.is_cancelled());
     }
 }
