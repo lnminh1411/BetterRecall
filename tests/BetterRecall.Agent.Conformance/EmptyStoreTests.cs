@@ -10,63 +10,13 @@ namespace BetterRecall.Agent.Conformance;
 public sealed class EmptyStoreTests(InstallFixture install)
 {
     [Fact]
-    public async Task Search_on_empty_store_returns_empty_results_across_modes()
-    {
-        await using var h = new AgentHarness(install);
-        await h.StartAndConnectUiAsync();
-        await h.SetupPassphraseAndWaitStoreAsync();
-        await h.WaitForWorkerWarmAsync();
-
-        foreach (var cmd in new[]
-        {
-            "search acme",
-            "search {\"q\":\"acme\",\"limit\":10}",
-            "search {\"q\":\"acme\",\"mode\":\"text\"}",
-            "search {\"q\":\"acme\",\"mode\":\"vector\"}",
-        })
-        {
-            var (ok, d, err) = await h.Ui.RequestAsync("ui", cmd);
-            Assert.True(ok, $"{cmd}: {err}");
-            var resp = d.Deserialize(ContractsJson.Default.SearchResponse)!;
-            Assert.Equal(0, resp.Count);
-            Assert.False(resp.Truncated);
-            Assert.Empty(resp.Results);
-            Assert.True(resp.TookMs >= 0);
-            Assert.Null(resp.Degraded);
-        }
-    }
-
-    [Fact]
-    public async Task Timeline_facets_and_replay_list_are_empty_on_fresh_store()
+    public async Task Empty_store_stats_audit_queries_missing_lookups_and_history()
     {
         await using var h = new AgentHarness(install);
         await h.StartAndConnectUiAsync();
         await h.SetupPassphraseAndWaitStoreAsync();
 
-        var (tlOk, tlData, tlErr) = await h.Ui.RequestAsync("ui", "timeline 2020-01-01T00:00:00Z 2030-01-01T00:00:00Z 10");
-        Assert.True(tlOk, tlErr);
-        var tl = tlData.Deserialize(ContractsJson.Default.ItemsReplyCaptureMeta)!;
-        Assert.Empty(tl.Items);
-
-        var (fOk, fData, fErr) = await h.Ui.RequestAsync("ui", "facets");
-        Assert.True(fOk, fErr);
-        var facets = fData.Deserialize(ContractsJson.Default.FacetsReply)!;
-        Assert.Empty(facets.Apps);
-        Assert.Empty(facets.Sites);
-
-        var (rOk, rData, rErr) = await h.Ui.RequestAsync("ui", "replay list");
-        Assert.True(rOk, rErr);
-        var replays = rData.Deserialize(ContractsJson.Default.ItemsReplyReplayClip)!;
-        Assert.Empty(replays.Items);
-    }
-
-    [Fact]
-    public async Task Stats_and_audit_shape_on_empty_store()
-    {
-        await using var h = new AgentHarness(install);
-        await h.StartAndConnectUiAsync();
-        await h.SetupPassphraseAndWaitStoreAsync();
-
+        // was: Stats_and_audit_shape_on_empty_store
         var (stOk, stData, stErr) = await h.Ui.RequestAsync("ui", "status");
         Assert.True(stOk, stErr);
         var st = stData.Deserialize(ContractsJson.Default.AgentStatus)!;
@@ -88,15 +38,54 @@ public sealed class EmptyStoreTests(InstallFixture install)
             Assert.False(string.IsNullOrWhiteSpace(entry.Verb));
             Assert.True(entry.ClientPid > 0);
         });
-    }
 
-    [Fact]
-    public async Task History_add_list_delete_and_clear_on_empty_store()
-    {
-        await using var h = new AgentHarness(install);
-        await h.StartAndConnectUiAsync();
-        await h.SetupPassphraseAndWaitStoreAsync();
+        // was: Timeline_facets_and_replay_list_are_empty_on_fresh_store
+        var (tlOk, tlData, tlErr) = await h.Ui.RequestAsync("ui", "timeline 2020-01-01T00:00:00Z 2030-01-01T00:00:00Z 10");
+        Assert.True(tlOk, tlErr);
+        var tl = tlData.Deserialize(ContractsJson.Default.ItemsReplyCaptureMeta)!;
+        Assert.Empty(tl.Items);
 
+        var (fOk, fData, fErr) = await h.Ui.RequestAsync("ui", "facets");
+        Assert.True(fOk, fErr);
+        var facets = fData.Deserialize(ContractsJson.Default.FacetsReply)!;
+        Assert.Empty(facets.Apps);
+        Assert.Empty(facets.Sites);
+
+        var (rOk, rData, rErr) = await h.Ui.RequestAsync("ui", "replay list");
+        Assert.True(rOk, rErr);
+        var replays = rData.Deserialize(ContractsJson.Default.ItemsReplyReplayClip)!;
+        Assert.Empty(replays.Items);
+
+        // was: Get_thumb_and_keyframe_missing_id_return_not_found
+        foreach (var cmd in new[] { "get s_missing", "thumb s_missing", "keyframe s_missing" })
+        {
+            var (ok, _, err) = await h.Ui.RequestAsync("ui", cmd);
+            Assert.False(ok);
+            Assert.Equal("Not found.", err);
+        }
+
+        // was: Search_on_empty_store_returns_empty_results_across_modes
+        await h.WaitForWorkerWarmAsync();
+
+        foreach (var cmd in new[]
+        {
+            "search acme",
+            "search {\"q\":\"acme\",\"limit\":10}",
+            "search {\"q\":\"acme\",\"mode\":\"text\"}",
+            "search {\"q\":\"acme\",\"mode\":\"vector\"}",
+        })
+        {
+            var (ok, d, err) = await h.Ui.RequestAsync("ui", cmd);
+            Assert.True(ok, $"{cmd}: {err}");
+            var resp = d.Deserialize(ContractsJson.Default.SearchResponse)!;
+            Assert.Equal(0, resp.Count);
+            Assert.False(resp.Truncated);
+            Assert.Empty(resp.Results);
+            Assert.True(resp.TookMs >= 0);
+            Assert.Null(resp.Degraded);
+        }
+
+        // was: History_add_list_delete_and_clear_on_empty_store
         var (h0Ok, h0Data, _) = await h.Ui.RequestAsync("ui", "history");
         Assert.True(h0Ok);
         Assert.Empty(h0Data.Deserialize(ContractsJson.Default.ItemsReplyHistoryEntry)!.Items);
@@ -117,20 +106,5 @@ public sealed class EmptyStoreTests(InstallFixture install)
         var (h3Ok, h3Data, _) = await h.Ui.RequestAsync("ui", "history");
         Assert.True(h3Ok);
         Assert.Empty(h3Data.Deserialize(ContractsJson.Default.ItemsReplyHistoryEntry)!.Items);
-    }
-
-    [Fact]
-    public async Task Get_thumb_and_keyframe_missing_id_return_not_found()
-    {
-        await using var h = new AgentHarness(install);
-        await h.StartAndConnectUiAsync();
-        await h.SetupPassphraseAndWaitStoreAsync();
-
-        foreach (var cmd in new[] { "get s_missing", "thumb s_missing", "keyframe s_missing" })
-        {
-            var (ok, _, err) = await h.Ui.RequestAsync("ui", cmd);
-            Assert.False(ok);
-            Assert.Equal("Not found.", err);
-        }
     }
 }

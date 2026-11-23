@@ -10,11 +10,12 @@ namespace BetterRecall.Agent.Conformance;
 public sealed class StartupTests(InstallFixture install)
 {
     [Fact]
-    public async Task Starts_writes_pid_and_ui_pipe_accepts_ping_and_version()
+    public async Task Starts_writes_pid_serves_ping_and_version_and_rejects_second_agent_on_same_home()
     {
         await using var h = new AgentHarness(install);
         var (agent, serverPid) = await h.StartAndConnectUiAsync();
 
+        // was: Starts_writes_pid_and_ui_pipe_accepts_ping_and_version
         Assert.Equal(agent.Id, serverPid);
         var pidFile = DataPaths.AgentPidFile(h.Home);
         Assert.True(File.Exists(pidFile), "agent.pid was not created.");
@@ -29,24 +30,18 @@ public sealed class StartupTests(InstallFixture install)
         var version = verData.Deserialize(ContractsJson.Default.VersionReply)!;
         Assert.Equal(1, version.Protocol);
         Assert.Matches(@"^\d+\.\d+\.\d+", version.App);
-    }
 
-    [Fact]
-    public async Task Second_agent_on_same_home_exits_and_keeps_first_running()
-    {
-        await using var h = new AgentHarness(install);
-        var (first, _) = await h.StartAndConnectUiAsync();
-
+        // was: Second_agent_on_same_home_exits_and_keeps_first_running
         var second = h.StartAgent(); // the harness owns and disposes it
         using var cts = new CancellationTokenSource(10_000);
         await second.WaitForExitAsync(cts.Token);
         Assert.Equal(0, second.ExitCode);
-        Assert.False(first.HasExited);
+        Assert.False(agent.HasExited);
 
-        Assert.Equal(first.Id, int.Parse(File.ReadAllText(DataPaths.AgentPidFile(h.Home)).Trim()));
-        var (ok, d, err) = await h.Ui.RequestAsync("ui", "ping");
-        Assert.True(ok, err);
-        Assert.True(d.GetProperty("pong").GetBoolean());
+        Assert.Equal(agent.Id, int.Parse(File.ReadAllText(pidFile).Trim()));
+        var (okAfter, dAfter, errAfter) = await h.Ui.RequestAsync("ui", "ping");
+        Assert.True(okAfter, errAfter);
+        Assert.True(dAfter.GetProperty("pong").GetBoolean());
     }
 
     [Fact]

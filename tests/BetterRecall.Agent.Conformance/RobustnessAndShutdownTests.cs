@@ -13,12 +13,13 @@ namespace BetterRecall.Agent.Conformance;
 public sealed class RobustnessAndShutdownTests(InstallFixture install)
 {
     [Fact]
-    public async Task Truncated_frame_drops_client_and_agent_keeps_serving()
+    public async Task Truncated_and_oversized_frames_drop_or_reject_client_and_agent_keeps_serving()
     {
         await using var h = new AgentHarness(install, s => s.Ipc.Enabled = true);
         await h.StartAndConnectUiAsync();
         await h.SetupPassphraseAndWaitStoreAsync();
 
+        // was: Truncated_frame_drops_client_and_agent_keeps_serving
         var pubName = PipeNames.Base(PipeNames.Public("BetterRecall", PipeNames.UserSid(), h.Home));
 
         // Send an unterminated line and close immediately.
@@ -51,15 +52,8 @@ public sealed class RobustnessAndShutdownTests(InstallFixture install)
         var (uiOk, uiData, uiErr) = await h.Ui.RequestAsync("ui", "ping");
         Assert.True(uiOk, uiErr);
         Assert.True(uiData.GetProperty("pong").GetBoolean());
-    }
 
-    [Fact]
-    public async Task Oversized_frame_returns_error_closes_connection_and_agent_keeps_serving()
-    {
-        await using var h = new AgentHarness(install, s => s.Ipc.Enabled = true);
-        await h.StartAndConnectUiAsync();
-        await h.SetupPassphraseAndWaitStoreAsync();
-
+        // was: Oversized_frame_returns_error_closes_connection_and_agent_keeps_serving
         // Public pipe limit: 4096 bytes.
         await using (var pub = await h.WaitForPublicConnectAsync())
         {
@@ -76,8 +70,8 @@ public sealed class RobustnessAndShutdownTests(InstallFixture install)
         }
 
         // UI pipe limit: 65536 bytes.
-        var (rawOk, _) = await h.Ui.RawOpenAsync("rawUi", h.Home);
-        Assert.True(rawOk);
+        var (rawOk2, _) = await h.Ui.RawOpenAsync("rawUi", h.Home);
+        Assert.True(rawOk2);
         await h.Ui.RawWriteAsync("rawUi", Encoding.UTF8.GetBytes("search " + new string('x', 70_000) + "\n"));
         var (eof1, errLine) = await h.Ui.RawReadLineAsync("rawUi");
         Assert.False(eof1);
@@ -86,9 +80,9 @@ public sealed class RobustnessAndShutdownTests(InstallFixture install)
         Assert.True(eof2);
         await h.Ui.CloseAsync("rawUi");
 
-        var (uiOk, uiData, uiErr) = await h.Ui.RequestAsync("ui", "ping");
-        Assert.True(uiOk, uiErr);
-        Assert.True(uiData.GetProperty("pong").GetBoolean());
+        var (uiOk2, uiData2, uiErr2) = await h.Ui.RequestAsync("ui", "ping");
+        Assert.True(uiOk2, uiErr2);
+        Assert.True(uiData2.GetProperty("pong").GetBoolean());
     }
 
     [Fact]

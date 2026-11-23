@@ -36,7 +36,7 @@ public sealed class McpTests(InstallFixture install)
     }
 
     [Fact]
-    public async Task Mcp_answers_recall_status_and_search_on_empty_store()
+    public async Task Mcp_answers_status_and_search_and_respects_locked_gate()
     {
         await using var h = new AgentHarness(install, s => s.Mcp.Enabled = true);
         await h.StartAndConnectUiAsync();
@@ -46,6 +46,7 @@ public sealed class McpTests(InstallFixture install)
         await using var mcp = h.StartMcp();
         await mcp.InitializeAsync();
 
+        // was: Mcp_answers_recall_status_and_search_on_empty_store
         var statusCall = await mcp.RequestAsync("tools/call", new { name = "recall_status", arguments = new { } });
         var statusResult = statusCall.GetProperty("result");
         Assert.False(statusResult.GetProperty("isError").GetBoolean());
@@ -66,28 +67,19 @@ public sealed class McpTests(InstallFixture install)
         Assert.Equal(0, search.Count);
         Assert.False(search.Truncated);
         Assert.Empty(search.Results);
-    }
 
-    [Fact]
-    public async Task Mcp_search_respects_locked_gate()
-    {
-        await using var h = new AgentHarness(install, s => s.Mcp.Enabled = true);
-        await h.StartAndConnectUiAsync();
-        await h.SetupPassphraseAndWaitStoreAsync();
+        // was: Mcp_search_respects_locked_gate
         await h.SetUnlockPasswordAsync();
         Assert.True((await h.Ui.RequestAsync("ui", "lock")).Ok);
 
-        await using var mcp = h.StartMcp();
-        await mcp.InitializeAsync();
-
-        var searchCall = await mcp.RequestAsync("tools/call", new
+        var lockedSearchCall = await mcp.RequestAsync("tools/call", new
         {
             name = "search_history",
             arguments = new { q = "quarterly" },
         });
-        var result = searchCall.GetProperty("result");
-        Assert.True(result.GetProperty("isError").GetBoolean());
-        Assert.Equal("Store is locked.", result.GetProperty("content")[0].GetProperty("text").GetString());
+        var lockedResult = lockedSearchCall.GetProperty("result");
+        Assert.True(lockedResult.GetProperty("isError").GetBoolean());
+        Assert.Equal("Store is locked.", lockedResult.GetProperty("content")[0].GetProperty("text").GetString());
     }
 
     [Fact]
