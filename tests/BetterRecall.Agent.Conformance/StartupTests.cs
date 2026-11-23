@@ -3,7 +3,6 @@
 using System.Text.Json;
 using BetterRecall.Agent.Conformance.Harness;
 using BetterRecall.Contracts;
-using BetterRecall.Core.Ipc;
 
 namespace BetterRecall.Agent.Conformance;
 
@@ -82,6 +81,7 @@ public sealed class StartupTests(InstallFixture install)
         var sid = PipeNames.UserSid();
         var (uiRes, uiClient) = await PipeClient.ConnectAsync(PipeNames.Ui(sid, h.Home), install.AgentExe, 3000);
         Assert.Equal(PipeConnectResult.Ok, uiRes);
+        Assert.NotNull(uiClient);
         await using (uiClient!)
         {
             var line = await uiClient.ReadLineAsync();
@@ -91,6 +91,7 @@ public sealed class StartupTests(InstallFixture install)
 
         var (mcpRes, mcpClient) = await PipeClient.ConnectAsync(PipeNames.Mcp(sid, h.Home), install.AgentExe, 3000);
         Assert.Equal(PipeConnectResult.Ok, mcpRes);
+        Assert.NotNull(mcpClient);
         await using (mcpClient!)
         {
             var line = await mcpClient.ReadLineAsync();

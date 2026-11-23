@@ -3,7 +3,6 @@
 using System.Diagnostics;
 using System.Text.Json;
 using BetterRecall.Contracts;
-using BetterRecall.Core.Ipc;
 
 namespace BetterRecall.Agent.Conformance.Harness;
 
