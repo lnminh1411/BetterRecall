@@ -1006,3 +1006,93 @@ fn overwrite_deletes_for_disk_when_the_store_covers_the_shortfall() {
     assert!(d.deleted > 0);
     assert!(store.inner.lock().unwrap().deletable > 0);
 }
+
+static B2_PANIC_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn b2_panicking_tick(_: &Arc<AgentHost>) {
+    let prev = B2_PANIC_COUNT.fetch_add(1, Ordering::SeqCst);
+    if prev == 0 {
+        panic!("simulated timer panic");
+    }
+}
+
+#[test]
+fn b2_timer_survives_panic_and_keeps_running() {
+    let dir = TempDir::new("b2-timer");
+    let core = CoreHost::create_with_hello_probe(
+        CoreHostOptions {
+            home: dir.path().to_path_buf(),
+            install_dir: dir.path().to_path_buf(),
+        },
+        false,
+    );
+    let agent = AgentHost::new(
+        core.clone(),
+        AgentOptions {
+            install_dir: dir.path().to_path_buf(),
+            home: dir.path().to_path_buf(),
+            autostart: false,
+        },
+    );
+
+    B2_PANIC_COUNT.store(0, Ordering::SeqCst);
+    let _handle = agent.spawn_timer_for_test(
+        "b2-test-timer",
+        Duration::from_millis(10),
+        Duration::from_millis(20),
+        b2_panicking_tick,
+    );
+
+    let start = std::time::Instant::now();
+    while B2_PANIC_COUNT.load(Ordering::SeqCst) < 2 && start.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        B2_PANIC_COUNT.load(Ordering::SeqCst) >= 2,
+        "timer should continue running after panic"
+    );
+
+    agent.shutdown();
+    core.shutdown();
+}
+
+#[test]
+fn c4_stop_auto_updater_returns_within_two_seconds_when_thread_stalls() {
+    let dir = TempDir::new("c4-updater");
+    let core = CoreHost::create_with_hello_probe(
+        CoreHostOptions {
+            home: dir.path().to_path_buf(),
+            install_dir: dir.path().to_path_buf(),
+        },
+        false,
+    );
+    let agent = AgentHost::new(
+        core.clone(),
+        AgentOptions {
+            install_dir: dir.path().to_path_buf(),
+            home: dir.path().to_path_buf(),
+            autostart: false,
+        },
+    );
+
+    let ignore_cancel_thread = std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_secs(10));
+    });
+    agent.set_auto_updater_handle_for_test(br_core::CancelSource::new(), ignore_cancel_thread);
+
+    let start = std::time::Instant::now();
+    agent.stop_auto_updater_for_test();
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed >= Duration::from_millis(1900),
+        "should wait about 2 s before giving up, took {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_millis(3500),
+        "should not wait full 10 s, took {elapsed:?}"
+    );
+
+    agent.shutdown();
+    core.shutdown();
+}

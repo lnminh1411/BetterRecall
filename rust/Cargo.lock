@@ -305,6 +305,7 @@ dependencies = [
  "thiserror",
  "unicode-normalization",
  "windows",
+ "zeroize",
 ]
 
 [[package]]

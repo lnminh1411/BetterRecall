@@ -172,7 +172,18 @@ impl AutoUpdateHandle {
         if let Some(h) = self.thread.take()
             && h.thread().id() != thread::current().id()
         {
-            let _ = h.join();
+            // C4: wait for the thread at most 2 s (poll is_finished())
+            let start = Instant::now();
+            let mut finished = h.is_finished();
+            while !finished && start.elapsed() < Duration::from_secs(2) {
+                thread::sleep(Duration::from_millis(25));
+                finished = h.is_finished();
+            }
+            if finished {
+                let _ = h.join();
+            } else {
+                AgentLog::warn("auto-update thread still busy; shutdown continues");
+            }
         }
     }
 }
@@ -892,6 +903,7 @@ impl AgentHost {
     ) -> JoinHandle<()> {
         let weak = Arc::downgrade(self);
         let stop_pair = self.timer_stop.clone();
+        let timer_name = name.to_string();
         thread::Builder::new()
             .name(name.to_string())
             .spawn(move || {
@@ -910,11 +922,35 @@ impl AgentHost {
                     }
                     drop(g2);
                     let Some(h) = weak.upgrade() else { return };
-                    tick(&h);
+                    // B2: wrap each tick in catch_unwind, log once per panic, keep timer running
+                    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        tick(&h);
+                    }));
+                    if let Err(e) = res {
+                        let msg = if let Some(s) = e.downcast_ref::<&str>() {
+                            *s
+                        } else if let Some(s) = e.downcast_ref::<String>() {
+                            s.as_str()
+                        } else {
+                            "unknown panic"
+                        };
+                        AgentLog::warn(&format!("timer {timer_name} panicked: {msg}"));
+                    }
                     wait = period;
                 }
             })
             .expect("spawn timer thread")
+    }
+
+    #[doc(hidden)]
+    pub fn spawn_timer_for_test(
+        self: &Arc<Self>,
+        name: &str,
+        initial: Duration,
+        period: Duration,
+        tick: fn(&Arc<Self>),
+    ) -> JoinHandle<()> {
+        self.spawn_timer(name, initial, period, tick)
     }
 
     fn open_store_loop(self: &Arc<Self>) {
@@ -1545,6 +1581,11 @@ impl AgentHost {
     }
 
     fn save_replay_from_hotkey(self: &Arc<Self>) {
+        // D2: refuse when replay is disabled
+        if !self.settings().replay.enabled {
+            AgentLog::warn("replay hotkey: Instant replay is off.");
+            return;
+        }
         let me = self.clone();
         let _ = thread::Builder::new()
             .name("BetterRecall.SaveReplay".to_string())
@@ -2109,6 +2150,21 @@ impl AgentHost {
         }
     }
 
+    #[doc(hidden)]
+    pub fn set_auto_updater_handle_for_test(&self, cts: CancelSource, thread: JoinHandle<()>) {
+        let mut slot = self.auto_update_thread.lock().unwrap_or_else(|e| e.into_inner());
+        *slot = Some(AutoUpdateHandle {
+            stop: Arc::new((Mutex::new(false), Condvar::new())),
+            cts,
+            thread: Some(thread),
+        });
+    }
+
+    #[doc(hidden)]
+    pub fn stop_auto_updater_for_test(&self) {
+        self.stop_auto_updater();
+    }
+
     fn effective_catalog(&self) -> Result<(br_fetch::Catalog, bool), AgentError> {
         if let Some(cat) = self
             .catalog_for_test
@@ -2302,6 +2358,12 @@ impl AgentControl for AgentHost {
     }
 
     fn save_replay(&self, ct: &CancelToken) -> Result<ReplayClip, AgentError> {
+        // D2: refuse when replay is disabled
+        if !self.settings().replay.enabled {
+            return Err(AgentError::InvalidOperation(
+                "Instant replay is off.".to_string(),
+            ));
+        }
         let capture = self.capture().ok_or_else(|| {
             AgentError::InvalidOperation("Replay is not running.".to_string())
         })?;
@@ -2493,6 +2555,7 @@ impl AgentControl for AgentHost {
             catalog: &catalog,
             fast_retries: is_test,
             downloading_flag: &self.models_downloading,
+            update_downloading_flag: Some(&self.update_downloading),
         };
         crate::host::models::download_models(&ctx, target, emit, ct, || {
             if let Some(ref hook) = *self

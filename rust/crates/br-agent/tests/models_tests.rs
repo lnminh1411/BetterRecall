@@ -358,3 +358,98 @@ fn models_download_refuses_while_update_download_is_running() {
     upd.join().unwrap().expect("cancelled update returns Ok");
     host.shutdown();
 }
+
+#[test]
+fn f2_ui_bytes_count_only_incomplete_components() {
+    let dir = TempDir::new("f2-ui-bytes");
+    let host = make_test_host(&dir);
+
+    let m_a = br#"{"id":"ocr"}"#.to_vec();
+    let m_b = br#"{"id":"ner"}"#.to_vec();
+    let m_c = br#"{"id":"silero-vad"}"#.to_vec();
+
+    let catalog = make_test_catalog(
+        "http://127.0.0.1:1/",
+        vec![
+            Component {
+                id: "ocr".to_string(),
+                sets: vec!["minimal".to_string(), "full".to_string()],
+                bytes: 100,
+                files: vec![catalog_file("manifest.json", &m_a)],
+            },
+            Component {
+                id: "ner".to_string(),
+                sets: vec!["minimal".to_string(), "full".to_string()],
+                bytes: 200,
+                files: vec![catalog_file("manifest.json", &m_b)],
+            },
+            Component {
+                id: "silero-vad".to_string(),
+                sets: vec!["full".to_string()],
+                bytes: 400,
+                files: vec![catalog_file("manifest.json", &m_c)],
+            },
+        ],
+    );
+    host.set_catalog_for_test(Some(catalog));
+
+    let models_dir = DataPaths::models_dir(&dir.path().join("home"), &Default::default());
+    // Mark "ocr" as complete (both minimal and full).
+    fs::create_dir_all(models_dir.join("ocr")).unwrap();
+    fs::write(models_dir.join("ocr").join("manifest.json"), &m_a).unwrap();
+
+    let list = host.models_list().expect("models_list ok");
+    // "ocr" (100) is complete, so minimal_bytes should be 200 (ner only), and full_bytes should be 200 + 400 = 600.
+    assert_eq!(list.minimal_bytes, 200);
+    assert_eq!(list.full_bytes, 600);
+
+    host.shutdown();
+}
+
+#[test]
+fn c7_models_download_rechecks_update_downloading_and_clears_flag() {
+    let dir = TempDir::new("c7-models");
+    let downloading_flag = std::sync::atomic::AtomicBool::new(false);
+    let update_flag = std::sync::atomic::AtomicBool::new(true);
+
+    let catalog = make_test_catalog(
+        "http://127.0.0.1:1/",
+        vec![Component {
+            id: "silero-vad".to_string(),
+            sets: vec!["full".to_string()],
+            bytes: 10,
+            files: vec![catalog_file("manifest.json", b"{}")],
+        }],
+    );
+
+    let ctx = br_agent::host::DownloadContext {
+        models_dir: dir.path(),
+        catalog: &catalog,
+        fast_retries: true,
+        downloading_flag: &downloading_flag,
+        update_downloading_flag: Some(&update_flag),
+    };
+
+    let err = match br_agent::host::download_models(
+        &ctx,
+        "silero-vad",
+        &mut |_| {},
+        &CancelToken::none(),
+        || {},
+    ) {
+        Err(e) => e,
+        Ok(()) => panic!("must refuse when update is downloading"),
+    };
+
+    match err {
+        AgentError::InvalidOperation(msg) => {
+            assert_eq!(msg, CommandProcessor::ERR_UPDATE_RUNNING_FOR_MODELS);
+        }
+        other => panic!("expected InvalidOperation ERR_UPDATE_RUNNING_FOR_MODELS, got {other:?}"),
+    }
+    // Flag must be cleared (not left set to true)
+    assert!(
+        !downloading_flag.load(Ordering::Acquire),
+        "models_downloading must be cleared when refused due to update download"
+    );
+}

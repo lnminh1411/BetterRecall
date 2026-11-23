@@ -326,8 +326,24 @@ pub fn get_class_name(hwnd: isize) -> String {
     }
 }
 
-pub fn get_process_image_path(pid: u32) -> Option<String> {
+pub fn get_process_image_path_and_creation(pid: u32) -> Option<(String, Option<u64>)> {
+    if pid == 0 {
+        return None;
+    }
     let h = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+    let mut creation = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    let creation_time = if unsafe {
+        GetProcessTimes(h, &mut creation, &mut exit, &mut kernel, &mut user)
+    }
+    .is_ok()
+    {
+        Some(filetime_to_u64(creation))
+    } else {
+        None
+    };
     let mut buf = vec![0u16; 1024];
     let mut size = buf.len() as u32;
     let ok = unsafe {
@@ -337,14 +353,36 @@ pub fn get_process_image_path(pid: u32) -> Option<String> {
         let _ = CloseHandle(h);
     }
     if ok.is_ok() && size > 0 {
-        Some(
+        Some((
             OsString::from_wide(&buf[..size as usize])
                 .to_string_lossy()
                 .into_owned(),
-        )
+            creation_time,
+        ))
     } else {
         None
     }
+}
+
+/// D1: the process creation time (FILETIME ticks), used with the PID as the path cache key.
+pub fn get_process_creation_time(pid: u32) -> Option<u64> {
+    if pid == 0 {
+        return None;
+    }
+    let h = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+    let mut creation = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    let ok = unsafe { GetProcessTimes(h, &mut creation, &mut exit, &mut kernel, &mut user) };
+    unsafe {
+        let _ = CloseHandle(h);
+    }
+    ok.ok().map(|_| filetime_to_u64(creation))
+}
+
+pub fn get_process_image_path(pid: u32) -> Option<String> {
+    get_process_image_path_and_creation(pid).map(|(p, _)| p)
 }
 
 pub fn is_cloaked(hwnd: isize) -> bool {

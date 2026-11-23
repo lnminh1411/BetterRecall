@@ -12,6 +12,7 @@ use std::thread::{self, JoinHandle};
 use br_contracts::{BinaryFrame, FrameError, WorkerRequest, WorkerResponse, to_json_string};
 use br_core::{CancelToken, PipeStream};
 use thiserror::Error;
+use zeroize::Zeroize;
 
 use crate::native::{liveness_now_ms, tick_count64};
 
@@ -167,6 +168,13 @@ struct WriteJob {
     header: Vec<u8>,
     payload: Vec<u8>,
     done: Arc<WriteDone>,
+}
+
+// A3: zeroize the payload Vec when the job is dropped (written, failed or disposed).
+impl Drop for WriteJob {
+    fn drop(&mut self) {
+        self.payload.zeroize();
+    }
 }
 
 struct WriteDone {
@@ -972,4 +980,19 @@ fn fill_exact(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a3_write_job_zeroizes_payload_on_drop() {
+        let job = WriteJob {
+            header: vec![1, 2, 3],
+            payload: vec![42u8; 128],
+            done: WriteDone::new(),
+        };
+        drop(job);
+    }
 }
