@@ -2141,40 +2141,59 @@ impl EncryptedStore {
         }
     }
 
+    // A2: case-folding length changes (e.g. Turkish İ) must map back to original char indices without panic
     pub fn snippet(text: &str, tokens: &[String]) -> String {
         let chars: Vec<char> = text.chars().collect();
         if chars.len() <= SNIPPET_MAX {
             return text.to_string();
         }
-        let text_lc = text.to_lowercase();
+
+        // Build lowercase char string and map each lowercase char index back to original char index
+        let mut lc_chars = Vec::new();
+        let mut lc_to_orig = Vec::new();
+        for (orig_idx, &c) in chars.iter().enumerate() {
+            for lc_c in c.to_lowercase() {
+                lc_chars.push(lc_c);
+                lc_to_orig.push(orig_idx);
+            }
+        }
+        let text_lc: String = lc_chars.into_iter().collect();
+
         let mut at_char: Option<usize> = None;
         for t in tokens {
             let t_lc = t.to_lowercase();
             if let Some(byte_pos) = text_lc.find(&t_lc) {
-                at_char = Some(text_lc[..byte_pos].chars().count());
+                let lc_idx = text_lc[..byte_pos].chars().count();
+                at_char = Some(lc_to_orig.get(lc_idx).copied().unwrap_or(chars.len()));
                 break;
             }
         }
         let Some(at) = at_char else {
             return Self::cut(text, SNIPPET_MAX);
         };
-        let start = at.saturating_sub(100);
-        let len = (SNIPPET_MAX - 2).min(chars.len() - start);
+
+        // Clamp all slice bounds so it can never underflow or panic
+        let at = at.min(chars.len());
+        let start = at.saturating_sub(100).min(chars.len());
+        let available = chars.len().saturating_sub(start);
+        let len = (SNIPPET_MAX.saturating_sub(2)).min(available);
+        let end = start.saturating_add(len).min(chars.len());
+
         let mut s = String::new();
         if start > 0 {
             s.push('…');
         }
-        for &c in &chars[start..start + len] {
+        for &c in &chars[start..end] {
             s.push(c);
         }
-        if start + len < chars.len() {
+        if end < chars.len() {
             s.push('…');
         }
         let s_chars: Vec<char> = s.chars().collect();
         if s_chars.len() <= SNIPPET_MAX {
             s
         } else {
-            s_chars[..SNIPPET_MAX].iter().collect()
+            s_chars[..SNIPPET_MAX.min(s_chars.len())].iter().collect()
         }
     }
 

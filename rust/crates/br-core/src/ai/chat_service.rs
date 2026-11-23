@@ -4,7 +4,7 @@
 //! Cloud chat service: approval cards, `search_history` tool, budget & audit, rollback (`ChatService.cs`).
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -23,7 +23,7 @@ use crate::ai::chat_share::{
 use crate::ai::cloud_describer::DescribeRedactor;
 use crate::ai::provider_http::{AiBudget, ChatFailure, ProviderErrors, ProviderHttp};
 use crate::ai::providers::ChatProviders;
-use crate::ai::providers::sse_reader::SseReadError;
+use crate::ai::providers::sse_reader::{SseReadError, SseReader};
 use crate::cancel::{CancelSource, CancelToken};
 use crate::log::Log;
 use crate::store::EncryptedStore;
@@ -137,6 +137,7 @@ struct ServiceState {
 pub struct ChatService {
     d: ChatDeps,
     gate: Mutex<ServiceState>,
+    idle_timeout_ms: AtomicU64,
 }
 
 impl ChatService {
@@ -207,7 +208,17 @@ impl ChatService {
                 purge_gen: 0,
                 stop: CancelSource::new(),
             }),
+            idle_timeout_ms: AtomicU64::new(60_000),
         }
+    }
+
+    /// E1: Shorten or configure idle timeout for testing
+    pub fn set_idle_timeout_for_test(&self, dur: Duration) {
+        self.idle_timeout_ms.store(dur.as_millis() as u64, Ordering::Release);
+    }
+
+    fn idle_timeout(&self) -> Duration {
+        Duration::from_millis(self.idle_timeout_ms.load(Ordering::Acquire))
     }
 
     fn settings(&self) -> Settings {
@@ -808,7 +819,9 @@ impl ChatService {
 
             let stream_to = CancelSource::with_timeout(ct, Self::STREAM_TIMEOUT);
             let stream_ct = stream_to.token();
-            let mut body = resp.body;
+            let body = resp.body;
+            // E1: Read body on dedicated thread with <= 250 ms wake and idle timeout
+            let mut channel_reader = SseReader::channel_reader(body, stream_ct.clone(), self.idle_timeout());
             let mut on_text = |t: &str| {
                 turn.text.push_str(t);
                 emit(ChatEvent {
@@ -817,7 +830,7 @@ impl ChatService {
                     ..empty_event()
                 });
             };
-            let result = match provider.read_stream(&mut *body, &mut on_text, &stream_ct) {
+            let result = match provider.read_stream(&mut channel_reader, &mut on_text, &stream_ct) {
                 Ok(r) => r,
                 Err(SseReadError::Cancelled) => {
                     if halt.is_cancelled() && !outer_ct.is_cancelled() {
@@ -829,6 +842,11 @@ impl ChatService {
                     }
                     audit_send(&mut turn, 0);
                     fail_turn(&mut turn, emit, &ProviderErrors::timeout(Self::STREAM_TIMEOUT));
+                    return;
+                }
+                Err(SseReadError::IdleTimeout) => {
+                    audit_send(&mut turn, 0);
+                    emit(err_event("timeout", "The AI provider stopped responding."));
                     return;
                 }
                 Err(SseReadError::Stream(ex)) => {

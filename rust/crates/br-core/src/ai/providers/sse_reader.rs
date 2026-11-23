@@ -4,6 +4,7 @@
 //! Bounded Server-Sent Events (SSE) reader (`SseReader.cs`).
 
 use std::io::Read;
+use std::time::{Duration, Instant};
 
 use crate::cancel::CancelToken;
 use crate::ai::provider_http::ProviderStreamError;
@@ -22,6 +23,17 @@ impl SseReader {
 
     pub fn too_large() -> ProviderStreamError {
         ProviderStreamError::new("invalid_request_error", Self::TOO_LARGE_MESSAGE)
+    }
+
+    /// E1: Spawns a dedicated reader thread and returns a channel-based reader.
+    /// The SSE loop polls with <= 250 ms timeout, checking the cancel token each wake,
+    /// and terminates on idle timeout.
+    pub fn channel_reader(
+        body: Box<dyn Read + Send>,
+        ct: CancelToken,
+        idle_timeout: Duration,
+    ) -> ChannelReader {
+        ChannelReader::new(body, ct, idle_timeout)
     }
 
     /// Streams SSE events `(event_name, data)` from `body`, calling `on_event` for each event.
@@ -94,6 +106,8 @@ pub enum SseReadError {
     Io(#[from] std::io::Error),
     #[error("Cancelled")]
     Cancelled,
+    #[error("The AI provider stopped responding.")]
+    IdleTimeout,
 }
 
 struct BoundedLines<'a, R: Read> {
@@ -124,7 +138,16 @@ impl<'a, R: Read> BoundedLines<'a, R> {
                 return Err(SseReadError::Cancelled);
             }
             if self.pos == self.len {
-                let n = self.reader.read(&mut self.buf)?;
+                let n = match self.reader.read(&mut self.buf) {
+                    Ok(n) => n,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted || ct.is_cancelled() => {
+                        return Err(SseReadError::Cancelled);
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                        return Err(SseReadError::IdleTimeout);
+                    }
+                    Err(e) => return Err(SseReadError::Io(e)),
+                };
                 self.pos = 0;
                 self.len = n;
                 if n == 0 {
@@ -167,6 +190,131 @@ impl<'a, R: Read> BoundedLines<'a, R> {
             }
             acc.get_or_insert_with(Vec::new)
                 .extend_from_slice(&self.buf[start..start + take]);
+        }
+    }
+}
+
+enum Chunk {
+    Data(Vec<u8>),
+    Error(std::io::Error),
+}
+
+/// A reader that consumes chunks from a dedicated background thread over a channel.
+/// Checks cancellation token and idle timeout every wake (<= 250 ms).
+pub struct ChannelReader {
+    rx: std::sync::mpsc::Receiver<Chunk>,
+    buffer: Vec<u8>,
+    pos: usize,
+    ct: CancelToken,
+    idle_timeout: Duration,
+    last_activity: Instant,
+}
+
+impl ChannelReader {
+    pub const WAKE_INTERVAL: Duration = Duration::from_millis(250);
+
+    pub fn new(
+        body: Box<dyn Read + Send>,
+        ct: CancelToken,
+        idle_timeout: Duration,
+    ) -> Self {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Chunk>(16);
+        let thread_ct = ct.clone();
+        let _ = std::thread::Builder::new()
+            .name("BetterRecall.SseReader".to_string())
+            .spawn(move || {
+                let mut mut_body = body;
+                let mut buf = vec![0u8; 8192];
+                loop {
+                    if thread_ct.is_cancelled() {
+                        break;
+                    }
+                    match mut_body.read(&mut buf) {
+                        Ok(0) => {
+                            let _ = tx.send(Chunk::Data(Vec::new()));
+                            break;
+                        }
+                        Ok(n) => {
+                            if tx.send(Chunk::Data(buf[..n].to_vec())).is_err() {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Chunk::Error(e));
+                            break;
+                        }
+                    }
+                }
+            });
+
+        Self {
+            rx,
+            buffer: Vec::new(),
+            pos: 0,
+            ct,
+            idle_timeout,
+            last_activity: Instant::now(),
+        }
+    }
+}
+
+impl Read for ChannelReader {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        if out.is_empty() {
+            return Ok(0);
+        }
+        if self.pos < self.buffer.len() {
+            let available = self.buffer.len() - self.pos;
+            let to_copy = available.min(out.len());
+            out[..to_copy].copy_from_slice(&self.buffer[self.pos..self.pos + to_copy]);
+            self.pos += to_copy;
+            return Ok(to_copy);
+        }
+
+        loop {
+            if self.ct.is_cancelled() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "cancelled",
+                ));
+            }
+            if self.last_activity.elapsed() >= self.idle_timeout {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "The AI provider stopped responding.",
+                ));
+            }
+
+            let remaining_idle = self.idle_timeout.saturating_sub(self.last_activity.elapsed());
+            let wait_dur = Self::WAKE_INTERVAL.min(remaining_idle);
+
+            match self.rx.recv_timeout(wait_dur) {
+                Ok(Chunk::Data(chunk)) => {
+                    self.last_activity = Instant::now();
+                    if chunk.is_empty() {
+                        return Ok(0);
+                    }
+                    let to_copy = chunk.len().min(out.len());
+                    out[..to_copy].copy_from_slice(&chunk[..to_copy]);
+                    if to_copy < chunk.len() {
+                        self.buffer = chunk;
+                        self.pos = to_copy;
+                    } else {
+                        self.buffer.clear();
+                        self.pos = 0;
+                    }
+                    return Ok(to_copy);
+                }
+                Ok(Chunk::Error(e)) => {
+                    return Err(e);
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    continue;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Ok(0);
+                }
+            }
         }
     }
 }
