@@ -16,16 +16,17 @@ use std::time::Duration;
 
 use br_contracts::{
     AgentStatus, AudioState, BenchDevice, BenchReport, BenchResult, CaptureBench, CaptureMeta,
-    EncoderBench, GpuInfo, HardwareInfo, ModelsList, ModelsProgress, MonitorInfo, NpuInfo,
-    QueueState, ReplayClip, StoreStats, ThumbData, UpdateProgress, UpdateStatus,
+    EncoderBench, Envelope, GpuInfo, HardwareInfo, ModelsList, ModelsProgress, MonitorInfo,
+    NpuInfo, QueueState, ReplayClip, StoreStats, ThumbData, UpdateProgress, UpdateStatus,
 };
 use br_core::{
-    AgentControl, AgentError, CancelToken, EmbedError, HttpRequest, HttpResponse, HttpTransport,
-    ListenerGuard, QueryEmbedder, Thumbnailer, TransportError,
+    AgentControl, AgentError, BlobCipher, CancelToken, ClientSession, CommandDeps,
+    CommandProcessor, EmbedError, EncryptedStore, HttpRequest, HttpResponse, HttpTransport,
+    KeyVault, ListenerGuard, PipeKind, QueryEmbedder, SettingsStore, Thumbnailer, TransportError,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 
-use super::{vec_seeded};
+use super::{TempHome, TempStore, screen, vec_info, vec_seeded};
 
 /// Unique pipe name scoped to a test (never touches default unscoped pipe names).
 pub fn test_pipe_name(tag: &str) -> String {
@@ -804,5 +805,108 @@ pub fn profile_this_pc() -> BenchReport {
         }),
         search: None,
         recommendations: Vec::new(),
+    }
+}
+
+/// Shared fixture for `bench`, `models`, and `update` verb tests.
+pub struct VerbFixture {
+    _t: TempStore,
+    pub store: Arc<EncryptedStore>,
+    pub home: TempHome,
+    pub settings: Arc<SettingsStore>,
+    pub vault: Arc<KeyVault>,
+    pub agent: Arc<FakeAgent>,
+    pub store_open: Arc<AtomicBool>,
+    pub p: Arc<CommandProcessor>,
+}
+
+impl VerbFixture {
+    pub fn new() -> Self {
+        let mut t = TempStore::new();
+        let store = Arc::new(t.store.take().unwrap());
+        let id = store
+            .add_screen_capture(&screen(
+                Utc::now() - ChronoDuration::minutes(5),
+                "chrome.exe",
+                "Acme invoice",
+                true,
+            ))
+            .unwrap();
+        store.set_embedding(&id, &vec_seeded(1), &vec_info()).unwrap();
+
+        let home = TempHome::new(Some("dpapi"));
+        let settings = Arc::new(SettingsStore::load(home.path()));
+        let s_for_vault = settings.clone();
+        let vault = Arc::new(KeyVault::new(
+            home.path(),
+            move || s_for_vault.current(),
+            None,
+            false,
+        ));
+        assert!(vault.try_load_silent().unwrap());
+
+        let agent = Arc::new(FakeAgent::new());
+        *agent.full_report.lock().unwrap() = Some(profile_this_pc());
+
+        let store_open = Arc::new(AtomicBool::new(true));
+        let st_clone = store.clone();
+        let open_clone = store_open.clone();
+        let p = Arc::new(CommandProcessor::new(CommandDeps {
+            settings: settings.clone(),
+            store: Arc::new(move || {
+                if open_clone.load(Ordering::Acquire) {
+                    Some(st_clone.clone())
+                } else {
+                    None
+                }
+            }),
+            keys: vault.clone(),
+            agent: agent.clone(),
+            embedder: Arc::new(FakeEmbedder::new()),
+            thumbnailer: Arc::new(FakeThumbs::new()),
+            purge_all: Arc::new(|_| 0),
+            purge_all_undeleted: None,
+            blobs: Some(Arc::new(BlobCipher::from_vault(vault.clone()))),
+            home: Some(home.path().to_path_buf()),
+            password: None,
+            ai_key: None,
+            describer: None,
+            redactor: None,
+            chat_http: None,
+            chat_providers: None,
+        }));
+
+        Self {
+            _t: t,
+            store,
+            home,
+            settings,
+            vault,
+            agent,
+            store_open,
+            p,
+        }
+    }
+
+    pub fn ui() -> ClientSession {
+        ClientSession::new(PipeKind::Ui, 101, r"C:\app\ui\BetterRecall.UI.exe")
+    }
+
+    pub fn pub_sess() -> ClientSession {
+        ClientSession::new(PipeKind::Public, 100, r"C:\tools\client.exe")
+    }
+
+    pub fn mcp() -> ClientSession {
+        ClientSession::new(PipeKind::Mcp, 102, r"C:\app\betterrecall-mcp.exe")
+    }
+
+    pub fn call(
+        &self,
+        s: &mut ClientSession,
+        line: &str,
+    ) -> (bool, Option<serde_json::Value>, Option<String>) {
+        let r = self.p.handle(s, line, &CancelToken::none());
+        assert!(!r.line.contains('\n'));
+        Envelope::parse(&r.line).unwrap()
     }
 }

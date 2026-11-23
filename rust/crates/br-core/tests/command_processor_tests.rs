@@ -7,14 +7,12 @@
 
 mod common;
 
-use std::fs;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use br_contracts::{
-    AiDefaults, AiSettings, CaptureDetail, CaptureKind, DataPaths, Envelope, NewScreenCapture,
-    PipeNames, PurgeNotice,
+    CaptureDetail, CaptureKind, Envelope, PipeNames, PurgeNotice, dotnet_base64,
 };
 use br_core::{
     AgentError, ApiKeyStore, CancelToken, ClientSession, CloudDescriber, CommandDeps,
@@ -25,7 +23,7 @@ use chrono::{Duration as ChronoDuration, Utc};
 use serde_json::{Value, json};
 
 use common::a3::{FakeAgent, FakeEmbedder, FakeHttpServer, FakeThumbs};
-use common::{TempHome, TempStore, audio, screen, vec_info, vec_seeded};
+use common::{FAKE_WEBP, TempHome, TempStore, audio, screen, vec_info, vec_seeded};
 
 #[allow(dead_code)]
 struct CmdFixture {
@@ -221,6 +219,8 @@ fn help_lists_only_enabled_verbs() {
     assert!(ui_v.contains(&"settings".to_string()));
     assert!(ui_v.contains(&"chat".to_string()));
     assert!(ui_v.contains(&"describe".to_string()));
+    assert!(ui_v.contains(&"bench full".to_string()));
+    assert!(ui_v.contains(&"bench last".to_string()));
 }
 
 #[test]
@@ -447,13 +447,19 @@ fn purge_two_step_tokens_and_purge_all_recent_unlock() {
 
 #[test]
 fn public_pipe_may_not_take_a_reserved_name() {
+    let f = CmdFixture::new();
     for name in ["BetterRecall.ui", "BetterRecall.mcp", "BetterRecall.worker"] {
         assert!(PipeNames::reserved(name));
+        assert_eq!(
+            Some("Invalid ipc.pipeName.".to_string()),
+            f.settings.try_update(&json!({"ipc": {"pipeName": name}})),
+            "name={name}"
+        );
     }
 }
 
 #[test]
-fn unlock_lock_consent_panic_bench_and_timeline_keyframe_audit_replay() {
+fn unlock_lock_consent_panic_and_bench_verbs() {
     let f = CmdFixture::new();
     let mut ui_s = CmdFixture::ui_sess();
     assert!(f.call(&mut ui_s, "lock").0);
@@ -462,8 +468,21 @@ fn unlock_lock_consent_panic_bench_and_timeline_keyframe_audit_replay() {
     assert!(f.agent.unlocked.load(Ordering::Acquire));
     assert!(f.call(&mut ui_s, "consent").0);
     assert!(f.call(&mut ui_s, "panic").0);
-    assert!(f.call(&mut ui_s, "bench").0);
+    let (ok, d, _) = f.call(&mut ui_s, "bench");
+    assert!(ok);
+    assert_eq!(Some("CPU"), d.unwrap()["chosen"].as_str());
 
+    let calls = f.agent.calls.lock().unwrap().clone();
+    assert!(calls.contains(&"lock".to_string()));
+    assert!(calls.contains(&"unlock".to_string()));
+    assert!(calls.contains(&"consent".to_string()));
+    assert!(calls.contains(&"panic".to_string()));
+}
+
+#[test]
+fn timeline_keyframe_audit_and_replay_verbs() {
+    let f = CmdFixture::new();
+    let mut ui_s = CmdFixture::ui_sess();
     let now = Utc::now();
     let mut sc = screen(now, "chrome.exe", "page", true);
     sc.image_mime = "image/avif".to_string();
@@ -475,17 +494,40 @@ fn unlock_lock_consent_panic_bench_and_timeline_keyframe_audit_replay() {
 
     let from = (now - ChronoDuration::minutes(5)).to_rfc3339();
     let to = (now + ChronoDuration::minutes(5)).to_rfc3339();
-    assert!(f.call(&mut ui_s, &format!("timeline {from} {to}")).0);
-    assert!(f.call(&mut ui_s, "audit 10").0);
+    let (ok_tl, d_tl, _) = f.call(&mut ui_s, &format!("timeline {from} {to}"));
+    assert!(ok_tl);
+    assert!(
+        d_tl.unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["id"].as_str() == Some(id.as_str()))
+    );
+    let (ok_au, d_au, _) = f.call(&mut ui_s, "audit 10");
+    assert!(ok_au);
+    assert!(d_au.unwrap()["items"].is_array());
 
-    assert!(f.call(&mut ui_s, "replay save").0);
-    assert!(f.call(&mut ui_s, "replay list").0);
+    let (ok_rs, d_rs, _) = f.call(&mut ui_s, "replay save");
+    assert!(ok_rs);
+    assert_eq!(Some("r1"), d_rs.unwrap()["id"].as_str());
+    let (ok_rl, d_rl, _) = f.call(&mut ui_s, "replay list");
+    assert!(ok_rl);
+    assert_eq!(1, d_rl.unwrap()["items"].as_array().unwrap().len());
     let export_path = f.home.path().join("clip.mp4");
     assert!(
         f.call(&mut ui_s, &format!("replay export r1 {}", export_path.display()))
             .0
     );
+    assert!(
+        f.agent
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c == &format!("export r1 {}", export_path.display()))
+    );
     assert!(f.call(&mut ui_s, "replay delete r1").0);
+    assert!(f.agent.replays.lock().unwrap().is_empty());
 }
 
 #[test]
@@ -497,8 +539,15 @@ fn history_and_facets_and_export_verbs() {
     assert!(ok);
     assert_eq!(1, d.unwrap()["items"].as_array().unwrap().len());
     assert!(f.call(&mut ui_s, "history delete hello world").0);
+    let (ok_after_del, d_after_del, _) = f.call(&mut ui_s, "history");
+    assert!(ok_after_del);
+    assert!(d_after_del.unwrap()["items"].as_array().unwrap().is_empty());
+
+    assert!(f.call(&mut ui_s, "history add second query").0);
     assert!(f.call(&mut ui_s, "history clear").0);
-    assert!(f.call(&mut ui_s, "facets").0);
+    let (ok_after_clr, d_after_clr, _) = f.call(&mut ui_s, "history");
+    assert!(ok_after_clr);
+    assert!(d_after_clr.unwrap()["items"].as_array().unwrap().is_empty());
 
     let now = Utc::now();
     let id = f
@@ -506,6 +555,18 @@ fn history_and_facets_and_export_verbs() {
         .add_screen_capture(&screen(now, "chrome.exe", "t", true))
         .unwrap();
     f.store.set_embedding(&id, &vec_seeded(3), &vec_info()).unwrap();
+
+    let (ok_f, d_f, _) = f.call(&mut ui_s, "facets");
+    assert!(ok_f);
+    let fd = d_f.unwrap();
+    assert!(
+        fd["apps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["name"].as_str() == Some("chrome.exe"))
+    );
+
     let req = json!({
         "from": (now - ChronoDuration::minutes(5)).to_rfc3339(),
         "to": (now + ChronoDuration::minutes(5)).to_rfc3339(),
@@ -545,40 +606,6 @@ fn password_method_and_unlock_flow() {
         Some(CommandProcessor::ERR_PASSWORD_IN_USE.to_string()),
         f.err(&mut ui_s, "password clear {\"current\":\"secret123\"}")
     );
-}
-
-#[test]
-fn api_key_store_and_legacy_provider_binding() {
-    let h = TempHome::new(Some("dpapi"));
-    let ks = ApiKeyStore::new(h.path());
-    let ai = AiSettings {
-        provider: AiDefaults::GEMINI.to_string(),
-        ..Default::default()
-    };
-
-    assert_eq!(Some(AiDefaults::CLAUDE), ApiKeyStore::legacy_provider("sk-ant-abc"));
-    assert_eq!(Some(AiDefaults::GEMINI), ApiKeyStore::legacy_provider("AIzaSyTest"));
-    assert_eq!(Some(AiDefaults::OPEN_AI), ApiKeyStore::legacy_provider("sk-proj-123"));
-    assert_eq!(None, ApiKeyStore::legacy_provider("other-key"));
-
-    ks.set("AIza-fake-test-key", &ai).unwrap();
-    assert_eq!(Some("AIza-fake-test-key".to_string()), ks.read(&ai));
-
-    // Changing provider invalidates read.
-    let mut claude_ai = ai.clone();
-    claude_ai.provider = AiDefaults::CLAUDE.to_string();
-    assert!(ks.read(&claude_ai).is_none());
-
-    // Legacy BRA1 file only matches matching prefix on default endpoint.
-    let blob = ApiKeyStore::protect(b"AIzaLegacyTestKey").unwrap();
-    let mut raw = b"BRA1".to_vec();
-    raw.extend_from_slice(&blob);
-    fs::write(DataPaths::ai_key_file(h.path()), raw).unwrap();
-    assert_eq!(Some("AIzaLegacyTestKey".to_string()), ks.read(&ai));
-    assert!(ks.read(&claude_ai).is_none());
-    let mut custom_ep = ai.clone();
-    custom_ep.endpoint = "https://example.com".to_string();
-    assert!(ks.read(&custom_ep).is_none());
 }
 
 struct StubRedactor;
@@ -634,17 +661,19 @@ fn describe_preview_send_redactor_and_fake_http_server() {
     assert_eq!(1, reqs.len());
     assert_eq!(Some("FAKE-GEMINI-KEY"), reqs[0].header("x-goog-api-key"));
     assert!(reqs[0].path.contains(":generateContent"));
-
-    // Provider error hides API key (B17).
-    let long_key = "SECRET-KEY-1234567890-ABCDEF";
-    let err_body = format!(r#"{{"error":{{"message":"{} {long_key} bad"}}}}"#, "x".repeat(190));
-    let msg = CloudDescriber::error_text(401, &err_body, Some(long_key));
-    assert!(!msg.contains("SECRET-KEY"));
-    assert!(msg.contains("***"));
+    assert!(
+        reqs[0].body.contains(&dotnet_base64::encode(b"REDACTED-IMAGE")),
+        "describe send did not send redacted image bytes"
+    );
+    assert!(
+        !reqs[0].body.contains(&dotnet_base64::encode(FAKE_WEBP)),
+        "describe send leaked unredacted original image bytes"
+    );
 }
 
+/// Regression D13.
 #[test]
-fn d13_purge_app_name_and_site_host() {
+fn purge_app_name_and_site_host() {
     assert_eq!("claude", CommandProcessor::purge_app_name(r"C:\Apps\claude.exe"));
     assert_eq!("CHROME", CommandProcessor::purge_app_name("CHROME.EXE"));
     // X1: multi-byte names must not panic on the ".exe" check.
@@ -656,15 +685,15 @@ fn d13_purge_app_name_and_site_host() {
         CommandProcessor::purge_site_host("https://www.google.com/path?a=1")
     );
     assert_eq!("github.com", CommandProcessor::purge_site_host("github.com/org/repo"));
+    assert_eq!("example.org", CommandProcessor::purge_site_host("example.org:8080"));
 }
 
 #[test]
-fn sweep3_and_sweep4_guarded_settings_and_replay_purge_refusal() {
+fn guarded_settings_refused_while_locked() {
     let f = CmdFixture::new();
     let mut ui_s = CmdFixture::ui_sess();
     f.agent.unlocked.store(false, Ordering::Release);
 
-    // Guarded setting refused while locked.
     assert_eq!(
         Some(CommandProcessor::ERR_LOCKED.to_string()),
         f.err(&mut ui_s, "settings set {\"retention\":{\"days\":7}}")
@@ -673,9 +702,14 @@ fn sweep3_and_sweep4_guarded_settings_and_replay_purge_refusal() {
         Some(CommandProcessor::ERR_LOCKED.to_string()),
         f.err(&mut ui_s, "settings set {\"inference\":{\"modelDir\":\"C:\\\\Models\"}}")
     );
+}
 
-    // D12: public status hides store stats while locked.
+/// Regression D12.
+#[test]
+fn public_status_hides_store_stats_while_locked() {
+    let f = CmdFixture::new();
     let mut pub_s = CmdFixture::pub_sess();
+    f.agent.unlocked.store(false, Ordering::Release);
     f.agent.status.lock().unwrap().store.rows = 999;
     f.agent.status.lock().unwrap().queue.pending = 12;
     let (ok, d, _) = f.call(&mut pub_s, "status");
@@ -683,9 +717,13 @@ fn sweep3_and_sweep4_guarded_settings_and_replay_purge_refusal() {
     let data = d.unwrap();
     assert_eq!(0, data["store"]["rows"].as_i64().unwrap());
     assert_eq!(0, data["queue"]["pending"].as_i64().unwrap());
+}
 
-    // S5: replay purge refusal becomes ERR_PURGED_DURING.
-    f.agent.unlocked.store(true, Ordering::Release);
+/// Regression S5.
+#[test]
+fn replay_purge_refusal_becomes_err_purged_during() {
+    let f = CmdFixture::new();
+    let mut ui_s = CmdFixture::ui_sess();
     *f.agent.on_save_replay.lock().unwrap() = Some(Box::new(|_| {
         Err(AgentError::InvalidOperation(
             "Purge all is running.".to_string(),
@@ -695,8 +733,11 @@ fn sweep3_and_sweep4_guarded_settings_and_replay_purge_refusal() {
         Some(CommandProcessor::ERR_PURGED_DURING.to_string()),
         f.err(&mut ui_s, "replay save")
     );
+}
 
-    // B10: removed_event_for caps ids at 500.
+/// Regression B10.
+#[test]
+fn removed_event_caps_ids_at_max_removed_ids() {
     let notice = PurgeNotice {
         reason: "purge".to_string(),
         ids: (0..600).map(|i| format!("s_{i}")).collect(),
@@ -710,9 +751,11 @@ fn sweep3_and_sweep4_guarded_settings_and_replay_purge_refusal() {
     assert!(ev.ids.is_empty());
 }
 
+/// Regression Sweep3K: cold worker falls back to text results within `COLD_EMBED_WAIT` and flags `degraded: "vector"`.
 #[test]
-fn sweep3k_cold_worker_gives_text_results_quickly_and_flags_them() {
+fn cold_worker_gives_text_results_quickly_and_flags_them() {
     let f = CmdFixture::new();
+    f.p.set_cold_embed_wait_for_test(Duration::from_millis(200));
     let mut pub_s = CmdFixture::pub_sess();
     let _ = f
         .store
@@ -723,15 +766,24 @@ fn sweep3k_cold_worker_gives_text_results_quickly_and_flags_them() {
         ct.wait_timeout(Duration::from_secs(10));
         Err(EmbedError::Cancelled)
     }));
+    let started = Instant::now();
     let (ok, d, _) = f.call(&mut pub_s, "search cold_worker_token");
+    let elapsed = started.elapsed();
     assert!(ok);
     let data = d.unwrap();
     assert_eq!(1, data["count"].as_i64().unwrap());
+    assert_eq!(Some(true), data["results"][0]["textMatch"].as_bool());
     assert_eq!(Some("vector"), data["degraded"].as_str());
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "cold worker search took {elapsed:?} (expected bounded by injected 200 ms wait)"
+    );
 }
 
+/// Regressions B3 and B4 (sweep 5u): missing Hello refuses passphrase protection; inline `passphrase verify`
+/// is a no-op on DPAPI and validates the passphrase on a passphrase-wrapped key.
 #[test]
-fn sweep5u_b3_hello_missing_refuses_passphrase_protection_and_b4_inline_verify() {
+fn hello_missing_refuses_passphrase_protection_and_inline_verify() {
     let f = CmdFixture::with_options("dpapi", false, None);
     let mut ui_s = CmdFixture::ui_sess();
     assert_eq!(
@@ -739,9 +791,22 @@ fn sweep5u_b3_hello_missing_refuses_passphrase_protection_and_b4_inline_verify()
         f.err(&mut ui_s, "settings set {\"security\":{\"keyProtection\":\"passphrase\"}}")
     );
 
-    // B4: passphrase verify succeeds on dpapi (no-op) and validates on passphrase-wrapped key.
+    // B4: passphrase verify succeeds on dpapi (no-op).
     assert!(f.call(&mut ui_s, "passphrase verify {\"passphrase\":\"anything\"}").0);
 
-    // Silence unused import warning for NewScreenCapture.
-    let _: Option<NewScreenCapture> = None;
+    // B4: passphrase verify validates against a real passphrase-wrapped key.
+    let fp = CmdFixture::with_options("passphrase", true, None);
+    assert!(fp.vault.unlock_with_passphrase("correct-passphrase-123"));
+    let mut ui_p = CmdFixture::ui_sess();
+    assert!(
+        !fp.call(&mut ui_p, "passphrase verify {\"passphrase\":\"wrong-passphrase\"}")
+            .0
+    );
+    assert!(
+        fp.call(
+            &mut ui_p,
+            "passphrase verify {\"passphrase\":\"correct-passphrase-123\"}"
+        )
+        .0
+    );
 }

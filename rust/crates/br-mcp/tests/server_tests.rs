@@ -345,10 +345,14 @@ fn stale_server_not_relayed_answers_updated_and_exits_75() {
 
 #[test]
 fn stale_server_relayed_exits_75_while_idle() {
-    struct BlockingReader(mpsc::Receiver<Vec<u8>>);
+    struct BlockingReader {
+        rx: mpsc::Receiver<Vec<u8>>,
+        entered: Arc<AtomicBool>,
+    }
     impl Read for BlockingReader {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            match self.0.recv() {
+            self.entered.store(true, Ordering::Release);
+            match self.rx.recv() {
                 Ok(data) => {
                     let n = data.len().min(buf.len());
                     buf[..n].copy_from_slice(&data[..n]);
@@ -360,6 +364,7 @@ fn stale_server_relayed_exits_75_while_idle() {
     }
 
     let stale_flag = Arc::new(AtomicBool::new(false));
+    let reader_entered = Arc::new(AtomicBool::new(false));
     struct ToggleStale(Arc<AtomicBool>);
     impl StaleState for ToggleStale {
         fn is_stale_now(&self) -> bool {
@@ -374,18 +379,30 @@ fn stale_server_relayed_exits_75_while_idle() {
     }
 
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    let (done_tx, done_rx) = mpsc::channel::<()>();
     let flag_bg = Arc::clone(&stale_flag);
-    thread::spawn(move || {
-        thread::sleep(Duration::from_millis(80));
+    let entered_bg = Arc::clone(&reader_entered);
+    let bg = thread::spawn(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !entered_bg.load(Ordering::Acquire) {
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
         flag_bg.store(true, Ordering::Release);
-        thread::sleep(Duration::from_millis(200));
+        // Keep stdin open until the test finishes (10 s watchdog prevents hang on failure).
+        let _ = done_rx.recv_timeout(Duration::from_secs(10));
         drop(tx);
     });
 
     let mut server = McpServer::new(|_| PipeAnswer::ok("{}"));
     let mut out = Vec::new();
     let code = McpHost::run(
-        BufReader::new(BlockingReader(rx)),
+        BufReader::new(BlockingReader {
+            rx,
+            entered: reader_entered,
+        }),
         &mut out,
         &mut server,
         &ToggleStale(stale_flag),
@@ -393,15 +410,31 @@ fn stale_server_relayed_exits_75_while_idle() {
             poll_interval: Duration::from_millis(25),
         },
     );
+    let _ = done_tx.send(());
+    let _ = bg.join();
     assert_eq!(code, InstallLayout::MCP_RESTART_EXIT_CODE);
     assert!(out.is_empty());
 }
 
 #[test]
 fn is_server_role_detects_agent_exe() {
+    // Same fallback order as br-core's test_tmp_root; never the system temp folder.
     let base = std::env::var("BR_TEST_TMP")
+        .ok()
+        .filter(|v| !v.is_empty())
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from(r"K:\scratch\br-rust\tmp"));
+        .or_else(|| {
+            std::env::var("CARGO_TARGET_DIR")
+                .ok()
+                .filter(|v| !v.is_empty())
+                .map(|d| std::path::PathBuf::from(d).join("test-tmp"))
+        })
+        .unwrap_or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().and_then(|d| d.parent()).map(|d| d.join("test-tmp")))
+                .expect("unable to determine cargo target dir for test temp folder")
+        });
     let dir = base.join(format!(
         "mcp-role-{}-{}",
         std::process::id(),

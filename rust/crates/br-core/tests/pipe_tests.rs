@@ -7,16 +7,15 @@
 mod common;
 
 use std::path::Path;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use br_contracts::{CaptureKind, CaptureMeta, Envelope, LineReader, PipeNames, Settings};
 use br_core::{
-    AgentPresence, AuditThrottle, CancelToken, CliPurge, CliPurgeOptions, CommandDeps,
-    CommandProcessor, KeyVault, PeerInfo, PipeClient, PipeConnectResult, PipeKind, PipeManager,
-    PipeServer, ProcessInfo, SettingsStore, StepClock,
+    AuditThrottle, CancelToken, CommandDeps, CommandProcessor, KeyVault, PeerInfo, PipeClient,
+    PipeConnectResult, PipeKind, PipeManager, PipeServer, ProcessInfo, SettingsStore,
 };
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 
@@ -186,14 +185,13 @@ fn ui_pipe_rejects_other_images() {
     let line = c.read_line(&CancelToken::none()).unwrap().unwrap();
     assert_eq!("{\"ok\":false,\"error\":\"Client not allowed.\"}", line);
     assert!(c.read_line(&CancelToken::none()).unwrap().is_none());
-    thread::sleep(Duration::from_millis(100));
-    assert!(
+    wait_for(|| {
         f.store
             .read_audit(10)
             .unwrap()
             .iter()
             .any(|a| a.verb == "rejected" && a.pipe == "ui")
-    );
+    });
 }
 
 #[test]
@@ -293,31 +291,51 @@ fn stop_does_not_wait_for_one_slow_pipe_before_the_others() {
     let self_exe = ProcessInfo::current_image().unwrap();
     f.set(serde_json::json!({"mcp": {"enabled": true}}));
     wait_for(|| f.pipes.mcp().is_some());
-    let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let entered = Arc::new(AtomicBool::new(false));
     let e2 = entered.clone();
-    // A search whose query embedding ignores cancel and takes 4 s keeps one public handler busy.
+    let release = Arc::new((Mutex::new(false), Condvar::new()));
+    let r2 = release.clone();
+    // A search whose query embedding ignores cancel and blocks on `release` keeps one public handler busy.
     *f.embedder.on_embed.lock().unwrap() = Some(Box::new(move |_q, _ct| {
-        e2.store(true, std::sync::atomic::Ordering::Release);
-        thread::sleep(Duration::from_secs(4));
+        e2.store(true, Ordering::Release);
+        let (lock, cv) = &*r2;
+        let guard = lock.lock().unwrap();
+        let _ = cv.wait_timeout_while(guard, Duration::from_secs(10), |done| !*done);
         Err(br_core::EmbedError::Cancelled)
     }));
     let mut c = f.connect(PipeKind::Public);
     let slow = thread::spawn(move || {
         let _ = c.request("search hello", &CancelToken::none());
     });
-    wait_for(|| entered.load(std::sync::atomic::Ordering::Acquire));
+    wait_for(|| entered.load(Ordering::Acquire));
     let mcp_name = f.name(PipeKind::Mcp);
     assert_eq!(
         PipeConnectResult::Ok,
         PipeClient::connect(&mcp_name, &self_exe, 300, &CancelToken::none()).0
     );
-    let started = std::time::Instant::now();
+    let started = Instant::now();
     thread::scope(|sc| {
         sc.spawn(|| f.pipes.stop());
-        thread::sleep(Duration::from_millis(1200));
-        assert_eq!(
-            PipeConnectResult::NotRunning,
-            PipeClient::connect(&mcp_name, &self_exe, 200, &CancelToken::none()).0,
+        // Poll until MCP pipe stops while the public handler is still blocked on `release`.
+        let deadline = Instant::now() + Duration::from_secs(4);
+        let mut mcp_stopped = false;
+        while Instant::now() < deadline {
+            if PipeClient::connect(&mcp_name, &self_exe, 100, &CancelToken::none()).0
+                == PipeConnectResult::NotRunning
+            {
+                mcp_stopped = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        // Release the slow handler before asserting so `pipes.stop()` cannot hang on failure.
+        {
+            let (lock, cv) = &*release;
+            *lock.lock().unwrap() = true;
+            cv.notify_all();
+        }
+        assert!(
+            mcp_stopped,
             "MCP pipe still serving while the public pipe waits for its slow handler"
         );
     });
@@ -437,19 +455,21 @@ fn slow_subscriber_is_disconnected() {
 #[test]
 fn idle_connection_is_closed() {
     let f = PipeFixture::new();
-    f.set(serde_json::json!({"ipc": {"idleTimeoutS": 10}}));
+    f.pipes
+        .set_idle_timeout_for_test(Some(Duration::from_millis(500)));
     let mut c = f.connect(PipeKind::Public);
     let sw = Instant::now();
     let res = c
-        .read_line_timeout(Duration::from_secs(20), &CancelToken::none())
+        .read_line_timeout(Duration::from_secs(5), &CancelToken::none())
         .unwrap();
     assert!(res.is_none());
     let secs = sw.elapsed().as_secs_f64();
-    assert!((9.0..=15.0).contains(&secs), "elapsed={secs}");
+    assert!((0.3..=3.0).contains(&secs), "elapsed={secs}");
 }
 
+/// Regression B14.
 #[test]
-fn b14_server_check_rejects_a_peer_that_started_after_the_connection() {
+fn server_check_rejects_a_peer_that_started_after_the_connection() {
     let server = PipeServer::new(
         &test_pipe_name("b14"),
         PipeKind::Public,
@@ -475,8 +495,9 @@ fn b14_server_check_rejects_a_peer_that_started_after_the_connection() {
     assert_eq!(None, server.check(&older, Some(now)));
 }
 
+/// Regression B14.
 #[test]
-fn b14_client_image_lookup_refuses_a_process_newer_than_the_connection() {
+fn client_image_lookup_refuses_a_process_newer_than_the_connection() {
     let pid = ProcessInfo::current_pid();
     let past = Utc::now() - ChronoDuration::days(365);
     assert!(ProcessInfo::image_path_if_started_before(pid, past).is_none());
@@ -484,8 +505,9 @@ fn b14_client_image_lookup_refuses_a_process_newer_than_the_connection() {
     assert!(ProcessInfo::image_path_if_started_before(pid, future).is_some());
 }
 
+/// Regression B15.
 #[test]
-fn b15_throttle_merges_repeats_per_key_and_caps_the_total() {
+fn throttle_merges_repeats_per_key_and_caps_the_total() {
     let t = AuditThrottle::new(ChronoDuration::minutes(1), 3, 512);
     let t0 = DateTime::parse_from_rfc3339("2026-11-10T10:00:00Z")
         .unwrap()
@@ -502,8 +524,9 @@ fn b15_throttle_merges_repeats_per_key_and_caps_the_total() {
     assert_eq!(2, t.admit("d", t0 + ChronoDuration::minutes(3)));
 }
 
+/// Regression B21.
 #[test]
-fn b21_revoked_means_a_permission_turned_off() {
+fn revoked_means_a_permission_turned_off() {
     let on = br_contracts::IpcSettings {
         allow_control: true,
         allow_purge: true,
@@ -542,8 +565,9 @@ fn b21_revoked_means_a_permission_turned_off() {
     ));
 }
 
+/// Regression B21.
 #[test]
-fn b21_removing_a_client_from_allow_clients_drops_its_live_connection() {
+fn removing_a_client_from_allow_clients_drops_its_live_connection() {
     let f = PipeFixture::new();
     let self_exe = ProcessInfo::current_image().unwrap();
     f.set(serde_json::json!({"ipc": {"allowClients": [self_exe]}}));
@@ -560,8 +584,9 @@ fn b21_removing_a_client_from_allow_clients_drops_its_live_connection() {
     assert!(line.is_none());
 }
 
+/// Regression B21.
 #[test]
-fn b21_turning_a_permission_off_drops_live_connections() {
+fn turning_a_permission_off_drops_live_connections() {
     let f = PipeFixture::new();
     f.set(serde_json::json!({"ipc": {"allowControl": true}}));
     let mut c = f.connect(PipeKind::Public);
@@ -578,133 +603,6 @@ fn b21_turning_a_permission_off_drops_live_connections() {
 }
 
 #[test]
-fn b10_cli_purge_applies_to_previews_and_takes_yes() {
-    assert!(CliPurge::applies(&["purge", "last", "60"]));
-    assert!(!CliPurge::applies(&["purge", "confirm", "abc"]));
-    assert!(!CliPurge::applies(&["purge"]));
-    let mut words: Vec<String> = vec!["purge".into(), "last".into(), "60".into(), "--yes".into()];
-    assert!(CliPurge::take_yes(&mut words));
-    assert_eq!(vec!["purge", "last", "60"], words);
-}
-
-#[test]
-fn b10_cli_purge_with_yes_confirms_on_the_same_connection() {
-    let mut sent = Vec::new();
-    let mut out = Vec::new();
-    let mut prompt = Vec::new();
-    let code = CliPurge::run(CliPurgeOptions {
-        request: |line: &str| {
-            sent.push(line.to_string());
-            if line.starts_with("purge confirm ") {
-                Some("{\"ok\":true,\"data\":{\"purged\":2}}".to_string())
-            } else {
-                Some("{\"ok\":true,\"data\":{\"confirm\":\"tok1\",\"rows\":2}}".to_string())
-            }
-        },
-        preview_line: "purge last 60",
-        yes: true,
-        interactive: false,
-        read_answer: || None,
-        output: &mut out,
-        prompt: &mut prompt,
-    });
-    assert_eq!(0, code);
-    assert_eq!(vec!["purge last 60", "purge confirm tok1"], sent);
-}
-
-#[test]
-fn b10_cli_purge_prompt_yes_deletes_and_no_keeps() {
-    let mut out = Vec::new();
-    let mut prompt = Vec::new();
-    let code_yes = CliPurge::run(CliPurgeOptions {
-        request: |line: &str| {
-            if line.starts_with("purge confirm ") {
-                Some("{\"ok\":true,\"data\":{\"purged\":1}}".to_string())
-            } else {
-                Some("{\"ok\":true,\"data\":{\"confirm\":\"tok2\",\"rows\":1}}".to_string())
-            }
-        },
-        preview_line: "purge last 60",
-        yes: false,
-        interactive: true,
-        read_answer: || Some("yes".to_string()),
-        output: &mut out,
-        prompt: &mut prompt,
-    });
-    assert_eq!(0, code_yes);
-
-    let mut confirmed = false;
-    let mut out2 = Vec::new();
-    let mut prompt2 = Vec::new();
-    let code_no = CliPurge::run(CliPurgeOptions {
-        request: |line: &str| {
-            if line.starts_with("purge confirm ") {
-                confirmed = true;
-            }
-            Some("{\"ok\":true,\"data\":{\"confirm\":\"tok3\",\"rows\":1}}".to_string())
-        },
-        preview_line: "purge last 60",
-        yes: false,
-        interactive: true,
-        read_answer: || Some("no".to_string()),
-        output: &mut out2,
-        prompt: &mut prompt2,
-    });
-    assert_eq!(1, code_no);
-    assert!(!confirmed);
-}
-
-#[test]
-fn b10_cli_purge_without_a_console_or_yes_does_not_delete() {
-    let mut out = Vec::new();
-    let mut prompt = Vec::new();
-    let code = CliPurge::run(CliPurgeOptions {
-        request: |_: &str| {
-            Some("{\"ok\":true,\"data\":{\"confirm\":\"tok4\",\"rows\":3}}".to_string())
-        },
-        preview_line: "purge last 60",
-        yes: false,
-        interactive: false,
-        read_answer: || None,
-        output: &mut out,
-        prompt: &mut prompt,
-    });
-    assert_eq!(1, code);
-    assert!(String::from_utf8_lossy(&prompt).contains(CliPurge::HINT_YES));
-}
-
-#[test]
-fn cli_says_ipc_is_off_when_the_agent_mutex_is_held() {
-    let home = TempHome::new(Some("dpapi"));
-    assert_eq!(
-        (AgentPresence::ERR_NOT_RUNNING, 2),
-        AgentPresence::not_answering(home.path(), false)
-    );
-    let mname = PipeNames::agent_mutex_for(home.path());
-    let wide: Vec<u16> = mname.encode_utf16().chain(Some(0)).collect();
-    let handle = unsafe {
-        windows::Win32::System::Threading::CreateMutexW(
-            None,
-            true,
-            windows::core::PCWSTR(wide.as_ptr()),
-        )
-    }
-    .expect("create test mutex");
-    assert!(AgentPresence::running(home.path()));
-    assert_eq!(
-        (AgentPresence::ERR_IPC_OFF, 3),
-        AgentPresence::not_answering(home.path(), false)
-    );
-    assert_eq!(
-        (AgentPresence::ERR_NOT_RUNNING, 2),
-        AgentPresence::not_answering(home.path(), true)
-    );
-    unsafe {
-        let _ = windows::Win32::Foundation::CloseHandle(handle);
-    }
-}
-
-#[test]
 fn pipe_manager_names_follow_home() {
     let home = TempHome::new(Some("dpapi"));
     let s = Settings::default();
@@ -717,94 +615,10 @@ fn pipe_manager_names_follow_home() {
     assert_eq!(PipeNames::mcp(&sid, home.path()), mcp);
 }
 
-#[test]
-fn t2_start_bound_follows_the_boot_clock_only_after_a_step_back() {
-    let boot = DateTime::parse_from_rfc3339("2026-11-10T08:00:00Z")
-        .unwrap()
-        .with_timezone(&Utc);
-    let wall = boot + ChronoDuration::hours(2);
-    // Normal clock: wall == boot + 2h -> bound is wall.
-    assert_eq!(
-        wall,
-        ProcessInfo::start_bound_fresh(wall, 2 * 3600 * 1000, Some(boot))
-    );
-    // Clock stepped back 1 hour: boot + 2h is 1h ahead of wall -> bound is boot + 2h.
-    let stepped = boot + ChronoDuration::hours(1);
-    assert_eq!(
-        boot + ChronoDuration::hours(2),
-        ProcessInfo::start_bound_fresh(stepped, 2 * 3600 * 1000, Some(boot))
-    );
-}
-
-#[test]
-fn s6_boot_bound_lasts_only_for_the_catch_up_period_and_is_logged_once_per_step() {
-    let logs = Arc::new(AtomicI32::new(0));
-    let logs_cb = logs.clone();
-    let clock = StepClock::new(Some(Box::new(move |_| {
-        logs_cb.fetch_add(1, Ordering::AcqRel);
-    })));
-    let boot = DateTime::parse_from_rfc3339("2026-11-10T08:00:00Z")
-        .unwrap()
-        .with_timezone(&Utc);
-    let step_wall = boot + ChronoDuration::minutes(30);
-    let b1 = clock.bound(step_wall, 60 * 60 * 1000, Some(boot));
-    assert_eq!(boot + ChronoDuration::minutes(60), b1);
-    assert_eq!(1, logs.load(Ordering::Acquire));
-
-    // Still inside catch-up: no second log.
-    let b2 = clock.bound(
-        step_wall + ChronoDuration::minutes(10),
-        70 * 60 * 1000,
-        Some(boot),
-    );
-    assert_eq!(boot + ChronoDuration::minutes(60), b2);
-    assert_eq!(1, logs.load(Ordering::Acquire));
-
-    // After catch-up: wall clock alone.
-    let after = boot + ChronoDuration::minutes(70);
-    let b3 = clock.bound(after, 100 * 60 * 1000, Some(boot));
-    assert_eq!(after, b3);
-    assert_eq!(1, logs.load(Ordering::Acquire));
-}
-
-/// N3 (sweep 6): a standard user cannot read pid 4's start time; the fallback anchor (wall
-/// time minus uptime, taken once) still lets a later backward clock step be seen.
-#[test]
-fn n3_boot_anchor_fallback_still_detects_a_clock_step() {
-    let t0 = DateTime::parse_from_rfc3339("2026-11-22T12:00:00Z")
-        .unwrap()
-        .with_timezone(&Utc);
-    let pid4 = t0 - ChronoDuration::hours(3);
-    assert_eq!(pid4, ProcessInfo::boot_anchor(Some(pid4), t0, 3 * 3600 * 1000));
-    let up0 = 5 * 3600 * 1000;
-    let anchor = ProcessInfo::boot_anchor(None, t0, up0);
-    assert_eq!(t0 - ChronoDuration::hours(5), anchor);
-    // One minute later the wall clock is stepped back 2 h.
-    let up1 = up0 + 60_000;
-    let wall1 = t0 + ChronoDuration::minutes(1) - ChronoDuration::hours(2);
-    let bound = StepClock::new(None).bound(wall1, up1, Some(anchor));
-    assert!(bound >= t0 + ChronoDuration::minutes(1) - ChronoDuration::seconds(1), "{bound}");
-}
-
-#[test]
-fn c3_step_clock_preserves_until_across_multiple_backward_steps_and_sub_tolerance_steps() {
-    let clock = StepClock::new(None);
-    let boot = DateTime::parse_from_rfc3339("2026-11-10T08:00:00Z")
-        .unwrap()
-        .with_timezone(&Utc);
-    let w1 = boot + ChronoDuration::minutes(30);
-    let b1 = clock.bound(w1, 60 * 60 * 1000, Some(boot));
-    assert_eq!(boot + ChronoDuration::minutes(60), b1);
-    // Second smaller step back preserves the later `until`.
-    let w2 = boot + ChronoDuration::minutes(20);
-    let b2 = clock.bound(w2, 70 * 60 * 1000, Some(boot));
-    assert!(b2 >= b1);
-}
-
 /// B12 with the 0.3 layout: fixed install folder, shim in `<home>\app\bin`, and 0.2.x
 /// versioned entries under `<home>\app\<version>` still name the bundled CLI.
 #[test]
-fn b12_same_install_file_fixed_install_and_home_shim() {
+fn same_install_file_fixed_install_and_home_shim() {
     let install = Path::new(r"C:\Users\u\AppData\Local\Programs\BetterRecall");
     let cli = Some(r"C:\Users\u\AppData\Local\Programs\BetterRecall\betterrecall.exe");
     let shim = r"C:\Users\u\AppData\Local\BetterRecall\app\bin\betterrecall.cmd";

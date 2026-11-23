@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use br_contracts::{AuditEntry, DataPaths, InstallLayout, IpcSettings, PipeNames, Settings};
 use chrono::Utc;
@@ -121,6 +122,11 @@ impl PipeManager {
             .unwrap_or_else(|e| e.into_inner())
             .mcp
             .clone()
+    }
+
+    /// For tests: override the non-UI pipe idle-connection timeout (`None` uses `ipc.idleTimeoutS`).
+    pub fn set_idle_timeout_for_test(&self, dur: Option<Duration>) {
+        self.inner.processor.set_idle_timeout_for_test(dur);
     }
 
     pub fn on_clients_changed(&self, cb: impl Fn(i32) + Send + Sync + 'static) {
