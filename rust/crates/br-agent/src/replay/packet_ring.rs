@@ -423,10 +423,13 @@ impl RingSnapshot {
 impl Drop for RingSnapshot {
     fn drop(&mut self) {
         if !self.buf.is_empty() {
+            // D3: save len and ptr before zeroize() empties self.buf
+            let len = self.buf.len();
+            let ptr = self.buf.as_ptr();
             self.buf.zeroize();
             if self.locked {
                 unsafe {
-                    let _ = VirtualUnlock(self.buf.as_ptr().cast::<c_void>(), self.buf.len());
+                    let _ = VirtualUnlock(ptr.cast::<c_void>(), len);
                 }
             }
         }

@@ -126,6 +126,18 @@ pub struct RedactionResult {
 /// Pure sensitive-text redactor over OCR lines (`Redactor.cs`).
 pub struct Redactor;
 
+// A1: convert UTF-16 code unit offset to char index in a character slice
+fn utf16_offset_to_char_index(chars: &[char], utf16_offset: usize) -> usize {
+    let mut current_u16 = 0usize;
+    for (char_idx, &c) in chars.iter().enumerate() {
+        if current_u16 >= utf16_offset {
+            return char_idx;
+        }
+        current_u16 += c.len_utf16();
+    }
+    chars.len()
+}
+
 impl Redactor {
     pub const PAD: i32 = 2;
 
@@ -225,9 +237,13 @@ impl Redactor {
                     if !keep_ent {
                         continue;
                     }
-                    let mut s = (e.start.max(0) as usize).min(char_len);
-                    let mut en = ((e.start.saturating_add(e.length)).max(0) as usize)
-                        .clamp(s, char_len);
+                    // A1: worker sends start/length in UTF-16 units; convert to char indices
+                    let u16_start = e.start.max(0) as usize;
+                    let u16_end = (e.start.saturating_add(e.length)).max(0) as usize;
+                    let s_char = utf16_offset_to_char_index(&chars, u16_start).min(char_len);
+                    let en_char = utf16_offset_to_char_index(&chars, u16_end).clamp(s_char, char_len);
+                    let mut s = s_char;
+                    let mut en = en_char;
                     while s < en && chars[s].is_whitespace() {
                         s += 1;
                     }

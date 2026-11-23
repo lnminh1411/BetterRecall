@@ -75,13 +75,22 @@ pub fn list_models(models_dir: &Path, catalog: &Catalog, downloading: bool) -> M
         })
         .collect();
 
+    // F2: count only components not already installed and complete
+    let needed_bytes = |mode: ModelSet| -> u64 {
+        catalog
+            .components_for(mode)
+            .into_iter()
+            .filter(|c| states.get(&c.id).copied() != Some(ComponentState::Complete))
+            .fold(0u64, |acc, c| acc.saturating_add(c.bytes))
+    };
+
     ModelsList {
         models_dir: models_dir.to_string_lossy().into_owned(),
         repo: catalog.repo.clone(),
         revision: catalog.revision.clone(),
         components,
-        full_bytes: catalog.bytes_for(ModelSet::Full),
-        minimal_bytes: catalog.bytes_for(ModelSet::Minimal),
+        full_bytes: needed_bytes(ModelSet::Full),
+        minimal_bytes: needed_bytes(ModelSet::Minimal),
         free_bytes: available_disk_space(models_dir).unwrap_or(0),
         downloading,
     }
@@ -207,6 +216,7 @@ pub struct DownloadContext<'a> {
     pub catalog: &'a Catalog,
     pub fast_retries: bool,
     pub downloading_flag: &'a AtomicBool,
+    pub update_downloading_flag: Option<&'a AtomicBool>,
 }
 
 /// Runs a single model download against `ctx.catalog` into `ctx.models_dir`, streaming throttled
@@ -237,6 +247,15 @@ pub fn download_models(
     let _guard = DownloadFlagGuard {
         flag: ctx.downloading_flag,
     };
+
+    // C7: re-check update_downloading; if set, clear models_downloading and refuse
+    if let Some(update_flag) = ctx.update_downloading_flag
+        && update_flag.load(Ordering::Acquire)
+    {
+        return Err(AgentError::InvalidOperation(
+            CommandProcessor::ERR_UPDATE_RUNNING_FOR_MODELS.to_string(),
+        ));
+    }
 
     AgentLog::info(&format!("models download start: target={target}"));
 

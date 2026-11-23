@@ -21,7 +21,8 @@ use br_agent::native::Rect;
 use br_agent::replay::{
     AnnexB, Av1, CanvasBlit, CanvasLayout, CursorDrawParams, CursorPainter, CursorShape,
     DirtyMapper, EncoderPlan, EncoderWatchdog, Fmp4Writer, FramePacer, MonitorPlacement, MuxTrack,
-    Nv12Mut, Nv12Ref, PacketRing, ReplayBlobCipher, ReplayBlobWriter, ReplayEngine, ReplayLibrary,
+    Nv12Mut, Nv12Ref, PacketRing, ReplayBlobCipher, ReplayBlobWriter, ReplayEngine,
+    ReplayEngineConfig, ReplayLibrary,
     ReplayRate, ReplaySampler, ReplayScaling, Sample, TrackKind, VideoCodec, VideoStream,
     dirty_to_dest,
 };
@@ -2004,4 +2005,37 @@ fn encoder_plan_candidates_selection_order() {
         assert_eq!(codec, candidates_e2[i].codec);
         assert_eq!(api, candidates_e2[i].api);
     }
+}
+
+#[test]
+fn ring_snapshot_drop_unlocks_with_original_length() {
+    let ring = PacketRing::new(64 * 1024, Duration::from_secs(10), true).unwrap();
+    let snap = ring.snapshot(0);
+    drop(snap);
+}
+
+#[test]
+fn replay_disable_clears_streams_and_refuses_save() {
+    let devices = Arc::new(br_agent::capture::GpuDeviceCache::new());
+    let eng = ReplayEngine::new(
+        devices,
+        Arc::new(Vec::new),
+        Arc::new(Vec::new),
+    );
+    eng.configure(ReplayEngineConfig {
+        enabled: false,
+        layout: "allMonitors".to_string(),
+        fps: 30,
+        kbps: 4000,
+        seconds: 30,
+        encoder: "auto".to_string(),
+        encoder_adapter: "auto".to_string(),
+        resolution: "source".to_string(),
+        scale_percent: 100,
+        lock_memory: false,
+    });
+    let mut out = Vec::new();
+    let res = eng.save(&mut out, None, 30);
+    assert_eq!(res.unwrap_err(), "Instant replay is off.");
+    assert_eq!(eng.ring_bytes(), 0);
 }
