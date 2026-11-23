@@ -198,6 +198,7 @@ fn sanitize_error(err: &FetchError) -> String {
         FetchError::Cancelled => "Download cancelled.".to_string(),
         FetchError::Io { context, .. } => format!("Disk error while {context}."),
         FetchError::Catalog(msg) => format!("Invalid model catalog: {msg}"),
+        FetchError::InUse => "Another download is writing this file.".to_string(),
     }
 }
 

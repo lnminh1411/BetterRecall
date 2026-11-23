@@ -22,11 +22,12 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use windows::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED};
+use windows::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::Storage::FileSystem::FILE_SHARE_READ;
 use windows::Win32::System::Threading::{
     CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CreateProcessW, DETACHED_PROCESS,
-    PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTUPINFOW,
+    GetExitCodeProcess, INFINITE, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTUPINFOW,
+    WaitForSingleObject,
 };
 use windows::core::{PCWSTR, PWSTR};
 
@@ -56,7 +57,21 @@ const HASH_BUF_LEN: usize = 1024 * 1024;
 const STATE_FILE_NAME: &str = "state.json";
 
 /// Test launcher hook invoked instead of `CreateProcessW` so tests never start a process.
-pub type InstallerLauncher = Arc<dyn Fn(&Path, &[String]) -> io::Result<()> + Send + Sync>;
+pub type InstallerLauncher =
+    Arc<dyn Fn(&Path, &[String]) -> io::Result<Option<HANDLE>> + Send + Sync>;
+
+// C1: RAII wrapper for installer process handle
+struct ProcessHandle(HANDLE);
+unsafe impl Send for ProcessHandle {}
+impl Drop for ProcessHandle {
+    fn drop(&mut self) {
+        if !self.0.is_invalid() && !self.0.0.is_null() {
+            unsafe {
+                let _ = CloseHandle(self.0);
+            }
+        }
+    }
+}
 
 /// Test-only seam configuring feed URL, allowed prefix, verifying key, version, retries, and launcher.
 /// Production never reads any of these from settings, environment, or files.
@@ -90,6 +105,46 @@ struct PersistedState {
     latest: Option<PersistedLatest>,
     #[serde(default)]
     downloaded: Option<String>,
+    // C1: Backoff and failure tracking
+    #[serde(default)]
+    failed_version: Option<String>,
+    #[serde(default)]
+    failed_count: u32,
+    #[serde(default, with = "br_contracts::utc_timestamp::opt")]
+    failed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    last_install_handled_utc: Option<String>,
+}
+
+impl PersistedState {
+    fn record_failure(&mut self, version: &str, now: DateTime<Utc>) {
+        if self.failed_version.as_deref() == Some(version) {
+            self.failed_count = self.failed_count.saturating_add(1);
+        } else {
+            self.failed_version = Some(version.to_string());
+            self.failed_count = 1;
+        }
+        self.failed_at = Some(now);
+    }
+}
+
+// C1: Installer report written by installer slice to last-install.json
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LastInstallReport {
+    version: String,
+    exit_code: i32,
+    utc: String,
+}
+
+// C1: Backoff: 1 h doubling per failure, capped at 24 h
+fn failure_backoff(failed_count: u32) -> ChronoDuration {
+    if failed_count == 0 {
+        return ChronoDuration::zero();
+    }
+    let shift = (failed_count - 1).min(30);
+    let hours = (1i64 << shift).min(24);
+    ChronoDuration::hours(hours)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,6 +205,7 @@ enum CheckOutcome {
     Verified(Box<VerifiedRelease>),
     Rejected(String),
     Offline,
+    Cancelled,
 }
 
 struct EffectiveConfig {
@@ -171,7 +227,7 @@ struct RuntimeState {
 pub struct UpdateManager {
     home: PathBuf,
     test_config: Mutex<Option<UpdateTestConfig>>,
-    runtime: Mutex<RuntimeState>,
+    runtime: Arc<Mutex<RuntimeState>>,
     update_downloading: Arc<AtomicBool>,
     models_downloading: Arc<AtomicBool>,
 }
@@ -182,20 +238,59 @@ impl UpdateManager {
         update_downloading: Arc<AtomicBool>,
         models_downloading: Arc<AtomicBool>,
     ) -> Self {
-        let persisted = load_state(&updates_state_path(&home));
-        let initial_state = if persisted.downloaded.is_some() {
+        let mut persisted = load_state(&updates_state_path(&home));
+        let mut initial_state = if persisted.downloaded.is_some() {
             "ready".to_string()
         } else {
             "idle".to_string()
         };
+        let mut initial_error = None;
+
+        // C1: Read last-install.json at start
+        let last_install_path = DataPaths::updates_dir(&home).join("last-install.json");
+        if let Ok(content) = fs::read_to_string(&last_install_path)
+            && let Ok(report) = serde_json::from_str::<LastInstallReport>(&content)
+        {
+            let is_newer = match (
+                persisted
+                    .last_install_handled_utc
+                    .as_deref()
+                    .and_then(|s| DateTime::parse_from_rfc3339(s).ok()),
+                DateTime::parse_from_rfc3339(&report.utc).ok(),
+            ) {
+                (Some(prev), Some(curr)) => curr > prev,
+                (None, Some(_)) => true,
+                _ => persisted.last_install_handled_utc.as_deref() != Some(&report.utc),
+            };
+
+            if is_newer {
+                persisted.last_install_handled_utc = Some(report.utc.clone());
+                if report.exit_code != 0
+                    && persisted.downloaded.as_deref() == Some(&report.version)
+                {
+                    initial_state = "error".to_string();
+                    let err_msg = format!(
+                        "Update could not be installed (setup exit code {}).",
+                        report.exit_code
+                    );
+                    initial_error = Some(err_msg);
+                    let report_time = DateTime::parse_from_rfc3339(&report.utc)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .unwrap_or_else(|_| Utc::now());
+                    persisted.record_failure(&report.version, report_time);
+                }
+                let _ = save_state(&updates_state_path(&home), &persisted);
+            }
+        }
+
         Self {
             home,
             test_config: Mutex::new(None),
-            runtime: Mutex::new(RuntimeState {
+            runtime: Arc::new(Mutex::new(RuntimeState {
                 state: initial_state,
-                error: None,
+                error: initial_error,
                 persisted,
-            }),
+            })),
             update_downloading,
             models_downloading,
         }
@@ -235,6 +330,20 @@ impl UpdateManager {
             }
             let _ = save_state(&updates_state_path(&self.home), &rt.persisted);
         }
+
+        // C1: A successful install of a newer version (running version >= failedVersion) clears them.
+        if let Some(ref fv_str) = rt.persisted.failed_version
+            && Version::parse(fv_str).is_ok_and(|fv| running >= fv)
+        {
+            AgentLog::info(&format!(
+                "update: clearing failure state for {fv_str} (running {})",
+                cfg.current_version
+            ));
+            rt.persisted.failed_version = None;
+            rt.persisted.failed_count = 0;
+            rt.persisted.failed_at = None;
+            let _ = save_state(&updates_state_path(&self.home), &rt.persisted);
+        }
     }
 
     /// Returns current update status from memory and `state.json` without any network call.
@@ -260,10 +369,15 @@ impl UpdateManager {
             return Err(AgentError::Cancelled);
         }
         let cfg = self.effective_config();
-        let outcome = self.run_feed_check(&cfg);
+        let outcome = self.run_feed_check(&cfg, ct);
 
         let mut rt = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
         match outcome {
+            CheckOutcome::Cancelled => {
+                // C4: A cancelled check logs one line and leaves state as it was before the check.
+                AgentLog::info("update check cancelled");
+                return Err(AgentError::Cancelled);
+            }
             CheckOutcome::NoRelease => {
                 AgentLog::info(&format!(
                     "update check: no release found (current={})",
@@ -329,6 +443,15 @@ impl UpdateManager {
                 rt.state = "error".to_string();
                 rt.error = Some(OFFLINE_ERROR.to_string());
             }
+        }
+        if let Ok(running) = Version::parse(&cfg.current_version)
+            && let Some(ref fv_str) = rt.persisted.failed_version
+            && Version::parse(fv_str).is_ok_and(|fv| running >= fv)
+        {
+            rt.persisted.failed_version = None;
+            rt.persisted.failed_count = 0;
+            rt.persisted.failed_at = None;
+            let _ = save_state(&updates_state_path(&self.home), &rt.persisted);
         }
         Ok(self.build_status(&cfg, &rt, auto_enabled))
     }
@@ -400,7 +523,18 @@ impl UpdateManager {
             AgentError::Other(format!("invalid running version '{}': {e}", cfg.current_version))
         })?;
 
-        let rel = match self.run_feed_check(&cfg) {
+        let rel = match self.run_feed_check(&cfg, ct) {
+            CheckOutcome::Cancelled => {
+                AgentLog::info("update download cancelled during check");
+                self.set_state("idle", None);
+                sink.emit_now(UpdateProgress {
+                    phase: "cancelled".to_string(),
+                    done_bytes: 0,
+                    total_bytes: 0,
+                    error: None,
+                });
+                return Ok(());
+            }
             CheckOutcome::Verified(r) => *r,
             CheckOutcome::Offline => {
                 AgentLog::warn("update download failed: offline");
@@ -627,6 +761,21 @@ impl UpdateManager {
         let Some(ref pub_pem) = cfg.public_key_pem else {
             return Err(AgentError::InvalidOperation(NO_KEY_REASON.to_string()));
         };
+        // C7: apply must refuse while a model download is running
+        if self.models_downloading.load(Ordering::Acquire) {
+            return Err(AgentError::InvalidOperation(
+                CommandProcessor::ERR_MODELS_RUNNING_FOR_UPDATE.to_string(),
+            ));
+        }
+        // C1: apply refuses with an InvalidOperation while state is applying
+        {
+            let rt = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
+            if rt.state == "applying" {
+                return Err(AgentError::InvalidOperation(
+                    "Update is already being installed.".to_string(),
+                ));
+            }
+        }
         let running = Version::parse(&cfg.current_version).map_err(|e| {
             AgentError::Other(format!("invalid running version '{}': {e}", cfg.current_version))
         })?;
@@ -716,25 +865,81 @@ impl UpdateManager {
         let launch_res = if let Some(ref hook) = cfg.launcher {
             hook(&installer_path, &["/S".to_string()])
         } else {
-            launch_installer_detached(&installer_path, &ver_dir)
+            launch_installer_detached(&installer_path, &ver_dir).map(Some)
         };
         drop(file);
 
-        if let Err(e) = launch_res {
-            AgentLog::warn(&format!(
-                "update apply failed to start installer for version={downloaded_ver}: {e}"
-            ));
-            return Err(AgentError::InvalidOperation(format!(
-                "Could not start the installer: {e}"
-            )));
-        }
+        let proc_handle = match launch_res {
+            Ok(h) => h,
+            Err(e) => {
+                AgentLog::warn(&format!(
+                    "update apply failed to start installer for version={downloaded_ver}: {e}"
+                ));
+                let mut rt = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
+                rt.state = "error".to_string();
+                let err_msg = format!("Could not start the installer: {e}");
+                rt.error = Some(err_msg);
+                rt.persisted.record_failure(&downloaded_ver, Utc::now());
+                let _ = save_state(&updates_state_path(&self.home), &rt.persisted);
+                return Err(AgentError::InvalidOperation(format!(
+                    "Could not start the installer: {e}"
+                )));
+            }
+        };
 
         AgentLog::info(&format!(
             "update apply started installer: version={downloaded_ver}"
         ));
-        let mut rt = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
-        rt.state = "applying".to_string();
-        rt.error = None;
+        {
+            let mut rt = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
+            rt.state = "applying".to_string();
+            rt.error = None;
+        }
+
+        // C1: Watch the installer
+        if let Some(h) = proc_handle {
+            let runtime = Arc::clone(&self.runtime);
+            let home = self.home.clone();
+            let version = downloaded_ver.clone();
+            let wrapper = ProcessHandle(h);
+            let _ = std::thread::Builder::new()
+                .name("br-installer-watcher".to_string())
+                .spawn(move || {
+                    // Move the whole Send wrapper in (closures capture fields disjointly).
+                    let wrapper = wrapper;
+                    let wait_res = unsafe { WaitForSingleObject(wrapper.0, INFINITE) };
+                    if wait_res == WAIT_OBJECT_0 {
+                        let mut exit_code = 0u32;
+                        let ok = unsafe { GetExitCodeProcess(wrapper.0, &mut exit_code) };
+                        if ok.is_ok() {
+                            let mut rt = runtime.lock().unwrap_or_else(|e| e.into_inner());
+                            if exit_code == 0 {
+                                AgentLog::info(&format!(
+                                    "installer exited successfully (code 0) for {version}"
+                                ));
+                                rt.state = if rt.persisted.downloaded.is_some() {
+                                    "ready".to_string()
+                                } else {
+                                    "idle".to_string()
+                                };
+                                rt.error = None;
+                            } else {
+                                AgentLog::warn(&format!(
+                                    "installer exited with code {exit_code} for {version}"
+                                ));
+                                rt.state = "error".to_string();
+                                rt.error = Some(format!(
+                                    "Update could not be installed (setup exit code {exit_code})."
+                                ));
+                                rt.persisted.record_failure(&version, Utc::now());
+                            }
+                            let _ = save_state(&updates_state_path(&home), &rt.persisted);
+                        }
+                    }
+                });
+        }
+
+        let rt = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
         Ok(self.build_status(&cfg, &rt, auto_enabled))
     }
 
@@ -749,6 +954,14 @@ impl UpdateManager {
     ) -> AutoStepOutcome {
         if !auto_enabled || !self.has_public_key() || ct.is_cancelled() {
             return AutoStepOutcome::Disabled;
+        }
+
+        // C1: auto_step must not apply a version while state is applying
+        {
+            let rt = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
+            if rt.state == "applying" {
+                return AutoStepOutcome::Deferred;
+            }
         }
 
         let need_check = {
@@ -771,6 +984,20 @@ impl UpdateManager {
 
         let latest_ver = status.latest_version.clone();
         let already_downloaded = latest_ver.is_some() && status.downloaded_version == latest_ver;
+
+        // C1: auto_step must not re-apply failedVersion until failedAt + backoff
+        {
+            let rt = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
+            if let (Some(target), Some(failed_ver)) = (&latest_ver, &rt.persisted.failed_version)
+                && target == failed_ver
+                && let Some(failed_at) = rt.persisted.failed_at
+            {
+                let backoff = failure_backoff(rt.persisted.failed_count);
+                if now < failed_at + backoff {
+                    return AutoStepOutcome::Deferred;
+                }
+            }
+        }
         if !already_downloaded {
             if is_busy {
                 return AutoStepOutcome::Deferred;
@@ -879,7 +1106,7 @@ impl UpdateManager {
         }
     }
 
-    fn run_feed_check(&self, cfg: &EffectiveConfig) -> CheckOutcome {
+    fn run_feed_check(&self, cfg: &EffectiveConfig, ct: &CancelToken) -> CheckOutcome {
         let Ok(running) = Version::parse(&cfg.current_version) else {
             return CheckOutcome::Rejected("Invalid installed version.".to_string());
         };
@@ -891,9 +1118,16 @@ impl UpdateManager {
             ("User-Agent", ua.as_str()),
         ];
 
+        let cancel = || ct.is_cancelled();
         let dl = make_downloader(cfg.fast_retries);
-        let feed_bytes = match dl.get_bytes(&cfg.feed_url, MAX_FEED_BYTES, &feed_headers) {
+        let feed_bytes = match dl.get_bytes_cancellable(
+            &cfg.feed_url,
+            MAX_FEED_BYTES,
+            &feed_headers,
+            &cancel,
+        ) {
             Ok(b) => b,
+            Err(FetchError::Cancelled) => return CheckOutcome::Cancelled,
             Err(FetchError::Offline) => return CheckOutcome::Offline,
             Err(FetchError::Http {
                 status: 403 | 429, ..
@@ -979,24 +1213,28 @@ impl UpdateManager {
         }
 
         let asset_headers = [("User-Agent", ua.as_str())];
-        let manifest_bytes = match dl.get_bytes(
+        let manifest_bytes = match dl.get_bytes_cancellable(
             &manifest_asset.browser_download_url,
             MAX_MANIFEST_BYTES,
             &asset_headers,
+            &cancel,
         ) {
             Ok(b) => b,
+            Err(FetchError::Cancelled) => return CheckOutcome::Cancelled,
             Err(FetchError::Offline) => return CheckOutcome::Offline,
             Err(FetchError::Http {
                 status: 403 | 429, ..
             }) => return CheckOutcome::Rejected(RATE_LIMIT_ERROR.to_string()),
             Err(e) => return CheckOutcome::Rejected(sanitize_fetch_error(&e)),
         };
-        let sig_bytes = match dl.get_bytes(
+        let sig_bytes = match dl.get_bytes_cancellable(
             &sig_asset.browser_download_url,
             MAX_SIG_BYTES,
             &asset_headers,
+            &cancel,
         ) {
             Ok(b) => b,
+            Err(FetchError::Cancelled) => return CheckOutcome::Cancelled,
             Err(FetchError::Offline) => return CheckOutcome::Offline,
             Err(FetchError::Http {
                 status: 403 | 429, ..
@@ -1254,6 +1492,7 @@ fn sanitize_fetch_error(err: &FetchError) -> String {
         FetchError::Cancelled => "Download cancelled.".to_string(),
         FetchError::Io { .. } => "Transfer or disk error while downloading update.".to_string(),
         FetchError::Catalog(msg) => format!("Invalid update data: {msg}"),
+        FetchError::InUse => "Another download is writing this file.".to_string(),
     }
 }
 
@@ -1264,7 +1503,7 @@ fn to_wide_nul(s: &str) -> Vec<u16> {
         .collect()
 }
 
-fn launch_installer_detached(installer_path: &Path, work_dir: &Path) -> io::Result<()> {
+fn launch_installer_detached(installer_path: &Path, work_dir: &Path) -> io::Result<HANDLE> {
     let app_w = to_wide_nul(&installer_path.to_string_lossy());
     let dir_w = to_wide_nul(&work_dir.to_string_lossy());
     let cmd_str = format!("\"{}\" /S", installer_path.display());
@@ -1273,7 +1512,7 @@ fn launch_installer_detached(installer_path: &Path, work_dir: &Path) -> io::Resu
     let breakaway_flags = base_flags | CREATE_BREAKAWAY_FROM_JOB;
 
     match spawn_with_flags(&app_w, &cmd_str, &dir_w, breakaway_flags) {
-        Ok(()) => Ok(()),
+        Ok(h) => Ok(h),
         Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED.0 as i32) => {
             spawn_with_flags(&app_w, &cmd_str, &dir_w, base_flags)
         }
@@ -1297,7 +1536,7 @@ fn spawn_with_flags(
     cmd_str: &str,
     dir_w: &[u16],
     flags: PROCESS_CREATION_FLAGS,
-) -> io::Result<()> {
+) -> io::Result<HANDLE> {
     let mut cmd_w = to_wide_nul(cmd_str);
     let si = STARTUPINFOW {
         cb: std::mem::size_of::<STARTUPINFOW>() as u32,
@@ -1320,7 +1559,6 @@ fn spawn_with_flags(
         )
         .map_err(|e| io::Error::from_raw_os_error(win32_code_from_hresult(e.code().0)))?;
         let _ = CloseHandle(pi.hThread);
-        let _ = CloseHandle(pi.hProcess);
+        Ok(pi.hProcess)
     }
-    Ok(())
 }
