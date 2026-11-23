@@ -452,12 +452,6 @@ pub fn uninstall_with_progress(
     Ok(Outcome::Uninstalled { reboot_required })
 }
 
-/// Modify action (I1 compatibility entry point; use [`modify_with_progress`] for I2+).
-pub fn modify(ctx: &Ctx) -> Result<Outcome, InstallError> {
-    log_line(&ctx.home, "modify: nothing to do in I1");
-    Ok(Outcome::NothingToDo)
-}
-
 /// Updates the chosen [`ModelMode`] in the registry and downloads or removes model components.
 pub fn modify_with_progress(
     ctx: &Ctx,

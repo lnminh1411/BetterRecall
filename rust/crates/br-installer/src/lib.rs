@@ -29,7 +29,7 @@ pub use extract::{
 };
 pub use install::{
     InstallOpts, ModelMode, ModelsResult, ModifyOpts, Outcome, SETUP_EXE, SETUP_MUTEX,
-    UninstallOpts, compare_versions, install, install_with_progress, install_with_space, modify,
+    UninstallOpts, compare_versions, install, install_with_progress, install_with_space,
     modify_with_progress, resolve_models_dir, uninstall, uninstall_with_progress,
     validate_delete_data_home,
 };

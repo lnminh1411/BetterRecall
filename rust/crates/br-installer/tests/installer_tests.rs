@@ -28,7 +28,7 @@ use br_installer::{
     SETUP_EXE, SETUP_JSON, STAGING_PREFIX, SetupManifest, Step, TRAILER_LEN, UNINSTALL_SUBKEY,
     URL_INFO_ABOUT, UninstallOpts, append_payload, available_disk_space, close_running,
     compare_versions, create_shortcut, delete_key_tree, exit_code, extract_to_staging,
-    extract_to_staging_with_space, install, install_with_progress, install_with_space, modify,
+    extract_to_staging_with_space, install, install_with_progress, install_with_space,
     modify_with_progress, parse_args, pick_processes_to_end, read_install_marker,
     read_license_text, read_model_mode, read_reg_dword, read_reg_sz, read_shortcut_target,
     read_trailer, register, remove_shortcut, resolve_models_dir, shortcut_path, stub_len,
@@ -357,11 +357,19 @@ fn locked_file_in_old_install_fails_swap_with_in_use() {
 fn n2_refused_upgrade_restarts_the_running_agent() {
     use windows::Win32::System::Threading::CreateEventW;
     let env = TestEnv::new("n2-restart");
+    // Stage a real small Windows executable as BetterRecall.Agent.exe so RestartAgentGuard's
+    // CreateProcessW actually launches it (fake bytes would fail with ERROR_BAD_EXE_FORMAT).
+    // Lock a sibling file instead of the agent exe so swap_into_place fails with InUse while
+    // BetterRecall.Agent.exe remains executable.
+    let ping_bytes = fs::read(r"C:\Windows\System32\PING.EXE").expect("read PING.EXE");
     let v1 = env.build_installer(
         "v1",
         b"MZ-STUB-V1",
         "0.3.0-dev",
-        &[(InstallLayout::AGENT_EXE, b"agent-v1-original")],
+        &[
+            (InstallLayout::AGENT_EXE, ping_bytes.as_slice()),
+            ("lock.bin", b"hold"),
+        ],
     );
     install(&env.ctx, &v1, &InstallOpts::default()).expect("install v1");
 
@@ -372,8 +380,9 @@ fn n2_refused_upgrade_restarts_the_running_agent() {
         .collect();
     let ev = unsafe { CreateEventW(None, true, false, PCWSTR(name.as_ptr())) }.expect("quit event");
 
-    let locked_path = env.ctx.install_dir.join(InstallLayout::AGENT_EXE);
-    let lock = OpenOptions::new().read(true).share_mode(0).open(&locked_path).expect("lock");
+    let agent_path = env.ctx.install_dir.join(InstallLayout::AGENT_EXE);
+    let lock_path = env.ctx.install_dir.join("lock.bin");
+    let lock = OpenOptions::new().read(true).share_mode(0).open(&lock_path).expect("lock");
     let v2 = env.build_installer(
         "v2",
         b"MZ-STUB-V2",
@@ -389,10 +398,17 @@ fn n2_refused_upgrade_restarts_the_running_agent() {
     let log = fs::read_to_string(env.ctx.home.join("logs").join("setup.log")).expect("setup.log");
     assert!(
         log.contains("restarting the agent that was running"),
-        "setup.log must show the restart attempt:
-{log}"
+        "setup.log must show the restart attempt:\n{log}"
     );
-    assert_eq!(fs::read(&locked_path).expect("old agent"), b"agent-v1-original");
+    assert!(
+        log.contains(&format!("starting {}", agent_path.display())),
+        "setup.log must show start_agent spawning the staged agent:\n{log}"
+    );
+    assert!(
+        !log.contains("agent restart failed"),
+        "start_agent must succeed on the staged executable:\n{log}"
+    );
+    assert_eq!(fs::read(&agent_path).expect("old agent"), ping_bytes);
 }
 
 // 6. Registry values written exactly as listed; unregister removes them; unrelated Run value survives.
@@ -665,14 +681,14 @@ fn pick_processes_to_end_filters_correctly() {
 
 // 11. Ctx::for_test panics for a prefix outside Software\BetterRecallTests\ and for the default home.
 #[test]
-#[should_panic]
+#[should_panic(expected = "invalid Ctx::for_test parameters")]
 fn ctx_for_test_panics_on_bad_reg_prefix() {
     let env = TestEnv::new("bad-prefix");
     let _ = Ctx::for_test(&env.root, r"Software\BetterRecall");
 }
 
 #[test]
-#[should_panic]
+#[should_panic(expected = "default BetterRecall data folder")]
 fn ctx_for_test_panics_on_default_home() {
     let default_home = Ctx::production().home;
     // Only if BETTERRECALL_HOME is not overriding default_home; compute %LOCALAPPDATA%\BetterRecall directly.
@@ -742,12 +758,6 @@ fn close_running_on_idle_test_home_returns_quickly() {
 }
 
 #[test]
-fn modify_returns_nothing_to_do_in_i1() {
-    let env = TestEnv::new("modify");
-    assert_eq!(modify(&env.ctx).expect("modify"), Outcome::NothingToDo);
-}
-
-#[test]
 fn cli_parse_args_handles_flags_and_errors() {
     let a = parse_args(["/S", "/norun", "/AllowDowngrade"]).expect("parse slash");
     assert!(a.silent);
@@ -789,6 +799,8 @@ fn cli_parse_args_handles_flags_and_errors() {
     let m = parse_args(["/S", "/models=Full"]).expect("parse /models=Full");
     assert_eq!(m.model_mode, Some(ModelMode::Full));
     assert!(!m.delete_data);
+    let l = parse_args(["/S", "/models=later"]).expect("parse /models=later");
+    assert_eq!(l.model_mode, Some(ModelMode::Later));
 
     let d = parse_args(["/uninstall", "/S", "/deletedata"]).expect("parse /deletedata");
     assert_eq!(d.action, Action::Uninstall);
@@ -802,56 +814,6 @@ fn cli_parse_args_handles_flags_and_errors() {
 }
 
 // --- I2 integration tests ---
-
-// 13. Model mode stored on install, changed by modify, removed by unregister.
-#[test]
-fn model_mode_install_modify_and_unregister() {
-    let env = TestEnv::new("model-mode");
-    let exe = env.build_installer(
-        "setup",
-        b"MZ-STUB",
-        "0.3.0-dev",
-        &[(InstallLayout::AGENT_EXE, b"agent")],
-    );
-    let (server, catalog) = start_tiny_model_server();
-
-    install(
-        &env.ctx,
-        &exe,
-        &InstallOpts {
-            allow_downgrade: false,
-            model_mode: ModelMode::Minimal,
-            skip_model_download: false,
-            catalog: Some(catalog.clone()),
-            integrity_key: None,
-        },
-    )
-    .expect("install");
-    assert_eq!(read_model_mode(&env.ctx), Some(ModelMode::Minimal));
-
-    let out = modify_with_progress(
-        &env.ctx,
-        &ModifyOpts {
-            model_mode: ModelMode::Full,
-            catalog: Some(catalog),
-            integrity_key: None,
-        },
-        &br_installer::NoProgress,
-    )
-    .expect("modify");
-    assert_eq!(
-        out,
-        Outcome::Modified {
-            mode: ModelMode::Full,
-            models: ModelsResult::Complete,
-        }
-    );
-    assert_eq!(read_model_mode(&env.ctx), Some(ModelMode::Full));
-
-    drop(server);
-    unregister(&env.ctx).expect("unregister");
-    assert_eq!(read_model_mode(&env.ctx), None);
-}
 
 // 14. Cancel during extraction: Cancelled, no staging folder, existing install untouched.
 #[test]
@@ -1141,16 +1103,23 @@ fn e2e_built_exe_silent_install_modify_and_uninstall() {
     );
     append_payload(bin_exe, &zip_path, &built_setup).expect("append_payload to built exe");
 
-    // 1. Silent install with /norun /models=later.
+    // 1. Silent install with /norun /models=minimal against a closed local port (offline -> exit 0).
+    let closed_port = closed_loopback_port();
+    let test_cat_path = env.root.join("tiny-catalog.json");
+    fs::write(&test_cat_path, tiny_catalog_json()).expect("write tiny catalog");
     let status = Command::new(&built_setup)
         .args([
             "/S",
             "/norun",
-            "/models=later",
+            "/models=minimal",
             "--dev-root",
             env.root.to_str().unwrap(),
             "--dev-reg-prefix",
             &env.reg_prefix,
+            "--dev-models-catalog",
+            test_cat_path.to_str().unwrap(),
+            "--dev-models-url",
+            &format!("http://127.0.0.1:{closed_port}/"),
         ])
         .creation_flags(CREATE_NO_WINDOW.0)
         .status()
@@ -1158,15 +1127,12 @@ fn e2e_built_exe_silent_install_modify_and_uninstall() {
     assert_eq!(status.code(), Some(exit_code::OK));
     assert!(env.ctx.install_dir.join(InstallLayout::AGENT_EXE).exists());
     assert!(env.ctx.install_dir.join(SETUP_EXE).exists());
-    assert_eq!(read_model_mode(&env.ctx), Some(ModelMode::Later));
+    assert_eq!(read_model_mode(&env.ctx), Some(ModelMode::Minimal));
 
     // Seed fake data in test home to confirm /deletedata cleans it.
     fs::write(env.ctx.home.join("settings.json"), b"{}").expect("write settings.json");
 
     // 2. Silent modify via installed BetterRecall-Setup.exe -> ModelMode = full (against closed local port).
-    let closed_port = closed_loopback_port();
-    let test_cat_path = env.root.join("tiny-catalog.json");
-    fs::write(&test_cat_path, tiny_catalog_json()).expect("write tiny catalog");
     let installed_setup = env.ctx.install_dir.join(SETUP_EXE);
     let status = Command::new(&installed_setup)
         .args([
@@ -1468,6 +1434,7 @@ fn i3_install_minimal_and_modify_full_to_minimal_removes_full_only() {
             models: ModelsResult::Complete,
         }
     );
+    assert_eq!(read_model_mode(&env.ctx), Some(ModelMode::Full));
     assert!(models_dir.join("comp-full").join("manifest.json").exists());
 
     // Modify from Full to Minimal removes comp-full and keeps comp-min.
@@ -1512,9 +1479,9 @@ fn i3_install_minimal_and_modify_full_to_minimal_removes_full_only() {
     assert!(models_dir.join("comp-min").join("manifest.json").exists());
 }
 
-// 21. Offline gives ModelsResult::Offline and exit code 0 in the silent end-to-end path.
+// 21. Offline gives ModelsResult::Offline (silent e2e offline exit 0 is covered by e2e_built_exe_silent_install_modify_and_uninstall).
 #[test]
-fn i3_offline_returns_offline_and_silent_e2e_exits_zero() {
+fn i3_offline_returns_offline() {
     let env = TestEnv::new("i3-offline");
     let closed_port = closed_loopback_port();
     let (raw_cat, _) = tiny_catalog_data();
@@ -1548,41 +1515,6 @@ fn i3_offline_returns_offline_and_silent_e2e_exits_zero() {
     );
     assert!(env.ctx.install_dir.join(InstallLayout::AGENT_EXE).exists());
     assert_eq!(read_model_mode(&env.ctx), Some(ModelMode::Minimal));
-
-    // Silent end-to-end path through the built br-installer.exe -> exit code 0.
-    let env2 = TestEnv::new("i3-offline-e2e");
-    let bin_exe = Path::new(env!("CARGO_BIN_EXE_br-installer"));
-    let zip_path = env2.root.join("payload.zip");
-    let built_setup = env2.root.join("BetterRecall-Setup-offline.exe");
-    let cat_path = env2.root.join("tiny-catalog.json");
-    fs::write(&cat_path, tiny_catalog_json()).expect("write tiny catalog");
-    build_zip(
-        &zip_path,
-        "0.3.0-dev",
-        &[(InstallLayout::AGENT_EXE, b"fake-agent")],
-    );
-    append_payload(bin_exe, &zip_path, &built_setup).expect("append_payload");
-
-    let status = Command::new(&built_setup)
-        .args([
-            "/S",
-            "/norun",
-            "/models=minimal",
-            "--dev-root",
-            env2.root.to_str().unwrap(),
-            "--dev-reg-prefix",
-            &env2.reg_prefix,
-            "--dev-models-catalog",
-            cat_path.to_str().unwrap(),
-            "--dev-models-url",
-            &format!("http://127.0.0.1:{closed_port}/"),
-        ])
-        .creation_flags(CREATE_NO_WINDOW.0)
-        .status()
-        .expect("run built installer offline");
-    assert_eq!(status.code(), Some(exit_code::OK));
-    assert!(env2.ctx.install_dir.join(InstallLayout::AGENT_EXE).exists());
-    assert_eq!(read_model_mode(&env2.ctx), Some(ModelMode::Minimal));
 }
 
 // 22. Silent e2e verify failure returns exit code 9 (InstallError::Models) with app still installed.
@@ -2101,6 +2033,17 @@ fn c1_launcher_cleanup_skips_a_folder_a_running_program_uses() {
     let _ = child.wait();
     assert!(still_there, "folder in use by a running program must be kept whole");
 
-    br_installer::cleanup_launcher_installs(&env.ctx.home);
-    assert!(!busy_ver.exists(), "folder is removed once nothing runs from it");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        br_installer::cleanup_launcher_installs(&env.ctx.home);
+        if !busy_ver.exists() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "folder should be removed within 2 s once nothing runs from it: {}",
+            busy_ver.display()
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
 }

@@ -8,205 +8,38 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) BetterRecall contributors
 
+mod common;
+
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::time::Instant;
 
-use br_contracts::{DataPaths, OcrEntity, OcrLine, Settings, WorkerRequest, WorkerResponse};
-use br_worker::audio::SileroVad;
+use br_contracts::{OcrEntity, OcrLine, Settings, WorkerRequest};
 use br_worker::engine::{IWorkerEngine, ImageInput, RealEngine};
 use br_worker::hosting::WorkerSettings;
-use br_worker::inference::device_selection::DevicePolicy;
-use br_worker::inference::onnx::OnnxBackend;
 use br_worker::inference::{
-    DeviceInfo, DeviceKind, HostTensor, IInferenceBackend, IInferenceSession, TensorSpec,
-    TensorType,
+    HostTensor, IInferenceBackend, TensorType,
 };
 use br_worker::models::catalog::ModelCatalog;
 use br_worker::models::image_pipeline::RgbImage;
 use br_worker::models::manifest::{
-    FusionGraph, ManifestFile, ModelManifest, NerSpec, OcrDetSpec, OcrRecSpec, OcrSpec,
-    PromptSpec, TextGraph, TokenizerSpec, VisionGraph,
+    ModelManifest, NerSpec, OcrDetSpec, OcrRecSpec, OcrSpec,
 };
 use br_worker::models::ner::{BpeTokenizer, NerGate, PiiNer};
 use br_worker::models::ocr::{CtcResult, OcrMath, PaddleOcr, WindowsOcr};
 use br_worker::protocol::{RequestHandler, WorkerError};
-
-// ---- Test helpers (local to W3 suite) ----
-
-struct ScopedDir {
-    path: PathBuf,
-}
-
-impl ScopedDir {
-    fn new(tag: &str) -> Self {
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let id = SEQ.fetch_add(1, Ordering::Relaxed);
-        let base = std::env::var_os("BR_TEST_TMP")
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
-        let dir = base
-            .join("betterrecall-worker-rust")
-            .join(format!("w3-{tag}-{}-{id}", std::process::id()));
-        fs::create_dir_all(&dir).expect("create test temp dir");
-        Self { path: dir }
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for ScopedDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
-}
-
-fn data_path(file: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../tests/BetterRecall.Worker.Tests/TestData")
-        .join(file)
-}
-
-fn test_settings(home: &Path, edit: impl FnOnce(&mut Settings)) -> WorkerSettings {
-    let mut s = Settings::default();
-    s.inference.model_dir = home.join("models").to_string_lossy().into_owned();
-    edit(&mut s);
-    fs::create_dir_all(home).expect("create home dir");
-    let json = serde_json::to_vec(&s).expect("serialize settings");
-    fs::write(DataPaths::settings_file(home), json).expect("write settings.json");
-    WorkerSettings::from(&s, home)
-}
-
-fn copy_model_file(dir: &Path, src: &str, dst: &str) -> ManifestFile {
-    fs::create_dir_all(dir).expect("create model dir");
-    let to = dir.join(dst);
-    fs::copy(data_path(src), &to).expect("copy test data file");
-    let size = fs::metadata(&to).expect("stat copied file").len() as i64;
-    ManifestFile {
-        file: dst.to_string(),
-        size,
-        sha256: String::new(),
-        source: None,
-    }
-}
-
-fn write_stub_file(dir: &Path, name: &str, bytes: &[u8]) -> ManifestFile {
-    fs::create_dir_all(dir).expect("create model dir");
-    let p = dir.join(name);
-    fs::write(&p, bytes).expect("write stub file");
-    ManifestFile {
-        file: name.to_string(),
-        size: bytes.len() as i64,
-        sha256: String::new(),
-        source: None,
-    }
-}
-
-fn write_manifest(dir: &Path, m: &ModelManifest) {
-    let json = serde_json::to_vec_pretty(m).expect("serialize manifest");
-    fs::write(dir.join("manifest.json"), json).expect("write manifest.json");
-}
+use common::{
+    FnSession, MockBackend, ScopedDir, dev_cpu, send_req, spec, test_settings, write_manifest,
+    write_stub_file,
+};
 
 fn bgra_pixel_bytes(w: usize, h: usize) -> Vec<u8> {
     vec![255u8; w * h * 4]
 }
 
-fn send_req(h: &RequestHandler<'_>, r: &WorkerRequest, payload: &[u8]) -> WorkerResponse {
-    let json = serde_json::to_vec(r).expect("serialize request");
-    h.handle(&json, payload).header
-}
-
-fn dev_cpu() -> DeviceInfo {
-    DeviceInfo::new(DeviceKind::Cpu, "CPU", "CPU", "CPU", None)
-}
-
-fn dev_igpu() -> DeviceInfo {
-    DeviceInfo::new(DeviceKind::Gpu, "GPU.0", "Intel Arc", "OpenVINO", Some(true))
-}
-
-fn dev_npu() -> DeviceInfo {
-    DeviceInfo::new(DeviceKind::Npu, "NPU", "Intel AI Boost", "OpenVINO", None)
-}
-
-fn dev_dml() -> DeviceInfo {
-    DeviceInfo::new(DeviceKind::Gpu, "DML:0", "Discrete GPU", "DirectML", None)
-}
-
-fn spec(name: &str, ty: TensorType, shape: &[i64]) -> TensorSpec {
-    TensorSpec {
-        name: name.to_string(),
-        ty,
-        shape: shape.to_vec(),
-    }
-}
-
-struct FnSession {
-    device: DeviceInfo,
-    inputs: Vec<TensorSpec>,
-    outputs: Vec<TensorSpec>,
-    handler: Box<dyn Fn(&[HostTensor]) -> Result<HashMap<String, HostTensor>, WorkerError> + Send + Sync>,
-}
-
-impl IInferenceSession for FnSession {
-    fn device(&self) -> &DeviceInfo {
-        &self.device
-    }
-    fn inputs(&self) -> &[TensorSpec] {
-        &self.inputs
-    }
-    fn outputs(&self) -> &[TensorSpec] {
-        &self.outputs
-    }
-    fn run(&self, inputs: &[HostTensor]) -> Result<HashMap<String, HostTensor>, WorkerError> {
-        (self.handler)(inputs)
-    }
-}
-
-struct MockBackend {
-    name: &'static str,
-    is_ov: bool,
-    devices: Vec<DeviceInfo>,
-    loader: Box<
-        dyn Fn(&Path, &DeviceInfo, Option<&HashMap<String, Vec<i64>>>) -> Result<Box<dyn IInferenceSession>, WorkerError>
-            + Send
-            + Sync,
-    >,
-}
-
-impl IInferenceBackend for MockBackend {
-    fn name(&self) -> &str {
-        self.name
-    }
-    fn version(&self) -> &str {
-        "1.0"
-    }
-    fn npu_driver_version(&self) -> &str {
-        ""
-    }
-    fn devices(&self) -> &[DeviceInfo] {
-        &self.devices
-    }
-    fn is_openvino_backend(&self) -> bool {
-        self.is_ov
-    }
-    fn is_onnx_backend(&self) -> bool {
-        !self.is_ov
-    }
-    fn load(
-        &self,
-        model_path: &Path,
-        device: &DeviceInfo,
-        _cache_dir: Option<&Path>,
-        static_shapes: Option<&HashMap<String, Vec<i64>>>,
-    ) -> Result<Box<dyn IInferenceSession>, WorkerError> {
-        (self.loader)(model_path, device, static_shapes)
-    }
-}
 
 fn install_mock_ocr(model_dir: &Path, mean: Vec<f32>, std: Vec<f32>) {
     let dir = ModelCatalog::dir(model_dir, ModelCatalog::OCR);
@@ -463,6 +296,7 @@ fn render_text_rgb(text: &str, width: i32, height: i32, x: i32, y: i32, size: i3
     }
 }
 
+
 // ---- OcrTests: OcrMathTests ----
 
 #[test]
@@ -504,6 +338,21 @@ fn ctc_decode_collapses_repeats_and_splits_on_blanks() {
 }
 
 #[test]
+fn cuts_cover_text_monotonically_inside_the_crop() {
+    let ctc = CtcResult {
+        text: "abc".to_string(),
+        confidence: 0.95,
+        step_start: vec![1, 4, 8],
+        step_end: vec![2, 5, 9],
+    };
+    let cuts = OcrMath::cuts(&ctc, 20, 256, 160, 100, 80);
+    assert_eq!(4, cuts.len());
+    assert_eq!(100, cuts[0]);
+    assert_eq!(180, cuts[3]);
+    assert!(cuts[1] > cuts[0] && cuts[2] >= cuts[1] && cuts[3] >= cuts[2]);
+}
+
+#[test]
 fn ctc_and_cuts_handle_surrogate_pairs_monotonically() {
     let table = OcrMath::table(&["😀".into(), "x".into()]);
     let probs = rec_logits_for_indices(&[1, 1, 0, 2, 0, 0], table.len());
@@ -525,21 +374,6 @@ fn ctc_and_cuts_handle_surrogate_pairs_monotonically() {
     assert_eq!("😀", truncated.text);
     assert!(OcrMath::ctc(&probs, 6, 0, &table).text.is_empty());
     assert_eq!(vec![100, 126, 153, 180], OcrMath::cuts(&ctc, 0, 256, 160, 100, 80));
-}
-
-#[test]
-fn cuts_cover_text_monotonically_inside_the_crop() {
-    let ctc = CtcResult {
-        text: "abc".to_string(),
-        confidence: 0.95,
-        step_start: vec![1, 4, 8],
-        step_end: vec![2, 5, 9],
-    };
-    let cuts = OcrMath::cuts(&ctc, 20, 256, 160, 100, 80);
-    assert_eq!(4, cuts.len());
-    assert_eq!(100, cuts[0]);
-    assert_eq!(180, cuts[3]);
-    assert!(cuts[1] > cuts[0] && cuts[2] >= cuts[1] && cuts[3] >= cuts[2]);
 }
 
 #[test]
@@ -621,14 +455,8 @@ fn bpe_tokenizer_encodes_metaspaces_added_tokens_and_byte_fallback_with_utf16_sp
     let last = *toks.last().unwrap();
     assert_eq!(100, last.id);
     assert_eq!((5, 11), (last.start, last.end));
-}
 
-#[test]
-fn bpe_tokenizer_handles_empty_and_whitespace() {
-    let dir = ScopedDir::new("bpe-empty");
-    let path = dir.path().join("tokenizer.json");
-    fs::write(&path, sample_bpe_tokenizer_json()).unwrap();
-    let tok = BpeTokenizer::load(&path).unwrap();
+    // Empty and whitespace-only inputs.
     assert!(tok.encode("").is_empty());
     let spaces = tok.encode("   ");
     assert_eq!(vec![4, 4, 4], spaces.iter().map(|t| t.id).collect::<Vec<_>>());
@@ -793,10 +621,8 @@ fn ner_gate_keeps_ocr_lines_on_model_missing_and_backs_off_on_failure() {
 
 #[test]
 fn windows_ocr_reads_a_rendered_line() {
-    let Some(win) = WindowsOcr::try_create(&["en-US".to_string()]) else {
-        // Optional Windows OCR language pack not installed on this machine.
-        return;
-    };
+    let win = WindowsOcr::try_create(&["en-US".to_string()])
+        .expect("Windows OCR en-US language pack must be installed");
     let img = render_text_rgb("Meeting notes for Thursday", 900, 120, 30, 40, 28);
     let lines = win.read(&img).expect("windows ocr read");
     let joined: String = lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join(" ");
@@ -813,13 +639,15 @@ fn windows_ocr_reads_a_rendered_line() {
 // ---- OcrTests: RealOcrTests / OcrDeviceTests (env-gated) ----
 
 #[test]
+#[ignore = "needs BR_OCR_MODELS"]
 fn real_ocr_and_ner_when_models_installed() {
-    let Some(model_dir) = std::env::var_os("BR_OCR_MODELS").map(PathBuf::from) else {
-        return;
-    };
-    if !model_dir.is_dir() {
-        return;
-    }
+    let model_dir =
+        PathBuf::from(std::env::var_os("BR_OCR_MODELS").expect("BR_OCR_MODELS must be set"));
+    assert!(
+        model_dir.is_dir(),
+        "BR_OCR_MODELS is not a directory: {}",
+        model_dir.display()
+    );
     let dir = ScopedDir::new("real-ocr");
     let mut s = Settings::default();
     s.inference.model_dir = model_dir.to_string_lossy().into_owned();
@@ -844,22 +672,36 @@ fn real_ocr_and_ner_when_models_installed() {
     };
     let res = engine.ocr(&input, true).expect("real ocr");
     assert_eq!("onnx", res.engine);
-    assert!(!res.lines.is_empty());
+    assert!(!res.lines.is_empty(), "expected non-empty OCR lines");
+    assert!(
+        res.lines.iter().any(|l| l.text.contains("Anna")),
+        "expected an OCR line containing 'Anna', got: {:?}",
+        res.lines.iter().map(|l| &l.text).collect::<Vec<_>>()
+    );
+    assert!(
+        res.lines.iter().any(|l| {
+            l.entities
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .any(|e| e.label == "person")
+        }),
+        "expected at least one 'person' NER entity, got: {:?}",
+        res.lines
+    );
 }
 
 #[test]
+#[ignore = "needs BR_OCR_MODELS and BR_OCR_DEVICES"]
 fn ocr_on_requested_devices_when_available() {
-    let (Some(model_dir), Some(devices_raw)) = (
-        std::env::var_os("BR_OCR_MODELS").map(PathBuf::from),
-        std::env::var("BR_OCR_DEVICES").ok(),
-    ) else {
-        return;
-    };
-    let Some(manifest) = ModelCatalog::load(&model_dir, ModelCatalog::OCR) else {
-        return;
-    };
-    let spec = manifest.ocr.as_ref().unwrap();
-    let recs = OcrMath::pick_recognisers(&spec.rec, &["en-US".to_string()]);
+    let model_dir =
+        PathBuf::from(std::env::var_os("BR_OCR_MODELS").expect("BR_OCR_MODELS must be set"));
+    let devices_raw = std::env::var("BR_OCR_DEVICES").expect("BR_OCR_DEVICES must be set");
+    assert!(
+        ModelCatalog::load(&model_dir, ModelCatalog::OCR).is_some(),
+        "OCR model manifest not found under {}",
+        model_dir.display()
+    );
     for dev_setting in devices_raw.split(',').map(str::trim).filter(|d| !d.is_empty()) {
         let dir = ScopedDir::new("ocr-dev");
         let mut s = Settings::default();
@@ -882,16 +724,30 @@ fn ocr_on_requested_devices_when_available() {
             height: img.height,
             stride: img.width * 4,
         };
-        let _ = recs.len();
         let res = engine.ocr(&input, false).expect("device ocr");
         assert_eq!("onnx", res.engine);
+        assert!(!res.lines.is_empty(), "expected non-empty OCR lines on {dev_setting}");
+        let hello = engine.hello(768).expect("hello");
+        let ocr_dev = hello
+            .ocr_device
+            .as_deref()
+            .expect("hello().ocr_device must be populated");
+        assert!(!ocr_dev.is_empty());
+        if !dev_setting.eq_ignore_ascii_case("auto") {
+            assert!(
+                ocr_dev
+                    .to_ascii_lowercase()
+                    .contains(&dev_setting.to_ascii_lowercase()),
+                "requested ocr device {dev_setting:?}, got {ocr_dev:?}"
+            );
+        }
     }
 }
 
 // ---- BatchHOcrTests ----
 
 #[test]
-fn c12_non_finite_value_anywhere_in_a_detector_map_is_found() {
+fn c12_non_finite_detector_or_recogniser_output_fails_device() {
     assert!(PaddleOcr::all_finite(&[0.0, 1.0, -3.5]));
     let mut big = vec![0.0f32; 1_000_000];
     big[999_999] = f32::NAN;
@@ -901,164 +757,121 @@ fn c12_non_finite_value_anywhere_in_a_detector_map_is_found() {
     big[999_999] = f32::NEG_INFINITY;
     assert!(!PaddleOcr::all_finite(&big));
 
-    let dir = ScopedDir::new("c12-det");
+    let dir = ScopedDir::new("c12-nan");
     install_mock_ocr(dir.path(), vec![0.5, 0.5, 0.5], vec![0.5, 0.5, 0.5]);
     let manifest = ModelCatalog::load(dir.path(), ModelCatalog::OCR).unwrap();
     let rec_spec = manifest.ocr.as_ref().unwrap().rec.clone();
 
-    let cpu = dev_cpu();
-    let backend: Arc<dyn IInferenceBackend> = Arc::new(MockBackend {
-        name: "Mock",
-        is_ov: false,
-        devices: vec![cpu.clone()],
-        loader: Box::new(|model_path, device, _| {
-            let file_name = model_path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            if file_name == "det.onnx" {
+    for (case, nan_in_det) in [("det", true), ("rec", false)] {
+        let cpu = dev_cpu();
+        let backend: Arc<dyn IInferenceBackend> = Arc::new(MockBackend {
+            name: "Mock",
+            is_ov: false,
+            devices: vec![cpu.clone()],
+            loader: Box::new(move |model_path, device, _| {
+                let file_name = model_path.file_name().and_then(|s| s.to_str()).unwrap_or("");
                 let d = device.clone();
-                Ok(Box::new(FnSession {
-                    device: d,
-                    inputs: vec![spec("x", TensorType::Float32, &[1, 3, -1, -1])],
-                    outputs: vec![spec("out", TensorType::Float32, &[1, 1, -1, -1])],
-                    handler: Box::new(|inputs| {
-                        let sh = &inputs[0].shape;
-                        let h = sh[2] as usize;
-                        let w = sh[3] as usize;
-                        let mut prob = vec![0.0f32; h * w];
-                        prob[h * w - 1] = f32::NAN;
-                        let mut map = HashMap::new();
-                        map.insert(
-                            "out".into(),
-                            HostTensor::f("out", prob, &[1, 1, h as i64, w as i64]),
-                        );
-                        Ok(map)
-                    }),
-                }))
-            } else {
-                let d = device.clone();
-                Ok(Box::new(FnSession {
-                    device: d,
-                    inputs: vec![spec("x", TensorType::Float32, &[-1, 3, 48, -1])],
-                    outputs: vec![spec("out", TensorType::Float32, &[-1, 4, 26])],
-                    handler: Box::new(|inputs| {
-                        let n = inputs[0].shape[0] as usize;
-                        let mut map = HashMap::new();
-                        map.insert(
-                            "out".into(),
-                            HostTensor::f("out", vec![0.0f32; n * 4 * 26], &[n as i64, 4, 26]),
-                        );
-                        Ok(map)
-                    }),
-                }))
-            }
-        }),
-    });
+                if file_name == "det.onnx" {
+                    Ok(Box::new(FnSession {
+                        device: d,
+                        inputs: vec![spec("x", TensorType::Float32, &[1, 3, -1, -1])],
+                        outputs: vec![spec("out", TensorType::Float32, &[1, 1, -1, -1])],
+                        handler: Box::new(move |inputs| {
+                            let h = inputs[0].shape[2] as usize;
+                            let w = inputs[0].shape[3] as usize;
+                            let mut prob = vec![0.0f32; h * w];
+                            if nan_in_det {
+                                prob[h * w - 1] = f32::NAN;
+                            } else {
+                                paint_box(&mut prob, w as i32, 4, 4, 28, 28, 0.9);
+                            }
+                            let mut map = HashMap::new();
+                            map.insert(
+                                "out".into(),
+                                HostTensor::f("out", prob, &[1, 1, h as i64, w as i64]),
+                            );
+                            Ok(map)
+                        }),
+                    }))
+                } else {
+                    let steps = if nan_in_det { 4usize } else { 2usize };
+                    Ok(Box::new(FnSession {
+                        device: d,
+                        inputs: vec![spec("x", TensorType::Float32, &[-1, 3, 48, -1])],
+                        outputs: vec![spec("out", TensorType::Float32, &[-1, steps as i64, 26])],
+                        handler: Box::new(move |inputs| {
+                            let n = inputs[0].shape[0] as usize;
+                            let mut probs = vec![0.0f32; n * steps * 26];
+                            if !nan_in_det {
+                                probs[1] = 0.9; // step 0: 'a'
+                                probs[26] = f32::NAN; // step 1: NaN would otherwise pick blank (index 0)
+                            }
+                            let mut map = HashMap::new();
+                            map.insert(
+                                "out".into(),
+                                HostTensor::f("out", probs, &[n as i64, steps as i64, 26]),
+                            );
+                            Ok(map)
+                        }),
+                    }))
+                }
+            }),
+        });
 
-    let mut ocr = PaddleOcr::new(backend, cpu, &manifest, &rec_spec, None, Some(false)).unwrap();
-    let err = ocr
-        .read(&RgbImage {
-            width: 32,
-            height: 32,
-            rgb: vec![255; 32 * 32 * 3],
-        })
-        .unwrap_err();
-    assert!(matches!(err, WorkerError::DeviceFailed(_)));
-    assert!(err.wire_message().contains("not finite"));
-}
-
-#[test]
-fn c12_nan_recogniser_row_is_not_read_as_blank() {
-    let dir = ScopedDir::new("c12-rec");
-    install_mock_ocr(dir.path(), vec![0.5, 0.5, 0.5], vec![0.5, 0.5, 0.5]);
-    let manifest = ModelCatalog::load(dir.path(), ModelCatalog::OCR).unwrap();
-    let rec_spec = manifest.ocr.as_ref().unwrap().rec.clone();
-
-    let cpu = dev_cpu();
-    let backend: Arc<dyn IInferenceBackend> = Arc::new(MockBackend {
-        name: "Mock",
-        is_ov: false,
-        devices: vec![cpu.clone()],
-        loader: Box::new(|model_path, device, _| {
-            let file_name = model_path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            if file_name == "det.onnx" {
-                let d = device.clone();
-                Ok(Box::new(FnSession {
-                    device: d,
-                    inputs: vec![spec("x", TensorType::Float32, &[1, 3, -1, -1])],
-                    outputs: vec![spec("out", TensorType::Float32, &[1, 1, -1, -1])],
-                    handler: Box::new(|inputs| {
-                        let h = inputs[0].shape[2] as i32;
-                        let w = inputs[0].shape[3] as i32;
-                        let mut prob = vec![0.0f32; (w * h) as usize];
-                        paint_box(&mut prob, w, 4, 4, 28, 28, 0.9);
-                        let mut map = HashMap::new();
-                        map.insert(
-                            "out".into(),
-                            HostTensor::f("out", prob, &[1, 1, h as i64, w as i64]),
-                        );
-                        Ok(map)
-                    }),
-                }))
-            } else {
-                let d = device.clone();
-                Ok(Box::new(FnSession {
-                    device: d,
-                    inputs: vec![spec("x", TensorType::Float32, &[-1, 3, 48, -1])],
-                    outputs: vec![spec("out", TensorType::Float32, &[-1, 2, 26])],
-                    handler: Box::new(|inputs| {
-                        let n = inputs[0].shape[0] as usize;
-                        let mut probs = vec![0.0f32; n * 2 * 26];
-                        probs[1] = 0.9; // step 0: 'a'
-                        probs[26] = f32::NAN; // step 1: NaN would otherwise pick blank (index 0)
-                        let mut map = HashMap::new();
-                        map.insert(
-                            "out".into(),
-                            HostTensor::f("out", probs, &[n as i64, 2, 26]),
-                        );
-                        Ok(map)
-                    }),
-                }))
-            }
-        }),
-    });
-
-    let mut ocr = PaddleOcr::new(backend, cpu, &manifest, &rec_spec, None, Some(false)).unwrap();
-    let err = ocr
-        .read(&RgbImage {
-            width: 32,
-            height: 32,
-            rgb: vec![255; 32 * 32 * 3],
-        })
-        .unwrap_err();
-    assert!(matches!(err, WorkerError::DeviceFailed(_)));
-    assert!(err.wire_message().contains("not finite"));
+        let mut ocr = PaddleOcr::new(backend, cpu, &manifest, &rec_spec, None, Some(false)).unwrap();
+        let err = ocr
+            .read(&RgbImage {
+                width: 32,
+                height: 32,
+                rgb: vec![255; 32 * 32 * 3],
+            })
+            .unwrap_err();
+        assert!(matches!(err, WorkerError::DeviceFailed(_)), "case={case}: {err:?}");
+        assert!(
+            err.wire_message().contains("not finite"),
+            "case={case}: {}",
+            err.wire_message()
+        );
+    }
 }
 
 // ---- Sweep2FTests ----
 
 #[test]
-fn outer_cuts_of_single_char_span_the_whole_box() {
-    let ctc = CtcResult {
+fn outer_cuts_pin_to_crop_edges_and_cover_first_glyph() {
+    // 1. Single char spans the whole box.
+    let single = CtcResult {
         text: "A".into(),
         confidence: 0.9,
         step_start: vec![3],
         step_end: vec![4],
     };
-    let cuts = OcrMath::cuts(&ctc, 10, 256, 48, 20, 40);
-    assert_eq!(vec![20, 60], cuts);
-}
+    assert_eq!(vec![20, 60], OcrMath::cuts(&single, 10, 256, 48, 20, 40));
 
-#[test]
-fn outer_cuts_pin_to_crop_edges_even_when_steps_drift() {
-    let ctc = CtcResult {
+    // 2. Drifting steps still pin outer cuts to crop edges monotonically.
+    let drift = CtcResult {
         text: "abc".into(),
         confidence: 0.9,
         step_start: vec![0, 5, 19],
         step_end: vec![2, 8, 19],
     };
-    let cuts = OcrMath::cuts(&ctc, 20, 256, 64, 50, 120);
+    let cuts = OcrMath::cuts(&drift, 20, 256, 64, 50, 120);
     assert_eq!(50, cuts[0]);
     assert_eq!(170, cuts[3]);
     assert!(cuts[1] <= cuts[2] && cuts[2] <= cuts[3]);
+
+    // 3. Entity starting at index 0 ("Anna") starts right at line.x (100) so the first glyph is covered.
+    let line = CtcResult {
+        text: "Anna Schmidt".into(),
+        confidence: 0.95,
+        step_start: vec![2, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25],
+        step_end: vec![3, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26],
+    };
+    let cuts = OcrMath::cuts(&line, 30, 256, 180, 100, 120);
+    let x0 = cuts[0];
+    let x1 = cuts[4];
+    assert_eq!(100, x0);
+    assert!(x1 > x0 && x1 <= 220);
 }
 
 fn ocr_ner_mock_backend(
@@ -1282,22 +1095,6 @@ fn no_lines_skip_the_ner() {
     assert!(ocr.lines.is_empty());
     assert!(!ocr.entities_missing);
     assert_eq!(0, ner_loads.load(Ordering::Relaxed));
-}
-
-#[test]
-fn redaction_box_of_a_line_starting_span_covers_the_first_glyph() {
-    let ctc = CtcResult {
-        text: "Anna Schmidt".into(),
-        confidence: 0.95,
-        step_start: vec![2, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25],
-        step_end: vec![3, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26],
-    };
-    let cuts = OcrMath::cuts(&ctc, 30, 256, 180, 100, 120);
-    // Entity starting at index 0 with length 4 ("Anna") starts right at line.x (100) so the first glyph is covered.
-    let x0 = cuts[0];
-    let x1 = cuts[4];
-    assert_eq!(100, x0);
-    assert!(x1 > x0 && x1 <= 220);
 }
 
 // ---- Sweep3ITests (C17 box cap) ----
@@ -1540,117 +1337,6 @@ fn bpe_long_word_is_not_quadratic() {
     assert_eq!(4097, toks.len());
 }
 
-#[test]
-fn whisper_auto_skips_the_gpu() {
-    let npu = dev_npu();
-    let gpu = dev_igpu();
-    let cpu = dev_cpu();
-
-    let a1 = DevicePolicy::whisper_allowed("auto", &[npu.clone(), gpu.clone(), cpu.clone()]);
-    assert_eq!(vec!["NPU", "CPU"], a1.iter().map(|d| d.id.as_str()).collect::<Vec<_>>());
-
-    let a2 = DevicePolicy::whisper_allowed("auto", &[gpu.clone(), cpu.clone()]);
-    assert_eq!(vec!["CPU"], a2.iter().map(|d| d.id.as_str()).collect::<Vec<_>>());
-
-    let g = DevicePolicy::whisper_allowed("gpu", &[npu.clone(), gpu.clone(), cpu.clone()]);
-    assert_eq!(vec!["GPU.0", "CPU"], g.iter().map(|d| d.id.as_str()).collect::<Vec<_>>());
-
-    let c = DevicePolicy::whisper_allowed("cpu", &[npu, gpu, cpu]);
-    assert_eq!(vec!["CPU"], c.iter().map(|d| d.id.as_str()).collect::<Vec<_>>());
-}
-
-#[test]
-fn bench_drops_the_graphs_of_other_budgets() {
-    let dir = ScopedDir::new("s3k-c13");
-    let model_dir = dir.path().join("models");
-    let gdir = ModelCatalog::dir(&model_dir, ModelCatalog::EMBEDDING_GEMMA);
-    let files = vec![
-        copy_model_file(&gdir, "sp.model", "tokenizer.model"),
-        copy_model_file(&gdir, "text_16.onnxt", "text_16.onnx"),
-        copy_model_file(&gdir, "text_32.onnxt", "text_32.onnx"),
-        copy_model_file(&gdir, "vision_28.onnxt", "vision_70.onnx"),
-        copy_model_file(&gdir, "fusion_28.onnxt", "fusion_70.onnx"),
-        copy_model_file(&gdir, "vision_28.onnxt", "vision_140.onnx"),
-        copy_model_file(&gdir, "fusion_28.onnxt", "fusion_140.onnx"),
-        copy_model_file(&gdir, "vision_28.onnxt", "vision_280.onnx"),
-        copy_model_file(&gdir, "fusion_28.onnxt", "fusion_280.onnx"),
-    ];
-    let mut ids = vec![300i64; 32];
-    ids[0] = 2;
-    ids[31] = 1;
-    let vision = |tokens: i32, suffix: &str| VisionGraph {
-        tokens,
-        file: format!("vision_{suffix}.onnx"),
-        height: 64,
-        width: 112,
-        output: "image_embeds".into(),
-        fusion: Some(FusionGraph {
-            file: format!("fusion_{suffix}.onnx"),
-            input_ids_input: Some("input_ids".into()),
-            attention_mask_input: Some("attention_mask".into()),
-            input_ids: ids.clone(),
-            ..FusionGraph::default()
-        }),
-        ..VisionGraph::default()
-    };
-    let manifest = ModelManifest {
-        name: ModelCatalog::EMBEDDING_GEMMA.into(),
-        id: "synthetic/embeddinggemma-2".into(),
-        revision: "syn1".into(),
-        dim: 768,
-        tokenizer: Some(TokenizerSpec {
-            file: "tokenizer.model".into(),
-            add_bos: true,
-            add_eos: true,
-            bos_id: 2,
-            eos_id: 1,
-            pad_id: 0,
-            ..TokenizerSpec::default()
-        }),
-        prompts: Some(PromptSpec {
-            query: "task: search result | query: {text}".into(),
-            document: "title: none | text: {text}".into(),
-        }),
-        text: vec![
-            TextGraph {
-                file: "text_16.onnx".into(),
-                seq: 16,
-                ..TextGraph::default()
-            },
-            TextGraph {
-                file: "text_32.onnx".into(),
-                seq: 32,
-                ..TextGraph::default()
-            },
-        ],
-        vision: vec![vision(70, "70"), vision(140, "140"), vision(280, "280")],
-        files,
-        ..ModelManifest::default()
-    };
-    write_manifest(&gdir, &manifest);
-
-    let s = test_settings(dir.path(), |x| {
-        x.inference.device = "cpu".into();
-        x.inference.image_tokens = 140;
-        x.privacy.nsfw_filter = false;
-        x.ocr.enabled = false;
-    });
-    let ort = Arc::new(OnnxBackend::new(true).unwrap());
-    let engine = RealEngine::with_backends(
-        s,
-        dir.path().to_path_buf(),
-        Arc::clone(&ort) as Arc<dyn IInferenceBackend>,
-        ort,
-    );
-    let res = engine.bench().expect("bench");
-    assert_eq!(3, res.tokens.as_ref().unwrap().len());
-
-    let keys = engine.embedder_session_keys();
-    assert!(keys.iter().any(|k| k.contains("vision_140.onnx")));
-    assert!(keys.iter().any(|k| k.contains("fusion_140.onnx")));
-    assert!(!keys.iter().any(|k| k.contains("70.onnx")));
-    assert!(!keys.iter().any(|k| k.contains("280.onnx")));
-}
 
 #[test]
 fn hello_survives_an_ocr_preload_that_throws_anything() {
@@ -1675,52 +1361,3 @@ fn hello_survives_an_ocr_preload_that_throws_anything() {
     assert!(hello.ocr_device.is_none());
 }
 
-// ---- UnitTests: SmallPartsTests.Vad_segmenter_rules ----
-
-#[test]
-fn vad_segmenter_rules() {
-    // C# UnitTests.Vad_segmenter_rules on synthetic vad.onnxt: 1 s silence, 1 s tone, 1 s silence.
-    let ort = OnnxBackend::new(true).unwrap();
-    let vad = SileroVad::new(&ort, &data_path("vad.onnxt")).unwrap();
-    let mut pcm = vec![0.0f32; 48_000];
-    for (i, sample) in pcm.iter_mut().enumerate().take(32_000).skip(16_000) {
-        *sample = 0.2 * ((i as f32) * 0.05).sin();
-    }
-    let segs = vad.segments(&pcm).unwrap();
-    assert_eq!(1, segs.len());
-    assert!((900..=1000).contains(&segs[0].0), "start={}", segs[0].0);
-    assert!((2000..=2100).contains(&segs[0].1), "end={}", segs[0].1);
-
-    assert!(vad.segments(&[0.0f32; 16_000]).unwrap().is_empty());
-
-    // Too short to count (100 ms).
-    let mut blip = vec![0.0f32; 16_000];
-    blip[8000..9600].fill(0.2);
-    assert!(vad.segments(&blip).unwrap().is_empty());
-
-    // Pure segmenter edge rules: silence, short blip, hysteresis + pad (end = temp_end + pad = 640 + 30 = 670 ms), and multi-segment split.
-    assert!(SileroVad::segment_probs(&[0.0; 100], 100 * 512, 0.5, 250, 100, 30).is_empty());
-
-    let mut short = vec![0.0f32; 40];
-    short[5..10].fill(0.9);
-    assert!(SileroVad::segment_probs(&short, 40 * 512, 0.5, 250, 100, 30).is_empty());
-
-    let mut one = vec![0.0f32; 50];
-    one[10..20].fill(0.9);
-    one[15] = 0.4; // >= threshold - 0.15 (0.35): stays triggered
-    let rule_segs = SileroVad::segment_probs(&one, 50 * 512, 0.5, 250, 100, 30);
-    assert_eq!(vec![(290, 670)], rule_segs);
-
-    let mut two = vec![0.0f32; 80];
-    two[5..16].fill(0.9);
-    two[25..36].fill(0.9);
-    let segs2 = SileroVad::segment_probs(&two, 80 * 512, 0.5, 250, 100, 30);
-    assert_eq!(2, segs2.len());
-    assert!(segs2[0].1 <= segs2[1].0);
-}
-
-// Keep unused test helper from drifting into dead-code warning.
-#[test]
-fn device_list_sanity() {
-    assert_eq!(DeviceKind::Gpu, dev_dml().kind);
-}
