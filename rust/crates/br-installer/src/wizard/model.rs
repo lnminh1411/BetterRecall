@@ -574,6 +574,14 @@ mod tests {
         );
         assert!(dl_failed.detail.contains("hash mismatch"));
 
+        // N10: the URL shrinks to its host and the repeated cause is shown once.
+        let long = "transfer failed for https://huggingface.co/x/y/resolve/abc/model.onnx: io: No such host is known. (os error 11001): io: No such host is known. (os error 11001)";
+        assert_eq!(
+            "transfer failed for huggingface.co: io: No such host is known. (os error 11001)",
+            strings::short_failure_reason(long)
+        );
+        assert_eq!("hash mismatch", strings::short_failure_reason("hash mismatch"));
+
         let cancelled = format_finish_error(&InstallError::Cancelled);
         assert_eq!(cancelled.header, strings::FINISH_HEADER_CANCELLED);
         assert!(cancelled.summary.contains("Nothing was changed"));

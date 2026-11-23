@@ -20,13 +20,13 @@ use windows::Win32::UI::Controls::{
     PROPSHEETHEADERW_V2, PROPSHEETHEADERW_V2_0, PROPSHEETHEADERW_V2_2, PROPSHEETPAGEW,
     PROPSHEETPAGEW_0, PSH_AEROWIZARD, PSH_NOAPPLYNOW, PSH_PROPSHEETPAGE, PSH_USEICONID,
     PSH_WIZARD, PSM_SETBUTTONTEXTW, PSM_SETCURSELID, PSM_SETHEADERTITLEW, PSM_SETWIZBUTTONS,
-    PSN_QUERYCANCEL, PSN_SETACTIVE, PSP_DEFAULT, PSP_USEHEADERTITLE, PSWIZB_BACK, PSWIZB_FINISH,
+    PSN_KILLACTIVE, PSN_QUERYCANCEL, PSN_SETACTIVE, PSP_DEFAULT, PSP_USEHEADERTITLE, PSWIZB_BACK, PSWIZB_FINISH,
     PSWIZB_NEXT, PropertySheetW,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     BM_GETCHECK, BM_SETCHECK, BN_CLICKED, DWLP_MSGRESULT, GWL_STYLE, GetDlgItem, GetParent,
-    GetWindowLongPtrW, GetWindowLongW, IDCANCEL, PostMessageW, SW_HIDE, SW_SHOW, SendMessageW,
+    GetWindowLongPtrW, GetWindowLongW, PostMessageW, SW_HIDE, SW_SHOW, SendMessageW,
     SetDlgItemTextW, SetWindowLongPtrW, SetWindowLongW, ShowWindow, WINDOW_LONG_PTR_INDEX, WM_APP,
     WM_COMMAND, WM_INITDIALOG, WM_NOTIFY,
 };
@@ -329,8 +329,7 @@ unsafe extern "system" fn models_proc(
             );
             set_item_text(hwnd, IDC_MODELS_NOTE, strings::MODELS_NOTE);
 
-            let selected_id = radio_from_model_mode(state.model.model_mode);
-            set_checked(hwnd, selected_id, true);
+            check_only_model_radio(hwnd, state.model.model_mode);
             1
         }
         WM_COMMAND => {
@@ -341,16 +340,31 @@ unsafe extern "system" fn models_proc(
                 && let Some(state) = (unsafe { page_state(hwnd) })
             {
                 state.model.model_mode = mode;
+                check_only_model_radio(hwnd, mode);
                 return 1;
             }
             0
         }
         WM_NOTIFY => {
-            if notify_code(lparam) == PSN_SETACTIVE {
+            let code = notify_code(lparam);
+            if code == PSN_SETACTIVE {
                 if let Some(state) = unsafe { page_state(hwnd) } {
                     apply_buttons(hwnd, state.model.buttons_for(PageId::Models));
                 }
                 return 1;
+            }
+            // N9 (sweep 6 retest): the choice is what is checked when the page is left, whether
+            // it was clicked or moved with the arrow keys.
+            if code == PSN_KILLACTIVE
+                && let Some(state) = unsafe { page_state(hwnd) }
+            {
+                if let Some(mode) = [ModelMode::Full, ModelMode::Minimal, ModelMode::Later]
+                    .into_iter()
+                    .find(|&m| is_checked(hwnd, radio_from_model_mode(m)))
+                {
+                    state.model.model_mode = mode;
+                }
+                return 0;
             }
             0
         }
@@ -772,13 +786,27 @@ fn apply_buttons(hwnd: HWND, buttons: WizardButtons) {
 }
 
 fn set_sheet_cancel(hwnd: HWND, enabled: bool, visible: bool) {
-    if let Ok(sheet) = (unsafe { GetParent(hwnd) })
-        && let Ok(cancel_btn) = (unsafe { GetDlgItem(Some(sheet), IDCANCEL.0) })
-    {
-        unsafe {
-            let _ = EnableWindow(cancel_btn, enabled);
-            let _ = ShowWindow(cancel_btn, if visible { SW_SHOW } else { SW_HIDE });
-        }
+    // Aero wizard buttons have no control id, so `GetDlgItem(sheet, IDCANCEL)` finds nothing
+    // (sweep 6 retest of N7). The sheet's own messages show/hide and enable/disable them.
+    const PSM_SHOWWIZBUTTONS: u32 = 0x0400 + 138;
+    const PSM_ENABLEWIZBUTTONS: u32 = 0x0400 + 139;
+    const PSWIZB_CANCEL: usize = 0x10;
+    let Ok(sheet) = (unsafe { GetParent(hwnd) }) else {
+        return;
+    };
+    unsafe {
+        SendMessageW(
+            sheet,
+            PSM_SHOWWIZBUTTONS,
+            Some(WPARAM(if visible { PSWIZB_CANCEL } else { 0 })),
+            Some(LPARAM(PSWIZB_CANCEL as isize)),
+        );
+        SendMessageW(
+            sheet,
+            PSM_ENABLEWIZBUTTONS,
+            Some(WPARAM(if enabled { PSWIZB_CANCEL } else { 0 })),
+            Some(LPARAM(PSWIZB_CANCEL as isize)),
+        );
     }
 }
 
@@ -859,6 +887,12 @@ fn set_item_text(hwnd: HWND, id: u16, text: &str) {
     let wide = to_wide_nul(text);
     unsafe {
         let _ = SetDlgItemTextW(hwnd, i32::from(id), PCWSTR(wide.as_ptr()));
+    }
+}
+
+fn check_only_model_radio(hwnd: HWND, mode: ModelMode) {
+    for m in [ModelMode::Full, ModelMode::Minimal, ModelMode::Later] {
+        set_checked(hwnd, radio_from_model_mode(m), m == mode);
     }
 }
 
