@@ -29,7 +29,7 @@ pub fn log_line(home: &Path, message: &str) {
     let _ = writeln!(file, "{ts} {clean}");
 }
 
-fn utc_now() -> String {
+pub(crate) fn utc_now() -> String {
     let st = unsafe { GetSystemTime() };
     format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",

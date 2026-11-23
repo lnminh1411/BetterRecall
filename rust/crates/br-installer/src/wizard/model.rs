@@ -128,7 +128,11 @@ impl WizardModel {
     /// Creates the initial wizard model with defaults for `init.action`.
     pub fn new(init: WizardInit) -> Self {
         let model_mode = match init.action {
-            Action::Install => init.cli_model_mode.unwrap_or(ModelMode::Minimal),
+            // C6: default the model choice to stored ModelMode on upgrade (fallback to Minimal)
+            Action::Install => init
+                .cli_model_mode
+                .or(init.existing_model_mode)
+                .unwrap_or(ModelMode::Minimal),
             Action::Modify => init
                 .cli_model_mode
                 .or(init.existing_model_mode)
