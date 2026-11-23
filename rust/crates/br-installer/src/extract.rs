@@ -167,6 +167,18 @@ where
         .saturating_add(extra_bytes);
     let available = free_space(parent)?;
     if available < needed {
+        // N3: setup.log line with needed and available bytes and the drive.
+        let drive = parent
+            .components()
+            .next()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .unwrap_or_else(|| parent.display().to_string());
+        log_line(
+            &ctx.home,
+            &format!(
+                "not enough disk space on drive {drive}: needed {needed} bytes, available {available} bytes"
+            ),
+        );
         return Err(InstallError::NotEnoughSpace { needed, available });
     }
 

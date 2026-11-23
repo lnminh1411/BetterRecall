@@ -20,23 +20,24 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use br_contracts::InstallLayout;
+use br_contracts::{DataPaths, InstallLayout, PipeNames};
 use br_fetch::{Catalog, CatalogFile, Component};
 use br_installer::{
-    APP_SUBKEY, Action, Ctx, DISPLAY_NAME, InstallError, InstallOpts, LICENSE_ENTRY, ModelMode,
-    ModelsResult, ModifyOpts, OLD_PREFIX, Outcome, PUBLISHER, ProcInfo, Progress, RUN_SUBKEY,
+    APP_SUBKEY, Action, CLEANUP_VALUE_NAME, Ctx, DISPLAY_NAME, InstallError, InstallOpts, LICENSE_ENTRY, ModelMode,
+    ModelsResult, ModifyOpts, OLD_PREFIX, Outcome, PUBLISHER, ProcInfo, Progress, RUNONCE_SUBKEY, RUN_SUBKEY,
     SETUP_EXE, SETUP_JSON, STAGING_PREFIX, SetupManifest, Step, TRAILER_LEN, UNINSTALL_SUBKEY,
     URL_INFO_ABOUT, UninstallOpts, append_payload, available_disk_space, close_running,
     compare_versions, create_shortcut, delete_key_tree, exit_code, extract_to_staging,
     extract_to_staging_with_space, install, install_with_progress, install_with_space,
-    modify_with_progress, parse_args, pick_processes_to_end, read_install_marker,
+    is_uninstall_temp_file_name, modify_with_progress, parse_args, pick_processes_to_end, read_install_marker,
     read_license_text, read_model_mode, read_reg_dword, read_reg_sz, read_shortcut_target,
-    read_trailer, register, remove_shortcut, resolve_models_dir, shortcut_path, stub_len,
-    swap_into_place, uninstall, unregister, validate_delete_data_home, verify, write_reg_sz,
+    read_trailer, register, remove_shortcut, resolve_models_dir, schedule_old_folder_cleanup, shortcut_path, stub_len,
+    swap_into_place, sweep_stale_uninstall_temp, uninstall, uninstall_with_progress, unregister, validate_delete_data_home, verify, write_reg_sz,
 };
 use sha2::{Digest, Sha256};
+use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError};
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RegDeleteKeyW};
-use windows::Win32::System::Threading::CREATE_NO_WINDOW;
+use windows::Win32::System::Threading::{CREATE_NO_WINDOW, CreateMutexW};
 use windows::core::PCWSTR;
 use zip::CompressionMethod;
 use zip::write::{SimpleFileOptions, ZipWriter};
@@ -2046,4 +2047,604 @@ fn c1_launcher_cleanup_skips_a_folder_a_running_program_uses() {
         );
         thread::sleep(Duration::from_millis(20));
     }
+}
+
+// B1: a Modify that downloads models does not hold SETUP_MUTEX during the download.
+#[test]
+fn b1_modify_does_not_hold_setup_mutex_during_download() {
+    let env = TestEnv::new("b1-mutex");
+    let exe = env.build_installer(
+        "setup",
+        b"MZ-STUB",
+        "0.3.0-dev",
+        &[(InstallLayout::AGENT_EXE, b"agent")],
+    );
+    let (_server, catalog) = start_tiny_model_server();
+
+    // First install with Minimal models
+    install(
+        &env.ctx,
+        &exe,
+        &InstallOpts {
+            allow_downgrade: false,
+            model_mode: ModelMode::Minimal,
+            skip_model_download: false,
+            catalog: Some(catalog.clone()),
+            integrity_key: None,
+        },
+    )
+    .expect("install minimal");
+
+    // Progress probe to check mutex state during DownloadingModels step
+    struct Probe<'a> {
+        home: &'a Path,
+        step_seen: Arc<AtomicBool>,
+        setup_mutex_free: Arc<AtomicBool>,
+        setup_lock_held: Arc<AtomicBool>,
+    }
+    impl Progress for Probe<'_> {
+        fn bytes(&self, _done: u64, _total: u64) {}
+        fn cancelled(&self) -> bool {
+            false
+        }
+        fn step(&self, s: Step) {
+            if s == Step::DownloadingModels {
+                self.step_seen.store(true, AtomicOrdering::SeqCst);
+
+                // Verify SETUP_MUTEX is free (we can acquire it without ERROR_ALREADY_EXISTS)
+                let mutex_name = PipeNames::setup_mutex_for(self.home);
+                let wide_m: Vec<u16> = mutex_name.encode_utf16().chain(Some(0)).collect();
+                let handle_m = unsafe { CreateMutexW(None, false, PCWSTR(wide_m.as_ptr())) };
+                let last_m = unsafe { GetLastError() };
+                if last_m != ERROR_ALREADY_EXISTS {
+                    self.setup_mutex_free.store(true, AtomicOrdering::SeqCst);
+                }
+                if let Ok(h) = handle_m {
+                    unsafe {
+                        let _ = CloseHandle(h);
+                    }
+                }
+
+                // Verify SETUP_LOCK is held (CreateMutexW reports ERROR_ALREADY_EXISTS)
+                let lock_name = PipeNames::setup_lock_for(self.home);
+                let wide_l: Vec<u16> = lock_name.encode_utf16().chain(Some(0)).collect();
+                let handle_l = unsafe { CreateMutexW(None, false, PCWSTR(wide_l.as_ptr())) };
+                let last_l = unsafe { GetLastError() };
+                if last_l == ERROR_ALREADY_EXISTS {
+                    self.setup_lock_held.store(true, AtomicOrdering::SeqCst);
+                }
+                if let Ok(h) = handle_l {
+                    unsafe {
+                        let _ = CloseHandle(h);
+                    }
+                }
+            }
+        }
+    }
+
+    let step_seen = Arc::new(AtomicBool::new(false));
+    let setup_mutex_free = Arc::new(AtomicBool::new(false));
+    let setup_lock_held = Arc::new(AtomicBool::new(false));
+    let probe = Probe {
+        home: &env.ctx.home,
+        step_seen: Arc::clone(&step_seen),
+        setup_mutex_free: Arc::clone(&setup_mutex_free),
+        setup_lock_held: Arc::clone(&setup_lock_held),
+    };
+
+    let out = modify_with_progress(
+        &env.ctx,
+        &ModifyOpts {
+            model_mode: ModelMode::Full,
+            catalog: Some(catalog),
+            integrity_key: None,
+        },
+        &probe,
+    )
+    .expect("modify to full");
+
+    assert_eq!(
+        out,
+        Outcome::Modified {
+            mode: ModelMode::Full,
+            models: ModelsResult::Complete,
+        }
+    );
+    assert!(step_seen.load(AtomicOrdering::SeqCst), "DownloadingModels step must be reached");
+    assert!(
+        setup_mutex_free.load(AtomicOrdering::SeqCst),
+        "SETUP_MUTEX must NOT be held during model download"
+    );
+    assert!(
+        setup_lock_held.load(AtomicOrdering::SeqCst),
+        "SETUP_LOCK must be held during model download"
+    );
+}
+
+// C3 (+F1): simulated in-use folder -> exit InUse, Uninstall key + Run value + shortcut still present, agent restart attempted.
+#[test]
+fn c3_uninstall_in_use_leaves_registry_and_shortcut_and_attempts_restart() {
+    let env = TestEnv::new("c3-inuse");
+    let ping_bytes = fs::read(r"C:\Windows\System32\PING.EXE").expect("read PING.EXE");
+    let exe = env.build_installer(
+        "setup",
+        b"MZ-STUB",
+        "0.3.0-dev",
+        &[
+            (InstallLayout::AGENT_EXE, ping_bytes.as_slice()),
+            ("sibling.dll", b"locked-sibling"),
+        ],
+    );
+
+    install(&env.ctx, &exe, &InstallOpts::default()).expect("install");
+    assert!(env.ctx.install_dir.exists());
+    assert!(shortcut_path(&env.ctx).exists());
+    assert!(read_reg_sz(&env.ctx.reg_key(UNINSTALL_SUBKEY), "DisplayName").unwrap().is_some());
+    assert!(read_reg_sz(&env.ctx.reg_key(RUN_SUBKEY), "BetterRecall").unwrap().is_some());
+
+    // An agent "runs" for this data folder: its scoped quit event exists.
+    let name: Vec<u16> = br_contracts::PipeNames::agent_quit_event_for(&env.ctx.home)
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    let ev = unsafe { windows::Win32::System::Threading::CreateEventW(None, true, false, PCWSTR(name.as_ptr())) }
+        .expect("quit event");
+
+    // Lock a file inside install_dir without FILE_SHARE_DELETE so folder rename fails with InUse.
+    let lock_target = env.ctx.install_dir.join("sibling.dll");
+    let _lock_file = OpenOptions::new()
+        .read(true)
+        .share_mode(1) // FILE_SHARE_READ only (no FILE_SHARE_DELETE)
+        .open(&lock_target)
+        .expect("lock sibling file");
+
+    let res = uninstall_with_progress(&env.ctx, &UninstallOpts::default(), &br_installer::NoProgress);
+    unsafe {
+        let _ = CloseHandle(ev);
+    }
+    let err = match res {
+        Err(e) => e,
+        Ok(o) => panic!("uninstall must fail on locked folder, got {o:?}"),
+    };
+    assert!(matches!(err, InstallError::InUse { .. }), "expected InUse error, got {err:?}");
+
+    // Registration, shortcut and Run value must remain untouched
+    assert!(
+        read_reg_sz(&env.ctx.reg_key(UNINSTALL_SUBKEY), "DisplayName").unwrap().is_some(),
+        "Uninstall key must remain present"
+    );
+    assert!(
+        read_reg_sz(&env.ctx.reg_key(RUN_SUBKEY), "BetterRecall").unwrap().is_some(),
+        "Run value must remain present"
+    );
+    assert!(shortcut_path(&env.ctx).exists(), "shortcut must remain present");
+
+    // Agent restart must have been attempted (logged)
+    let log_path = env.ctx.home.join(r"logs\setup.log");
+    assert!(log_path.is_file(), "setup.log must exist");
+    let log_content = fs::read_to_string(&log_path).expect("read setup.log");
+    assert!(
+        log_content.contains("uninstall did not finish; restarting the agent that was running"),
+        "log must contain restart attempt"
+    );
+}
+
+// C5: stale-copy sweep (pattern match, keeps own file, ignores other names).
+#[test]
+fn c5_stale_uninstall_temp_copy_sweep() {
+    let env = TestEnv::new("c5-sweep");
+    let temp = env.root.join("temp");
+    fs::create_dir_all(&temp).unwrap();
+
+    let own_file = temp.join("BetterRecall-uninstall-456.exe");
+    let stale_1 = temp.join("BetterRecall-uninstall-123.exe");
+    let stale_2 = temp.join("BetterRecall-uninstall-789.exe");
+    let other_file = temp.join("other-file.exe");
+    let non_digit = temp.join("BetterRecall-uninstall-abc.exe");
+
+    fs::write(&own_file, b"own").unwrap();
+    fs::write(&stale_1, b"stale1").unwrap();
+    fs::write(&stale_2, b"stale2").unwrap();
+    fs::write(&other_file, b"other").unwrap();
+    fs::write(&non_digit, b"nondigit").unwrap();
+
+    // Verify pattern matching helper directly
+    assert!(is_uninstall_temp_file_name("BetterRecall-uninstall-123.exe"));
+    assert!(is_uninstall_temp_file_name("BetterRecall-uninstall-456.exe"));
+    assert!(!is_uninstall_temp_file_name("other-file.exe"));
+    assert!(!is_uninstall_temp_file_name("BetterRecall-uninstall-abc.exe"));
+    assert!(!is_uninstall_temp_file_name("BetterRecall-uninstall-.exe"));
+
+    sweep_stale_uninstall_temp(&temp, &own_file);
+
+    assert!(!stale_1.exists(), "stale temp copy 1 must be deleted");
+    assert!(!stale_2.exists(), "stale temp copy 2 must be deleted");
+    assert!(own_file.exists(), "own temp file must be kept");
+    assert!(other_file.exists(), "unrelated file must be kept");
+    assert!(non_digit.exists(), "non-matching file must be kept");
+}
+
+// C6: Modify -> Minimal frees full-only components present on disk regardless of prev_mode.
+#[test]
+fn c6_modify_to_minimal_frees_full_models_when_prev_mode_not_full() {
+    let env = TestEnv::new("c6-models");
+    let exe = env.build_installer(
+        "setup",
+        b"MZ-STUB",
+        "0.3.0-dev",
+        &[(InstallLayout::AGENT_EXE, b"agent")],
+    );
+    let (_server, catalog) = start_tiny_model_server();
+
+    // Install with Minimal
+    install(
+        &env.ctx,
+        &exe,
+        &InstallOpts {
+            allow_downgrade: false,
+            model_mode: ModelMode::Minimal,
+            skip_model_download: false,
+            catalog: Some(catalog.clone()),
+            integrity_key: None,
+        },
+    )
+    .expect("install minimal");
+
+    let models_dir = resolve_models_dir(&env.ctx.home);
+    assert!(models_dir.join("comp-min").join("manifest.json").exists());
+
+    // Manually place full-only component on disk as if downloaded via Models page
+    let comp_full_dir = models_dir.join("comp-full");
+    fs::create_dir_all(&comp_full_dir).unwrap();
+    fs::write(comp_full_dir.join("manifest.json"), b"{\"files\":[]}").unwrap();
+    fs::write(comp_full_dir.join("weights.bin"), b"full-weights").unwrap();
+    assert!(comp_full_dir.exists());
+
+    // Stored mode is Minimal (NOT Full)
+    assert_eq!(read_model_mode(&env.ctx), Some(ModelMode::Minimal));
+
+    // Modify -> Minimal must free comp-full because it is on disk
+    let out = modify_with_progress(
+        &env.ctx,
+        &ModifyOpts {
+            model_mode: ModelMode::Minimal,
+            catalog: Some(catalog),
+            integrity_key: None,
+        },
+        &br_installer::NoProgress,
+    )
+    .expect("modify minimal");
+
+    assert_eq!(
+        out,
+        Outcome::Modified {
+            mode: ModelMode::Minimal,
+            models: ModelsResult::Complete,
+        }
+    );
+    assert!(!comp_full_dir.exists(), "full-only component must be freed on disk");
+    assert!(models_dir.join("comp-min").join("manifest.json").exists());
+}
+
+// C6: Wizard on upgrade defaults the model choice to the stored ModelMode.
+#[test]
+fn c6_wizard_upgrade_defaults_to_stored_model_mode() {
+    use br_installer::wizard::model::{WizardInit, WizardModel};
+
+    // Upgrade with stored Full mode
+    let init_full = WizardInit {
+        action: Action::Install,
+        existing_model_mode: Some(ModelMode::Full),
+        cli_model_mode: None,
+        cli_delete_data: false,
+        cli_no_run: false,
+        licence_found: true,
+    };
+    let model_full = WizardModel::new(init_full);
+    assert_eq!(model_full.model_mode, ModelMode::Full, "stored Full mode must be default on upgrade");
+
+    // Fresh install (no existing mode) falls back to Minimal
+    let init_none = WizardInit {
+        action: Action::Install,
+        existing_model_mode: None,
+        cli_model_mode: None,
+        cli_delete_data: false,
+        cli_no_run: false,
+        licence_found: true,
+    };
+    let model_none = WizardModel::new(init_none);
+    assert_eq!(model_none.model_mode, ModelMode::Minimal, "fresh install must default to Minimal");
+
+    // Explicit CLI mode overrides stored mode
+    let init_cli = WizardInit {
+        action: Action::Install,
+        existing_model_mode: Some(ModelMode::Full),
+        cli_model_mode: Some(ModelMode::Later),
+        cli_delete_data: false,
+        cli_no_run: false,
+        licence_found: true,
+    };
+    let model_cli = WizardModel::new(init_cli);
+    assert_eq!(model_cli.model_mode, ModelMode::Later, "CLI flag overrides stored mode");
+}
+
+// C8: delete-data uninstall removes settings.json.bad, exports.pending, updates dir, and old relay copies.
+#[test]
+fn c8_delete_home_data_removes_bad_pending_updates_and_old_relay_files() {
+    let env = TestEnv::new("c8-deldata");
+    fs::create_dir_all(&env.ctx.home).unwrap();
+
+    // Create the extra C8 state files
+    let bad_settings = env.ctx.home.join("settings.json.bad");
+    let exports_pending = env.ctx.home.join("exports.pending");
+    fs::write(&bad_settings, b"bad-json").unwrap();
+    fs::write(&exports_pending, b"pending-exports").unwrap();
+
+    let updates_dir = DataPaths::updates_dir(&env.ctx.home);
+    fs::create_dir_all(&updates_dir).unwrap();
+    fs::write(updates_dir.join("update-temp.bin"), b"update-bytes").unwrap();
+
+    let bin_dir = env.ctx.home.join("app").join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let old_relay = bin_dir.join("betterrecall-mcp.exe.old-1");
+    fs::write(&old_relay, b"old-relay").unwrap();
+
+    // Standard items
+    fs::write(env.ctx.home.join("settings.json"), b"{}").unwrap();
+    fs::write(env.ctx.home.join("store.db"), b"store").unwrap();
+
+    let exe = env.build_installer(
+        "setup",
+        b"MZ-STUB",
+        "0.3.0-dev",
+        &[(InstallLayout::AGENT_EXE, b"agent")],
+    );
+    install(&env.ctx, &exe, &InstallOpts::default()).expect("install");
+
+    uninstall(
+        &env.ctx,
+        &UninstallOpts {
+            delete_data: true,
+            integrity_key: None,
+        },
+    )
+    .expect("uninstall delete_data");
+
+    assert!(!bad_settings.exists(), "settings.json.bad must be removed");
+    assert!(!exports_pending.exists(), "exports.pending must be removed");
+    assert!(!updates_dir.exists(), "cache\\updates must be removed");
+    assert!(!old_relay.exists(), "app\\bin\\*.old-* must be removed");
+    assert!(!env.ctx.home.join("settings.json").exists());
+    assert!(!env.ctx.home.join("store.db").exists());
+}
+
+// C8: After unregister, delete Software\BetterRecall if it has no values and no subkeys left.
+#[test]
+fn c8_unregister_deletes_empty_app_key() {
+    let env = TestEnv::new("c8-reg");
+    let app_key = env.ctx.reg_key(APP_SUBKEY);
+
+    // Case 1: only InstallPath and ModelMode values present -> key is removed
+    write_reg_sz(&app_key, "InstallPath", "C:\\fake").unwrap();
+    write_reg_sz(&app_key, "ModelMode", "minimal").unwrap();
+    assert!(read_reg_sz(&app_key, "InstallPath").unwrap().is_some());
+
+    unregister(&env.ctx).expect("unregister");
+    assert_eq!(
+        read_reg_sz(&app_key, "InstallPath").unwrap(),
+        None,
+        "empty app key must be removed"
+    );
+
+    // Case 2: key has an extra custom value -> key is preserved
+    write_reg_sz(&app_key, "InstallPath", "C:\\fake").unwrap();
+    write_reg_sz(&app_key, "UserSetting", "custom").unwrap();
+
+    unregister(&env.ctx).expect("unregister");
+    assert_eq!(read_reg_sz(&app_key, "InstallPath").unwrap(), None);
+    assert_eq!(
+        read_reg_sz(&app_key, "UserSetting").unwrap(),
+        Some("custom".to_string()),
+        "app key with extra values must be preserved"
+    );
+}
+
+// F2: free-space check counts only components of the set not already installed and complete.
+#[test]
+fn f2_free_space_check_counts_only_uninstalled_model_components() {
+    let env = TestEnv::new("f2-space");
+    let (cat_data, files) = tiny_catalog_data();
+    let server = TinyHttpServer::start(files.clone());
+    let catalog = cat_data.with_base_url_for_test(server.base_url());
+
+    let exe = env.build_installer(
+        "setup",
+        b"MZ-STUB",
+        "0.3.0-dev",
+        &[(InstallLayout::AGENT_EXE, b"agent")],
+    );
+
+    let models_dir = resolve_models_dir(&env.ctx.home);
+    let comp_min_dir = models_dir.join("comp-min");
+    fs::create_dir_all(&comp_min_dir).unwrap();
+
+    // Create exact matching manifest so br_fetch::installed_state marks comp-min as Complete
+    fs::write(comp_min_dir.join("manifest.json"), &files["/comp-min/manifest.json"]).unwrap();
+
+    // Verify it is recognized as Complete by installed_state
+    let states = br_fetch::installed_state(&models_dir, &catalog);
+    assert_eq!(
+        states.iter().find(|(id, _)| id == "comp-min").map(|(_, st)| *st),
+        Some(br_fetch::ComponentState::Complete)
+    );
+
+    let opts = InstallOpts {
+        allow_downgrade: false,
+        model_mode: ModelMode::Full,
+        skip_model_download: false,
+        catalog: Some(catalog.clone()),
+        integrity_key: None,
+    };
+
+    let res = install_with_space(&env.ctx, &exe, &opts, |_| {
+        Ok(10) // refuse with NotEnoughSpace
+    });
+    let err = match res {
+        Err(e) => e,
+        Ok(o) => panic!("must fail space check, got {o:?}"),
+    };
+
+    if let InstallError::NotEnoughSpace { needed, .. } = err {
+        // Full set has comp-min + comp-full.
+        // Because comp-min is already complete, extra_model_bytes must only count comp-full!
+        let full_comp = catalog.component("comp-full").unwrap();
+        let app_manifest = br_installer::read_setup_manifest(&exe, &br_installer::read_trailer(&exe).unwrap()).unwrap();
+        let expected_needed = app_manifest.bytes
+            .saturating_add(app_manifest.bytes.div_ceil(10))
+            .saturating_add(full_comp.bytes);
+        assert_eq!(needed, expected_needed, "needed bytes must drop by installed comp-min size");
+    } else {
+        panic!("expected NotEnoughSpace, got {err:?}");
+    }
+}
+
+// F4: per-user uninstall falls back to HKCU RunOnce cleanup when MoveFileEx fails.
+#[test]
+fn f4_uninstall_falls_back_to_runonce_cleanup_for_old_folder() {
+    let env = TestEnv::new("f4-runonce");
+    let exe = env.build_installer(
+        "setup",
+        b"MZ-STUB",
+        "0.3.0-dev",
+        &[(InstallLayout::AGENT_EXE, b"agent")],
+    );
+    install(&env.ctx, &exe, &InstallOpts::default()).expect("install");
+
+    // Put an old install folder left behind with a locked file
+    let parent = env.ctx.install_dir.parent().unwrap();
+    let old_dir = parent.join(".BetterRecall.old-1234567890abcdef");
+    fs::create_dir_all(&old_dir).unwrap();
+
+    // Lock a file inside old_dir without FILE_SHARE_DELETE so remove_dir_all fails
+    let locked_path = old_dir.join("locked.txt");
+    fs::write(&locked_path, b"lock-me").unwrap();
+    let _lock = OpenOptions::new()
+        .read(true)
+        .share_mode(1)
+        .open(&locked_path)
+        .expect("open locked file");
+
+    let reboot_required = schedule_old_folder_cleanup(&env.ctx, &old_dir);
+    assert!(reboot_required, "reboot_required must be true when RunOnce is scheduled");
+
+    // Verify RunOnce value was written under dev registry prefix
+    let runonce_key = env.ctx.reg_key(RUNONCE_SUBKEY);
+    let val = read_reg_sz(&runonce_key, CLEANUP_VALUE_NAME).unwrap();
+    assert!(val.is_some(), "RunOnce BetterRecallCleanup value must be written");
+    let val_str = val.unwrap();
+    assert!(
+        val_str.contains("cmd.exe /d /c rmdir /s /q"),
+        "command must be cmd.exe rmdir, got: {val_str}"
+    );
+    assert!(val_str.contains(".BetterRecall.old-1234567890abcdef"));
+}
+
+// N3: Exit 6 (NotEnoughSpace) logs needed and available bytes and the drive.
+#[test]
+fn n3_not_enough_space_logs_drive_needed_and_available() {
+    let env = TestEnv::new("n3-space");
+    let exe = env.build_installer(
+        "setup",
+        b"MZ-STUB",
+        "0.3.0-dev",
+        &[(InstallLayout::AGENT_EXE, b"agent")],
+    );
+
+    let res = install_with_space(&env.ctx, &exe, &InstallOpts::default(), |_| Ok(0));
+    let err = match res {
+        Err(e) => e,
+        Ok(o) => panic!("must fail with space check, got {o:?}"),
+    };
+    assert!(matches!(err, InstallError::NotEnoughSpace { .. }));
+
+    let log_path = env.ctx.home.join(r"logs\setup.log");
+    assert!(log_path.is_file(), "setup.log must exist");
+    let log = fs::read_to_string(&log_path).expect("read setup.log");
+    assert!(log.contains("needed"), "log must mention needed bytes: {log}");
+    assert!(log.contains("available"), "log must mention available bytes: {log}");
+    assert!(log.contains("drive"), "log must mention drive: {log}");
+}
+
+// N4: Exit 7 (AlreadyRunning) logs `setup already running (mutex held)`.
+#[test]
+fn n4_already_running_logs_setup_already_running() {
+    let env = TestEnv::new("n4-mutex");
+    let exe = env.build_installer(
+        "setup",
+        b"MZ-STUB",
+        "0.3.0-dev",
+        &[(InstallLayout::AGENT_EXE, b"agent")],
+    );
+
+    // Pre-acquire SETUP_LOCK to simulate another installer running
+    let lock_name = PipeNames::setup_lock_for(&env.ctx.home);
+    let wide: Vec<u16> = lock_name.encode_utf16().chain(Some(0)).collect();
+    let handle = unsafe { CreateMutexW(None, false, PCWSTR(wide.as_ptr())) }.expect("create lock mutex");
+
+    let res = install(&env.ctx, &exe, &InstallOpts::default());
+    let err = match res {
+        Err(e) => e,
+        Ok(o) => panic!("must fail AlreadyRunning, got {o:?}"),
+    };
+    assert!(matches!(err, InstallError::AlreadyRunning));
+
+    unsafe {
+        let _ = CloseHandle(handle);
+    }
+
+    let log_path = env.ctx.home.join(r"logs\setup.log");
+    assert!(log_path.is_file(), "setup.log must exist");
+    let log = fs::read_to_string(&log_path).expect("read setup.log");
+    assert!(
+        log.contains("setup already running (mutex held)"),
+        "setup.log must contain expected message: {log}"
+    );
+}
+
+// C1 installer half: writes DataPaths::updates_dir(home).join("last-install.json") on success and failure.
+#[test]
+fn c1_installer_writes_last_install_report() {
+    let env = TestEnv::new("c1-report");
+    let exe = env.build_installer(
+        "setup",
+        b"MZ-STUB",
+        "0.3.0-dev",
+        &[(InstallLayout::AGENT_EXE, b"agent")],
+    );
+
+    // Run successful install
+    install(&env.ctx, &exe, &InstallOpts::default()).expect("install");
+
+    let report_path = DataPaths::updates_dir(&env.ctx.home).join("last-install.json");
+    assert!(report_path.is_file(), "last-install.json must exist after install");
+    let content = fs::read_to_string(&report_path).expect("read last-install.json");
+    let parsed: serde_json::Value = serde_json::from_str(&content).expect("parse json");
+    assert_eq!(parsed["version"], "0.3.0-dev");
+    assert_eq!(parsed["exitCode"], 0);
+    assert!(parsed["utc"].as_str().is_some_and(|s| s.contains('T') && s.ends_with('Z')));
+
+    // Run failed install (AlreadyRunning, exit 7)
+    let lock_name = PipeNames::setup_lock_for(&env.ctx.home);
+    let wide: Vec<u16> = lock_name.encode_utf16().chain(Some(0)).collect();
+    let handle = unsafe { CreateMutexW(None, false, PCWSTR(wide.as_ptr())) }.expect("create lock mutex");
+
+    let _ = install(&env.ctx, &exe, &InstallOpts::default());
+    unsafe {
+        let _ = CloseHandle(handle);
+    }
+
+    let content_fail = fs::read_to_string(&report_path).expect("read last-install.json on fail");
+    let parsed_fail: serde_json::Value = serde_json::from_str(&content_fail).expect("parse fail json");
+    assert_eq!(parsed_fail["version"], "0.3.0-dev");
+    assert_eq!(parsed_fail["exitCode"], 7);
 }

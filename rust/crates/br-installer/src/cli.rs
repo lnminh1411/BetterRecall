@@ -250,7 +250,7 @@ pub fn run_main() -> i32 {
                 return err.exit_code();
             }
         };
-        if let Err(e) = relaunch_from_temp(&ctx.temp_dir, &me, &raw_args) {
+        if let Err(e) = relaunch_from_temp(&ctx.temp_dir, &ctx.home, &me, &raw_args) {
             if !args.silent {
                 show_message(&e.to_string(), MB_OK | MB_ICONERROR);
             }
@@ -259,14 +259,28 @@ pub fn run_main() -> i32 {
         return exit_code::OK;
     }
 
-    if !args.silent {
-        return wizard::run_wizard(ctx, args);
+    if args.relaunched
+        && let Ok(me) = std::env::current_exe()
+    {
+        // C5: delete stale temp uninstall copies other than itself at start
+        sweep_stale_uninstall_temp(&ctx.temp_dir, &me);
     }
 
-    match dispatch_silent(&ctx, &args) {
-        Ok(_) => exit_code::OK,
-        Err(e) => e.exit_code(),
+    let code = if !args.silent {
+        wizard::run_wizard(ctx.clone(), args.clone())
+    } else {
+        match dispatch_silent(&ctx, &args) {
+            Ok(_) => exit_code::OK,
+            Err(e) => e.exit_code(),
+        }
+    };
+
+    if args.relaunched {
+        // C5: schedule self-deletion at end of temp-copy run
+        schedule_self_delete(&ctx.temp_dir);
     }
+
+    code
 }
 
 fn build_ctx(args: &CliArgs) -> Result<Ctx, InstallError> {
@@ -399,6 +413,7 @@ pub fn dispatch_silent_for_exe(
 
 fn relaunch_from_temp(
     temp_dir: &Path,
+    home: &Path,
     me: &Path,
     raw_args: &[String],
 ) -> Result<(), InstallError> {
@@ -414,6 +429,10 @@ fn relaunch_from_temp(
     ));
     fs::copy(me, &copy)
         .map_err(|e| InstallError::io(format!("copying the uninstaller to {}", copy.display()), e))?;
+    // C5: The parent cannot wait for the temp copy (its own image locks the install folder).
+    // The exit code cannot be returned because the parent process must exit immediately
+    // so its executable handle is closed, allowing the uninstaller to rename/remove the folder.
+    log_line(home, &format!("uninstall handed over to {}", copy.display()));
     Command::new(&copy)
         .args(raw_args)
         .arg(RELAUNCHED_FLAG)
@@ -421,6 +440,55 @@ fn relaunch_from_temp(
         .spawn()
         .map_err(|e| InstallError::io(format!("starting {}", copy.display()), e))?;
     Ok(())
+}
+
+/// Matches the exact name pattern `BetterRecall-uninstall-<pid>.exe` (C5).
+pub fn is_uninstall_temp_file_name(name: &str) -> bool {
+    name.strip_prefix("BetterRecall-uninstall-")
+        .and_then(|rest| rest.strip_suffix(".exe"))
+        .is_some_and(|pid_str| !pid_str.is_empty() && pid_str.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// Sweeps stale `%TEMP%\BetterRecall-uninstall-*.exe` files other than itself (C5).
+pub fn sweep_stale_uninstall_temp(temp_dir: &Path, current_exe: &Path) {
+    let Ok(entries) = fs::read_dir(temp_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file()
+            && let Some(name) = path.file_name().and_then(|n| n.to_str())
+            && is_uninstall_temp_file_name(name)
+            && path != current_exe
+        {
+            let _ = fs::remove_file(&path);
+        }
+    }
+}
+
+fn schedule_self_delete(temp_dir: &Path) {
+    let Ok(me) = std::env::current_exe() else {
+        return;
+    };
+    let Some(file_name) = me.file_name().and_then(|n| n.to_str()) else {
+        return;
+    };
+    if !is_uninstall_temp_file_name(file_name) {
+        return;
+    }
+    let is_in_temp = me.parent().is_some_and(|p| {
+        p == temp_dir || std::env::var_os("TEMP").map(PathBuf::from).as_deref() == Some(p)
+    });
+    if !is_in_temp {
+        return;
+    }
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let raw_args = format!("/d /c ping -n 3 127.0.0.1 >nul & del /f /q \"{}\"", me.display());
+    let _ = Command::new("cmd.exe")
+        .raw_arg(raw_args)
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn();
 }
 
 fn show_message(text: &str, style: MESSAGEBOX_STYLE) {

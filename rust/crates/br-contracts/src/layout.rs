@@ -333,6 +333,8 @@ pub struct PipeNames;
 impl PipeNames {
     pub const AGENT_MUTEX: &'static str = r"Local\BetterRecall.Agent";
     pub const SETUP_MUTEX: &'static str = r"Local\BetterRecall.Setup";
+    // B1: scoped setup lock for installer-vs-installer exclusion.
+    pub const SETUP_LOCK: &'static str = r"Local\BetterRecall.SetupLock";
     pub const SHOW_LAUNCHER_EVENT: &'static str = r"Local\BetterRecall.UI.ShowLauncher";
     pub const UI_INSTANCE_KEY: &'static str = "BetterRecall.UI";
     pub const AGENT_QUIT_EVENT: &'static str = r"Local\BetterRecall.Agent.Quit";
@@ -432,6 +434,11 @@ impl PipeNames {
 
     pub fn setup_mutex_for(home: &Path) -> String {
         Self::scoped(Self::SETUP_MUTEX, home)
+    }
+
+    // B1: scoped setup lock mirroring setup_mutex_for.
+    pub fn setup_lock_for(home: &Path) -> String {
+        Self::scoped(Self::SETUP_LOCK, home)
     }
 
     pub fn agent_quit_event_for(home: &Path) -> String {

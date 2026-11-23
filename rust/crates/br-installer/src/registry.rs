@@ -14,7 +14,8 @@ use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, WIN
 use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_READ, KEY_SET_VALUE, KEY_WRITE,
     REG_OPTION_NON_VOLATILE, REG_DWORD, REG_SZ, REG_VALUE_TYPE, RegCloseKey, RegCreateKeyExW,
-    RegDeleteTreeW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
+    RegDeleteKeyW, RegDeleteTreeW, RegDeleteValueW, RegOpenKeyExW, RegQueryInfoKeyW,
+    RegQueryValueExW, RegSetValueExW,
 };
 use windows::core::PCWSTR;
 
@@ -26,6 +27,9 @@ use crate::running::{normalized_dir_prefix, path_is_under_prefix};
 pub const UNINSTALL_SUBKEY: &str =
     r"Software\Microsoft\Windows\CurrentVersion\Uninstall\BetterRecall";
 pub const RUN_SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+// F4: HKCU RunOnce subkey for delayed cleanup.
+pub const RUNONCE_SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\RunOnce";
+pub const CLEANUP_VALUE_NAME: &str = "BetterRecallCleanup";
 pub const APP_SUBKEY: &str = r"Software\BetterRecall";
 pub const MODEL_MODE_VALUE: &str = "ModelMode";
 
@@ -88,6 +92,45 @@ pub fn read_model_mode(ctx: &Ctx) -> Option<ModelMode> {
     ModelMode::parse(&raw)
 }
 
+/// Writes `BetterRecallCleanup` command into `HKCU\<reg_prefix>\Software\Microsoft\Windows\CurrentVersion\RunOnce` (F4).
+pub fn write_run_once_cleanup(ctx: &Ctx, command: &str) -> Result<(), InstallError> {
+    write_reg_sz(&ctx.reg_key(RUNONCE_SUBKEY), CLEANUP_VALUE_NAME, command)
+}
+
+/// Deletes an entire HKCU subkey if it has no values and no subkeys left (C8).
+pub fn delete_key_if_empty(subkey: &str) -> Result<(), InstallError> {
+    let Some(hkey) = open_key_opt(subkey, KEY_READ)? else {
+        return Ok(());
+    };
+    let mut subkeys = 0u32;
+    let mut values = 0u32;
+    let err = unsafe {
+        RegQueryInfoKeyW(
+            hkey.0,
+            None,
+            None,
+            None,
+            Some(&mut subkeys),
+            None,
+            None,
+            Some(&mut values),
+            None,
+            None,
+            None,
+            None,
+        )
+    };
+    drop(hkey);
+    if err.is_ok() && subkeys == 0 && values == 0 {
+        let wide = to_wide_nul(subkey);
+        let del_err = unsafe { RegDeleteKeyW(HKEY_CURRENT_USER, PCWSTR(wide.as_ptr())) };
+        if del_err.is_err() && del_err != ERROR_FILE_NOT_FOUND && del_err != ERROR_PATH_NOT_FOUND {
+            return Err(reg_err(format!("deleting empty registry key HKCU\\{subkey}"), del_err));
+        }
+    }
+    Ok(())
+}
+
 /// Removes the Uninstall key, the `InstallPath` and `ModelMode` values, and the `Run` value only
 /// if it points into `ctx.install_dir`.
 pub fn unregister(ctx: &Ctx) -> Result<(), InstallError> {
@@ -98,6 +141,8 @@ pub fn unregister(ctx: &Ctx) -> Result<(), InstallError> {
         delete_value_opt(hkey.0, "InstallPath")?;
         delete_value_opt(hkey.0, MODEL_MODE_VALUE)?;
     }
+    // C8: delete Software\BetterRecall if it has no values and no subkeys left
+    delete_key_if_empty(&app_key)?;
 
     let run_key = ctx.reg_key(RUN_SUBKEY);
     if let Some(hkey) = open_key_opt(&run_key, KEY_QUERY_VALUE | KEY_SET_VALUE)?
