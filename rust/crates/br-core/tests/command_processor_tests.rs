@@ -7,7 +7,8 @@
 
 mod common;
 
-use std::sync::Arc;
+use std::fs;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
@@ -17,7 +18,7 @@ use br_contracts::{
 use br_core::{
     AgentError, ApiKeyStore, CancelToken, ClientSession, CloudDescriber, CommandDeps,
     CommandProcessor, DescribeError, DescribeRedactor, EmbedError, KeyVault, OutgoingImage,
-    PipeKind, SettingsStore, UnlockPassword,
+    PasswordCheck, PipeKind, SettingsStore, UnlockPassword,
 };
 use chrono::{Duration as ChronoDuration, Utc};
 use serde_json::{Value, json};
@@ -809,4 +810,100 @@ fn hello_missing_refuses_passphrase_protection_and_inline_verify() {
         )
         .0
     );
+}
+
+#[test]
+fn password_set_and_clear_report_error_when_io_fails_e2() {
+    let f = CmdFixture::new();
+    let mut ui_s = CmdFixture::ui_sess();
+
+    // Set an initial password
+    assert!(f.call(&mut ui_s, "password set {\"current\":\"\",\"new\":\"oldpass1\"}").0);
+    assert_eq!(PasswordCheck::Ok, f.password.verify(Some("oldpass1")));
+
+    // Hold unlock.bin.tmp with share_mode 0 so write fails
+    let tmp_path = f.home.path().join("keys").join("unlock.bin.tmp");
+    if let Some(parent) = tmp_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    use std::fs::OpenOptions;
+    use std::os::windows::fs::OpenOptionsExt;
+    let locked_tmp = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .share_mode(0)
+        .open(&tmp_path)
+        .expect("open locked tmp");
+
+    // Attempt to set a new password while tmp is held
+    let (ok, _, err) = f.call(&mut ui_s, "password set {\"current\":\"oldpass1\",\"new\":\"newpass22\"}");
+    assert!(!ok);
+    assert_eq!(Some(CommandProcessor::ERR_PASSWORD_SAVE.to_string()), err);
+
+    // Old password must still work, new password must NOT work
+    assert_eq!(PasswordCheck::Ok, f.password.verify(Some("oldpass1")));
+    assert_eq!(PasswordCheck::Wrong, f.password.verify(Some("newpass22")));
+
+    // Release tmp
+    drop(locked_tmp);
+    let _ = fs::remove_file(&tmp_path);
+
+    // Clear variant: hold unlock.bin with FILE_SHARE_READ so delete fails while reading works
+    let bin_path = f.home.path().join("keys").join("unlock.bin");
+    let locked_bin = OpenOptions::new()
+        .read(true)
+        .share_mode(1) // FILE_SHARE_READ
+        .open(&bin_path)
+        .expect("open locked bin");
+
+    let (ok_clear, _, err_clear) = f.call(&mut ui_s, "password clear {\"current\":\"oldpass1\"}");
+    assert!(!ok_clear);
+    assert_eq!(Some(CommandProcessor::ERR_PASSWORD_REMOVE.to_string()), err_clear);
+
+    drop(locked_bin);
+    // Old password still works because clear failed
+    assert_eq!(PasswordCheck::Ok, f.password.verify(Some("oldpass1")));
+}
+
+#[test]
+fn backward_clock_step_does_not_pin_search_rate_limit_b3() {
+    let f = CmdFixture::new();
+    let mut pub_s = CmdFixture::pub_sess();
+    f.settings.try_update(&json!({
+        "ipc": {
+            "maxSearchPerMinute": 5
+        }
+    }));
+
+    let base_instant = std::time::Instant::now();
+    let now_instant = Arc::new(Mutex::new(base_instant));
+    let now_instant_clone = now_instant.clone();
+    f.p.set_monotonic_now_for_test(move || *now_instant_clone.lock().unwrap());
+
+    // Run 5 searches -> allowed
+    for _ in 0..5 {
+        assert!(f.call(&mut pub_s, "search test").0);
+    }
+    // 6th search -> rate limited
+    let (ok, _, err) = f.call(&mut pub_s, "search test");
+    assert!(!ok);
+    assert_eq!(Some("Rate limit exceeded.".to_string()), err);
+
+    // Backward wall clock step by 30 minutes!
+    let wall_now = Arc::new(Mutex::new(Utc::now() - ChronoDuration::minutes(30)));
+    let wall_clone = wall_now.clone();
+    f.p.set_now_for_test(move || *wall_clone.lock().unwrap());
+
+    // Still rate limited before 60s of monotonic time
+    let (ok2, _, err2) = f.call(&mut pub_s, "search test");
+    assert!(!ok2);
+    assert_eq!(Some("Rate limit exceeded.".to_string()), err2);
+
+    // Advance monotonic clock by 61 seconds
+    *now_instant.lock().unwrap() = base_instant + Duration::from_secs(61);
+
+    // Search is now allowed again despite wall clock being 30 minutes in the past
+    let (ok3, _, _) = f.call(&mut pub_s, "search test");
+    assert!(ok3);
 }

@@ -139,6 +139,7 @@ impl Reply {
 pub type StoreFn = Arc<dyn Fn() -> Option<Arc<EncryptedStore>> + Send + Sync>;
 pub type PurgeAllFn = Arc<dyn Fn(&CancelToken) -> i32 + Send + Sync>;
 pub type ClockFn = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
+pub type MonotonicClockFn = Arc<dyn Fn() -> Instant + Send + Sync>;
 
 /// Everything the command processor reads or calls (`CommandDeps`).
 pub struct CommandDeps {
@@ -173,8 +174,9 @@ pub struct CommandProcessor {
     idle_timeout_override_ms: AtomicI64,
     cold_embed_wait_ms: AtomicI64,
     chat: Option<Arc<ChatService>>,
-    public_searches: Mutex<VecDeque<DateTime<Utc>>>,
-    mcp_searches: Mutex<VecDeque<DateTime<Utc>>>,
+    public_searches: Mutex<VecDeque<Instant>>,
+    mcp_searches: Mutex<VecDeque<Instant>>,
+    monotonic_now: Mutex<MonotonicClockFn>,
     purge_all_epoch: AtomicI32,
     removed_listeners: Arc<Mutex<Vec<(u64, RemovedHandler)>>>,
     next_removed_id: AtomicU64,
@@ -236,6 +238,8 @@ impl CommandProcessor {
     pub const ERR_NO_PASSWORD: &'static str = "No unlock password is set.";
     pub const ERR_PASSWORD_RULE: &'static str = "Password must be 6 to 256 characters.";
     pub const ERR_PASSWORD_IN_USE: &'static str = "Password in use (config security.unlockMethod).";
+    pub const ERR_PASSWORD_SAVE: &'static str = "Could not save the password.";
+    pub const ERR_PASSWORD_REMOVE: &'static str = "Could not remove the password.";
     pub const ERR_HELLO_MISSING: &'static str = "Windows Hello is not available: unlock with the password (config security.unlockMethod).";
     pub const ERR_PASSPHRASE_RULE: &'static str = "A new passphrase must be 8 to 1024 characters.";
     pub const ERR_PASSPHRASE_FIRST: &'static str = "Set the passphrase first: with security.unlockMethod hello, unlock with the new passphrase, then switch to password.";
@@ -368,6 +372,7 @@ impl CommandProcessor {
             chat,
             public_searches: Mutex::new(VecDeque::new()),
             mcp_searches: Mutex::new(VecDeque::new()),
+            monotonic_now: Mutex::new(Arc::new(Instant::now)),
             purge_all_epoch: AtomicI32::new(0),
             removed_listeners: Arc::new(Mutex::new(Vec::new())),
             next_removed_id: AtomicU64::new(1),
@@ -386,6 +391,16 @@ impl CommandProcessor {
         *self.now.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(now);
     }
 
+    /// B3: Injectable monotonic clock seam for rate limiter tests.
+    pub fn set_monotonic_now_for_test(&self, now: impl Fn() -> Instant + Send + Sync + 'static) {
+        *self.monotonic_now.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(now);
+    }
+
+    fn monotonic_now(&self) -> Instant {
+        let f = self.monotonic_now.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        f()
+    }
+
     pub fn set_status_heartbeat_for_test(&self, dur: Duration) {
         self.status_heartbeat_ms
             .store(dur.as_millis() as i64, Ordering::Release);
@@ -401,6 +416,13 @@ impl CommandProcessor {
     pub fn set_cold_embed_wait_for_test(&self, dur: Duration) {
         self.cold_embed_wait_ms
             .store(dur.as_millis().max(1) as i64, Ordering::Release);
+    }
+
+    /// E1: For tests: override chat service idle timeout.
+    pub fn set_chat_idle_timeout_for_test(&self, dur: Duration) {
+        if let Some(ref c) = self.chat {
+            c.set_idle_timeout_for_test(dur);
+        }
     }
 
     fn now(&self) -> DateTime<Utc> {
@@ -1318,11 +1340,12 @@ impl CommandProcessor {
         None
     }
 
+    // B3: Use monotonic clock so backward wall-clock step does not pin search rate limit
     fn rate_limited(&self, s: &ClientSession) -> bool {
         if s.kind == PipeKind::Ui {
             return false;
         }
-        let now = self.now();
+        let now = self.monotonic_now();
         let queue = if s.kind == PipeKind::Mcp {
             &self.mcp_searches
         } else {
@@ -1330,7 +1353,7 @@ impl CommandProcessor {
         };
         let mut times = queue.lock().unwrap_or_else(|e| e.into_inner());
         while let Some(&front) = times.front() {
-            if now.signed_duration_since(front) >= ChronoDuration::minutes(1) {
+            if now.saturating_duration_since(front) >= Duration::from_secs(60) {
                 times.pop_front();
             } else {
                 break;
@@ -2336,7 +2359,12 @@ impl CommandProcessor {
                     if self.uses_password() {
                         return Reply::err(Self::ERR_PASSWORD_IN_USE);
                     }
-                    let _ = pw.clear();
+                    // E2: return error reply and audit 0 if delete fails
+                    if let Err(e) = pw.clear() {
+                        Log::warn_err("password clear failed", &e.to_string());
+                        self.audit(s, "password clear", 0, "");
+                        return Reply::err(Self::ERR_PASSWORD_REMOVE);
+                    }
                     self.audit(s, "password clear", 1, "");
                     return Reply::ok("null".to_string());
                 }
@@ -2346,7 +2374,12 @@ impl CommandProcessor {
                 if !UnlockPassword::valid_new(next) {
                     return Reply::err(Self::ERR_PASSWORD_RULE);
                 }
-                let _ = pw.set(next);
+                // E2: return error reply and audit 0 if write fails
+                if let Err(e) = pw.set(next) {
+                    Log::warn_err("password set failed", &e.to_string());
+                    self.audit(s, "password set", 0, "");
+                    return Reply::err(Self::ERR_PASSWORD_SAVE);
+                }
                 self.audit(s, "password set", 1, "");
                 Reply::ok("null".to_string())
             }

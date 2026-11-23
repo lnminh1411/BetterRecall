@@ -32,6 +32,9 @@ pub struct SettingsStore {
     /// Serialises saves (merge, write, swap). Readers of `current()` never wait on it.
     write_gate: Mutex<()>,
     changed: Arc<Mutex<Vec<(u64, ChangedHandler)>>>,
+    // E4: sequence numbers to raise notifications in commit order and drop stale ones
+    commit_seq: AtomicU64,
+    notified_seq: AtomicU64,
 }
 
 struct State {
@@ -101,6 +104,8 @@ impl SettingsStore {
             }),
             write_gate: Mutex::new(()),
             changed: Arc::new(Mutex::new(Vec::new())),
+            commit_seq: AtomicU64::new(1),
+            notified_seq: AtomicU64::new(0),
         };
         if write
             && let Err(e) = store.save()
@@ -177,7 +182,7 @@ impl SettingsStore {
         let Value::Object(partial_obj) = partial else {
             return Some("Invalid JSON.".to_string());
         };
-        let next = {
+        let (next, seq) = {
             let _write_guard = self.write_gate.lock().expect("settings write gate");
             let current = {
                 let st = self.gate.lock().expect("settings gate");
@@ -242,9 +247,10 @@ impl SettingsStore {
                 st.current = parsed.clone();
                 st.load_error = None;
             }
-            parsed
+            let seq = self.commit_seq.fetch_add(1, Ordering::SeqCst);
+            (parsed, seq)
         };
-        self.raise_changed(&next);
+        self.raise_changed(seq, &next);
         None
     }
 
@@ -252,7 +258,7 @@ impl SettingsStore {
     /// `settings.json.bad`, writes the defaults in use, clears `load_error`, and allows saves again.
     /// Returns `Ok(false)` when the file had loaded cleanly.
     pub fn reset_unreadable(&self) -> io::Result<bool> {
-        let snapshot = {
+        let (snapshot, seq) = {
             let _write_guard = self.write_gate.lock().expect("settings write gate");
             let snapshot = {
                 let st = self.gate.lock().expect("settings gate");
@@ -279,10 +285,11 @@ impl SettingsStore {
                 let mut st = self.gate.lock().expect("settings gate");
                 st.load_error = None;
             }
-            snapshot
+            let seq = self.commit_seq.fetch_add(1, Ordering::SeqCst);
+            (snapshot, seq)
         };
         Log::info("settings.json reset to defaults (the unreadable file is kept as settings.json.bad)");
-        self.raise_changed(&snapshot);
+        self.raise_changed(seq, &snapshot);
         Ok(true)
     }
 
@@ -300,14 +307,15 @@ impl SettingsStore {
         if let Some(bad) = Self::validate(&next) {
             return Ok(Some(format!("Invalid {bad}.")));
         }
-        {
+        let seq = {
             let _write_guard = self.write_gate.lock().expect("settings write gate");
             self.write_file(&next)?;
             let mut st = self.gate.lock().expect("settings gate");
             st.current = next.clone();
             st.load_error = None;
-        }
-        self.raise_changed(&next);
+            self.commit_seq.fetch_add(1, Ordering::SeqCst)
+        };
+        self.raise_changed(seq, &next);
         Ok(None)
     }
 
@@ -365,7 +373,23 @@ impl SettingsStore {
         true
     }
 
-    fn raise_changed(&self, s: &Settings) {
+    // E4: Drop stale notifications if a newer commit was already raised
+    fn raise_changed(&self, seq: u64, s: &Settings) {
+        let mut last = self.notified_seq.load(Ordering::Acquire);
+        loop {
+            if seq <= last {
+                return;
+            }
+            match self.notified_seq.compare_exchange_weak(
+                last,
+                seq,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(actual) => last = actual,
+            }
+        }
         let handlers: Vec<ChangedHandler> = self
             .changed
             .lock()

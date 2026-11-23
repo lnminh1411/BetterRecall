@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use br_contracts::DataPaths;
 use chrono::{DateTime, Duration, Utc};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::crypto::{CryptoError, KeyVault};
 use crate::log::Log;
@@ -156,22 +156,24 @@ impl UnlockPassword {
         let mut salt = [0u8; 16];
         win32::fill_random(&mut salt);
         let mut hash = KeyVault::argon(password, &salt, self.mem_kib, self.passes, self.lanes)?;
-        let mut hash_arr = [0u8; 32];
+        let mut hash_arr = Zeroizing::new([0u8; 32]);
         hash_arr.copy_from_slice(&hash);
         hash.zeroize();
-        {
+        let res = {
             let _g = self.gate.lock().expect("unlock password gate");
             self.write(&Record {
                 mem_kib: self.mem_kib,
                 passes: self.passes,
                 lanes: self.lanes,
                 salt,
-                hash: hash_arr,
+                hash: *hash_arr,
                 failures: 0,
                 locked_until_ms: 0,
-            })?;
-        }
+            })
+        };
+        // E2b: zeroize Argon2 hash copy on error path too before propagating error
         hash_arr.zeroize();
+        res?;
         Log::info("unlock password set");
         Ok(())
     }

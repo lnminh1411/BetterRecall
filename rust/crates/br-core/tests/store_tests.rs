@@ -1287,3 +1287,16 @@ fn hybrid_search_without_text_hits_reports_the_cosine() {
     assert_eq!(fused.results.len(), 1);
     assert!(fused.results[0].text_match);
 }
+
+#[test]
+fn snippet_does_not_panic_on_turkish_i_length_growth_a2() {
+    // 150 x "İ " + "zebrafinch": lowercasing 'İ' expands length by 150 chars.
+    let text = "İ ".repeat(150) + "zebrafinch";
+    let snip = EncryptedStore::snippet(&text, &["zebrafinch".to_string()]);
+    assert!(snip.contains("zebrafinch"));
+    assert!(snip.chars().count() <= 300);
+
+    // Sweeper's arithmetic case: len 310, p 300, lowercase match index 450, start 350 > 310
+    let snip_arith = EncryptedStore::snippet(&("İ ".repeat(150) + "zebrafinch"), &["zebrafinch".into()]);
+    assert!(snip_arith.contains("zebrafinch"));
+}

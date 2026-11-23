@@ -175,6 +175,14 @@ impl PortFixture {
         }));
         let now_for_proc = now.clone();
         p.set_now_for_test(move || *now_for_proc.lock().unwrap());
+        // B3: the rate limiter uses a monotonic clock; drive it from the same fake time.
+        let now_for_mono = now.clone();
+        let wall0 = *now.lock().unwrap();
+        let mono0 = std::time::Instant::now();
+        p.set_monotonic_now_for_test(move || {
+            let d = (*now_for_mono.lock().unwrap() - wall0).to_std().unwrap_or_default();
+            mono0 + d
+        });
         let p_weak = Arc::downgrade(&p);
         store.on_purged(move |n| {
             if let Some(proc) = p_weak.upgrade() {

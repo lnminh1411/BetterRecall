@@ -7,6 +7,7 @@ mod common;
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use br_contracts::{
     AiDefaults, AiShare, CaptureDetail, CaptureKind, Envelope, SearchHit, Settings, ThumbData,
@@ -563,4 +564,250 @@ fn chat_verb_gemini_end_to_end_over_fake_http_server() {
         .0
     );
     assert!(store.chats(10).unwrap().is_empty());
+}
+
+fn openai_delta_sse(text: &str) -> String {
+    format!("data: {{\"choices\":[{{\"delta\":{{\"content\":\"{text}\"}}}}]}}\n\n")
+}
+
+struct StallServer {
+    addr: std::net::SocketAddr,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl StallServer {
+    fn start(first_event: String) -> Self {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_clone = stop.clone();
+
+        let handle = std::thread::spawn(move || {
+            while let Ok((mut stream, _)) = listener.accept() {
+                if stop_clone.load(std::sync::atomic::Ordering::Acquire) {
+                    break;
+                }
+                let mut buf = [0u8; 1024];
+                let _ = std::io::Read::read(&mut stream, &mut buf);
+                use std::io::Write;
+                let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+                if stream.write_all(head.as_bytes()).is_err() {
+                    continue;
+                }
+                if stream.write_all(first_event.as_bytes()).is_err() {
+                    continue;
+                }
+                let _ = stream.flush();
+                while !stop_clone.load(std::sync::atomic::Ordering::Acquire) {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+        });
+
+        Self {
+            addr,
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    fn url(&self) -> String {
+        format!("http://{}", self.addr)
+    }
+}
+
+impl Drop for StallServer {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
+        let _ = std::net::TcpStream::connect(self.addr);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+#[test]
+fn stalled_provider_stream_cancelled_ends_within_one_second_and_frees_busy_e1() {
+    let srv = StallServer::start(openai_delta_sse("Hi"));
+
+    let home = TempHome::new(Some("dpapi"));
+    let settings = Arc::new(SettingsStore::load(home.path()));
+    assert!(
+        settings
+            .try_update(&json!({
+                "ai": {
+                    "enabled": true,
+                    "provider": "openai-compatible",
+                    "endpoint": format!("{}/v1", srv.url()),
+                    "model": "gpt-fake"
+                }
+            }))
+            .is_none()
+    );
+    let s_for_v = settings.clone();
+    let vault = Arc::new(KeyVault::new(
+        home.path(),
+        move || s_for_v.current(),
+        None,
+        false,
+    ));
+    let _ = vault.try_load_silent();
+    let ai_key = Arc::new(ApiKeyStore::new(home.path()));
+    ai_key.set("sk-fake-key", &settings.current().ai).unwrap();
+
+    let mut t = TempStore::new();
+    let store = Arc::new(t.store.take().unwrap());
+    let st_clone = store.clone();
+    let p = CommandProcessor::new(CommandDeps {
+        settings: settings.clone(),
+        store: Arc::new(move || Some(st_clone.clone())),
+        keys: vault,
+        agent: Arc::new(FakeAgent::new()),
+        embedder: Arc::new(FakeEmbedder::new()),
+        thumbnailer: Arc::new(FakeThumbs::new()),
+        purge_all: Arc::new(|_| 0),
+        purge_all_undeleted: None,
+        blobs: None,
+        home: Some(home.path().to_path_buf()),
+        password: None,
+        ai_key: Some(ai_key),
+        describer: None,
+        redactor: None,
+        chat_http: None,
+        chat_providers: None,
+    });
+
+    let mut ui = ClientSession::new(PipeKind::Ui, 1, "ui.exe");
+    let cancel = br_core::CancelSource::new();
+    let ct = cancel.token();
+
+    let cancel_thread = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        cancel.cancel();
+    });
+
+    let reply = p.handle(
+        &mut ui,
+        r#"chat send {"text":"Stall test question"}"#,
+        &ct,
+    );
+    let producer = reply.stream.expect("streaming reply");
+    let mut lines = Vec::new();
+    let start = std::time::Instant::now();
+    producer(&mut |l| lines.push(l));
+    let elapsed = start.elapsed();
+    cancel_thread.join().unwrap();
+
+    // Must end within ~1 s
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "turn took {elapsed:?}, expected < 1 s"
+    );
+
+    // Parse the chat id from the start event
+    // The stream lines wrap the event; take the chat id from the start event text.
+    let start_line = lines.iter().find(|l| l.contains("\"start\"")).expect("start event");
+    let at = start_line.find("\"chatId\":\"").expect("chatId") + "\"chatId\":\"".len();
+    let cid = start_line[at..].split('"').next().unwrap().to_string();
+
+    // Verify chat is NO LONGER BUSY: sending again on same chat id must not return busy
+    let retry_reply = p.handle(
+        &mut ui,
+        &format!(r#"chat send {{"chatId":"{cid}","text":"Another question"}}"#),
+        &CancelToken::cancelled(),
+    );
+    assert!(!retry_reply.line.contains("\"code\":\"busy\""), "chat was still busy: {}", retry_reply.line);
+}
+
+#[test]
+fn stalled_provider_stream_idle_timeout_emits_error_event_e1() {
+    let srv = StallServer::start(openai_delta_sse("Hi"));
+
+    let home = TempHome::new(Some("dpapi"));
+    let settings = Arc::new(SettingsStore::load(home.path()));
+    assert!(
+        settings
+            .try_update(&json!({
+                "ai": {
+                    "enabled": true,
+                    "provider": "openai-compatible",
+                    "endpoint": format!("{}/v1", srv.url()),
+                    "model": "gpt-fake"
+                }
+            }))
+            .is_none()
+    );
+    let s_for_v = settings.clone();
+    let vault = Arc::new(KeyVault::new(
+        home.path(),
+        move || s_for_v.current(),
+        None,
+        false,
+    ));
+    let _ = vault.try_load_silent();
+    let ai_key = Arc::new(ApiKeyStore::new(home.path()));
+    ai_key.set("sk-fake-key", &settings.current().ai).unwrap();
+
+    let mut t = TempStore::new();
+    let store = Arc::new(t.store.take().unwrap());
+    let st_clone = store.clone();
+    let p = CommandProcessor::new(CommandDeps {
+        settings: settings.clone(),
+        store: Arc::new(move || Some(st_clone.clone())),
+        keys: vault,
+        agent: Arc::new(FakeAgent::new()),
+        embedder: Arc::new(FakeEmbedder::new()),
+        thumbnailer: Arc::new(FakeThumbs::new()),
+        purge_all: Arc::new(|_| 0),
+        purge_all_undeleted: None,
+        blobs: None,
+        home: Some(home.path().to_path_buf()),
+        password: None,
+        ai_key: Some(ai_key),
+        describer: None,
+        redactor: None,
+        chat_http: None,
+        chat_providers: None,
+    });
+
+    // Inject short idle timeout of 400 ms
+    p.set_chat_idle_timeout_for_test(Duration::from_millis(400));
+
+    let mut ui = ClientSession::new(PipeKind::Ui, 1, "ui.exe");
+    let reply = p.handle(
+        &mut ui,
+        r#"chat send {"text":"Idle stall test"}"#,
+        &CancelToken::none(),
+    );
+    let producer = reply.stream.expect("streaming reply");
+    let mut lines = Vec::new();
+    let start = std::time::Instant::now();
+    producer(&mut |l| lines.push(l));
+    let elapsed = start.elapsed();
+
+    // Must end quickly (around 400ms + <= 250ms wake)
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "idle timeout took {elapsed:?}, expected < 2 s"
+    );
+
+    // Must emit the specified error event: "The AI provider stopped responding."
+    assert!(
+        lines.iter().any(|l| l.contains("The AI provider stopped responding.")),
+        "expected error event 'The AI provider stopped responding.', got: {lines:?}"
+    );
+
+    // The stream lines wrap the event; take the chat id from the start event text.
+    let start_line = lines.iter().find(|l| l.contains("\"start\"")).expect("start event");
+    let at = start_line.find("\"chatId\":\"").expect("chatId") + "\"chatId\":\"".len();
+    let cid = start_line[at..].split('"').next().unwrap().to_string();
+
+    // Verify chat is NO LONGER BUSY
+    let retry_reply = p.handle(
+        &mut ui,
+        &format!(r#"chat send {{"chatId":"{cid}","text":"Another question"}}"#),
+        &CancelToken::cancelled(),
+    );
+    assert!(!retry_reply.line.contains("\"code\":\"busy\""), "chat was still busy: {}", retry_reply.line);
 }
