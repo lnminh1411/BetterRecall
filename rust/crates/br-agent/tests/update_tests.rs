@@ -138,7 +138,7 @@ fn make_launcher() -> (LaunchLog, br_agent::host::InstallerLauncher) {
             .lock()
             .unwrap()
             .push((path.to_path_buf(), args.to_vec()));
-        Ok(())
+        Ok(None)
     });
     (log, hook)
 }
@@ -806,4 +806,381 @@ fn update_download_rejects_concurrent_update_and_models_running() {
     cts2.cancel();
     mdl.join().unwrap().expect("cancelled models returns Ok");
     host.shutdown();
+}
+
+// C1: Watcher thread observes non-zero exit code (3), transitions state to error and records failure.
+#[test]
+fn apply_watcher_detects_exit_code_3_and_records_failure() {
+    use std::os::windows::io::IntoRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+
+    let dir = TempDir::new("upd-watcher-exit3");
+    let host = make_test_host(&dir);
+    let (priv_pem, pub_pem) = gen_keypair();
+    let server = LocalHttpServer::start(HashMap::new());
+    let rel = make_signed_release(
+        "0.3.0",
+        "BetterRecall-Setup-0.3.0.exe",
+        vec![0x42u8; 1024],
+        &priv_pem,
+    );
+    let gh_rel = populate_release(&server, "v0.3.0", &rel, ReleaseOpts::signed());
+    server.set_file("/releases", serde_json::to_vec(&vec![gh_rel]).unwrap());
+
+    let hook: br_agent::host::InstallerLauncher = Arc::new(move |_path, _args| {
+        let child = std::process::Command::new("cmd")
+            .args(["/c", "exit", "3"])
+            .spawn()?;
+        let raw = child.into_raw_handle();
+        Ok(Some(HANDLE(raw as *mut _)))
+    });
+
+    host.set_update_test_config(Some(UpdateTestConfig {
+        feed_url: server.feed_url(),
+        allowed_prefix: server.release_prefix(),
+        public_key_pem: Some(pub_pem),
+        current_version: Some("0.2.0".to_string()),
+        fast_retries: true,
+        launcher: Some(hook),
+    }));
+
+    let status = host
+        .update_check(&CancelToken::none())
+        .expect("check ok");
+    assert!(status.available);
+
+    host.update_download(&mut |_| {}, &CancelToken::none())
+        .expect("download ok");
+
+    let applied = host.update_apply().expect("apply ok");
+    assert_eq!(applied.state, "applying");
+
+    assert!(
+        until(
+            || host.update_status().unwrap().state == "error",
+            Duration::from_secs(5),
+        ),
+        "state never transitioned to error"
+    );
+
+    let final_status = host.update_status().unwrap();
+    assert_eq!(final_status.state, "error");
+    assert!(
+        final_status
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("setup exit code 3"),
+        "error was {:?}",
+        final_status.error
+    );
+
+    let state_path = DataPaths::updates_dir(&dir.path().join("home")).join("state.json");
+    let state_raw = fs::read_to_string(&state_path).expect("read state.json");
+    let state_json: serde_json::Value = serde_json::from_str(&state_raw).expect("parse state.json");
+    assert_eq!(state_json["failedVersion"], "0.3.0");
+    assert_eq!(state_json["failedCount"], 1);
+    assert!(state_json["failedAt"].is_string());
+}
+
+// C1: Manager start reads last-install.json, starts in error if exit code != 0 and records failure.
+#[test]
+fn manager_start_reads_last_install_json_error_and_records_failure() {
+    let dir = TempDir::new("upd-last-install");
+    let updates_dir = DataPaths::updates_dir(&dir.path().join("home"));
+    fs::create_dir_all(&updates_dir).unwrap();
+
+    let state_path = updates_dir.join("state.json");
+    let state_data = serde_json::json!({
+        "downloaded": "0.3.0",
+        "lastCheck": "2026-11-23T10:00:00Z",
+    });
+    fs::write(&state_path, serde_json::to_vec(&state_data).unwrap()).unwrap();
+
+    let last_install_path = updates_dir.join("last-install.json");
+    let last_install_data = serde_json::json!({
+        "version": "0.3.0",
+        "exitCode": 3,
+        "utc": "2026-11-23T11:00:00Z"
+    });
+    fs::write(&last_install_path, serde_json::to_vec(&last_install_data).unwrap()).unwrap();
+
+    let host = make_test_host(&dir);
+    let status = host.update_status().unwrap();
+    assert_eq!(status.state, "error");
+    assert!(
+        status
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("setup exit code 3"),
+        "error was {:?}",
+        status.error
+    );
+
+    let state_raw = fs::read_to_string(&state_path).expect("read state.json");
+    let state_json: serde_json::Value = serde_json::from_str(&state_raw).expect("parse state.json");
+    assert_eq!(state_json["failedVersion"], "0.3.0");
+    assert_eq!(state_json["failedCount"], 1);
+    assert_eq!(state_json["lastInstallHandledUtc"], "2026-11-23T11:00:00Z");
+
+    // Second start does not increment failedCount when utc is same
+    let _host2 = make_test_host(&dir);
+    let state_raw2 = fs::read_to_string(&state_path).expect("read state.json");
+    let state_json2: serde_json::Value = serde_json::from_str(&state_raw2).expect("parse state.json");
+    assert_eq!(state_json2["failedCount"], 1);
+}
+
+// C1: auto_step skips during backoff and resumes after.
+#[test]
+fn auto_step_skips_during_backoff_and_resumes_after() {
+    let dir = TempDir::new("upd-backoff");
+    let host = make_test_host(&dir);
+    let (priv_pem, pub_pem) = gen_keypair();
+    let server = LocalHttpServer::start(HashMap::new());
+    let rel = make_signed_release(
+        "0.3.0",
+        "BetterRecall-Setup-0.3.0.exe",
+        vec![0x42u8; 1024],
+        &priv_pem,
+    );
+    let gh_rel = populate_release(&server, "v0.3.0", &rel, ReleaseOpts::signed());
+    server.set_file("/releases", serde_json::to_vec(&vec![gh_rel]).unwrap());
+
+    let (launches, hook) = make_launcher();
+    host.set_update_test_config(Some(UpdateTestConfig {
+        feed_url: server.feed_url(),
+        allowed_prefix: server.release_prefix(),
+        public_key_pem: Some(pub_pem.clone()),
+        current_version: Some("0.2.0".to_string()),
+        fast_retries: true,
+        launcher: Some(hook),
+    }));
+
+    host.update_check(&CancelToken::none()).unwrap();
+    host.update_download(&mut |_| {}, &CancelToken::none()).unwrap();
+
+    let updates_dir = DataPaths::updates_dir(&dir.path().join("home"));
+    let state_path = updates_dir.join("state.json");
+
+    let t0 = Utc.with_ymd_and_hms(2026, 11, 23, 10, 0, 0).unwrap();
+    let state_data = serde_json::json!({
+        "downloaded": "0.3.0",
+        "lastCheck": "2026-11-23T10:00:00Z",
+        "latest": {
+            "version": "0.3.0",
+            "installerBytes": 1024
+        },
+        "failedVersion": "0.3.0",
+        "failedCount": 1,
+        "failedAt": "2026-11-23T10:00:00Z"
+    });
+    fs::write(&state_path, serde_json::to_vec(&state_data).unwrap()).unwrap();
+
+    let host_new = make_test_host(&dir);
+    let launches_clone = Arc::clone(&launches);
+    host_new.set_update_test_config(Some(UpdateTestConfig {
+        feed_url: server.feed_url(),
+        allowed_prefix: server.release_prefix(),
+        public_key_pem: Some(pub_pem),
+        current_version: Some("0.2.0".to_string()),
+        fast_retries: true,
+        launcher: Some(Arc::new(move |_p, _a| {
+            launches_clone.lock().unwrap().push((_p.to_path_buf(), _a.to_vec()));
+            Ok(None)
+        })),
+    }));
+
+    let idle_ms = 15 * 60 * 1000;
+
+    // At t0 + 30m: within 1 h backoff -> skipped (Deferred)
+    let t_30m = t0 + chrono::Duration::minutes(30);
+    let outcome = host_new.updater().auto_step(t_30m, idle_ms, false, true, &CancelToken::none());
+    assert_eq!(outcome, AutoStepOutcome::Deferred);
+
+    // At t0 + 65m: past 1 h backoff -> resumes and applies
+    let t_65m = t0 + chrono::Duration::minutes(65);
+    let outcome2 = host_new.updater().auto_step(t_65m, idle_ms, false, true, &CancelToken::none());
+    assert_eq!(outcome2, AutoStepOutcome::Applied);
+}
+
+// C1: state.json without the new fields still loads successfully.
+#[test]
+fn state_json_without_new_c1_fields_loads_successfully() {
+    let dir = TempDir::new("upd-compat");
+    let updates_dir = DataPaths::updates_dir(&dir.path().join("home"));
+    fs::create_dir_all(&updates_dir).unwrap();
+
+    let state_path = updates_dir.join("state.json");
+    let legacy_json = r#"{
+        "lastCheck": "2026-11-22T10:00:00Z",
+        "latest": {
+            "version": "0.3.0",
+            "installerBytes": 1024
+        },
+        "downloaded": "0.3.0"
+    }"#;
+    fs::write(&state_path, legacy_json).unwrap();
+
+    let host = make_test_host(&dir);
+    let status = host.update_status().unwrap();
+    assert_eq!(status.state, "ready");
+    assert_eq!(status.downloaded_version.as_deref(), Some("0.3.0"));
+}
+
+// C1: apply refuses with an InvalidOperation while state is applying.
+#[test]
+fn apply_refuses_while_already_applying() {
+    let dir = TempDir::new("upd-applying-refuse");
+    let host = make_test_host(&dir);
+    let (priv_pem, pub_pem) = gen_keypair();
+    let server = LocalHttpServer::start(HashMap::new());
+    let rel = make_signed_release(
+        "0.3.0",
+        "BetterRecall-Setup-0.3.0.exe",
+        vec![0x42u8; 1024],
+        &priv_pem,
+    );
+    let gh_rel = populate_release(&server, "v0.3.0", &rel, ReleaseOpts::signed());
+    server.set_file("/releases", serde_json::to_vec(&vec![gh_rel]).unwrap());
+
+    let (_launches, hook) = make_launcher();
+    host.set_update_test_config(Some(UpdateTestConfig {
+        feed_url: server.feed_url(),
+        allowed_prefix: server.release_prefix(),
+        public_key_pem: Some(pub_pem),
+        current_version: Some("0.2.0".to_string()),
+        fast_retries: true,
+        launcher: Some(hook),
+    }));
+
+    host.update_check(&CancelToken::none()).unwrap();
+    host.update_download(&mut |_| {}, &CancelToken::none()).unwrap();
+
+    let st = host.update_apply().expect("first apply ok");
+    assert_eq!(st.state, "applying");
+
+    let err = host.update_apply().expect_err("second apply while applying must refuse");
+    assert!(matches!(err, AgentError::InvalidOperation(_)), "got {err:?}");
+}
+
+// C7: apply refuses while models downloading.
+#[test]
+fn apply_refuses_while_models_downloading() {
+    let dir = TempDir::new("upd-c7-apply");
+    let host = make_test_host(&dir);
+    let (priv_pem, pub_pem) = gen_keypair();
+    let server = LocalHttpServer::start(HashMap::new());
+    let rel = make_signed_release(
+        "0.3.0",
+        "BetterRecall-Setup-0.3.0.exe",
+        vec![0x42u8; 1024],
+        &priv_pem,
+    );
+    let gh_rel = populate_release(&server, "v0.3.0", &rel, ReleaseOpts::signed());
+    server.set_file("/releases", serde_json::to_vec(&vec![gh_rel]).unwrap());
+
+    let (_launches, hook) = make_launcher();
+    host.set_update_test_config(Some(UpdateTestConfig {
+        feed_url: server.feed_url(),
+        allowed_prefix: server.release_prefix(),
+        public_key_pem: Some(pub_pem),
+        current_version: Some("0.2.0".to_string()),
+        fast_retries: true,
+        launcher: Some(hook),
+    }));
+
+    host.update_check(&CancelToken::none()).unwrap();
+    host.update_download(&mut |_| {}, &CancelToken::none()).unwrap();
+
+    let weights = vec![0xABu8; 8192];
+    let manifest = br#"{"id":"silero-vad","version":1}"#.to_vec();
+    server.set_file("/silero-vad/silero_vad.onnx", weights.clone());
+    server.set_file("/silero-vad/manifest.json", manifest.clone());
+    server.set_slow("/silero-vad/silero_vad.onnx", 512, Duration::from_millis(2000));
+    let rev = "0123456789abcdef0123456789abcdef01234567";
+    let cat = Catalog {
+        repo: "test/models".to_string(),
+        revision: rev.to_string(),
+        base_url: format!("https://huggingface.co/test/models/resolve/{rev}/"),
+        components: vec![Component {
+            id: "silero-vad".to_string(),
+            sets: vec!["full".to_string()],
+            bytes: (weights.len() + manifest.len()) as u64,
+            files: vec![
+                CatalogFile {
+                    path: "manifest.json".to_string(),
+                    size: manifest.len() as u64,
+                    sha256: sha256_hex(&manifest),
+                },
+                CatalogFile {
+                    path: "silero_vad.onnx".to_string(),
+                    size: weights.len() as u64,
+                    sha256: sha256_hex(&weights),
+                },
+            ],
+        }],
+    };
+    cat.validate().unwrap();
+    host.set_catalog_for_test(Some(cat.with_base_url_for_test(server.base_url())));
+
+    let cts = CancelSource::new();
+    let tok = cts.token();
+    let host_bg = host.clone();
+    let mdl = thread::spawn(move || {
+        host_bg.models_download("silero-vad", &mut |_| {}, &tok)
+    });
+
+    assert!(
+        until(
+            || server
+                .request_paths()
+                .iter()
+                .any(|p| p == "/silero-vad/silero_vad.onnx"),
+            Duration::from_secs(5),
+        ),
+        "model download never reached server"
+    );
+
+    let err = host.update_apply().expect_err("update_apply must refuse while models_download runs");
+    match err {
+        AgentError::InvalidOperation(msg) => {
+            assert_eq!(msg, CommandProcessor::ERR_MODELS_RUNNING_FOR_UPDATE);
+        }
+        other => panic!("expected InvalidOperation ERR_MODELS_RUNNING_FOR_UPDATE, got {other:?}"),
+    }
+
+    cts.cancel();
+    mdl.join().unwrap().expect("cancelled models returns Ok");
+    host.shutdown();
+}
+
+// C4: Cancelled update check leaves state as it was before the check.
+#[test]
+fn check_cancellation_leaves_state_as_before() {
+    let dir = TempDir::new("upd-cancel-check");
+    let host = make_test_host(&dir);
+    let (_priv_pem, pub_pem) = gen_keypair();
+    let server = LocalHttpServer::start(HashMap::new());
+
+    host.set_update_test_config(Some(UpdateTestConfig {
+        feed_url: server.feed_url(),
+        allowed_prefix: server.release_prefix(),
+        public_key_pem: Some(pub_pem),
+        current_version: Some("0.2.0".to_string()),
+        fast_retries: true,
+        launcher: None,
+    }));
+
+    let initial_status = host.update_status().unwrap();
+    assert_eq!(initial_status.state, "idle");
+
+    let cts = CancelSource::new();
+    cts.cancel();
+    let res = host.update_check(&cts.token());
+    assert!(matches!(res, Err(AgentError::Cancelled)));
+
+    let after_status = host.update_status().unwrap();
+    assert_eq!(after_status.state, initial_status.state);
+    assert_eq!(after_status.last_check, initial_status.last_check);
 }

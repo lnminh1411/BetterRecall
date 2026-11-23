@@ -75,6 +75,7 @@ struct ServerConfig {
     ignore_range: bool,
     cut_after: Option<usize>,
     fail_500_remaining: usize,
+    fail_503_remaining: usize,
     requests: Vec<RecordedRequest>,
 }
 
@@ -178,7 +179,7 @@ fn handle_conn(mut stream: TcpStream, config: &Arc<Mutex<ServerConfig>>) {
         }
     }
 
-    let (redirect, fail_500, file_data, ignore_range, cut_after) = {
+    let (redirect, fail_500, fail_503, file_data, ignore_range, cut_after) = {
         let mut cfg = config.lock().unwrap();
         cfg.requests.push(RecordedRequest {
             path: path.clone(),
@@ -191,15 +192,36 @@ fn handle_conn(mut stream: TcpStream, config: &Arc<Mutex<ServerConfig>>) {
         } else {
             false
         };
+        let fail_503 = if cfg.fail_503_remaining > 0 {
+            cfg.fail_503_remaining -= 1;
+            true
+        } else {
+            false
+        };
         let redirect = cfg.redirects.get(&path).cloned();
         let file_data = cfg.files.get(&path).cloned();
-        (redirect, fail_500, file_data, cfg.ignore_range, cfg.cut_after)
+        (
+            redirect,
+            fail_500,
+            fail_503,
+            file_data,
+            cfg.ignore_range,
+            cfg.cut_after,
+        )
     };
 
     if fail_500 {
         let _ = write!(
             stream,
             "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        return;
+    }
+
+    if fail_503 {
+        let _ = write!(
+            stream,
+            "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
         );
         return;
     }
@@ -930,4 +952,83 @@ fn get_bytes_enforces_cap_follows_redirect_and_refuses_disallowed_urls() {
         .get_bytes("http://example.com/releases", 1024, &[])
         .expect_err("disallowed initial url refused");
     assert!(matches!(err, FetchError::Http { status: 0, .. }), "got {err:?}");
+}
+
+// 12. C2: Holding .part open for writing causes another download to fail with InUse, leaving .part untouched.
+#[test]
+fn hold_part_open_for_writing_returns_in_use_and_preserves_part() {
+    let payload = vec![0xABu8; 1024];
+    let payload_sha = sha256_hex(&payload);
+
+    let mut files = HashMap::new();
+    files.insert("/model.bin".to_string(), payload);
+    let server = LocalHttpServer::start(files);
+
+    let dir = TestDir::new("in-use");
+    let dest = dir.path().join("model.bin");
+    let part = dir.path().join("model.bin.part");
+
+    // Pre-create .part with initial contents
+    let initial_part_data = b"untouched part bytes";
+    fs::write(&part, initial_part_data).expect("write initial part");
+
+    // Hold .part open for writing
+    let _holder = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&part)
+        .expect("open part for writing");
+
+    let dl = Downloader::new().with_retry_delays(vec![]);
+    let res = dl.download_file(
+        &server.url("/model.bin"),
+        &dest,
+        1024,
+        &payload_sha,
+        &NoFetchProgress,
+        &|| false,
+    );
+
+    match res {
+        Err(FetchError::InUse) => {}
+        other => panic!("expected FetchError::InUse, got {other:?}"),
+    }
+
+    // Assert .part is untouched
+    let part_data = fs::read(&part).expect("read part");
+    assert_eq!(part_data, initial_part_data);
+    assert!(!dest.exists());
+}
+
+// 13. C4: Cancel during retry sleep aborts immediately without waiting for the retry delay.
+#[test]
+fn get_bytes_cancellable_aborts_on_cancel_during_retry_sleep() {
+    let mut files = HashMap::new();
+    files.insert("/retry.json".to_string(), b"{\"ok\":true}".to_vec());
+    let server = LocalHttpServer::start(files);
+    server.config.lock().unwrap().fail_503_remaining = 5;
+
+    // Set a 10-second retry delay so a non-cancellable sleep would block for 10 s
+    let dl = Downloader::new().with_retry_delays(vec![Duration::from_secs(10)]);
+
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancelled_c = Arc::clone(&cancelled);
+
+    // Cancel after 200 ms
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(200));
+        cancelled_c.store(true, Ordering::SeqCst);
+    });
+
+    let cancel_fn = move || cancelled.load(Ordering::SeqCst);
+
+    let start = std::time::Instant::now();
+    let res = dl.get_bytes_cancellable(&server.url("/retry.json"), 1024, &[], &cancel_fn);
+    let elapsed = start.elapsed();
+
+    assert!(matches!(res, Err(FetchError::Cancelled)), "got {res:?}");
+    // Must return well under the 10 s retry delay / 60 s timeout
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "cancellation took too long: {elapsed:?}"
+    );
 }

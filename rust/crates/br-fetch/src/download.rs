@@ -6,13 +6,14 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::windows::ffi::OsStrExt;
+use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
-use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+use windows::Win32::Storage::FileSystem::{FILE_SHARE_READ, GetDiskFreeSpaceExW};
 use windows::core::PCWSTR;
 
 use crate::catalog::{
@@ -278,15 +279,36 @@ impl Downloader {
             let mut written: u64 = 0;
 
             let mut out = if appending {
-                hash_existing_part(&part, &mut hasher, cancel)?;
-                written = resume_from;
+                // C2: Count hashed bytes on resume, not stale resume_from
+                let hashed_bytes = hash_existing_part(&part, &mut hasher, cancel)?;
+                written = hashed_bytes;
+                // C2: Deny other writers via FILE_SHARE_READ
                 OpenOptions::new()
                     .append(true)
+                    .share_mode(FILE_SHARE_READ.0)
                     .open(&part)
-                    .map_err(|e| FetchError::io(format!("opening {}", part.display()), e))?
+                    .map_err(|e| {
+                        if is_in_use_error(&e) {
+                            FetchError::InUse
+                        } else {
+                            FetchError::io(format!("opening {}", part.display()), e)
+                        }
+                    })?
             } else {
-                File::create(&part)
-                    .map_err(|e| FetchError::io(format!("creating {}", part.display()), e))?
+                // C2: Deny other writers via FILE_SHARE_READ
+                OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .share_mode(FILE_SHARE_READ.0)
+                    .open(&part)
+                    .map_err(|e| {
+                        if is_in_use_error(&e) {
+                            FetchError::InUse
+                        } else {
+                            FetchError::io(format!("creating {}", part.display()), e)
+                        }
+                    })?
             };
 
             // The body is read on its own thread so a stalled connection cannot block this loop:
@@ -372,6 +394,24 @@ impl Downloader {
         max_bytes: usize,
         headers: &[(&str, &str)],
     ) -> Result<Vec<u8>, FetchError> {
+        // C4: Keep get_bytes as a wrapper with a never-cancel closure
+        self.get_bytes_cancellable(url, max_bytes, headers, &|| false)
+    }
+
+    /// Cancel-aware variant of [`Self::get_bytes`].
+    /// Checks cancel before each attempt, sleeps between retries in slices of at most 100 ms checking cancel,
+    /// checks cancel between body chunks, and returns [`FetchError::Cancelled`] if cancelled.
+    pub fn get_bytes_cancellable(
+        &self,
+        url: &str,
+        max_bytes: usize,
+        headers: &[(&str, &str)],
+        cancel: &dyn Fn() -> bool,
+    ) -> Result<Vec<u8>, FetchError> {
+        // C4: Check cancel before attempt
+        if cancel() {
+            return Err(FetchError::Cancelled);
+        }
         if !is_allowed_url(url) {
             return Err(FetchError::Http {
                 status: 0,
@@ -381,6 +421,10 @@ impl Downloader {
 
         let mut attempt = 0usize;
         loop {
+            // C4: Check cancel before each attempt
+            if cancel() {
+                return Err(FetchError::Cancelled);
+            }
             let resp = match self.send_following_redirects(url, None, headers, READ_STALL_TIMEOUT) {
                 Ok(r) => r,
                 Err(SendErr::Connect) => {
@@ -388,7 +432,7 @@ impl Downloader {
                         return Err(FetchError::Offline);
                     }
                     if let Some(&delay) = self.retry_delays.get(attempt) {
-                        thread::sleep(delay);
+                        sleep_cancellable(delay, cancel)?;
                         attempt += 1;
                         continue;
                     }
@@ -396,7 +440,7 @@ impl Downloader {
                 }
                 Err(SendErr::Transient(msg)) => {
                     if let Some(&delay) = self.retry_delays.get(attempt) {
-                        thread::sleep(delay);
+                        sleep_cancellable(delay, cancel)?;
                         attempt += 1;
                         continue;
                     }
@@ -408,10 +452,14 @@ impl Downloader {
                 Err(SendErr::Fatal(e)) => return Err(e),
             };
 
+            if cancel() {
+                return Err(FetchError::Cancelled);
+            }
+
             let status = resp.status().as_u16();
             if (500..600).contains(&status) {
                 if let Some(&delay) = self.retry_delays.get(attempt) {
-                    thread::sleep(delay);
+                    sleep_cancellable(delay, cancel)?;
                     attempt += 1;
                     continue;
                 }
@@ -430,16 +478,37 @@ impl Downloader {
             let cap_plus_one = (max_bytes as u64).saturating_add(1);
             let mut reader = resp.into_body().into_reader().take(cap_plus_one);
             let mut buf = Vec::new();
-            match reader.read_to_end(&mut buf) {
-                Ok(_) => {}
-                Err(e) => {
-                    if let Some(&delay) = self.retry_delays.get(attempt) {
-                        thread::sleep(delay);
-                        attempt += 1;
-                        continue;
-                    }
-                    return Err(FetchError::io(format!("reading response from {url}"), e));
+            let mut chunk = [0u8; 8192];
+            let mut read_err: Option<io::Error> = None;
+            loop {
+                // C4: Check cancel between body chunks
+                if cancel() {
+                    return Err(FetchError::Cancelled);
                 }
+                match reader.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        buf.extend_from_slice(&chunk[..n]);
+                        if buf.len() > max_bytes {
+                            return Err(FetchError::io(
+                                format!("response from {url} exceeded {max_bytes} bytes"),
+                                io::Error::new(io::ErrorKind::InvalidData, "response too large"),
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        read_err = Some(e);
+                        break;
+                    }
+                }
+            }
+            if let Some(e) = read_err {
+                if let Some(&delay) = self.retry_delays.get(attempt) {
+                    sleep_cancellable(delay, cancel)?;
+                    attempt += 1;
+                    continue;
+                }
+                return Err(FetchError::io(format!("reading response from {url}"), e));
             }
             if buf.len() > max_bytes {
                 return Err(FetchError::io(
@@ -876,10 +945,17 @@ fn existing_part_len(part: &Path) -> Result<u64, FetchError> {
     }
 }
 
+// C2: Detect sharing violation on Windows (error 32 or lock violation 33).
+fn is_in_use_error(e: &io::Error) -> bool {
+    matches!(e.raw_os_error(), Some(32 | 33))
+}
+
 fn remove_file_if_exists(path: &Path) -> Result<(), FetchError> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        // C2: Return InUse error on sharing violation and do not delete
+        Err(e) if is_in_use_error(&e) => Err(FetchError::InUse),
         Err(e) => Err(FetchError::io(format!("removing {}", path.display()), e)),
     }
 }
@@ -913,7 +989,7 @@ fn file_matches_catalog(
 
 fn hash_file(path: &Path, cancel: &dyn Fn() -> bool) -> Result<[u8; 32], FetchError> {
     let mut hasher = Sha256::new();
-    hash_existing_part(path, &mut hasher, cancel)?;
+    let _ = hash_existing_part(path, &mut hasher, cancel)?;
     Ok(hasher.finalize().into())
 }
 
@@ -921,10 +997,14 @@ fn hash_existing_part(
     path: &Path,
     hasher: &mut Sha256,
     cancel: &dyn Fn() -> bool,
-) -> Result<(), FetchError> {
-    let mut file =
-        File::open(path).map_err(|e| FetchError::io(format!("opening {}", path.display()), e))?;
+) -> Result<u64, FetchError> {
+    let mut file = match File::open(path) {
+        Ok(f) => f,
+        Err(e) if is_in_use_error(&e) => return Err(FetchError::InUse),
+        Err(e) => return Err(FetchError::io(format!("opening {}", path.display()), e)),
+    };
     let mut buf = vec![0u8; IO_BUF_LEN];
+    let mut total: u64 = 0;
     loop {
         if cancel() {
             return Err(FetchError::Cancelled);
@@ -936,8 +1016,9 @@ fn hash_existing_part(
             break;
         }
         hasher.update(&buf[..n]);
+        total = total.saturating_add(n as u64);
     }
-    Ok(())
+    Ok(total)
 }
 
 fn decode_sha256_hex(hex: &str) -> Option<[u8; 32]> {
