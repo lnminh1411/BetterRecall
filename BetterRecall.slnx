@@ -7,9 +7,6 @@
       <Platform Project="x64" />
     </Project>
     <Project Path="src/BetterRecall.Contracts/BetterRecall.Contracts.csproj" />
-    <Project Path="src/BetterRecall.Core/BetterRecall.Core.csproj">
-      <Platform Project="x64" />
-    </Project>
     <Project Path="src/BetterRecall.Mcp/BetterRecall.Mcp.csproj">
       <Platform Project="x64" />
     </Project>
@@ -22,9 +19,6 @@
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/BetterRecall.Agent.Conformance/BetterRecall.Agent.Conformance.csproj">
-      <Platform Project="x64" />
-    </Project>
-    <Project Path="tests/BetterRecall.Core.Tests/BetterRecall.Core.Tests.csproj">
       <Platform Project="x64" />
     </Project>
     <Project Path="tests/BetterRecall.UI.Tests/BetterRecall.UI.Tests.csproj">

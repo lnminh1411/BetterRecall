@@ -774,7 +774,7 @@ fn update_download_rejects_concurrent_update_and_models_running() {
         }],
     };
     cat.validate().unwrap();
-    host.set_catalog_for_test(Some(cat.with_base_url_for_test(&server.base_url())));
+    host.set_catalog_for_test(Some(cat.with_base_url_for_test(server.base_url())));
 
     let cts2 = CancelSource::new();
     let tok2 = cts2.token();

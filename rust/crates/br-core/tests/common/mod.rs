@@ -4,6 +4,7 @@
 #![allow(dead_code)]
 
 pub mod a3;
+pub mod ports;
 
 use std::fs::{self, OpenOptions};
 use std::io::Read;
@@ -46,11 +47,19 @@ pub struct TempHome {
 impl TempHome {
     pub fn new(key_protection: Option<&str>) -> Self {
         static SEQ: AtomicU64 = AtomicU64::new(0);
-        let id = SEQ.fetch_add(1, Ordering::Relaxed);
-        let path = test_tmp_root()
-            .join("br-core-store")
-            .join(format!("h-{}-{id}", std::process::id()));
-        fs::create_dir_all(&path).expect("create temp home");
+        let root = test_tmp_root().join("br-core-store");
+        fs::create_dir_all(&root).expect("create temp root");
+        // A dir left by an earlier run with the same pid may hold a store.db under another key;
+        // `create_dir` fails on an existing path, so every home starts empty.
+        let path = loop {
+            let id = SEQ.fetch_add(1, Ordering::Relaxed);
+            let p = root.join(format!("h-{}-{id}", std::process::id()));
+            match fs::create_dir(&p) {
+                Ok(()) => break p,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => panic!("create temp home: {e}"),
+            }
+        };
         if let Some(kp) = key_protection {
             let settings_file = br_contracts::DataPaths::settings_file(&path);
             fs::write(

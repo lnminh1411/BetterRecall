@@ -117,7 +117,8 @@ fn session_lock_affinity_badge_and_deny_priority() {
     let chrome = win(r"C:\Program Files\Google\Chrome\Application\chrome.exe", "Google");
     let onepass = win(r"C:\x\1Password.exe", "Doc");
 
-    let cases: &[(Option<&WindowInfo>, bool, bool, BadgeResult, bool, GuardReason)] = &[
+    type Case<'a> = (Option<&'a WindowInfo>, bool, bool, BadgeResult, bool, GuardReason);
+    let cases: &[Case] = &[
         (Some(&chrome), true, false, BadgeResult::NoBadge, false, GuardReason::SessionLocked),
         (None, false, false, BadgeResult::NoBadge, false, GuardReason::NoForeground),
         // Deny-list wins over display affinity and private badge.

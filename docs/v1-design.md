@@ -36,7 +36,7 @@ Written 2026-11-10. `docs\design.md` is the user's design. This file turns it in
 | Path | Owner | What it is |
 |---|---|---|
 | `src/BetterRecall.Contracts` | lead | Shared records, interfaces, settings, framing, pipe names. Frozen for sub-agents: request changes in your report, do not edit |
-| `src/BetterRecall.Core` | backend | Settings store, key vault, blob cipher, encrypted store, vector index, hybrid search, command processor, pipe servers, retention, audit |
+| `rust/crates/br-core` | backend | Settings store, key vault, blob cipher, encrypted store, vector index, hybrid search, command processor, pipe servers, retention, audit (the C# `src/BetterRecall.Core` was removed in sweep 6) |
 | `src/BetterRecall.Cli` | backend | `betterrecall.exe ipc <words...>` |
 | `src/BetterRecall.Mcp` | backend | `betterrecall-mcp.exe`, MCP over stdio, client of the MCP pipe |
 | `src/BetterRecall.Agent` | agent | Always-on process: capture, replay buffer and encoder, guardrails, audio capture, scheduler, worker supervisor, thumbnailer, tray, hotkeys, panic flush |
@@ -447,7 +447,7 @@ Vector search needs no ANN library at v1 sizes: 30 days of 2 s keyframes after d
 
 - .NET SDK 10.0.403, Rust toolchain via `rustup` (stable, `x86_64-pc-windows-msvc` target), `BetterRecall.slnx`, `Directory.Build.props` (nullable on, artifacts output under `artifacts\`, `win-x64`).
 - CLI, MCP and Stub publish Native AOT. Agent and Worker are Rust binaries built by their wrapper projects: `BetterRecall.Agent.csproj` runs `cargo build -p br-agent` and ships `BetterRecall.Agent.exe` (icon, version information and `app.manifest` embedded by `build.rs` through `rc.exe`) with `sqlite3mc.dll`, `libSkiaSharp.dll`, `libvpl.dll` and the codec DLLs; `BetterRecall.Worker.csproj` runs `cargo build -p br-worker` and ships `BetterRecall.Worker.exe` next to the OpenVINO and ONNX Runtime native DLLs. UI publishes unpackaged and self-contained (`WindowsPackageType=None`, `WindowsAppSDKSelfContained=true`).
-- Contracts and Core are AOT and trim compatible: System.Text.Json source generation only. The C# Core library serves the CLI and MCP until they move to Rust; the agent runs `br-core`.
+- Contracts is AOT and trim compatible: System.Text.Json source generation only. The agent, CLI and MCP all run `br-core`; the C# Core library is gone.
 - Build one project without rebuilding Contracts: `dotnet build src/<Project> -p:BuildProjectReferences=false`.
 - Model files are never committed. Model download needs the user's go-ahead; until then use `inference.fake`.
 - Image codecs: `src\BetterRecall.Agent\Native\` holds prebuilt x64 DLLs, copied next to the agent exe: `avif.dll` (libavif 1.4.2 with aom 3.15.3 encode, dav1d 1.5.4 decode, libyuv), `jxl.dll`, `jxl_cms.dll`, `jxl_threads.dll` (libjxl 0.12.0). Built with vcpkg, custom triplet `x64-windows-br` (static dependencies, static CRT, release only, only libavif and libjxl dynamic); the DLLs import KERNEL32 only. Licences in `codecs.LICENSE.txt` (BSD-2/BSD-3, aom and libjxl patent grants, dav1d, libyuv, libjpeg-turbo, brotli, highway, Little CMS). Loaded with `libloading` from the agent directory only (`br-agent` `codecs` module). `BetterRecall.Agent.exe --selftest-codec` round-trips a synthetic frame in every format.

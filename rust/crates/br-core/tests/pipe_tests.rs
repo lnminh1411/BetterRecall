@@ -644,4 +644,23 @@ fn same_install_file_fixed_install_and_home_shim() {
     ));
     // A shim-named file outside an `app\bin` folder does not match.
     assert!(!PipeManager::same_install_file(install, cli, r"C:\Tools\betterrecall.cmd"));
+    // Not a version folder: "tools" is refused.
+    assert!(!PipeManager::same_install_file(
+        install,
+        cli,
+        r"C:\Users\u\AppData\Local\BetterRecall\app\tools\betterrecall.exe"
+    ));
+    // Sub-folder relative image admitted when relative paths match across version folders.
+    let ui_client = Some(r"C:\Users\u\AppData\Local\Programs\BetterRecall\ui\BetterRecall.UI.exe");
+    assert!(PipeManager::same_install_file(
+        install,
+        ui_client,
+        r"C:\Users\u\AppData\Local\BetterRecall\app\0.2.3-aaaaaaaaaaaa\ui\BetterRecall.UI.exe"
+    ));
+    // Another root is admitted: only the ...\app\<version>\<file> suffix is checked (kept by design, 2026-11-23).
+    assert!(PipeManager::same_install_file(
+        install,
+        cli,
+        r"C:\other\app\0.2.3-dev-0123456789ab\betterrecall.exe"
+    ));
 }

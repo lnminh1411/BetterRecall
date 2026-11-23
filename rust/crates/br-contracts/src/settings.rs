@@ -664,7 +664,7 @@ impl Default for LogSettings {
     }
 }
 
-// ---- Settings validation rules (mirrored from BetterRecall.Core.SettingsStore) ----
+// ---- Settings validation rules (ported from the removed C# SettingsStore) ----
 
 const MODIFIERS: [&str; 4] = ["Ctrl", "Alt", "Shift", "Win"];
 

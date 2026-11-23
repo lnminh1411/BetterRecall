@@ -421,6 +421,29 @@ fn good_settings_accepted() {
     }
 }
 
+/// Batch4Tests.Bad_settings_rejected: cleartext remote endpoints, credentials in the endpoint
+/// and an API key in the settings file are refused, with the exact error the UI shows.
+#[test]
+fn bad_settings_rejected() {
+    let cases = [
+        (r#"{"ai":{"endpoint":"http://example.com"}}"#, "Invalid ai.endpoint."),
+        (r#"{"ai":{"endpoint":"https://user:pw@example.com"}}"#, "Invalid ai.endpoint."),
+        (r#"{"ai":{"endpoint":"https://example.com/v1?key=1"}}"#, "Invalid ai.endpoint."),
+        (r#"{"ai":{"provider":"mistral"}}"#, "Invalid ai.provider."),
+        (r#"{"ai":{"model":"bad model"}}"#, "Invalid ai.model."),
+        (r#"{"security":{"unlockMethod":"pin"}}"#, "Invalid security.unlockMethod."),
+        (r#"{"replay":{"sampleSeconds":1}}"#, "Invalid replay.sampleSeconds."),
+        (r#"{"ai":{"apiKey":"x"}}"#, "Invalid ai.apiKey."),
+    ];
+    for (json, want) in cases {
+        let h = TempHome::new(None);
+        let store = SettingsStore::load(h.path());
+        let before = store.current().ai.endpoint.clone();
+        assert_eq!(Some(want.to_string()), store.try_update(&j(json)), "json={json}");
+        assert_eq!(before, store.current().ai.endpoint, "json={json}");
+    }
+}
+
 // ---- Sweep2GTests.cs ----
 
 #[test]
