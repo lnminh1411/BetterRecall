@@ -11,7 +11,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use br_contracts::{Envelope, PipeNames};
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Utc};
 use windows::Win32::Foundation::{HANDLE, HLOCAL, LocalFree};
 use windows::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -76,6 +76,7 @@ struct ServerInner {
     handler: ConnectionHandlerFn,
     on_reject: Option<RejectHandlerFn>,
     rejects: AuditThrottle,
+    monotonic_now: Mutex<Arc<dyn Fn() -> Instant + Send + Sync>>,
     cts: CancelSource,
     gate: Mutex<ServerState>,
     connected: AtomicI32,
@@ -106,7 +107,9 @@ impl PipeServer {
                 image_allowed: Arc::new(image_allowed),
                 handler: Arc::new(handler),
                 on_reject,
-                rejects: AuditThrottle::new(ChronoDuration::minutes(1), 10, 512),
+                // B4: monotonic clock so backward wall-clock steps do not suppress reject audits.
+                rejects: AuditThrottle::new(Duration::from_secs(60), 10, 512),
+                monotonic_now: Mutex::new(Arc::new(Instant::now)),
                 cts: CancelSource::new(),
                 gate: Mutex::new(ServerState {
                     live: HashMap::new(),
@@ -121,6 +124,16 @@ impl PipeServer {
 
     pub fn name(&self) -> &str {
         &self.inner.name
+    }
+
+    /// B4: Injectable monotonic clock seam for reject-throttle tests.
+    #[doc(hidden)]
+    pub fn set_monotonic_now_for_test(&self, now: impl Fn() -> Instant + Send + Sync + 'static) {
+        *self
+            .inner
+            .monotonic_now
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Arc::new(now);
     }
 
     pub fn kind(&self) -> PipeKind {
@@ -373,7 +386,15 @@ fn serve_connection(
     let peer = ProcessInfo::read(pid as i32, session);
     if let Some(why) = check_peer(&inner.image_allowed, &peer, Some(connected_utc)) {
         let key = format!("{why}|{}", peer.image.as_deref().unwrap_or(""));
-        let times = inner.rejects.admit(&key, Utc::now());
+        let mono_now = {
+            let f = inner
+                .monotonic_now
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            f()
+        };
+        let times = inner.rejects.admit(&key, mono_now);
         if times > 0 {
             let suffix = if times > 1 {
                 format!(", {times} times since the last entry")

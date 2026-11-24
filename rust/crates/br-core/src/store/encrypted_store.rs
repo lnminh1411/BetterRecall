@@ -2148,11 +2148,14 @@ impl EncryptedStore {
             return text.to_string();
         }
 
-        // Build lowercase char string and map each lowercase char index back to original char index
+        // Build lowercase char string and map each lowercase char index back to original char index.
+        // E4: fold per char (mapping Greek final ς -> σ too) on both text and query tokens so
+        // word-final Σ matches regardless of casing.
+        let fold_char = |c: char| c.to_lowercase().map(|lc| if lc == 'ς' { 'σ' } else { lc });
         let mut lc_chars = Vec::new();
         let mut lc_to_orig = Vec::new();
         for (orig_idx, &c) in chars.iter().enumerate() {
-            for lc_c in c.to_lowercase() {
+            for lc_c in fold_char(c) {
                 lc_chars.push(lc_c);
                 lc_to_orig.push(orig_idx);
             }
@@ -2161,7 +2164,7 @@ impl EncryptedStore {
 
         let mut at_char: Option<usize> = None;
         for t in tokens {
-            let t_lc = t.to_lowercase();
+            let t_lc: String = t.chars().flat_map(fold_char).collect();
             if let Some(byte_pos) = text_lc.find(&t_lc) {
                 let lc_idx = text_lc[..byte_pos].chars().count();
                 at_char = Some(lc_to_orig.get(lc_idx).copied().unwrap_or(chars.len()));
