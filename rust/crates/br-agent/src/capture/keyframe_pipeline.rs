@@ -556,6 +556,11 @@ impl KeyframePipeline {
     }
 
     pub fn post(&self, grab: KeyframeGrab) {
+        // D4: bench requests skip guardrails and password masks; refuse them at the pipeline entry.
+        if grab.request.bench {
+            AgentLog::warn("keyframe pipeline: refused bench keyframe grab");
+            return;
+        }
         let monitor = grab.monitor;
         let grab_ticks = grab.grab_ticks;
         let queued = {
@@ -957,6 +962,10 @@ fn process_grab(
     ct: &CancelToken,
     last_missing_log: &mut i64,
 ) {
+    // D4: defense in depth — never store a bench request.
+    if g.request.bench {
+        return;
+    }
     let s = (inner.settings)();
     let Some(store) = (inner.store)() else {
         return;

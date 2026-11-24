@@ -130,7 +130,8 @@ impl LoopbackHub {
 
     /// Called from status tick: restarts an ended stream once backoff allows.
     pub fn check_health(self: &Arc<Self>, now_ms: i64) -> bool {
-        let Ok(mut g) = self.state.try_lock() else {
+        // D1: recover if a panic poisoned the state mutex instead of staying "busy" forever.
+        let Some(mut g) = crate::util::try_lock_recover(&self.state, "loopback_hub") else {
             return false;
         };
         if g.subs.is_empty() {

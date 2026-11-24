@@ -194,3 +194,40 @@ fn same_tick_urgent_preemption_blames_first_on_wire_in_worker_connection() {
     assert_eq!(CRASHED_ELSEWHERE_MESSAGE, e2.message());
     conn.dispose();
 }
+
+// A3: queued WriteJob must complete with an error on dispose instead of hanging forever.
+#[test]
+fn a3_dispose_completes_queued_write_job_with_error() {
+    let stream = GatedDuplexStream::new();
+    let conn = WorkerConnection::new_without_writer_for_test(stream, Some(Arc::new(|| 1000)));
+
+    let c1 = conn.clone();
+    let handle = thread::spawn(move || {
+        c1.send(
+            WorkerRequest {
+                id: 0,
+                op: "transcribe".to_string(),
+                ..Default::default()
+            },
+            &[1, 2, 3, 4],
+            &br_core::CancelToken::none(),
+            false,
+        )
+    });
+
+    assert!(
+        until(|| conn.queued_writes_for_test() == 1, Duration::from_secs(5)),
+        "expected WriteJob to be queued"
+    );
+
+    conn.dispose();
+
+    let err = handle
+        .join()
+        .expect("sender thread panicked")
+        .expect_err("queued job must fail on dispose");
+    assert!(
+        matches!(err, br_agent::worker::WorkerError::Transport(_)),
+        "expected Transport error, got {err:?}"
+    );
+}

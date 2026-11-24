@@ -810,6 +810,7 @@ fn dedup_filter_compares_with_the_last_stored_keyframe() {
         secrets: None,
         bounds: Rect::default(),
         mask_only: false,
+        bench: false,
     };
     let ma = ChangeMap::compute(&a, w, h, w * 4).unwrap();
     let (r1, c1) = d.decide(&ma, 1, &req, 6, 15.0);
