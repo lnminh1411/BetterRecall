@@ -17,6 +17,12 @@ pub struct RgbImage {
     pub rgb: Vec<u8>,
 }
 
+impl zeroize::Zeroize for RgbImage {
+    fn zeroize(&mut self) {
+        self.rgb.zeroize();
+    }
+}
+
 /// Patch form tensors for a Gemma 4 / EmbeddingGemma 2 vision pass.
 #[derive(Debug, Clone)]
 pub struct PatchInput {

@@ -183,13 +183,16 @@ impl McpHost {
     {
         let (tx, rx) = mpsc::channel::<String>();
         thread::spawn(move || {
-            let mut buf = String::new();
+            let mut buf = Vec::new();
             loop {
                 buf.clear();
-                match input.read_line(&mut buf) {
+                // F3: read raw bytes and decode lossily so one invalid UTF-8 byte does not
+                // terminate the MCP session (matches the C# UTF8Encoding(false) reader).
+                match input.read_until(b'\n', &mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(_) => {
-                        let trimmed = buf.trim_end_matches(['\r', '\n']).to_string();
+                        let decoded = String::from_utf8_lossy(&buf);
+                        let trimmed = decoded.trim_end_matches(['\r', '\n']).to_string();
                         if tx.send(trimmed).is_err() {
                             break;
                         }

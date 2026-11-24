@@ -34,7 +34,6 @@ use crate::models::ocr::windows_ocr::user_profile_languages;
 use crate::models::ocr::{OcrMath, PaddleOcr, WindowsOcr};
 use crate::protocol::{WorkerError, WorkerErrors};
 use crate::vectors::VectorMath;
-use zeroize::Zeroize;
 
 pub const RUN_FAILURES_BEFORE_REPLAN: usize = 2;
 pub const BENCH_TEXT: &str =
@@ -1570,20 +1569,12 @@ impl IWorkerEngine for RealEngine {
     }
 
     fn ocr(&self, image: &ImageInput<'_>, entities: bool) -> Result<OcrResult, WorkerError> {
-        // E5: the decoded pixels are zeroized on every path, early `?` returns included;
-        // `zeroize` is not elided like a plain `fill(0)` before the free.
-        struct ZeroOnDrop(RgbImage);
-        impl Drop for ZeroOnDrop {
-            fn drop(&mut self) {
-                self.0.rgb.zeroize();
-            }
-        }
-
         let started = Instant::now();
         let (lines, engine) = {
             let mut st = self.state.lock().expect("real engine lock");
-            let guard = ZeroOnDrop(ImagePipeline::decode(image)?);
-            let rgb = &guard.0;
+            // E5/E2: the decoded pixels are zeroized on every path, early `?` returns included.
+            let guard = crate::ZeroOnDrop::new(ImagePipeline::decode(image)?);
+            let rgb = &*guard;
             let res = if st.s.ocr_engine == "windows" {
                 st.ensure_windows_ocr()?;
                 st.win_ocr

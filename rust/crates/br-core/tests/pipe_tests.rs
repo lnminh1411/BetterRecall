@@ -505,23 +505,66 @@ fn client_image_lookup_refuses_a_process_newer_than_the_connection() {
     assert!(ProcessInfo::image_path_if_started_before(pid, future).is_some());
 }
 
-/// Regression B15.
+/// Regression B15 / B4 (monotonic clock).
 #[test]
 fn throttle_merges_repeats_per_key_and_caps_the_total() {
-    let t = AuditThrottle::new(ChronoDuration::minutes(1), 3, 512);
-    let t0 = DateTime::parse_from_rfc3339("2026-11-10T10:00:00Z")
-        .unwrap()
-        .with_timezone(&Utc);
+    let t = AuditThrottle::new(Duration::from_secs(60), 3, 512);
+    let t0 = std::time::Instant::now();
     assert_eq!(1, t.admit("a", t0));
     for _ in 0..50 {
-        assert_eq!(0, t.admit("a", t0 + ChronoDuration::seconds(1)));
+        assert_eq!(0, t.admit("a", t0 + Duration::from_secs(1)));
     }
-    let t1 = t0 + ChronoDuration::minutes(1);
+    let t1 = t0 + Duration::from_secs(60);
     assert_eq!(51, t.admit("A", t1)); // next row carries the merged repeats (case-insensitive)
     assert_eq!(1, t.admit("b", t1));
     assert_eq!(1, t.admit("c", t1));
     assert_eq!(0, t.admit("d", t1)); // over the per-window total
-    assert_eq!(2, t.admit("d", t0 + ChronoDuration::minutes(3)));
+    assert_eq!(2, t.admit("d", t0 + Duration::from_secs(180)));
+}
+
+/// Regression B4: PipeServer reject throttle uses monotonic clock so rejects are still logged
+/// and audited after a window even when wall clock steps backward.
+#[test]
+fn pipe_server_reject_throttle_uses_monotonic_clock_b4() {
+    let name = format!("brtest.b4.{}", std::process::id());
+    let rejects: Arc<Mutex<Vec<i32>>> = Arc::new(Mutex::new(Vec::new()));
+    let rejects_cb = rejects.clone();
+    let srv = PipeServer::new(
+        &name,
+        PipeKind::Public,
+        |_| false,
+        |_, _| {},
+        Some(Arc::new(move |_, _, _, times| {
+            rejects_cb.lock().unwrap().push(times);
+        })),
+    );
+    let base = std::time::Instant::now();
+    let fake_mono = Arc::new(Mutex::new(base));
+    let fm = fake_mono.clone();
+    srv.set_monotonic_now_for_test(move || *fm.lock().unwrap());
+    srv.start().expect("start");
+
+    let self_exe = ProcessInfo::current_image().unwrap();
+    let connect_rejected = |pipe_name: &str| {
+        let mut c = PipeClient::connect(pipe_name, &self_exe, 5_000, &CancelToken::none())
+            .1
+            .expect("connect");
+        let line = c.read_line(&CancelToken::none()).unwrap().unwrap();
+        assert!(line.contains("Client not allowed."));
+    };
+
+    // First reject admitted (times = 1); two more within window merged.
+    connect_rejected(&name);
+    connect_rejected(&name);
+    connect_rejected(&name);
+    assert_eq!(vec![1], *rejects.lock().unwrap());
+
+    // Advance monotonic clock past the 60 s window; next reject is admitted with merged count (3).
+    *fake_mono.lock().unwrap() = base + Duration::from_secs(61);
+    connect_rejected(&name);
+    assert_eq!(vec![1, 3], *rejects.lock().unwrap());
+
+    drop(srv);
 }
 
 /// Regression B21.

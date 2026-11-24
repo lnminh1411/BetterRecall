@@ -255,6 +255,7 @@ impl CommandProcessor {
     pub const ERR_PROVIDER_UNREACHABLE: &'static str = "Provider unreachable.";
     pub const ERR_PROVIDER_TIMEOUT: &'static str = "Provider timed out.";
     pub const ERR_PURGED_DURING: &'static str = "A purge ran during the export; nothing was written.";
+    pub const ERR_REPLAY_OFF: &'static str = "Instant replay is off.";
 
     pub const REPLAY_PURGE_REFUSALS: [&'static str; 2] = [
         "Purge all is running.",
@@ -362,7 +363,8 @@ impl CommandProcessor {
 
         Self {
             d: deps,
-            connect_audit: AuditThrottle::new(ChronoDuration::minutes(1), 30, 512),
+            // B4: monotonic clock so backward wall-clock steps do not suppress connect audits.
+            connect_audit: AuditThrottle::new(Duration::from_secs(60), 30, 512),
             last_unlock: Mutex::new(DateTime::<Utc>::MIN_UTC),
             last_no_hello_purge: Mutex::new(DateTime::<Utc>::MIN_UTC),
             now: Mutex::new(Arc::new(Utc::now)),
@@ -532,7 +534,7 @@ impl CommandProcessor {
             conn.peer.image.unwrap_or_default(),
         );
         let key = format!("{}|{}", session.pipe_label(), session.image);
-        let merged = self.connect_audit.admit(&key, self.now());
+        let merged = self.connect_audit.admit(&key, self.monotonic_now());
         if merged > 0 {
             self.audit(&session, "connect", merged, "");
         }
@@ -2854,6 +2856,11 @@ impl CommandProcessor {
             Err(AgentError::Locked) => Reply::err(Self::ERR_LOCKED),
             Err(AgentError::InvalidOperation(ref m)) if m == Self::ERR_LOCKED => {
                 Reply::err(Self::ERR_LOCKED)
+            }
+            // B2: user disabled instant replay; return the refusal text without an error log.
+            Err(AgentError::InvalidOperation(ref m)) if m == Self::ERR_REPLAY_OFF => {
+                Log::info(&format!("replay {sub_lower}: instant replay is off"));
+                Reply::err(Self::ERR_REPLAY_OFF)
             }
             Err(AgentError::NotFound) => Reply::err(Self::ERR_NOT_FOUND),
             Err(e) => {

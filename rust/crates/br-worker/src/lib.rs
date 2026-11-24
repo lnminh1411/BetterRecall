@@ -11,6 +11,9 @@ pub mod inference;
 pub mod models;
 pub mod protocol;
 pub mod vectors;
+pub mod zero;
+
+pub use zero::ZeroOnDrop;
 
 use std::path::PathBuf;
 use std::time::Duration;

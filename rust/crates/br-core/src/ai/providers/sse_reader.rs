@@ -207,7 +207,8 @@ pub struct ChannelReader {
     pos: usize,
     ct: CancelToken,
     idle_timeout: Duration,
-    last_activity: Instant,
+    /// E3: None until the first body byte arrives; idle timeout starts only after that.
+    last_activity: Option<Instant>,
 }
 
 impl ChannelReader {
@@ -253,7 +254,7 @@ impl ChannelReader {
             pos: 0,
             ct,
             idle_timeout,
-            last_activity: Instant::now(),
+            last_activity: None,
         }
     }
 }
@@ -278,22 +279,27 @@ impl Read for ChannelReader {
                     "cancelled",
                 ));
             }
-            if self.last_activity.elapsed() >= self.idle_timeout {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "The AI provider stopped responding.",
-                ));
-            }
-
-            let remaining_idle = self.idle_timeout.saturating_sub(self.last_activity.elapsed());
-            let wait_dur = Self::WAKE_INTERVAL.min(remaining_idle);
+            // E3: apply idle timeout only after the first body byte has arrived; before it,
+            // only the outer stream timeout (300 s) and Stop cancel token apply.
+            let wait_dur = if let Some(last) = self.last_activity {
+                if last.elapsed() >= self.idle_timeout {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "The AI provider stopped responding.",
+                    ));
+                }
+                let remaining_idle = self.idle_timeout.saturating_sub(last.elapsed());
+                Self::WAKE_INTERVAL.min(remaining_idle)
+            } else {
+                Self::WAKE_INTERVAL
+            };
 
             match self.rx.recv_timeout(wait_dur) {
                 Ok(Chunk::Data(chunk)) => {
-                    self.last_activity = Instant::now();
                     if chunk.is_empty() {
                         return Ok(0);
                     }
+                    self.last_activity = Some(Instant::now());
                     let to_copy = chunk.len().min(out.len());
                     out[..to_copy].copy_from_slice(&chunk[..to_copy]);
                     if to_copy < chunk.len() {

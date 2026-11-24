@@ -1300,3 +1300,22 @@ fn snippet_does_not_panic_on_turkish_i_length_growth_a2() {
     let snip_arith = EncryptedStore::snippet(&("İ ".repeat(150) + "zebrafinch"), &["zebrafinch".into()]);
     assert!(snip_arith.contains("zebrafinch"));
 }
+
+#[test]
+fn snippet_centres_on_greek_final_sigma_e4() {
+    let text = format!("{} ΟΔΟΣ {}", "x".repeat(400), "y".repeat(400));
+
+    // Uppercase query ΟΔΟΣ -> both sides fold final Σ to σ.
+    let snip_upper = EncryptedStore::snippet(&text, &["ΟΔΟΣ".to_string()]);
+    assert!(
+        snip_upper.starts_with('…') && snip_upper.contains("ΟΔΟΣ"),
+        "expected snippet centred on ΟΔΟΣ, got: {snip_upper}"
+    );
+
+    // Lowercase query with final sigma οδος also centres on ΟΔΟΣ.
+    let snip_lower = EncryptedStore::snippet(&text, &["οδος".to_string()]);
+    assert!(
+        snip_lower.starts_with('…') && snip_lower.contains("ΟΔΟΣ"),
+        "expected snippet centred on ΟΔΟΣ for lowercase query, got: {snip_lower}"
+    );
+}
