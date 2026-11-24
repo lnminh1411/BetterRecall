@@ -308,6 +308,38 @@ impl ReplayEngine {
             .sum()
     }
 
+    /// A1: oldest packet timestamp (100 ns QPC units) across all live video rings, if any.
+    pub fn oldest_packet_pts(&self) -> Option<i64> {
+        self.shared
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .streams
+            .values()
+            .filter_map(|s| s.ring().oldest_pts())
+            .min()
+    }
+
+    /// Test seam (A1): attaches a pre-populated stream and sets `current_config.enabled`.
+    #[doc(hidden)]
+    pub fn insert_stream_for_test(&self, stream: Arc<VideoStream>, enabled: bool) {
+        let mut st = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        st.streams.insert(stream.key().to_string(), stream);
+        let cfg = st.current_config.get_or_insert(ReplayEngineConfig {
+            enabled,
+            layout: "allMonitors".to_string(),
+            fps: 30,
+            kbps: 4000,
+            seconds: 30,
+            encoder: "auto".to_string(),
+            encoder_adapter: "auto".to_string(),
+            resolution: "source".to_string(),
+            scale_percent: 100,
+            lock_memory: false,
+        });
+        cfg.enabled = enabled;
+    }
+
     pub fn stop(&self) {
         self.shared.stop.store(true, Ordering::Release);
         if let Some(h) = self

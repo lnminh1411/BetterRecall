@@ -2039,3 +2039,145 @@ fn replay_disable_clears_streams_and_refuses_save() {
     assert_eq!(res.unwrap_err(), "Instant replay is off.");
     assert_eq!(eng.ring_bytes(), 0);
 }
+
+// A1: paused replay holding packets and samples from 10 min ago + range purge of that time
+// clears both ring and samples so replay save writes nothing from the purged range.
+#[test]
+fn a1_paused_replay_range_purge_clears_ring_and_samples() {
+    use br_agent::capture::{CaptureService, GpuDeviceCache, OutputCapture};
+    use br_agent::guardrails::GuardrailService;
+    use br_agent::native::qpc;
+
+    let dir = TempDir::new("a1-paused-purge");
+    let core = CoreHost::create_with_hello_probe(
+        CoreHostOptions {
+            home: dir.path().to_path_buf(),
+            install_dir: dir.path().to_path_buf(),
+        },
+        false,
+    );
+    let patch = serde_json::json!({
+        "replay": { "enabled": true, "seconds": 30, "searchable": true, "encryptExports": false }
+    });
+    assert!(core.settings().try_update(&patch).is_none());
+
+    let agent = AgentHost::new(
+        core.clone(),
+        AgentOptions {
+            install_dir: dir.path().to_path_buf(),
+            home: dir.path().to_path_buf(),
+            autostart: false,
+        },
+    );
+
+    let settings_store = core.settings().clone();
+    let guard = GuardrailService::new(
+        move || settings_store.current(),
+        || false,
+        Vec::new,
+        dir.path(),
+    );
+    let settings_store2 = core.settings().clone();
+    let capture = CaptureService::new(
+        Arc::new(move || settings_store2.current()),
+        Arc::new(|| true),
+        Arc::new(|| true),
+        guard,
+        None,
+        None,
+        false,
+    );
+
+    let devices = Arc::new(GpuDeviceCache::new());
+    let eng = ReplayEngine::new(devices, Arc::new(Vec::new), Arc::new(Vec::new));
+    eng.set_paused(true);
+
+    let stream = Arc::new(VideoStream::new("0", 1 << 20, Duration::from_secs(30), false).unwrap());
+    let session = stream.begin_session(VideoCodec::Av1, 1280, 720, 30);
+    let seq = av1_seq_header_obu();
+    let now_qpc = OutputCapture::qpc_100ns(qpc());
+    let ten_min_ago_pts = now_qpc - 600 * SEC;
+    stream.on_packet(session, &make_av1_frame(&seq, true, 0), ten_min_ago_pts, true);
+    stream.on_packet(
+        session,
+        &make_av1_frame(&seq, false, 1),
+        ten_min_ago_pts + SEC / 30,
+        false,
+    );
+    assert_eq!(2, stream.ring().count());
+    eng.insert_stream_for_test(stream.clone(), true);
+    capture.attach_engine_for_test(eng);
+    agent.set_capture_for_test(capture);
+
+    let now = Utc::now();
+    let ten_min_ago = now - ChronoDuration::minutes(10);
+    agent.sampler_for_test().push_for_test(Sample {
+        ts: ten_min_ago,
+        monitor: 0,
+        app: "notepad".to_string(),
+        title: "Secret".to_string(),
+        site: String::new(),
+        width: 64,
+        height: 64,
+        bytes: vec![0xAB; 64],
+        mime: "image/webp".to_string(),
+        grabbed: None,
+    });
+    assert_eq!(1, agent.sampler_for_test().count());
+
+    // Range purge covering 10 minutes ago while replay is paused.
+    agent.on_purged(&PurgeNotice {
+        reason: "purge".to_string(),
+        ids: Vec::new(),
+        from: Some(ten_min_ago - ChronoDuration::minutes(1)),
+        to: Some(ten_min_ago + ChronoDuration::minutes(1)),
+        newest: Some(ten_min_ago),
+        scope: Some("range".to_string()),
+    });
+
+    assert_eq!(0, stream.ring().count(), "paused ring must be cleared");
+    assert!(
+        stream.ring().committed_bytes_all_zero_for_test(),
+        "ring memory must be zeroed"
+    );
+    assert_eq!(
+        0,
+        agent.sampler_for_test().count(),
+        "paused replay samples must be cleared"
+    );
+    assert!(
+        agent.save_replay(&CancelToken::none()).is_err(),
+        "replay save after purge must write nothing from the purged range"
+    );
+
+    // Non-overlapping purge still drops stale replay samples older than the ring window while paused.
+    agent.sampler_for_test().push_for_test(Sample {
+        ts: ten_min_ago,
+        monitor: 0,
+        app: "notepad".to_string(),
+        title: "Stale".to_string(),
+        site: String::new(),
+        width: 64,
+        height: 64,
+        bytes: vec![0xCD; 64],
+        mime: "image/webp".to_string(),
+        grabbed: None,
+    });
+    assert_eq!(1, agent.sampler_for_test().count());
+    agent.on_purged(&PurgeNotice {
+        reason: "purge".to_string(),
+        ids: Vec::new(),
+        from: Some(now - ChronoDuration::days(2)),
+        to: Some(now - ChronoDuration::days(1)),
+        newest: Some(now - ChronoDuration::days(1)),
+        scope: Some("range".to_string()),
+    });
+    assert_eq!(
+        0,
+        agent.sampler_for_test().count(),
+        "stale paused sample older than ring window must be dropped on purge"
+    );
+
+    agent.shutdown();
+    core.shutdown();
+}

@@ -613,6 +613,7 @@ impl KeyframeBudgetRun {
                     secrets: None,
                     bounds: Rect::default(),
                     mask_only: false,
+                    bench: false,
                 };
                 for c in &captures {
                     c.set_pending_keyframe(Some(req.clone()));

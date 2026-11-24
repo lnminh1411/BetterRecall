@@ -271,6 +271,8 @@ struct GrabOverrideGuard<'a>(&'a [Arc<OutputCapture>]);
 impl Drop for GrabOverrideGuard<'_> {
     fn drop(&mut self) {
         for o in self.0 {
+            // D4: drop any unconsumed bench request before removing the override.
+            o.clear_pending_bench_keyframe();
             o.set_grab_override(None);
         }
     }
@@ -741,6 +743,7 @@ impl BenchTarget for AgentBenchTarget {
                 secrets: None,
                 bounds: Rect::default(),
                 mask_only: false,
+                bench: true,
             };
             for o in &outputs {
                 o.set_pending_keyframe(Some(req.clone()));

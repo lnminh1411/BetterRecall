@@ -79,6 +79,31 @@ impl ReplaySampler {
             .sum()
     }
 
+    /// A1: timestamp of the oldest sample currently held in the ring, if any.
+    pub fn oldest_time(&self) -> Option<DateTime<Utc>> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .ring
+            .iter()
+            .map(|s| s.ts)
+            .min()
+    }
+
+    /// A1: drops samples older than the ring window even while paused (when `add` is not called).
+    pub fn trim(&self, keep_seconds: i32) {
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        self.trim_locked(&mut g, keep_seconds);
+    }
+
+    /// Test seam (A1): inserts a sample without running `trim_locked`, simulating a pre-pause sample.
+    #[doc(hidden)]
+    pub fn push_for_test(&self, s: Sample) {
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        g.last.insert(s.monitor, s.ts);
+        g.ring.push(s);
+    }
+
     /// True when the monitor has no sample in the last `sample_seconds` (minus 400 ms jitter slack).
     pub fn due(&self, monitor: i32, sample_seconds: i32) -> bool {
         let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());

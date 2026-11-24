@@ -54,6 +54,8 @@ pub struct KeyframeRequest {
     pub secrets: Option<Vec<Rect>>,
     pub bounds: Rect,
     pub mask_only: bool,
+    /// D4: true for benchmark probe grabs; never allowed to enter the real keyframe store path.
+    pub bench: bool,
 }
 
 /// Grabbed, downscaled BGRA keyframe. Zeroes its pixel buffer on drop.
@@ -297,6 +299,19 @@ impl OutputCapture {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    /// D4: drops any pending request marked `bench` so an output without duplication cannot
+    /// deliver it to the real keyframe pipeline after the benchmark ends.
+    pub fn clear_pending_bench_keyframe(&self) {
+        let mut slot = self
+            .shared
+            .pending_keyframe
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if slot.as_ref().is_some_and(|r| r.bench) {
+            *slot = None;
+        }
     }
 
     /// TH1: next request grabs again even when no new desktop frame arrived.
@@ -1232,6 +1247,9 @@ impl CaptureWorker {
             .clone();
         if let Some(cb) = deliver {
             cb(grab);
+        } else if grab.request.bench {
+            // D4: bench requests bypass guardrails/secrets; never deliver to the real store path.
+            AgentLog::warn("capture: dropped orphaned bench keyframe grab");
         } else {
             (self.shared.on_grab)(grab);
         }
