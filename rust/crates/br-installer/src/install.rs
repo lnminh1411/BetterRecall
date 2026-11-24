@@ -143,16 +143,148 @@ pub enum Outcome {
     },
     Uninstalled {
         reboot_required: bool,
+        /// N2: `Some(home)` when `delete_data` was requested and `home` still exists afterwards
+        /// (e.g. unknown files remained inside it).
+        data_folder_kept: Option<PathBuf>,
     },
     NothingToDo,
     /// Uninstall handed over to a temp copy of the setup exe (see `cli`).
     Relaunched,
 }
 
+/// Recorded installer lifecycle events for integration tests (C1, F1).
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TestHookEvent {
+    AcquireSetupMutex,
+    ReleaseSetupMutex,
+    CloseRunning,
+    StartAgent,
+    DownloadModels,
+}
+
+struct TestHookState {
+    events: Vec<TestHookEvent>,
+    stub_start_agent: bool,
+}
+
+thread_local! {
+    static TEST_HOOKS: std::cell::RefCell<Option<TestHookState>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// RAII guard enabling thread-local event recording (and optional `start_agent` stubbing)
+/// for integration tests (C1, F1).
+#[doc(hidden)]
+pub struct TestHookGuard {
+    _private: (),
+}
+
+impl TestHookGuard {
+    #[doc(hidden)]
+    pub fn install(stub_start_agent: bool) -> Self {
+        TEST_HOOKS.with(|cell| {
+            *cell.borrow_mut() = Some(TestHookState {
+                events: Vec::new(),
+                stub_start_agent,
+            });
+        });
+        Self { _private: () }
+    }
+
+    #[doc(hidden)]
+    pub fn events(&self) -> Vec<TestHookEvent> {
+        TEST_HOOKS.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .map(|s| s.events.clone())
+                .unwrap_or_default()
+        })
+    }
+}
+
+impl Drop for TestHookGuard {
+    fn drop(&mut self) {
+        TEST_HOOKS.with(|cell| {
+            *cell.borrow_mut() = None;
+        });
+    }
+}
+
+fn record_hook(event: TestHookEvent) {
+    TEST_HOOKS.with(|cell| {
+        if let Some(state) = cell.borrow_mut().as_mut() {
+            state.events.push(event);
+        }
+    });
+}
+
+fn is_start_agent_stubbed() -> bool {
+    TEST_HOOKS.with(|cell| cell.borrow().as_ref().is_some_and(|s| s.stub_start_agent))
+}
+
+fn close_running_hooked(ctx: &Ctx) -> Result<bool, InstallError> {
+    record_hook(TestHookEvent::CloseRunning);
+    close_running(ctx)
+}
+
 /// Resolves the models directory for `home`, honoring `settings.json` when present.
 pub fn resolve_models_dir(home: &Path) -> PathBuf {
     read_custom_models_dir(home)
         .unwrap_or_else(|| DataPaths::models_dir(home, &Settings::default()))
+}
+
+/// C2: Full-only components (catalog set `full` minus `minimal`) that have a complete install
+/// on disk (`manifest.json` present).
+pub fn installed_full_only_components<'a>(
+    models_dir: &Path,
+    catalog: &'a Catalog,
+) -> Vec<&'a br_fetch::Component> {
+    catalog
+        .components_for(ModelSet::Full)
+        .into_iter()
+        .filter(|c| !c.sets.iter().any(|s| s == ModelSet::Minimal.as_str()))
+        .filter(|c| models_dir.join(&c.id).join("manifest.json").is_file())
+        .collect()
+}
+
+/// C2: Full-only components (catalog set `full` minus `minimal`) whose folder exists on disk.
+pub fn present_full_only_components<'a>(
+    models_dir: &Path,
+    catalog: &'a Catalog,
+) -> Vec<&'a br_fetch::Component> {
+    catalog
+        .components_for(ModelSet::Full)
+        .into_iter()
+        .filter(|c| !c.sets.iter().any(|s| s == ModelSet::Minimal.as_str()))
+        .filter(|c| models_dir.join(&c.id).exists())
+        .collect()
+}
+
+/// C2: Returns `Some(Full)` when any Full-only component has a complete install on disk,
+/// else the stored `ModelMode` from the registry (`None` when neither is present).
+pub fn detect_existing_model_mode(ctx: &Ctx, catalog: Option<&Catalog>) -> Option<ModelMode> {
+    let owned_cat;
+    let cat = match catalog {
+        Some(c) => Some(c),
+        None => {
+            owned_cat = Catalog::embedded().ok();
+            owned_cat.as_ref()
+        }
+    };
+    if let Some(c) = cat {
+        let models_dir = resolve_models_dir(&ctx.home);
+        if !installed_full_only_components(&models_dir, c).is_empty() {
+            return Some(ModelMode::Full);
+        }
+    }
+    registry::read_model_mode(ctx)
+}
+
+/// C2: Effective current model mode: `Full` when any Full-only component has a complete install
+/// on disk (`manifest.json` present), else the stored `ModelMode`, else `Later`.
+pub fn effective_model_mode(ctx: &Ctx, catalog: Option<&Catalog>) -> ModelMode {
+    detect_existing_model_mode(ctx, catalog).unwrap_or(ModelMode::Later)
 }
 
 /// Runs the full installation flow.
@@ -187,7 +319,12 @@ where
     let outcome = install_with_progress_inner(ctx, exe, opts, free_space, progress);
     let exit_code = match &outcome {
         Ok(_) => crate::error::exit_code::OK,
-        Err(e) => e.exit_code(),
+        Err(e) => {
+            let code = e.exit_code();
+            // N1: log every non-zero install result with exit code and error Display before report_last_install
+            log_line(&ctx.home, &format!("install failed (exit {code}): {e}"));
+            code
+        }
     };
     let version = match &outcome {
         Ok(Outcome::Installed { version, .. }) => version.clone(),
@@ -211,10 +348,9 @@ fn install_with_progress_inner<F>(
 where
     F: FnOnce(&Path) -> Result<u64, InstallError>,
 {
-    // B1: take SETUP_LOCK for installer-vs-installer exclusion
+    // B1 / C1: take SETUP_LOCK for installer-vs-installer exclusion; SETUP_MUTEX is taken
+    // only right before closing the running app so refused runs never signal an update.
     let _lock = acquire_setup_lock(&ctx.home)?;
-    // B1: take SETUP_MUTEX while app is replaced
-    let _mutex = acquire_setup_mutex(&ctx.home)?;
     log_line(
         &ctx.home,
         &format!(
@@ -263,21 +399,19 @@ where
             None => None,
         }
     };
-    let extra_model_bytes = model_plan
-        .as_ref()
-        .map_or(0, |(cat, set)| {
-            // F2: count only components of the set that are not already installed and complete
-            let models_dir = resolve_models_dir(&ctx.home);
-            let states = br_fetch::installed_state(&models_dir, cat);
-            cat.components_for(*set)
-                .into_iter()
-                .filter(|c| {
-                    !states
-                        .iter()
-                        .any(|(id, st)| id == &c.id && *st == br_fetch::ComponentState::Complete)
-                })
-                .fold(0u64, |acc, c| acc.saturating_add(c.bytes))
-        });
+    let extra_model_bytes = model_plan.as_ref().map_or(0, |(cat, set)| {
+        // F2: count only components of the set that are not already installed and complete
+        let models_dir = resolve_models_dir(&ctx.home);
+        let states = br_fetch::installed_state(&models_dir, cat);
+        cat.components_for(*set)
+            .into_iter()
+            .filter(|c| {
+                !states
+                    .iter()
+                    .any(|(id, st)| id == &c.id && *st == br_fetch::ComponentState::Complete)
+            })
+            .fold(0u64, |acc, c| acc.saturating_add(c.bytes))
+    });
 
     let staged = extract_to_staging_with_progress_and_extra(
         ctx,
@@ -306,56 +440,93 @@ where
         return Err(InstallError::Cancelled);
     }
 
-    progress.step(Step::Closing);
-    let agent_was_running = close_running(ctx)?;
-    // N2: any failure or cancel from here on restarts the agent that was running, so a
-    // refused upgrade (folder in use, exit 3) does not leave BetterRecall stopped.
-    let mut restart_on_exit = RestartAgentGuard {
-        ctx,
-        armed: agent_was_running,
-        op: "install",
+    // C2: determine the mode actually in effect after install (Full if Full-only models are on disk).
+    let effective_mode_after = {
+        let owned_cat;
+        let cat = match opts.catalog.as_ref() {
+            Some(c) => Some(c),
+            None => {
+                owned_cat = Catalog::embedded().ok();
+                owned_cat.as_ref()
+            }
+        };
+        if let Some(c) = cat
+            && !installed_full_only_components(&resolve_models_dir(&ctx.home), c).is_empty()
+        {
+            ModelMode::Full
+        } else {
+            opts.model_mode
+        }
     };
 
-    if progress.cancelled() {
-        let _ = fs::remove_dir_all(&staged.dir);
-        log_line(&ctx.home, "install cancelled before swap");
-        return Err(InstallError::Cancelled);
-    }
+    let agent_started = {
+        // C1: take SETUP_MUTEX only right before closing the running app and release it once
+        // the swap, registration, relay copy and (when start_after) agent start are done.
+        let _mutex = acquire_setup_mutex(&ctx.home)?;
 
-    shims::cleanup_launcher_installs(&ctx.home);
+        progress.step(Step::Closing);
+        let agent_was_running = close_running_hooked(ctx)?;
+        // N2: any failure or cancel from here on restarts the agent that was running, so a
+        // refused upgrade (folder in use, exit 3) does not leave BetterRecall stopped.
+        let mut restart_on_exit = RestartAgentGuard {
+            ctx,
+            armed: agent_was_running,
+            op: "install",
+        };
 
-    progress.step(Step::Swapping);
-    swap_into_place(ctx, staged)?;
-    copy_stub_exe(exe, stub_len(&trailer), &ctx.install_dir)?;
+        if progress.cancelled() {
+            let _ = fs::remove_dir_all(&staged.dir);
+            log_line(&ctx.home, "install cancelled before swap");
+            return Err(InstallError::Cancelled);
+        }
 
-    if let Some(key_pem) = resolve_integrity_key(opts.integrity_key.as_deref())
-        && let Err(e) = br_integrity::check_single_file(&ctx.install_dir, key_pem, SETUP_EXE)
-    {
-        log_line(
-            &ctx.home,
-            &format!("install integrity check failed on {SETUP_EXE}: {e}"),
-        );
-        return Err(InstallError::Integrity(e.to_string()));
-    }
+        shims::cleanup_launcher_installs(&ctx.home);
 
-    shims::place_relay_and_shim(ctx)?;
+        progress.step(Step::Swapping);
+        swap_into_place(ctx, staged)?;
+        copy_stub_exe(exe, stub_len(&trailer), &ctx.install_dir)?;
 
-    progress.step(Step::Registering);
-    registry::register(ctx, &version)?;
-    registry::write_model_mode(ctx, opts.model_mode)?;
-    shortcut::create_shortcut(ctx)?;
+        if let Some(key_pem) = resolve_integrity_key(opts.integrity_key.as_deref())
+            && let Err(e) = br_integrity::check_single_file(&ctx.install_dir, key_pem, SETUP_EXE)
+        {
+            log_line(
+                &ctx.home,
+                &format!("install integrity check failed on {SETUP_EXE}: {e}"),
+            );
+            return Err(InstallError::Integrity(e.to_string()));
+        }
 
+        shims::place_relay_and_shim(ctx)?;
+
+        progress.step(Step::Registering);
+        registry::register(ctx, &version)?;
+        registry::write_model_mode(ctx, effective_mode_after)?;
+        shortcut::create_shortcut(ctx)?;
+
+        restart_on_exit.armed = false;
+        if ctx.start_after {
+            start_agent(ctx)?;
+            true
+        } else {
+            false
+        }
+    };
+
+    // C1: model download runs after the new agent was started, with SETUP_MUTEX released.
     let models = if let Some((ref cat, set)) = model_plan {
         progress.step(Step::DownloadingModels);
-        download_models_set(&ctx.home, cat, set, progress)
+        let (result, downloaded_files) = download_models_set(&ctx.home, cat, set, progress);
+        // C1: if any component was downloaded and the agent was started by this run, restart it
+        // (holding SETUP_MUTEX only around close + start) so the worker loads the new models.
+        if result == ModelsResult::Complete && downloaded_files > 0 && agent_started {
+            let _mutex = acquire_setup_mutex(&ctx.home)?;
+            let _ = close_running_hooked(ctx)?;
+            start_agent(ctx)?;
+        }
+        result
     } else {
         ModelsResult::Skipped
     };
-
-    restart_on_exit.armed = false;
-    if ctx.start_after {
-        start_agent(ctx)?;
-    }
 
     progress.step(Step::Done);
     log_line(
@@ -412,11 +583,25 @@ pub fn uninstall_with_progress(
     if opts.delete_data {
         validate_delete_data_home(&ctx.home)?;
     }
+    let outcome = uninstall_with_progress_inner(ctx, opts, progress);
+    if let Err(ref e) = outcome {
+        // N1: log every non-zero uninstall result with exit code and error Display
+        log_line(
+            &ctx.home,
+            &format!("uninstall failed (exit {}): {e}", e.exit_code()),
+        );
+    }
+    outcome
+}
 
-    // B1: take SETUP_LOCK for installer-vs-installer exclusion
+fn uninstall_with_progress_inner(
+    ctx: &Ctx,
+    opts: &UninstallOpts,
+    progress: &dyn Progress,
+) -> Result<Outcome, InstallError> {
+    // B1 / C1: take SETUP_LOCK for installer-vs-installer exclusion; SETUP_MUTEX is taken
+    // only from closing the app to the end (after the integrity hash).
     let _lock = acquire_setup_lock(&ctx.home)?;
-    // B1: take SETUP_MUTEX while app is closed and removed
-    let _mutex = acquire_setup_mutex(&ctx.home)?;
     log_line(
         &ctx.home,
         &format!(
@@ -425,6 +610,12 @@ pub fn uninstall_with_progress(
             opts.delete_data
         ),
     );
+
+    // F4: check cancel before every step up to the point of no return.
+    if progress.cancelled() {
+        log_line(&ctx.home, "uninstall cancelled before integrity check");
+        return Err(InstallError::Cancelled);
+    }
 
     if let Some(key_pem) = resolve_integrity_key(opts.integrity_key.as_deref())
         && let Err(e) = br_integrity::check_dir(&ctx.install_dir, key_pem)
@@ -435,18 +626,35 @@ pub fn uninstall_with_progress(
         );
     }
 
+    if progress.cancelled() {
+        log_line(&ctx.home, "uninstall cancelled before closing");
+        return Err(InstallError::Cancelled);
+    }
+
+    // C1: take SETUP_MUTEX from closing the app to the end.
+    let _mutex = acquire_setup_mutex(&ctx.home)?;
+
     progress.step(Step::Closing);
-    let agent_was_running = close_running(ctx)?;
-    // C3: restart agent if rename fails
+    let agent_was_running = close_running_hooked(ctx)?;
+    // C3 / F4: restart agent if cancelled before removal or if rename fails.
     let mut restart_on_exit = RestartAgentGuard {
         ctx,
         armed: agent_was_running,
         op: "uninstall",
     };
 
+    if progress.cancelled() {
+        log_line(&ctx.home, "uninstall cancelled before removing files");
+        return Err(InstallError::Cancelled);
+    }
+
     progress.step(Step::RemovingFiles);
     let mut reboot_required = false;
     if ctx.install_dir.exists() {
+        if progress.cancelled() {
+            log_line(&ctx.home, "uninstall cancelled before moving install folder");
+            return Err(InstallError::Cancelled);
+        }
         let self_inside = std::env::current_exe().ok().is_some_and(|me| {
             let prefix = normalized_dir_prefix(&ctx.install_dir);
             path_is_under_prefix(&me, &prefix)
@@ -476,7 +684,7 @@ pub fn uninstall_with_progress(
                     path: ctx.install_dir.clone(),
                 });
             }
-            // Folder moved aside successfully: disarm agent restart
+            // Folder moved aside successfully (point of no return): disarm agent restart.
             restart_on_exit.armed = false;
 
             // C3: unregister and remove shortcut AFTER rename succeeds
@@ -497,6 +705,10 @@ pub fn uninstall_with_progress(
             }
         }
     } else {
+        if progress.cancelled() {
+            log_line(&ctx.home, "uninstall cancelled before unregistering");
+            return Err(InstallError::Cancelled);
+        }
         restart_on_exit.armed = false;
         progress.step(Step::Unregistering);
         registry::unregister(ctx)?;
@@ -518,19 +730,46 @@ pub fn uninstall_with_progress(
         ),
     );
 
-    if opts.delete_data {
+    let data_folder_kept = if opts.delete_data {
         // Remove logs\ after the final log line is written; ignore failure.
         let _ = fs::remove_dir_all(DataPaths::logs_dir(&ctx.home));
         // Remove ctx.home only if it is now empty (leaves app\ or unknown files intact).
         let _ = fs::remove_dir(&ctx.home);
-    }
+        // N2: report when the data folder still exists so the Finish page can inform the user.
+        if ctx.home.exists() {
+            Some(ctx.home.clone())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     progress.step(Step::Done);
-    Ok(Outcome::Uninstalled { reboot_required })
+    Ok(Outcome::Uninstalled {
+        reboot_required,
+        data_folder_kept,
+    })
 }
 
 /// Updates the chosen [`ModelMode`] in the registry and downloads or removes model components.
 pub fn modify_with_progress(
+    ctx: &Ctx,
+    opts: &ModifyOpts,
+    progress: &dyn Progress,
+) -> Result<Outcome, InstallError> {
+    let outcome = modify_with_progress_inner(ctx, opts, progress);
+    if let Err(ref e) = outcome {
+        // N1: log every non-zero modify result with exit code and error Display
+        log_line(
+            &ctx.home,
+            &format!("modify failed (exit {}): {e}", e.exit_code()),
+        );
+    }
+    outcome
+}
+
+fn modify_with_progress_inner(
     ctx: &Ctx,
     opts: &ModifyOpts,
     progress: &dyn Progress,
@@ -557,13 +796,17 @@ pub fn modify_with_progress(
         return Err(InstallError::Integrity(e.to_string()));
     }
 
+    if progress.cancelled() {
+        log_line(&ctx.home, "modify cancelled before saving settings");
+        return Err(InstallError::Cancelled);
+    }
+
     progress.step(Step::SavingSettings);
     registry::write_model_mode(ctx, opts.model_mode)?;
     if ctx.install_dir.is_dir() {
         shims::place_relay_and_shim(ctx)?;
     }
 
-    let mut restart_agent = false;
     let models = match opts.model_mode.to_model_set() {
         None => ModelsResult::Skipped,
         Some(set) => {
@@ -571,64 +814,78 @@ pub fn modify_with_progress(
             let models_dir = resolve_models_dir(&ctx.home);
 
             // C6: Modify to Minimal removes full-only components present on disk regardless of prev_mode
-            if opts.model_mode == ModelMode::Minimal {
-                let full_only: Vec<&str> = cat
-                    .components_for(ModelSet::Full)
+            let full_only: Vec<&str> = if opts.model_mode == ModelMode::Minimal {
+                present_full_only_components(&models_dir, &cat)
                     .into_iter()
-                    .filter(|c| !c.sets.iter().any(|s| s == ModelSet::Minimal.as_str()))
                     .map(|c| c.id.as_str())
-                    .filter(|id| models_dir.join(id).exists())
-                    .collect();
-                if !full_only.is_empty() {
-                    // B1: hold SETUP_MUTEX only around close_running, model removal and restart
-                    let _mutex = acquire_setup_mutex(&ctx.home)?;
-                    if close_running(ctx)? {
-                        restart_agent = true;
-                    }
-                    log_line(
-                        &ctx.home,
-                        &format!(
-                            "modify: removing full-only models {:?} from {}",
-                            full_only,
-                            models_dir.display()
-                        ),
-                    );
-                    if let Err(e) = remove_components_from_catalog(&models_dir, &cat, &full_only) {
-                        log_line(&ctx.home, &format!("modify: failed to remove models: {e}"));
-                        if restart_agent && ctx.start_after {
-                            start_agent(ctx)?;
-                        }
-                        progress.step(Step::Done);
-                        return Ok(Outcome::Modified {
-                            mode: opts.model_mode,
-                            models: ModelsResult::Failed(e.to_string()),
-                        });
-                    }
-                    if restart_agent && ctx.start_after {
-                        start_agent(ctx)?;
-                        restart_agent = false;
-                    }
-                }
-            }
+                    .collect()
+            } else {
+                Vec::new()
+            };
 
-            // B1: download_models_set runs WITHOUT holding SETUP_MUTEX
+            // B1 / F1: download first WITHOUT holding SETUP_MUTEX and WITHOUT closing the app,
+            // so at most one close/start pair happens per Modify.
             progress.step(Step::DownloadingModels);
-            let result = download_models_set(&ctx.home, &cat, set, progress);
-            // A running worker loads models at start: restart the app so it picks up new ones.
-            if result == ModelsResult::Complete && !restart_agent && agent_running(ctx) {
-                // B1: hold SETUP_MUTEX around restart
-                let _mutex = acquire_setup_mutex(&ctx.home)?;
-                if close_running(ctx)? && ctx.start_after {
-                    start_agent(ctx)?;
+            let (result, downloaded_files) = download_models_set(&ctx.home, &cat, set, progress);
+
+            // F4: check cancel before the model removal step.
+            if result == ModelsResult::Cancelled || progress.cancelled() {
+                if !full_only.is_empty() {
+                    log_line(&ctx.home, "modify cancelled before removing full-only models");
                 }
+                ModelsResult::Cancelled
+            } else {
+                let need_remove = !full_only.is_empty();
+                let need_reload = result == ModelsResult::Complete && downloaded_files > 0;
+
+                // F1: close/start at most once; if nothing is removed and nothing was downloaded,
+                // do not close the app at all.
+                if need_remove || (need_reload && agent_running(ctx)) {
+                    if need_remove {
+                        // F4: disable Cancel once removal starts.
+                        progress.step(Step::RemovingModels);
+                    }
+                    // B1: hold SETUP_MUTEX only around close, removal, and restart.
+                    let _mutex = acquire_setup_mutex(&ctx.home)?;
+                    let agent_was_running = close_running_hooked(ctx)?;
+                    let mut restart_on_exit = RestartAgentGuard {
+                        ctx,
+                        armed: agent_was_running && ctx.start_after,
+                        op: "modify",
+                    };
+
+                    if need_remove {
+                        log_line(
+                            &ctx.home,
+                            &format!(
+                                "modify: removing full-only models {:?} from {}",
+                                full_only,
+                                models_dir.display()
+                            ),
+                        );
+                        if let Err(e) =
+                            remove_components_from_catalog(&models_dir, &cat, &full_only)
+                        {
+                            log_line(&ctx.home, &format!("modify: failed to remove models: {e}"));
+                            drop(restart_on_exit);
+                            progress.step(Step::Done);
+                            return Ok(Outcome::Modified {
+                                mode: opts.model_mode,
+                                models: ModelsResult::Failed(e.to_string()),
+                            });
+                        }
+                    }
+
+                    restart_on_exit.armed = false;
+                    if agent_was_running && ctx.start_after {
+                        start_agent(ctx)?;
+                    }
+                }
+
+                result
             }
-            result
         }
     };
-    if restart_agent && ctx.start_after {
-        let _mutex = acquire_setup_mutex(&ctx.home)?;
-        start_agent(ctx)?;
-    }
 
     progress.step(Step::Done);
     log_line(
@@ -652,8 +909,12 @@ fn resolve_integrity_key(override_key: Option<&str>) -> Option<&str> {
 }
 
 fn start_agent(ctx: &Ctx) -> Result<(), InstallError> {
+    record_hook(TestHookEvent::StartAgent);
     let agent = ctx.install_dir.join(InstallLayout::AGENT_EXE);
     log_line(&ctx.home, &format!("starting {}", agent.display()));
+    if is_start_agent_stubbed() {
+        return Ok(());
+    }
     Command::new(&agent)
         .current_dir(&ctx.install_dir)
         .spawn()
@@ -692,7 +953,8 @@ fn download_models_set(
     catalog: &Catalog,
     set: ModelSet,
     progress: &dyn Progress,
-) -> ModelsResult {
+) -> (ModelsResult, u64) {
+    record_hook(TestHookEvent::DownloadModels);
     let models_dir = resolve_models_dir(home);
     let components = catalog.components_for(set);
     let fetch_opts = InstallOptions::for_catalog(catalog);
@@ -725,19 +987,19 @@ fn download_models_set(
                     report.downloaded_files, report.skipped_files, report.bytes_downloaded
                 ),
             );
-            ModelsResult::Complete
+            (ModelsResult::Complete, report.downloaded_files as u64)
         }
         Err(FetchError::Offline) => {
             log_line(home, "model download skipped: offline");
-            ModelsResult::Offline
+            (ModelsResult::Offline, 0)
         }
         Err(FetchError::Cancelled) => {
             log_line(home, "model download cancelled by user");
-            ModelsResult::Cancelled
+            (ModelsResult::Cancelled, 0)
         }
         Err(e) => {
             log_line(home, &format!("model download failed: {e}"));
-            ModelsResult::Failed(e.to_string())
+            (ModelsResult::Failed(e.to_string()), 0)
         }
     }
 }
@@ -1150,7 +1412,10 @@ fn acquire_setup_lock(home: &Path) -> Result<OwnedMutex, InstallError> {
         log_line(home, "setup already running (mutex held)");
         return Err(InstallError::AlreadyRunning);
     }
-    Ok(OwnedMutex(handle))
+    Ok(OwnedMutex {
+        handle,
+        is_setup_mutex: false,
+    })
 }
 
 fn acquire_setup_mutex(home: &Path) -> Result<OwnedMutex, InstallError> {
@@ -1170,7 +1435,11 @@ fn acquire_setup_mutex(home: &Path) -> Result<OwnedMutex, InstallError> {
         log_line(home, "setup already running (mutex held)");
         return Err(InstallError::AlreadyRunning);
     }
-    Ok(OwnedMutex(handle))
+    record_hook(TestHookEvent::AcquireSetupMutex);
+    Ok(OwnedMutex {
+        handle,
+        is_setup_mutex: true,
+    })
 }
 
 // C1 installer half: report result to agent
@@ -1207,14 +1476,20 @@ pub fn report_last_install(home: &Path, version: &str, exit_code: i32) {
     let _ = fs::remove_file(&tmp);
 }
 
-struct OwnedMutex(HANDLE);
+struct OwnedMutex {
+    handle: HANDLE,
+    is_setup_mutex: bool,
+}
 
 impl Drop for OwnedMutex {
     fn drop(&mut self) {
-        if !self.0.is_invalid() {
+        if !self.handle.is_invalid() {
             unsafe {
-                let _ = CloseHandle(self.0);
+                let _ = CloseHandle(self.handle);
             }
+        }
+        if self.is_setup_mutex {
+            record_hook(TestHookEvent::ReleaseSetupMutex);
         }
     }
 }

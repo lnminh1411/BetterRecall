@@ -18,6 +18,7 @@ pub enum Step {
     DeletingData = 9,
     Done = 10,
     DownloadingModels = 11,
+    RemovingModels = 12,
 }
 
 impl Step {
@@ -35,6 +36,7 @@ impl Step {
             9 => Some(Self::DeletingData),
             10 => Some(Self::Done),
             11 => Some(Self::DownloadingModels),
+            12 => Some(Self::RemovingModels),
             _ => None,
         }
     }

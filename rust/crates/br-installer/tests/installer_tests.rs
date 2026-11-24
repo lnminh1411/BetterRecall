@@ -721,7 +721,8 @@ fn uninstall_cleans_install_reg_and_shortcut_but_keeps_home() {
     assert_eq!(
         outcome,
         Outcome::Uninstalled {
-            reboot_required: false
+            reboot_required: false,
+            data_folder_kept: None,
         }
     );
 
@@ -1741,7 +1742,8 @@ fn i7_integrity_staging_modify_and_uninstall_behaviour() {
     assert_eq!(
         uninst,
         Outcome::Uninstalled {
-            reboot_required: false
+            reboot_required: false,
+            data_folder_kept: None,
         }
     );
     assert!(!env.ctx.install_dir.exists());
@@ -2647,4 +2649,637 @@ fn c1_installer_writes_last_install_report() {
     let parsed_fail: serde_json::Value = serde_json::from_str(&content_fail).expect("parse fail json");
     assert_eq!(parsed_fail["version"], "0.3.0-dev");
     assert_eq!(parsed_fail["exitCode"], 7);
+}
+
+// --- Sweep 7 tests (C1, C2, F4, F1, N1, N2) ---
+
+// C1: a refused install (downgrade or damaged payload) never acquires SETUP_MUTEX.
+#[test]
+fn c1_refused_install_never_acquires_setup_mutex() {
+    use br_installer::{TestHookEvent, TestHookGuard};
+
+    let env = TestEnv::new("c1-refused");
+    let v2 = env.build_installer(
+        "v2",
+        b"MZ-STUB",
+        "0.4.0",
+        &[(InstallLayout::AGENT_EXE, b"agent-v2")],
+    );
+    install(&env.ctx, &v2, &InstallOpts::default()).expect("install v2");
+
+    // 1. Downgrade refusal (exit 4) must never acquire SETUP_MUTEX.
+    let v1 = env.build_installer(
+        "v1",
+        b"MZ-STUB",
+        "0.3.0",
+        &[(InstallLayout::AGENT_EXE, b"agent-v1")],
+    );
+    let guard = TestHookGuard::install(true);
+    let err = install(&env.ctx, &v1, &InstallOpts::default()).expect_err("downgrade refused");
+    assert_eq!(err.exit_code(), exit_code::DOWNGRADE);
+    assert!(
+        !guard.events().contains(&TestHookEvent::AcquireSetupMutex),
+        "downgrade refusal must not acquire SETUP_MUTEX: {:?}",
+        guard.events()
+    );
+    drop(guard);
+
+    // 2. Damaged payload (exit 5) must never acquire SETUP_MUTEX.
+    let damaged = env.root.join("damaged.exe");
+    let mut bytes = fs::read(&v2).expect("read v2");
+    let trailer = read_trailer(&v2).expect("trailer");
+    bytes[trailer.offset as usize] ^= 0xFF;
+    fs::write(&damaged, &bytes).expect("write damaged");
+
+    let guard = TestHookGuard::install(true);
+    let err = install(&env.ctx, &damaged, &InstallOpts::default()).expect_err("damaged payload");
+    assert_eq!(err.exit_code(), exit_code::PAYLOAD);
+    assert!(
+        !guard.events().contains(&TestHookEvent::AcquireSetupMutex),
+        "damaged payload must not acquire SETUP_MUTEX: {:?}",
+        guard.events()
+    );
+}
+
+// C1: install with models starts the agent and releases SETUP_MUTEX before downloading models,
+// and restarts the agent afterwards only when models were downloaded and start_after is true.
+#[test]
+fn c1_install_downloads_models_after_start_with_mutex_released() {
+    use br_installer::{TestHookEvent, TestHookGuard};
+
+    let env = TestEnv::new("c1-order");
+    let exe = env.build_installer(
+        "setup",
+        b"MZ-STUB",
+        "0.3.0-dev",
+        &[(InstallLayout::AGENT_EXE, b"agent")],
+    );
+    let (_server, catalog) = start_tiny_model_server();
+
+    struct MutexProbe<'a> {
+        home: &'a Path,
+        mutex_free_during_download: Arc<AtomicBool>,
+    }
+    impl Progress for MutexProbe<'_> {
+        fn step(&self, step: Step) {
+            if step == Step::DownloadingModels {
+                let name = PipeNames::setup_mutex_for(self.home);
+                let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+                let h = unsafe { CreateMutexW(None, false, PCWSTR(wide.as_ptr())) };
+                let last = unsafe { GetLastError() };
+                if last != ERROR_ALREADY_EXISTS {
+                    self.mutex_free_during_download
+                        .store(true, AtomicOrdering::SeqCst);
+                }
+                if let Ok(handle) = h {
+                    unsafe {
+                        let _ = CloseHandle(handle);
+                    }
+                }
+            }
+        }
+        fn bytes(&self, _done: u64, _total: u64) {}
+        fn cancelled(&self) -> bool {
+            false
+        }
+    }
+
+    // With start_after=true (stubbed via TestHookGuard): start happens before download,
+    // SETUP_MUTEX is released during download, then a single restart happens after download.
+    let mut ctx = env.ctx.clone();
+    ctx.start_after = true;
+    let mutex_free = Arc::new(AtomicBool::new(false));
+    let probe = MutexProbe {
+        home: &ctx.home,
+        mutex_free_during_download: Arc::clone(&mutex_free),
+    };
+    let guard = TestHookGuard::install(true);
+    let out = install_with_progress(
+        &ctx,
+        &exe,
+        &InstallOpts {
+            allow_downgrade: false,
+            model_mode: ModelMode::Minimal,
+            skip_model_download: false,
+            catalog: Some(catalog.clone()),
+            integrity_key: None,
+        },
+        available_disk_space,
+        &probe,
+    )
+    .expect("install with models");
+    assert_eq!(
+        out,
+        Outcome::Installed {
+            version: "0.3.0-dev".to_string(),
+            models: ModelsResult::Complete,
+        }
+    );
+    assert!(
+        mutex_free.load(AtomicOrdering::SeqCst),
+        "SETUP_MUTEX must be released before DownloadingModels"
+    );
+    let events = guard.events();
+    let first_start = events
+        .iter()
+        .position(|e| *e == TestHookEvent::StartAgent)
+        .expect("first StartAgent");
+    let first_release = events
+        .iter()
+        .position(|e| *e == TestHookEvent::ReleaseSetupMutex)
+        .expect("first ReleaseSetupMutex");
+    let dl_pos = events
+        .iter()
+        .position(|e| *e == TestHookEvent::DownloadModels)
+        .expect("DownloadModels");
+    assert!(
+        first_start < first_release && first_release < dl_pos,
+        "expected StartAgent < ReleaseSetupMutex < DownloadModels, got: {events:?}"
+    );
+    // Post-download restart because files were downloaded and agent was started.
+    let start_count = events
+        .iter()
+        .filter(|e| **e == TestHookEvent::StartAgent)
+        .count();
+    assert_eq!(
+        start_count, 2,
+        "expected initial start + post-download restart, got: {events:?}"
+    );
+    drop(guard);
+
+    // With dev root / start_after=false: no start and no post-download restart.
+    let env2 = TestEnv::new("c1-norun");
+    let exe2 = env2.build_installer(
+        "setup",
+        b"MZ-STUB",
+        "0.3.0-dev",
+        &[(InstallLayout::AGENT_EXE, b"agent")],
+    );
+    let guard2 = TestHookGuard::install(true);
+    install(
+        &env2.ctx,
+        &exe2,
+        &InstallOpts {
+            allow_downgrade: false,
+            model_mode: ModelMode::Minimal,
+            skip_model_download: false,
+            catalog: Some(catalog),
+            integrity_key: None,
+        },
+    )
+    .expect("install dev root");
+    let events2 = guard2.events();
+    assert!(
+        !events2.contains(&TestHookEvent::StartAgent),
+        "start_after=false must not start or restart agent: {events2:?}"
+    );
+}
+
+// C2: effective_model_mode detects Full-only components on disk, and silent /modify without
+// /models= uses the effective mode so it removes nothing.
+#[test]
+fn c2_effective_mode_from_disk_and_silent_modify_keeps_full_models() {
+    use br_installer::cli::dispatch_silent_for_exe;
+    use br_installer::effective_model_mode;
+
+    let env = TestEnv::new("c2-effective");
+    let (raw_cat, files) = tiny_catalog_data();
+    let server = TinyHttpServer::start(files.clone());
+    let catalog = raw_cat.clone().with_base_url_for_test(server.base_url());
+    let cat_path = env.root.join("tiny-cat.json");
+    fs::write(&cat_path, serde_json::to_string(&raw_cat).unwrap()).expect("write cat");
+
+    // Before install: no models on disk and no registry -> Later.
+    assert_eq!(effective_model_mode(&env.ctx, Some(&catalog)), ModelMode::Later);
+
+    let exe = env.build_installer(
+        "setup",
+        b"MZ-STUB",
+        "0.3.0-dev",
+        &[(InstallLayout::AGENT_EXE, b"agent")],
+    );
+    install(
+        &env.ctx,
+        &exe,
+        &InstallOpts {
+            allow_downgrade: false,
+            model_mode: ModelMode::Minimal,
+            skip_model_download: false,
+            catalog: Some(catalog.clone()),
+            integrity_key: None,
+        },
+    )
+    .expect("install minimal");
+    assert_eq!(read_model_mode(&env.ctx), Some(ModelMode::Minimal));
+    assert_eq!(
+        effective_model_mode(&env.ctx, Some(&catalog)),
+        ModelMode::Minimal
+    );
+
+    // Place a complete Full-only component on disk (as Models page leaves it) while
+    // registry ModelMode stays stale at "minimal".
+    let models_dir = resolve_models_dir(&env.ctx.home);
+    let comp_full_dir = models_dir.join("comp-full");
+    fs::create_dir_all(&comp_full_dir).unwrap();
+    for (url_path, bytes) in &files {
+        if let Some(rel) = url_path.strip_prefix("/comp-full/") {
+            fs::write(comp_full_dir.join(rel), bytes).unwrap();
+        }
+    }
+
+    assert_eq!(
+        effective_model_mode(&env.ctx, Some(&catalog)),
+        ModelMode::Full,
+        "Full-only component with manifest.json on disk must yield effective mode Full"
+    );
+
+    // Silent /S /modify without /models= must use effective mode (Full) and remove nothing.
+    let args = parse_args([
+        "/S",
+        "/modify",
+        "--dev-root",
+        env.root.to_str().unwrap(),
+        "--dev-reg-prefix",
+        &env.reg_prefix,
+        "--dev-models-catalog",
+        cat_path.to_str().unwrap(),
+        "--dev-models-url",
+        &server.base_url(),
+    ])
+    .expect("parse silent modify");
+    let out = dispatch_silent_for_exe(&env.ctx, &args, &exe).expect("silent modify");
+    assert_eq!(
+        out,
+        Outcome::Modified {
+            mode: ModelMode::Full,
+            models: ModelsResult::Complete,
+        }
+    );
+    assert!(
+        comp_full_dir.join("manifest.json").is_file(),
+        "silent /modify without /models= must not delete Full-only component"
+    );
+    assert_eq!(
+        read_model_mode(&env.ctx),
+        Some(ModelMode::Full),
+        "ModelMode registry value must be updated to effective mode Full"
+    );
+}
+
+// F4: uninstall cancelled before close exits 8 and leaves the install folder and data intact;
+// cancelled after close restarts the agent and still leaves the install folder intact.
+#[test]
+fn f4_uninstall_cancel_stops_before_removal() {
+    use br_installer::{TestHookEvent, TestHookGuard};
+    use windows::Win32::System::Threading::CreateEventW;
+
+    let env = TestEnv::new("f4-cancel");
+    let exe = env.build_installer(
+        "setup",
+        b"MZ-STUB",
+        "0.3.0-dev",
+        &[(InstallLayout::AGENT_EXE, b"agent")],
+    );
+    install(&env.ctx, &exe, &InstallOpts::default()).expect("install");
+    let marker = env.ctx.home.join("store.db");
+    fs::write(&marker, b"user-history").unwrap();
+
+    struct CancelImmediately;
+    impl Progress for CancelImmediately {
+        fn step(&self, _step: Step) {}
+        fn bytes(&self, _done: u64, _total: u64) {}
+        fn cancelled(&self) -> bool {
+            true
+        }
+    }
+
+    // 1. Cancel set before the close step -> exit 8, install folder and data intact.
+    let err = uninstall_with_progress(
+        &env.ctx,
+        &UninstallOpts {
+            delete_data: true,
+            integrity_key: None,
+        },
+        &CancelImmediately,
+    )
+    .expect_err("must cancel");
+    assert_eq!(err.exit_code(), exit_code::CANCELLED);
+    assert!(env.ctx.install_dir.exists(), "install_dir must stay");
+    assert!(marker.exists(), "user data must stay");
+
+    // 2. Cancel triggered during Step::Closing -> exit 8, install folder intact, agent restarted.
+    struct CancelOnClosing {
+        flag: AtomicBool,
+    }
+    impl Progress for CancelOnClosing {
+        fn step(&self, step: Step) {
+            if step == Step::Closing {
+                self.flag.store(true, AtomicOrdering::SeqCst);
+            }
+        }
+        fn bytes(&self, _done: u64, _total: u64) {}
+        fn cancelled(&self) -> bool {
+            self.flag.load(AtomicOrdering::SeqCst)
+        }
+    }
+
+    let ev_name: Vec<u16> = PipeNames::agent_quit_event_for(&env.ctx.home)
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    let ev =
+        unsafe { CreateEventW(None, true, false, PCWSTR(ev_name.as_ptr())) }.expect("quit event");
+    let guard = TestHookGuard::install(true);
+    let err = uninstall_with_progress(
+        &env.ctx,
+        &UninstallOpts {
+            delete_data: true,
+            integrity_key: None,
+        },
+        &CancelOnClosing {
+            flag: AtomicBool::new(false),
+        },
+    )
+    .expect_err("must cancel after close");
+    unsafe {
+        let _ = CloseHandle(ev);
+    }
+    assert_eq!(err.exit_code(), exit_code::CANCELLED);
+    assert!(env.ctx.install_dir.exists(), "install_dir must stay");
+    assert!(marker.exists(), "user data must stay");
+    assert!(
+        guard.events().contains(&TestHookEvent::StartAgent),
+        "agent closed by cancelled uninstall must be restarted: {:?}",
+        guard.events()
+    );
+}
+
+// F4: Modify cancelled before the model removal step leaves Full-only models untouched.
+#[test]
+fn f4_modify_cancelled_before_removal_keeps_full_models() {
+    let env = TestEnv::new("f4-mod-cancel");
+    let exe = env.build_installer(
+        "setup",
+        b"MZ-STUB",
+        "0.3.0-dev",
+        &[(InstallLayout::AGENT_EXE, b"agent")],
+    );
+    let (_server, catalog) = start_tiny_model_server();
+    install(
+        &env.ctx,
+        &exe,
+        &InstallOpts {
+            allow_downgrade: false,
+            model_mode: ModelMode::Minimal,
+            skip_model_download: false,
+            catalog: Some(catalog.clone()),
+            integrity_key: None,
+        },
+    )
+    .expect("install minimal");
+
+    let models_dir = resolve_models_dir(&env.ctx.home);
+    let comp_full_dir = models_dir.join("comp-full");
+    fs::create_dir_all(&comp_full_dir).unwrap();
+    fs::write(comp_full_dir.join("manifest.json"), b"{\"files\":[]}").unwrap();
+
+    struct CancelOnDownload {
+        flag: AtomicBool,
+    }
+    impl Progress for CancelOnDownload {
+        fn step(&self, step: Step) {
+            if step == Step::DownloadingModels {
+                self.flag.store(true, AtomicOrdering::SeqCst);
+            }
+        }
+        fn bytes(&self, _done: u64, _total: u64) {}
+        fn cancelled(&self) -> bool {
+            self.flag.load(AtomicOrdering::SeqCst)
+        }
+    }
+
+    let out = modify_with_progress(
+        &env.ctx,
+        &ModifyOpts {
+            model_mode: ModelMode::Minimal,
+            catalog: Some(catalog),
+            integrity_key: None,
+        },
+        &CancelOnDownload {
+            flag: AtomicBool::new(false),
+        },
+    )
+    .expect("modify cancelled during download");
+    assert_eq!(
+        out,
+        Outcome::Modified {
+            mode: ModelMode::Minimal,
+            models: ModelsResult::Cancelled,
+        }
+    );
+    assert!(
+        comp_full_dir.exists(),
+        "Full-only models must not be removed when Modify is cancelled before removal"
+    );
+}
+
+// F1: Modify with 0 downloads records no close; Minimal-with-removal plus downloads records
+// exactly one close/start pair.
+#[test]
+fn f1_modify_zero_downloads_no_close_and_removal_plus_download_restarts_once() {
+    use br_installer::{TestHookEvent, TestHookGuard};
+    use windows::Win32::System::Threading::CreateEventW;
+
+    let env = TestEnv::new("f1-modify");
+    let exe = env.build_installer(
+        "setup",
+        b"MZ-STUB",
+        "0.3.0-dev",
+        &[(InstallLayout::AGENT_EXE, b"agent")],
+    );
+    let (_server, catalog) = start_tiny_model_server();
+    install(
+        &env.ctx,
+        &exe,
+        &InstallOpts {
+            allow_downgrade: false,
+            model_mode: ModelMode::Minimal,
+            skip_model_download: false,
+            catalog: Some(catalog.clone()),
+            integrity_key: None,
+        },
+    )
+    .expect("install minimal");
+
+    // 1. Modify Minimal -> Minimal (0 downloads, 0 removals) while agent mutex exists:
+    // must NOT close the app at all.
+    let agent_mutex_name: Vec<u16> = PipeNames::agent_mutex_for(&env.ctx.home)
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    let agent_mutex = unsafe { CreateMutexW(None, false, PCWSTR(agent_mutex_name.as_ptr())) }
+        .expect("agent mutex");
+
+    let guard = TestHookGuard::install(true);
+    let out = modify_with_progress(
+        &env.ctx,
+        &ModifyOpts {
+            model_mode: ModelMode::Minimal,
+            catalog: Some(catalog.clone()),
+            integrity_key: None,
+        },
+        &br_installer::NoProgress,
+    )
+    .expect("modify minimal noop");
+    unsafe {
+        let _ = CloseHandle(agent_mutex);
+    }
+    assert_eq!(
+        out,
+        Outcome::Modified {
+            mode: ModelMode::Minimal,
+            models: ModelsResult::Complete,
+        }
+    );
+    assert!(
+        !guard.events().contains(&TestHookEvent::CloseRunning),
+        "0-download Modify must not close the app: {:?}",
+        guard.events()
+    );
+    drop(guard);
+
+    // 2. Minimal-with-removal + downloads: remove comp-min so it downloads, place comp-full
+    // so it is removed; simulate running agent -> exactly 1 close and 1 start.
+    let models_dir = resolve_models_dir(&env.ctx.home);
+    fs::remove_dir_all(models_dir.join("comp-min")).expect("remove comp-min");
+    let comp_full_dir = models_dir.join("comp-full");
+    fs::create_dir_all(&comp_full_dir).unwrap();
+    fs::write(comp_full_dir.join("manifest.json"), b"{\"files\":[]}").unwrap();
+
+    let ev_name: Vec<u16> = PipeNames::agent_quit_event_for(&env.ctx.home)
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    let ev =
+        unsafe { CreateEventW(None, true, false, PCWSTR(ev_name.as_ptr())) }.expect("quit event");
+
+    let mut ctx = env.ctx.clone();
+    ctx.start_after = true;
+    let guard = TestHookGuard::install(true);
+    let out = modify_with_progress(
+        &ctx,
+        &ModifyOpts {
+            model_mode: ModelMode::Minimal,
+            catalog: Some(catalog),
+            integrity_key: None,
+        },
+        &br_installer::NoProgress,
+    )
+    .expect("modify minimal with removal and download");
+    unsafe {
+        let _ = CloseHandle(ev);
+    }
+    assert_eq!(
+        out,
+        Outcome::Modified {
+            mode: ModelMode::Minimal,
+            models: ModelsResult::Complete,
+        }
+    );
+    assert!(!comp_full_dir.exists(), "comp-full must be removed");
+    assert!(
+        models_dir.join("comp-min").join("manifest.json").is_file(),
+        "comp-min must be downloaded"
+    );
+    let events = guard.events();
+    let close_count = events
+        .iter()
+        .filter(|e| **e == TestHookEvent::CloseRunning)
+        .count();
+    let start_count = events
+        .iter()
+        .filter(|e| **e == TestHookEvent::StartAgent)
+        .count();
+    assert_eq!(
+        (close_count, start_count),
+        (1, 1),
+        "expected exactly one close/start pair, got: {events:?}"
+    );
+}
+
+// N1: a damaged payload run logs the exit code (5) and error text in setup.log.
+#[test]
+fn n1_damaged_payload_logs_exit_code_in_setup_log() {
+    let env = TestEnv::new("n1-log");
+    let exe = env.build_installer(
+        "setup",
+        b"MZ-STUB",
+        "0.3.0-dev",
+        &[(InstallLayout::AGENT_EXE, b"agent")],
+    );
+    let damaged = env.root.join("damaged.exe");
+    let mut bytes = fs::read(&exe).expect("read exe");
+    let trailer = read_trailer(&exe).expect("trailer");
+    bytes[trailer.offset as usize] ^= 0x55;
+    fs::write(&damaged, &bytes).expect("write damaged");
+
+    let err = install(&env.ctx, &damaged, &InstallOpts::default()).expect_err("damaged payload");
+    assert_eq!(err.exit_code(), exit_code::PAYLOAD);
+
+    let log_path = env.ctx.home.join(r"logs\setup.log");
+    let log = fs::read_to_string(&log_path).expect("read setup.log");
+    assert!(
+        log.contains("exit 5"),
+        "setup.log must contain exit code 5:\n{log}"
+    );
+    assert!(
+        log.contains(&err.to_string()),
+        "setup.log must contain error Display text:\n{log}"
+    );
+}
+
+// N2: delete-data on a dev home with an extra unknown file reports data_folder_kept = Some(home).
+#[test]
+fn n2_delete_data_with_unknown_file_reports_folder_kept() {
+    use br_installer::wizard::model::format_finish_outcome;
+
+    let env = TestEnv::new("n2-kept");
+    let exe = env.build_installer(
+        "setup",
+        b"MZ-STUB",
+        "0.3.0-dev",
+        &[(InstallLayout::AGENT_EXE, b"agent")],
+    );
+    install(&env.ctx, &exe, &InstallOpts::default()).expect("install");
+
+    let extra = env.ctx.home.join("user-extra-file.txt");
+    fs::write(&extra, b"keep").unwrap();
+
+    let out = uninstall(
+        &env.ctx,
+        &UninstallOpts {
+            delete_data: true,
+            integrity_key: None,
+        },
+    )
+    .expect("uninstall delete_data");
+    assert_eq!(
+        out,
+        Outcome::Uninstalled {
+            reboot_required: false,
+            data_folder_kept: Some(env.ctx.home.clone()),
+        }
+    );
+    assert!(extra.exists(), "unknown file must remain");
+    assert!(
+        !env.ctx.home.join("logs").exists(),
+        "logs\\ must still be deleted"
+    );
+
+    let msg = format_finish_outcome(Action::Uninstall, &out);
+    assert!(
+        msg.detail.contains(&env.ctx.home.display().to_string()),
+        "Finish page detail must name the kept folder: {:?}",
+        msg.detail
+    );
 }
