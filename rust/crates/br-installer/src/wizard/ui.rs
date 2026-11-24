@@ -38,11 +38,11 @@ use crate::error::{InstallError, exit_code};
 use crate::extract::available_disk_space;
 use crate::install::{
     InstallOpts, ModelMode, ModelsResult, ModifyOpts, Outcome, UninstallOpts,
-    install_with_progress, modify_with_progress, resolve_models_dir, uninstall_with_progress,
+    detect_existing_model_mode, effective_model_mode, install_with_progress, modify_with_progress,
+    present_full_only_components, resolve_models_dir, uninstall_with_progress,
 };
 use crate::payload::read_license_text;
 use crate::progress::{Progress, Step};
-use crate::registry::read_model_mode;
 use crate::strings;
 use crate::wizard::ids::{
     IDC_FINISH_DETAIL, IDC_FINISH_SUMMARY, IDC_LICENCE_ACCEPT, IDC_LICENCE_EDIT,
@@ -141,7 +141,15 @@ pub fn run_wizard(ctx: Ctx, args: CliArgs) -> i32 {
         (true, String::new())
     };
 
-    let existing_model_mode = read_model_mode(&ctx);
+    let dev_catalog = load_dev_catalog(&args).ok().flatten();
+    let catalog = dev_catalog.clone().or_else(|| Catalog::embedded().ok());
+
+    // C2: preselect the effective mode (inspecting disk for Full-only models).
+    let existing_model_mode = match args.action {
+        Action::Modify => Some(effective_model_mode(&ctx, catalog.as_ref())),
+        Action::Install => detect_existing_model_mode(&ctx, catalog.as_ref()),
+        Action::Uninstall => None,
+    };
     let model = WizardModel::new(WizardInit {
         action: args.action,
         existing_model_mode,
@@ -151,9 +159,6 @@ pub fn run_wizard(ctx: Ctx, args: CliArgs) -> i32 {
         cli_no_run: args.no_run || !ctx.start_after,
         licence_found,
     });
-
-    let dev_catalog = load_dev_catalog(&args).ok().flatten();
-    let catalog = dev_catalog.clone().or_else(|| Catalog::embedded().ok());
 
     let mut state = Box::new(WizardState {
         ctx,
@@ -327,9 +332,8 @@ unsafe extern "system" fn models_proc(
                 IDC_MODELS_LATER_DESC,
                 strings::model_mode_description(ModelMode::Later),
             );
-            set_item_text(hwnd, IDC_MODELS_NOTE, strings::MODELS_NOTE);
-
             check_only_model_radio(hwnd, state.model.model_mode);
+            update_models_note(hwnd, state);
             1
         }
         WM_COMMAND => {
@@ -341,6 +345,7 @@ unsafe extern "system" fn models_proc(
             {
                 state.model.model_mode = mode;
                 check_only_model_radio(hwnd, mode);
+                update_models_note(hwnd, state);
                 return 1;
             }
             0
@@ -894,6 +899,28 @@ fn check_only_model_radio(hwnd: HWND, mode: ModelMode) {
     for m in [ModelMode::Full, ModelMode::Minimal, ModelMode::Later] {
         set_checked(hwnd, radio_from_model_mode(m), m == mode);
     }
+}
+
+/// C2: Show which Full-only components will be removed and their size when the user picks
+/// Minimal during Modify while Full-only components are present on disk.
+fn update_models_note(hwnd: HWND, state: &WizardState) {
+    if state.model.action == Action::Modify
+        && state.model.model_mode == ModelMode::Minimal
+        && let Some(ref cat) = state.catalog
+    {
+        let models_dir = resolve_models_dir(&state.ctx.home);
+        let to_remove = present_full_only_components(&models_dir, cat);
+        if !to_remove.is_empty() {
+            let names: Vec<&str> = to_remove.iter().map(|c| c.id.as_str()).collect();
+            let total_bytes: u64 = to_remove
+                .iter()
+                .fold(0u64, |acc, c| acc.saturating_add(c.bytes));
+            let notice = strings::modify_removal_notice(&names, total_bytes);
+            set_item_text(hwnd, IDC_MODELS_NOTE, &notice);
+            return;
+        }
+    }
+    set_item_text(hwnd, IDC_MODELS_NOTE, strings::MODELS_NOTE);
 }
 
 fn set_checked(hwnd: HWND, id: u16, checked: bool) {

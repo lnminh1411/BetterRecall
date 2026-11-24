@@ -136,7 +136,7 @@ impl WizardModel {
             Action::Modify => init
                 .cli_model_mode
                 .or(init.existing_model_mode)
-                .unwrap_or(ModelMode::Minimal),
+                .unwrap_or(ModelMode::Later),
             Action::Uninstall => ModelMode::Later,
         };
         Self {
@@ -174,6 +174,7 @@ impl WizardModel {
             Step::Swapping
                 | Step::Registering
                 | Step::RemovingFiles
+                | Step::RemovingModels
                 | Step::DeletingData
                 | Step::Done
         ) {
@@ -286,18 +287,20 @@ pub fn format_finish_outcome(action: Action, outcome: &Outcome) -> FinishMessage
             detail: format_models_detail(models),
         },
         Outcome::Uninstalled {
-            reboot_required: false,
+            reboot_required,
+            data_folder_kept,
         } => FinishMessage {
             header,
-            summary: strings::FINISH_UNINSTALLED.to_string(),
-            detail: String::new(),
-        },
-        Outcome::Uninstalled {
-            reboot_required: true,
-        } => FinishMessage {
-            header,
-            summary: strings::FINISH_UNINSTALLED_REBOOT.to_string(),
-            detail: String::new(),
+            summary: if *reboot_required {
+                strings::FINISH_UNINSTALLED_REBOOT.to_string()
+            } else {
+                strings::FINISH_UNINSTALLED.to_string()
+            },
+            // N2: tell the user when delete-data kept the folder due to unknown files
+            detail: data_folder_kept
+                .as_deref()
+                .map(strings::finish_uninstalled_data_kept)
+                .unwrap_or_default(),
         },
         Outcome::NothingToDo => FinishMessage {
             header,
@@ -644,5 +647,34 @@ mod tests {
         );
         assert!(prog.contains("50.0 MB / 200.0 MB"));
         assert!(prog.contains("25.0 MB/s"));
+
+        // C2: removal notice lists component IDs and size.
+        let notice = strings::modify_removal_notice(
+            &["whisper-large-v3-turbo", "siglip2-base"],
+            2_900_000_000,
+        );
+        assert!(notice.contains("whisper-large-v3-turbo"));
+        assert!(notice.contains("siglip2-base"));
+        assert!(notice.contains("2.9 GB"));
+
+        // F4: RemovingModels disables Cancel on Progress page.
+        let mut m = WizardModel::new(WizardInit {
+            action: Action::Modify,
+            ..Default::default()
+        });
+        m.on_step(Step::DownloadingModels);
+        assert!(m.can_cancel());
+        m.on_step(Step::RemovingModels);
+        assert!(!m.can_cancel());
+
+        // N2: Uninstalled with data_folder_kept names the folder in detail.
+        let kept = format_finish_outcome(
+            Action::Uninstall,
+            &Outcome::Uninstalled {
+                reboot_required: false,
+                data_folder_kept: Some(PathBuf::from(r"C:\dev\home")),
+            },
+        );
+        assert!(kept.detail.contains(r"C:\dev\home"));
     }
 }
