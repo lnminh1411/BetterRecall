@@ -220,6 +220,8 @@ struct EffectiveConfig {
 struct RuntimeState {
     state: String,
     error: Option<String>,
+    // D3: True when `state == "error"` came from an install failure (not a feed/download error).
+    install_error: bool,
     persisted: PersistedState,
 }
 
@@ -238,6 +240,21 @@ impl UpdateManager {
         update_downloading: Arc<AtomicBool>,
         models_downloading: Arc<AtomicBool>,
     ) -> Self {
+        Self::new_with_version(
+            home,
+            update_downloading,
+            models_downloading,
+            env!("CARGO_PKG_VERSION"),
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn new_with_version(
+        home: PathBuf,
+        update_downloading: Arc<AtomicBool>,
+        models_downloading: Arc<AtomicBool>,
+        running_version: &str,
+    ) -> Self {
         let mut persisted = load_state(&updates_state_path(&home));
         let mut initial_state = if persisted.downloaded.is_some() {
             "ready".to_string()
@@ -245,39 +262,45 @@ impl UpdateManager {
             "idle".to_string()
         };
         let mut initial_error = None;
+        let mut initial_install_error = false;
 
         // C1: Read last-install.json at start
         let last_install_path = DataPaths::updates_dir(&home).join("last-install.json");
         if let Ok(content) = fs::read_to_string(&last_install_path)
             && let Ok(report) = serde_json::from_str::<LastInstallReport>(&content)
         {
-            let is_newer = match (
-                persisted
-                    .last_install_handled_utc
-                    .as_deref()
-                    .and_then(|s| DateTime::parse_from_rfc3339(s).ok()),
-                DateTime::parse_from_rfc3339(&report.utc).ok(),
-            ) {
-                (Some(prev), Some(curr)) => curr > prev,
-                (None, Some(_)) => true,
-                _ => persisted.last_install_handled_utc.as_deref() != Some(&report.utc),
-            };
+            // C3: Equality check (not time ordering) so a report written after a backward clock
+            // step is still handled once.
+            let is_new = persisted.last_install_handled_utc.as_deref() != Some(&report.utc);
 
-            if is_newer {
+            if is_new {
                 persisted.last_install_handled_utc = Some(report.utc.clone());
-                if report.exit_code != 0
-                    && persisted.downloaded.as_deref() == Some(&report.version)
-                {
-                    initial_state = "error".to_string();
-                    let err_msg = format!(
-                        "Update could not be installed (setup exit code {}).",
-                        report.exit_code
-                    );
-                    initial_error = Some(err_msg);
-                    let report_time = DateTime::parse_from_rfc3339(&report.utc)
-                        .map(|dt| dt.with_timezone(&Utc))
-                        .unwrap_or_else(|_| Utc::now());
-                    persisted.record_failure(&report.version, report_time);
+                if report.exit_code != 0 {
+                    // C4: A non-zero exit whose version equals the running version means the swap
+                    // succeeded and only a post-swap step failed; warn without recording an error.
+                    let matches_running = report.version == running_version
+                        || matches!(
+                            (Version::parse(&report.version), Version::parse(running_version)),
+                            (Ok(a), Ok(b)) if a == b
+                        );
+                    if matches_running {
+                        AgentLog::warn(&format!(
+                            "update post-swap step failed for {} (setup exit code {}); running version already updated",
+                            report.version, report.exit_code
+                        ));
+                    } else if persisted.downloaded.as_deref() == Some(&report.version) {
+                        initial_state = "error".to_string();
+                        let err_msg = format!(
+                            "Update could not be installed (setup exit code {}).",
+                            report.exit_code
+                        );
+                        initial_error = Some(err_msg);
+                        initial_install_error = true;
+                        let report_time = DateTime::parse_from_rfc3339(&report.utc)
+                            .map(|dt| dt.with_timezone(&Utc))
+                            .unwrap_or_else(|_| Utc::now());
+                        persisted.record_failure(&report.version, report_time);
+                    }
                 }
                 let _ = save_state(&updates_state_path(&home), &persisted);
             }
@@ -289,6 +312,7 @@ impl UpdateManager {
             runtime: Arc::new(Mutex::new(RuntimeState {
                 state: initial_state,
                 error: initial_error,
+                install_error: initial_install_error,
                 persisted,
             })),
             update_downloading,
@@ -311,27 +335,26 @@ impl UpdateManager {
             return;
         };
         let mut rt = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(ref dl_ver_str) = rt.persisted.downloaded else {
-            return;
-        };
-        let is_newer = Version::parse(dl_ver_str).is_ok_and(|v| v > running);
-        if !is_newer {
-            let folder = DataPaths::updates_dir(&self.home).join(dl_ver_str);
-            if folder.exists() {
-                let _ = fs::remove_dir_all(&folder);
+        if let Some(dl_ver_str) = rt.persisted.downloaded.clone() {
+            let is_newer = Version::parse(&dl_ver_str).is_ok_and(|v| v > running);
+            if !is_newer {
+                let folder = DataPaths::updates_dir(&self.home).join(&dl_ver_str);
+                if folder.exists() {
+                    let _ = fs::remove_dir_all(&folder);
+                }
+                AgentLog::info(&format!(
+                    "update cleanup: removed stale folder for version {dl_ver_str} (running {})",
+                    cfg.current_version
+                ));
+                rt.persisted.downloaded = None;
+                if rt.state == "ready" {
+                    rt.state = "idle".to_string();
+                }
+                let _ = save_state(&updates_state_path(&self.home), &rt.persisted);
             }
-            AgentLog::info(&format!(
-                "update cleanup: removed stale folder for version {dl_ver_str} (running {})",
-                cfg.current_version
-            ));
-            rt.persisted.downloaded = None;
-            if rt.state == "ready" {
-                rt.state = "idle".to_string();
-            }
-            let _ = save_state(&updates_state_path(&self.home), &rt.persisted);
         }
 
-        // C1: A successful install of a newer version (running version >= failedVersion) clears them.
+        // C1/C4: A successful install of a newer version (running version >= failedVersion) clears them.
         if let Some(ref fv_str) = rt.persisted.failed_version
             && Version::parse(fv_str).is_ok_and(|fv| running >= fv)
         {
@@ -342,6 +365,22 @@ impl UpdateManager {
             rt.persisted.failed_version = None;
             rt.persisted.failed_count = 0;
             rt.persisted.failed_at = None;
+            // C4: Clear install-failure error state once the running version is at or past the failed version.
+            if rt.state == "error" && rt.install_error {
+                rt.state = if rt.persisted.downloaded.is_some()
+                    && rt
+                        .persisted
+                        .latest
+                        .as_ref()
+                        .is_none_or(|l| Some(l.version.as_str()) == rt.persisted.downloaded.as_deref())
+                {
+                    "ready".to_string()
+                } else {
+                    "idle".to_string()
+                };
+                rt.error = None;
+                rt.install_error = false;
+            }
             let _ = save_state(&updates_state_path(&self.home), &rt.persisted);
         }
     }
@@ -372,78 +411,12 @@ impl UpdateManager {
         let outcome = self.run_feed_check(&cfg, ct);
 
         let mut rt = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
-        match outcome {
-            CheckOutcome::Cancelled => {
-                // C4: A cancelled check logs one line and leaves state as it was before the check.
-                AgentLog::info("update check cancelled");
-                return Err(AgentError::Cancelled);
-            }
-            CheckOutcome::NoRelease => {
-                AgentLog::info(&format!(
-                    "update check: no release found (current={})",
-                    cfg.current_version
-                ));
-                rt.persisted.last_check = Some(now);
-                rt.persisted.latest = None;
-                rt.state = if rt.persisted.downloaded.is_some() {
-                    "ready".to_string()
-                } else {
-                    "idle".to_string()
-                };
-                rt.error = None;
-                let _ = save_state(&updates_state_path(&self.home), &rt.persisted);
-            }
-            CheckOutcome::Unverifiable {
-                version,
-                notes_url,
-                published_at,
-            } => {
-                AgentLog::info(&format!(
-                    "update check: latest={version} current={} (no release key)",
-                    cfg.current_version
-                ));
-                rt.persisted.last_check = Some(now);
-                rt.persisted.latest = Some(PersistedLatest {
-                    version: version.to_string(),
-                    notes_url,
-                    published_at,
-                    installer_bytes: None,
-                });
-                rt.state = "idle".to_string();
-                rt.error = None;
-                let _ = save_state(&updates_state_path(&self.home), &rt.persisted);
-            }
-            CheckOutcome::Verified(rel) => {
-                AgentLog::info(&format!(
-                    "update check: verified latest={} current={}",
-                    rel.version, cfg.current_version
-                ));
-                rt.persisted.last_check = Some(now);
-                rt.persisted.latest = Some(PersistedLatest {
-                    version: rel.version.to_string(),
-                    notes_url: rel.notes_url,
-                    published_at: rel.published_at,
-                    installer_bytes: Some(rel.manifest.size),
-                });
-                rt.state = if rt.persisted.downloaded.as_deref() == Some(&rel.version.to_string()) {
-                    "ready".to_string()
-                } else {
-                    "idle".to_string()
-                };
-                rt.error = None;
-                let _ = save_state(&updates_state_path(&self.home), &rt.persisted);
-            }
-            CheckOutcome::Rejected(reason) => {
-                AgentLog::warn(&format!("update check rejected: {reason}"));
-                rt.state = "error".to_string();
-                rt.error = Some(reason);
-            }
-            CheckOutcome::Offline => {
-                AgentLog::warn("update check failed: offline");
-                rt.state = "error".to_string();
-                rt.error = Some(OFFLINE_ERROR.to_string());
-            }
+        if matches!(outcome, CheckOutcome::Cancelled) {
+            // C4: A cancelled check logs one line and leaves state as it was before the check.
+            AgentLog::info("update check cancelled");
+            return Err(AgentError::Cancelled);
         }
+
         if let Ok(running) = Version::parse(&cfg.current_version)
             && let Some(ref fv_str) = rt.persisted.failed_version
             && Version::parse(fv_str).is_ok_and(|fv| running >= fv)
@@ -452,6 +425,103 @@ impl UpdateManager {
             rt.persisted.failed_count = 0;
             rt.persisted.failed_at = None;
             let _ = save_state(&updates_state_path(&self.home), &rt.persisted);
+        }
+
+        let is_applying = rt.state == "applying";
+        let keep_install_error = |rt: &RuntimeState, latest: Option<&str>| {
+            rt.state == "error"
+                && rt.install_error
+                && latest.is_some()
+                && rt.persisted.failed_version.as_deref() == latest
+        };
+
+        match outcome {
+            CheckOutcome::Cancelled => unreachable!(),
+            CheckOutcome::NoRelease => {
+                AgentLog::info(&format!(
+                    "update check: no release found (current={})",
+                    cfg.current_version
+                ));
+                rt.persisted.last_check = Some(now);
+                rt.persisted.latest = None;
+                // D3: Do not overwrite `applying` state.
+                if !is_applying {
+                    rt.state = if rt.persisted.downloaded.is_some() {
+                        "ready".to_string()
+                    } else {
+                        "idle".to_string()
+                    };
+                    rt.error = None;
+                    rt.install_error = false;
+                }
+                let _ = save_state(&updates_state_path(&self.home), &rt.persisted);
+            }
+            CheckOutcome::Unverifiable {
+                version,
+                notes_url,
+                published_at,
+            } => {
+                let ver_str = version.to_string();
+                AgentLog::info(&format!(
+                    "update check: latest={ver_str} current={} (no release key)",
+                    cfg.current_version
+                ));
+                rt.persisted.last_check = Some(now);
+                rt.persisted.latest = Some(PersistedLatest {
+                    version: ver_str.clone(),
+                    notes_url,
+                    published_at,
+                    installer_bytes: None,
+                });
+                // D3: Keep `applying` and keep an install-failure error while latest is still the failed version.
+                if !is_applying && !keep_install_error(&rt, Some(&ver_str)) {
+                    rt.state = "idle".to_string();
+                    rt.error = None;
+                    rt.install_error = false;
+                }
+                let _ = save_state(&updates_state_path(&self.home), &rt.persisted);
+            }
+            CheckOutcome::Verified(rel) => {
+                let ver_str = rel.version.to_string();
+                AgentLog::info(&format!(
+                    "update check: verified latest={ver_str} current={}",
+                    cfg.current_version
+                ));
+                rt.persisted.last_check = Some(now);
+                rt.persisted.latest = Some(PersistedLatest {
+                    version: ver_str.clone(),
+                    notes_url: rel.notes_url,
+                    published_at: rel.published_at,
+                    installer_bytes: Some(rel.manifest.size),
+                });
+                // D3: Keep `applying` and keep an install-failure error while latest is still the failed version.
+                if !is_applying && !keep_install_error(&rt, Some(&ver_str)) {
+                    rt.state = if rt.persisted.downloaded.as_deref() == Some(ver_str.as_str()) {
+                        "ready".to_string()
+                    } else {
+                        "idle".to_string()
+                    };
+                    rt.error = None;
+                    rt.install_error = false;
+                }
+                let _ = save_state(&updates_state_path(&self.home), &rt.persisted);
+            }
+            CheckOutcome::Rejected(reason) => {
+                AgentLog::warn(&format!("update check rejected: {reason}"));
+                if !is_applying {
+                    rt.state = "error".to_string();
+                    rt.error = Some(reason);
+                    rt.install_error = false;
+                }
+            }
+            CheckOutcome::Offline => {
+                AgentLog::warn("update check failed: offline");
+                if !is_applying {
+                    rt.state = "error".to_string();
+                    rt.error = Some(OFFLINE_ERROR.to_string());
+                    rt.install_error = false;
+                }
+            }
         }
         Ok(self.build_status(&cfg, &rt, auto_enabled))
     }
@@ -599,6 +669,7 @@ impl UpdateManager {
                 });
                 rt.state = "idle".to_string();
                 rt.error = None;
+                rt.install_error = false;
                 let _ = save_state(&updates_state_path(&self.home), &rt.persisted);
             }
             sink.emit_now(UpdateProgress {
@@ -704,6 +775,7 @@ impl UpdateManager {
                     rt.persisted.downloaded = Some(ver_str.clone());
                     rt.state = "ready".to_string();
                     rt.error = None;
+                    rt.install_error = false;
                     let _ = save_state(&updates_state_path(&self.home), &rt.persisted);
                 }
                 AgentLog::info(&format!("update download done: version={ver_str}"));
@@ -767,26 +839,38 @@ impl UpdateManager {
                 CommandProcessor::ERR_MODELS_RUNNING_FOR_UPDATE.to_string(),
             ));
         }
-        // C1: apply refuses with an InvalidOperation while state is applying
-        {
-            let rt = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
+        let running = Version::parse(&cfg.current_version).map_err(|e| {
+            AgentError::Other(format!("invalid running version '{}': {e}", cfg.current_version))
+        })?;
+
+        // D3: Test-and-set `applying` under the runtime lock before verifying/starting the
+        // installer so two concurrent apply calls cannot both start an installer.
+        let (downloaded_ver, mut applying_guard) = {
+            let mut rt = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
             if rt.state == "applying" {
                 return Err(AgentError::InvalidOperation(
                     "Update is already being installed.".to_string(),
                 ));
             }
-        }
-        let running = Version::parse(&cfg.current_version).map_err(|e| {
-            AgentError::Other(format!("invalid running version '{}': {e}", cfg.current_version))
-        })?;
-
-        let downloaded_ver = {
-            let rt = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
-            rt.persisted.downloaded.clone()
-        }
-        .ok_or_else(|| {
-            AgentError::InvalidOperation("No downloaded update is ready to install.".to_string())
-        })?;
+            let Some(dl) = rt.persisted.downloaded.clone() else {
+                return Err(AgentError::InvalidOperation(
+                    "No downloaded update is ready to install.".to_string(),
+                ));
+            };
+            let prev_state = std::mem::replace(&mut rt.state, "applying".to_string());
+            let prev_error = rt.error.take();
+            let prev_install_error = std::mem::replace(&mut rt.install_error, false);
+            (
+                dl,
+                ApplyingGuard {
+                    runtime: &self.runtime,
+                    prev_state,
+                    prev_error,
+                    prev_install_error,
+                    armed: true,
+                },
+            )
+        };
 
         let target_ver = Version::parse(&downloaded_ver).map_err(|_| {
             AgentError::InvalidOperation("Downloaded update version is invalid.".to_string())
@@ -870,8 +954,12 @@ impl UpdateManager {
         drop(file);
 
         let proc_handle = match launch_res {
-            Ok(h) => h,
+            Ok(h) => {
+                applying_guard.armed = false;
+                h
+            }
             Err(e) => {
+                applying_guard.armed = false;
                 AgentLog::warn(&format!(
                     "update apply failed to start installer for version={downloaded_ver}: {e}"
                 ));
@@ -879,6 +967,7 @@ impl UpdateManager {
                 rt.state = "error".to_string();
                 let err_msg = format!("Could not start the installer: {e}");
                 rt.error = Some(err_msg);
+                rt.install_error = true;
                 rt.persisted.record_failure(&downloaded_ver, Utc::now());
                 let _ = save_state(&updates_state_path(&self.home), &rt.persisted);
                 return Err(AgentError::InvalidOperation(format!(
@@ -890,11 +979,6 @@ impl UpdateManager {
         AgentLog::info(&format!(
             "update apply started installer: version={downloaded_ver}"
         ));
-        {
-            let mut rt = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
-            rt.state = "applying".to_string();
-            rt.error = None;
-        }
 
         // C1: Watch the installer
         if let Some(h) = proc_handle {
@@ -912,7 +996,19 @@ impl UpdateManager {
                         let mut exit_code = 0u32;
                         let ok = unsafe { GetExitCodeProcess(wrapper.0, &mut exit_code) };
                         if ok.is_ok() {
+                            // C3: Read last-install.json so start-up does not count this exit again.
+                            let report_utc = fs::read_to_string(
+                                DataPaths::updates_dir(&home).join("last-install.json"),
+                            )
+                            .ok()
+                            .and_then(|c| serde_json::from_str::<LastInstallReport>(&c).ok())
+                            .filter(|r| r.version == version)
+                            .map(|r| r.utc);
+
                             let mut rt = runtime.lock().unwrap_or_else(|e| e.into_inner());
+                            if let Some(utc) = report_utc {
+                                rt.persisted.last_install_handled_utc = Some(utc);
+                            }
                             if exit_code == 0 {
                                 AgentLog::info(&format!(
                                     "installer exited successfully (code 0) for {version}"
@@ -923,6 +1019,7 @@ impl UpdateManager {
                                     "idle".to_string()
                                 };
                                 rt.error = None;
+                                rt.install_error = false;
                             } else {
                                 AgentLog::warn(&format!(
                                     "installer exited with code {exit_code} for {version}"
@@ -931,6 +1028,7 @@ impl UpdateManager {
                                 rt.error = Some(format!(
                                     "Update could not be installed (setup exit code {exit_code})."
                                 ));
+                                rt.install_error = true;
                                 rt.persisted.record_failure(&version, Utc::now());
                             }
                             let _ = save_state(&updates_state_path(&home), &rt.persisted);
@@ -1061,6 +1159,7 @@ impl UpdateManager {
         let mut rt = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
         rt.state = state.to_string();
         rt.error = error;
+        rt.install_error = false;
     }
 
     fn build_status(
@@ -1296,6 +1395,26 @@ impl UpdateManager {
             sig_bytes,
             installer_url: installer_asset.browser_download_url.clone(),
         }))
+    }
+}
+
+// D3: Restores runtime state if `apply` fails before the installer starts.
+struct ApplyingGuard<'a> {
+    runtime: &'a Mutex<RuntimeState>,
+    prev_state: String,
+    prev_error: Option<String>,
+    prev_install_error: bool,
+    armed: bool,
+}
+
+impl Drop for ApplyingGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let mut rt = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
+            rt.state = std::mem::take(&mut self.prev_state);
+            rt.error = self.prev_error.take();
+            rt.install_error = self.prev_install_error;
+        }
     }
 }
 

@@ -465,20 +465,7 @@ impl ConnInner {
                 cb(error, pending_at_close);
             }));
         }
-        {
-            let mut q = self.writer_queue.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(mut jobs) = q.take() {
-                for job in jobs.drain(..) {
-                    let msg = if by_agent {
-                        STOPPED_MESSAGE
-                    } else {
-                        NOT_SENT_MESSAGE
-                    };
-                    job.done.complete(Err(WorkerError::Transport(msg.to_string())));
-                }
-            }
-            self.writer_cv.notify_all();
-        }
+        self.drain_writer_queue();
         for (id, slot) in drained {
             let msg = if Some(id) == blamed {
                 PIPE_CLOSED_MESSAGE
@@ -488,6 +475,29 @@ impl ConnInner {
                 CRASHED_ELSEWHERE_MESSAGE
             };
             slot.set(Err(WorkerError::Transport(msg.to_string())));
+        }
+    }
+
+    /// A3: close the writer queue and fail every queued job so callers never hang in `done.wait`.
+    fn drain_writer_queue(&self) {
+        let by_agent = self.by_agent();
+        let drained = {
+            let mut q = self.writer_queue.lock().unwrap_or_else(|e| e.into_inner());
+            let taken = q.take();
+            self.writer_cv.notify_all();
+            taken
+        };
+        if let Some(mut jobs) = drained {
+            let msg = if by_agent {
+                STOPPED_MESSAGE
+            } else {
+                NOT_SENT_MESSAGE
+            };
+            for job in jobs.drain(..) {
+                self.write_gate.exit();
+                job.done
+                    .complete(Err(WorkerError::Transport(msg.to_string())));
+            }
         }
     }
 
@@ -550,6 +560,54 @@ impl WorkerConnection {
             inner,
             threads: Mutex::new((reader, writer)),
         })
+    }
+
+    /// Test seam (A3): builds a connection without spawning the writer thread so a queued
+    /// `WriteJob` stays in `writer_queue` until `dispose()`.
+    #[doc(hidden)]
+    pub fn new_without_writer_for_test(
+        stream: Arc<dyn WorkerStream>,
+        clock: Option<ClockFn>,
+    ) -> Arc<Self> {
+        let now = clock.unwrap_or_else(|| Arc::new(liveness_now_ms));
+        let start_reply = now();
+        let inner = Arc::new(ConnInner {
+            stream,
+            write_gate: WriteGate::new(),
+            now,
+            pending: Mutex::new(HashMap::new()),
+            started: Mutex::new(HashMap::new()),
+            abandoned: Mutex::new(HashMap::new()),
+            next_id: AtomicI64::new(0),
+            write_seq: AtomicI64::new(0),
+            last_activity_ticks: AtomicI64::new(tick_count64()),
+            last_reply_ticks: AtomicI64::new(start_reply),
+            consecutive_timeouts: AtomicI32::new(0),
+            long_ops: AtomicI32::new(0),
+            closed: AtomicBool::new(false),
+            disposed: AtomicBool::new(false),
+            recycled: AtomicBool::new(false),
+            shutting_down: AtomicBool::new(false),
+            aborted: AtomicBool::new(false),
+            cts: br_core::CancelSource::new(),
+            writer_queue: Mutex::new(Some(VecDeque::new())),
+            writer_cv: Condvar::new(),
+            closed_cb: Mutex::new(None),
+        });
+        Arc::new(Self {
+            inner,
+            threads: Mutex::new((None, None)),
+        })
+    }
+
+    #[doc(hidden)]
+    pub fn queued_writes_for_test(&self) -> usize {
+        self.inner
+            .writer_queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map_or(0, VecDeque::len)
     }
 
     pub fn set_closed_handler(&self, cb: ClosedCallback) {
@@ -799,15 +857,8 @@ impl WorkerConnection {
         }
         self.inner.cts.cancel();
         self.inner.stream.close();
-        {
-            let mut q = self
-                .inner
-                .writer_queue
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            let _ = q.take();
-            self.inner.writer_cv.notify_all();
-        }
+        // A3: fail every queued WriteJob before joining so callers waiting in done.wait recover.
+        self.inner.drain_writer_queue();
         let (r, w) = {
             let mut t = self.threads.lock().unwrap_or_else(|e| e.into_inner());
             (t.0.take(), t.1.take())

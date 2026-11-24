@@ -907,3 +907,17 @@ fn backward_clock_step_does_not_pin_search_rate_limit_b3() {
     let (ok3, _, _) = f.call(&mut pub_s, "search test");
     assert!(ok3);
 }
+
+#[test]
+fn replay_save_when_replay_off_returns_exact_error_b2() {
+    let f = CmdFixture::new();
+    let mut ui_s = CmdFixture::ui_sess();
+    *f.agent.on_save_replay.lock().unwrap() = Some(Box::new(|_| {
+        Err(br_core::AgentError::InvalidOperation(
+            CommandProcessor::ERR_REPLAY_OFF.to_string(),
+        ))
+    }));
+    let (ok, _, err) = f.call(&mut ui_s, "replay save");
+    assert!(!ok);
+    assert_eq!(Some(CommandProcessor::ERR_REPLAY_OFF), err.as_deref());
+}

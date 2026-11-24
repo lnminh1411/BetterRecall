@@ -74,6 +74,36 @@ pub fn format_approx_gb(bytes: u64) -> String {
     format!("about {:.1} GB", bytes as f64 / 1_000_000_000.0)
 }
 
+/// Formats a byte count as an approximate human-readable size (GB for >= 100 MB, else MB).
+pub fn format_approx_size(bytes: u64) -> String {
+    if bytes >= 100_000_000 {
+        format_approx_gb(bytes)
+    } else if bytes >= 100_000 {
+        format!("about {:.1} MB", bytes as f64 / 1_000_000.0)
+    } else {
+        "under 1 MB".to_string()
+    }
+}
+
+/// C2: Notice shown on the Models page during Modify when Minimal is selected while
+/// Full-only components are installed on disk.
+pub fn modify_removal_notice(component_ids: &[&str], total_bytes: u64) -> String {
+    format!(
+        "Next will remove: {} ({}).",
+        component_ids.join(", "),
+        format_approx_size(total_bytes)
+    )
+}
+
+/// N2: Detail line shown on the Finish page when delete-data uninstall left the data folder
+/// in place because unknown files remained inside it.
+pub fn finish_uninstalled_data_kept(home: &Path) -> String {
+    format!(
+        "Some files were not created by BetterRecall, so {} was kept.",
+        home.display()
+    )
+}
+
 /// Radio button label for `mode` on the Models wizard page, using sizes from `catalog`.
 pub fn model_mode_radio_label(mode: ModelMode, catalog: Option<&Catalog>) -> String {
     match mode {
@@ -219,6 +249,7 @@ pub fn step_label(step: Step) -> &'static str {
         Step::Swapping => "Moving files into place...",
         Step::Registering => "Registering BetterRecall...",
         Step::DownloadingModels => "Downloading models...",
+        Step::RemovingModels => "Removing unused models...",
         Step::SavingSettings => "Saving model selection...",
         Step::Unregistering => "Removing registration...",
         Step::RemovingFiles => "Removing installed files...",

@@ -11,7 +11,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use br_contracts::{ReplaySettings, Settings};
-use chrono::Utc;
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use windows::Win32::System::SystemInformation::GetTickCount;
 
 use crate::audio::{AudioReplayEncoder, LoopbackHub};
@@ -23,7 +23,7 @@ use crate::capture::output_capture::{KeyframeRequest, OutputCapture};
 use crate::guardrails::{
     AudioGate, GuardReason, GuardSnapshot, GuardrailService, WindowInfo, WindowInspector,
 };
-use crate::native::{MASK_EVERYTHING, Rect, idle_milliseconds, tick_count64};
+use crate::native::{MASK_EVERYTHING, Rect, idle_milliseconds, qpc, tick_count64};
 use crate::privacy::{RedactionMasks, RedactionOptions};
 use crate::replay::{MediaFoundationRuntime, ReplayEngine, ReplayEngineConfig};
 use crate::seams::CaptureSubsystem;
@@ -442,6 +442,26 @@ impl CaptureService {
         v + a
     }
 
+    /// A1: oldest packet timestamp across all live video and audio replay rings, mapped to UTC.
+    pub fn oldest_replay_time(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        let mut oldest_pts: Option<i64> = None;
+        if let Some(pts) = self.engine().and_then(|e| e.oldest_packet_pts()) {
+            oldest_pts = Some(oldest_pts.map_or(pts, |cur| cur.min(pts)));
+        }
+        if let Some(pts) = self.audio().and_then(|a| a.ring().oldest_pts()) {
+            oldest_pts = Some(oldest_pts.map_or(pts, |cur| cur.min(pts)));
+        }
+        let pts = oldest_pts?;
+        let now_qpc = OutputCapture::qpc_100ns(qpc());
+        let age_100ns = now_qpc.saturating_sub(pts).max(0);
+        Some(now - ChronoDuration::microseconds(age_100ns / 10))
+    }
+
+    #[doc(hidden)]
+    pub fn attach_engine_for_test(&self, engine: Arc<ReplayEngine>) {
+        *self.engine.lock().unwrap_or_else(|e| e.into_inner()) = Some(engine);
+    }
+
     /// Computes replay masks: denied windows, password fields, keyframe OCR boxes,
     /// unscanned foreground window, and foreground window while text masks are unchecked (C2).
     pub fn masks(&self) -> Vec<Rect> {
@@ -726,6 +746,7 @@ impl CaptureService {
                 },
                 bounds,
                 mask_only: false,
+                bench: false,
             };
             o.set_pending_keyframe(Some(req));
         }
@@ -779,6 +800,7 @@ impl CaptureService {
                 secrets: None,
                 bounds,
                 mask_only: true,
+                bench: false,
             }));
         }
     }

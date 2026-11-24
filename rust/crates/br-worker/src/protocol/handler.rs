@@ -216,7 +216,8 @@ impl<'a> RequestHandler<'a> {
                 if !Self::is_language(&lang) {
                     return Err(WorkerError::bad_request("language"));
                 }
-                let mut pcm = Vec::with_capacity(payload.len() / 4);
+                // E2: zeroize decoded PCM buffer on drop (including early error returns).
+                let mut pcm = crate::ZeroOnDrop::new(Vec::with_capacity(payload.len() / 4));
                 for chunk in payload.chunks_exact(4) {
                     let x = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
                     if !x.is_finite() {

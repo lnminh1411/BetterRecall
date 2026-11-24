@@ -610,10 +610,47 @@ fn reaches_ring_table() {
     for (label, notice, replay_s, expected) in cases {
         assert_eq!(
             *expected,
-            AgentHost::reaches_ring(notice, now, *replay_s),
+            AgentHost::reaches_ring(notice, now, *replay_s, None, None),
             "case={label}"
         );
     }
+
+    // A1: paused replay holding packets or samples from 10 min ago.
+    let ten_min_ago = now - ChronoDuration::minutes(10);
+    let paused_overlap = PurgeNotice {
+        reason: "purge".to_string(),
+        ids: Vec::new(),
+        from: Some(now - ChronoDuration::minutes(11)),
+        to: Some(now - ChronoDuration::minutes(9)),
+        newest: Some(ten_min_ago),
+        scope: Some("range".to_string()),
+    };
+    assert!(
+        AgentHost::reaches_ring(&paused_overlap, now, 30, Some(ten_min_ago), None),
+        "A1: range overlapping oldest ring packet while paused must reach ring"
+    );
+    assert!(
+        AgentHost::reaches_ring(&paused_overlap, now, 30, None, Some(ten_min_ago)),
+        "A1: range overlapping oldest sample while paused must reach ring"
+    );
+    let older_than_held = PurgeNotice {
+        reason: "purge".to_string(),
+        ids: Vec::new(),
+        from: Some(now - ChronoDuration::hours(2)),
+        to: Some(now - ChronoDuration::hours(1)),
+        newest: Some(now - ChronoDuration::hours(1)),
+        scope: Some("range".to_string()),
+    };
+    assert!(
+        !AgentHost::reaches_ring(
+            &older_than_held,
+            now,
+            30,
+            Some(ten_min_ago),
+            Some(ten_min_ago)
+        ),
+        "A1: range strictly older than held packets and samples must not clear ring"
+    );
 }
 
 // sweep 4R S3
@@ -1095,4 +1132,71 @@ fn c4_stop_auto_updater_returns_within_two_seconds_when_thread_stalls() {
 
     agent.shutdown();
     core.shutdown();
+}
+
+#[test]
+fn b1_second_instance_action_shows_launcher_only_without_args() {
+    use br_agent::{SecondInstanceAction, second_instance_action};
+
+    assert_eq!(
+        SecondInstanceAction::ShowLauncher,
+        second_instance_action(&[])
+    );
+    for args in [
+        vec!["--unregister".to_string()],
+        vec!["--no-autostart".to_string()],
+        vec!["--console".to_string()],
+        vec!["--exit-after".to_string(), "5".to_string()],
+        vec!["--allow-default-home".to_string()],
+    ] {
+        assert_eq!(
+            SecondInstanceAction::ExitSilent,
+            second_instance_action(&args),
+            "args={args:?}"
+        );
+    }
+}
+
+#[test]
+fn d1_try_lock_recover_handles_poison_and_preserves_would_block() {
+    use std::sync::{Barrier, Mutex};
+    use br_agent::util::try_lock_recover;
+
+    let m = Arc::new(Mutex::new(41i32));
+
+    // WouldBlock stays None while another thread holds the lock.
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let m1 = m.clone();
+    let e1 = entered.clone();
+    let r1 = release.clone();
+    let holder = std::thread::spawn(move || {
+        let _g = m1.lock().unwrap();
+        e1.wait();
+        r1.wait();
+    });
+    entered.wait();
+    assert!(try_lock_recover(&m, "test_lock").is_none());
+    release.wait();
+    holder.join().unwrap();
+
+    // Panic while holding poisons the lock; try_lock_recover acquires, clears poison, and carries on.
+    let m2 = m.clone();
+    let _ = std::thread::spawn(move || {
+        let mut g = m2.lock().unwrap();
+        *g = 42;
+        panic!("simulated panic while holding lock");
+    })
+    .join();
+    assert!(m.is_poisoned());
+
+    {
+        let g = try_lock_recover(&m, "test_lock").expect("poisoned lock must be recovered");
+        assert_eq!(*g, 42);
+    }
+    assert!(!m.is_poisoned());
+    assert_eq!(
+        *m.try_lock().expect("lock should be clean after recovery"),
+        42
+    );
 }

@@ -446,3 +446,58 @@ fn is_server_role_detects_agent_exe() {
     assert!(is_server_role(&dir));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn invalid_utf8_line_does_not_end_mcp_session_f3() {
+    struct NeverStale;
+    impl StaleState for NeverStale {
+        fn is_stale_now(&self) -> bool {
+            false
+        }
+        fn marked_stale(&self) -> bool {
+            false
+        }
+        fn relayed(&self) -> bool {
+            true
+        }
+    }
+
+    let mut server = McpServer::new(|_| PipeAnswer::ok(r#"{"items":[]}"#));
+    let mut raw_input = Vec::new();
+    // Raw 0xE9 byte inside a JSON-RPC request line (Latin-1 'é', invalid UTF-8).
+    raw_input.extend_from_slice(
+        br#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_history","arguments":{"q":"caf"#,
+    );
+    raw_input.push(0xE9);
+    raw_input.extend_from_slice(b"\"}}}\n");
+    // Malformed JSON line with raw 0xE9 byte -> should get parse error (-32700), not close session.
+    raw_input.extend_from_slice(b"{not-json-");
+    raw_input.push(0xE9);
+    raw_input.extend_from_slice(b"\n");
+    // Valid ping after the invalid UTF-8 lines must still be answered.
+    raw_input.extend_from_slice(br#"{"jsonrpc":"2.0","id":3,"method":"ping"}"#);
+    raw_input.push(b'\n');
+
+    let mut out = Vec::new();
+    let code = McpHost::run(
+        BufReader::new(Cursor::new(raw_input)),
+        &mut out,
+        &mut server,
+        &NeverStale,
+        HostOptions::default(),
+    );
+    assert_eq!(code, 0);
+    let text = String::from_utf8(out).expect("UTF-8 output");
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 3, "expected 3 replies, got: {lines:?}");
+
+    let r0: Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(r0["id"].as_i64(), Some(2));
+
+    let r1: Value = serde_json::from_str(lines[1]).unwrap();
+    assert_eq!(r1["error"]["code"].as_i64(), Some(-32700));
+
+    let r2: Value = serde_json::from_str(lines[2]).unwrap();
+    assert_eq!(r2["id"].as_i64(), Some(3));
+    assert_eq!(r2["result"], serde_json::json!({}));
+}

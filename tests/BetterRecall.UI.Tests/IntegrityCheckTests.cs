@@ -49,7 +49,7 @@ public sealed class IntegrityCheckTests : IDisposable
             entries.Add((rel, content.Length, hash));
         }
 
-        entries.Sort((a, b) => string.Compare(a.Path, b.Path, StringComparison.OrdinalIgnoreCase));
+        entries.Sort((a, b) => AsciiIgnoreCaseComparer.Instance.Compare(a.Path, b.Path));
 
         using var ms = new MemoryStream();
         using (var w = new Utf8JsonWriter(ms))
@@ -132,6 +132,26 @@ public sealed class IntegrityCheckTests : IDisposable
         Assert.Equal(IntegrityOutcome.Ok, IntegrityCheck.CheckDir(dir, pubPem).Outcome);
 
         File.WriteAllText(Path.Combine(dir, IntegrityCheck.InstallMarkerName), "0.3.0-dev\nabc\n3\n");
+        Assert.Equal(IntegrityOutcome.Ok, IntegrityCheck.CheckDir(dir, pubPem).Outcome);
+    }
+
+    [Fact]
+    public void CheckDir_AcceptsRustOrder_ForPunctuationBetweenLetters()
+    {
+        // F2: Rust sorts by ASCII-lowercase, so "a_b.dll" ('_' 0x5F) comes before "ab.dll" ('b' 0x62);
+        // OrdinalIgnoreCase upper-cases ('B' 0x42) and would call this manifest unsorted.
+        Assert.True(AsciiIgnoreCaseComparer.Instance.Compare("a_b.dll", "ab.dll") < 0);
+        Assert.True(string.Compare("a_b.dll", "ab.dll", StringComparison.OrdinalIgnoreCase) > 0);
+        Assert.Equal(0, AsciiIgnoreCaseComparer.Instance.Compare(@"Worker\A.DLL", @"worker\a.dll"));
+
+        var dir = Path.Combine(_tempRoot, "punct");
+        Directory.CreateDirectory(dir);
+        var (pubPem, _, _) = CreateSignedLayout(dir, "0.3.0-dev", [
+            ("ab.dll", Encoding.UTF8.GetBytes("ab")),
+            ("a_b.dll", Encoding.UTF8.GetBytes("a_b")),
+            ("a[1].dll", Encoding.UTF8.GetBytes("bracket")),
+        ]);
+
         Assert.Equal(IntegrityOutcome.Ok, IntegrityCheck.CheckDir(dir, pubPem).Outcome);
     }
 

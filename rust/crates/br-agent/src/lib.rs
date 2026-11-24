@@ -36,9 +36,26 @@ use windows::core::PCWSTR;
 
 use crate::host::{
     AgentHost, AgentOptions, DevSelfTest, Diagnostics, KeyframeBudgetRun, StartupRegistration,
+    UiLauncher,
 };
 use crate::native::to_wide_z;
 use crate::util::AgentLog;
+
+/// B1: action taken when a second agent instance sees the single-instance mutex already held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecondInstanceAction {
+    ShowLauncher,
+    ExitSilent,
+}
+
+/// B1: only a bare launch (Start menu shortcut, no CLI arguments) opens the search launcher.
+pub fn second_instance_action(args: &[String]) -> SecondInstanceAction {
+    if args.is_empty() {
+        SecondInstanceAction::ShowLauncher
+    } else {
+        SecondInstanceAction::ExitSilent
+    }
+}
 
 struct OwnedMutex(HANDLE);
 
@@ -156,6 +173,10 @@ pub fn run_with_args(args: &[String]) -> i32 {
     if already {
         unsafe {
             let _ = CloseHandle(handle);
+        }
+        // B1: a bare second launch (e.g. Start menu shortcut) shows the launcher instead of exiting silently.
+        if second_instance_action(args) == SecondInstanceAction::ShowLauncher {
+            let _ = UiLauncher::show_launcher(&install_dir, &home);
         }
         return 0; // single instance per data folder
     }

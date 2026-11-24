@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use br_contracts::{BinaryFrame, FrameError, WorkerResponse};
 
+use crate::ZeroOnDrop;
 use crate::hosting::Log;
 use crate::protocol::errors::WorkerErrors;
 use crate::protocol::handler::{RequestHandler, WorkerReply};
@@ -22,8 +23,9 @@ pub enum LoopExit {
 }
 
 /// Outcome of waiting for the next frame with an idle timeout.
+/// E2: payload is wrapped in `ZeroOnDrop` so raw screen frames and PCM audio are zeroized on drop.
 pub enum FrameRead {
-    Frame(Vec<u8>, Vec<u8>),
+    Frame(Vec<u8>, ZeroOnDrop<Vec<u8>>),
     TimedOut,
     Eof,
 }

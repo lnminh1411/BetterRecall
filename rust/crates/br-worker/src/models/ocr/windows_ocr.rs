@@ -80,12 +80,14 @@ impl WindowsOcr {
             let s = max as f64 / img.width.max(img.height) as f64;
             let dw = 1.max((img.width as f64 * s) as i32);
             let dh = 1.max((img.height as f64 * s) as i32);
-            let small = ImagePipeline::resize(img, dw, dh, "bilinear");
+            // E2: zeroize downscaled copy on drop.
+            let small = crate::ZeroOnDrop::new(ImagePipeline::resize(img, dw, dh, "bilinear"));
             return Ok(scale_lines(self.read(&small)?, 1.0 / s));
         }
 
         let n = (img.width * img.height) as usize;
-        let mut bgra = vec![0u8; n * 4];
+        // E2: zeroize BGRA pixel copy on drop (replaces plain fill(0) which the compiler may elide).
+        let mut bgra = crate::ZeroOnDrop::new(vec![0u8; n * 4]);
         for i in 0..n {
             bgra[i * 4] = img.rgb[i * 3 + 2];
             bgra[i * 4 + 1] = img.rgb[i * 3 + 1];
@@ -97,8 +99,7 @@ impl WindowsOcr {
         let ibuf_res = writer
             .WriteBytes(&bgra)
             .and_then(|()| writer.DetachBuffer());
-        // Zero raw frame bytes before WinRT OCR returns.
-        bgra.fill(0);
+        drop(bgra);
         let ibuf = ibuf_res.map_err(|e| WorkerError::Internal(format!("DataWriter buffer: {e}")))?;
         let bmp = SoftwareBitmap::CreateCopyWithAlphaFromBuffer(
             &ibuf,

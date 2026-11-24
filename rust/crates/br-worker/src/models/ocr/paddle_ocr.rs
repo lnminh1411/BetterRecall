@@ -224,17 +224,19 @@ impl PaddleOcr {
     }
 
     pub fn read(&mut self, img: &RgbImage) -> Result<Vec<OcrLine>, WorkerError> {
+        // E2: zeroize detector resize, input tensor, text-line crops and retry crops on drop.
         let (dw, dh) = OcrMath::det_size(img.width, img.height, self.det.max_side);
-        let sized = ImagePipeline::resize(img, dw, dh, "bilinear");
-        let tensor = OcrMath::bgr_tensor(&sized, &self.det.mean, &self.det.std)?;
-        let outp = self
-            .det_graph
-            .session(&[1, 3, dh as i64, dw as i64])?
-            .run(&[HostTensor::f(
-                self.det.input.clone(),
-                tensor,
-                &[1, 3, dh as i64, dw as i64],
-            )])?;
+        let sized = crate::ZeroOnDrop::new(ImagePipeline::resize(img, dw, dh, "bilinear"));
+        let mut tensor =
+            crate::ZeroOnDrop::new(OcrMath::bgr_tensor(&sized, &self.det.mean, &self.det.std)?);
+        let det_shape = [1, 3, dh as i64, dw as i64];
+        let det_session = self.det_graph.session(&det_shape)?;
+        let det_inputs = crate::ZeroOnDrop::new([HostTensor::f(
+            self.det.input.clone(),
+            std::mem::take(&mut *tensor),
+            &det_shape,
+        )]);
+        let outp = det_session.run(&*det_inputs)?;
         let prob = outp
             .values()
             .next()
@@ -268,10 +270,10 @@ impl PaddleOcr {
             return Ok(Vec::new());
         }
 
-        let crops: Vec<RgbImage> = boxes
-            .iter()
-            .map(|b| ImagePipeline::crop(img, b.x, b.y, b.w, b.h))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut crops = crate::ZeroOnDrop::new(Vec::with_capacity(boxes.len()));
+        for b in &boxes {
+            crops.push(ImagePipeline::crop(img, b.x, b.y, b.w, b.h)?);
+        }
         let mut best = recognise_with(
             &mut self.recs[0],
             &self.device,
@@ -300,8 +302,12 @@ impl PaddleOcr {
                 })
                 .collect();
             if !retry.is_empty() {
-                let retry_crops: Vec<RgbImage> =
-                    retry.iter().map(|&i| crops[i].clone()).collect();
+                let retry_crops = crate::ZeroOnDrop::new(
+                    retry
+                        .iter()
+                        .map(|&i| crops[i].clone())
+                        .collect::<Vec<RgbImage>>(),
+                );
                 let retry_boxes: Vec<TextBox> = retry.iter().map(|&i| boxes[i]).collect();
                 for r in &mut self.recs[1..] {
                     let alt = recognise_with(
@@ -362,20 +368,24 @@ fn recognise_with(
         } else {
             chunk.len()
         };
-        let resized: Vec<RgbImage> = chunk
-            .iter()
-            .enumerate()
-            .map(|(k, &i)| ImagePipeline::resize(&crops[i], widths[k].min(width), height, "bilinear"))
-            .collect();
-        let tensor = OcrMath::rec_tensor(&resized, height, width, n)?;
-        let outp = r
-            .graph
-            .session(&[n as i64, 3, height as i64, width as i64])?
-            .run(&[HostTensor::f(
-                r.spec.input.clone(),
-                tensor,
-                &[n as i64, 3, height as i64, width as i64],
-            )])?;
+        // E2: zeroize resized crops and recogniser input tensor on drop.
+        let resized = crate::ZeroOnDrop::new(
+            chunk
+                .iter()
+                .enumerate()
+                .map(|(k, &i)| ImagePipeline::resize(&crops[i], widths[k].min(width), height, "bilinear"))
+                .collect::<Vec<RgbImage>>(),
+        );
+        let mut tensor =
+            crate::ZeroOnDrop::new(OcrMath::rec_tensor(&resized, height, width, n)?);
+        let rec_shape = [n as i64, 3, height as i64, width as i64];
+        let rec_session = r.graph.session(&rec_shape)?;
+        let rec_inputs = crate::ZeroOnDrop::new([HostTensor::f(
+            r.spec.input.clone(),
+            std::mem::take(&mut *tensor),
+            &rec_shape,
+        )]);
+        let outp = rec_session.run(&*rec_inputs)?;
         let t = outp
             .values()
             .next()

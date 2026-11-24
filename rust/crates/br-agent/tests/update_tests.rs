@@ -1184,3 +1184,446 @@ fn check_cancellation_leaves_state_as_before() {
     assert_eq!(after_status.state, initial_status.state);
     assert_eq!(after_status.last_check, initial_status.last_check);
 }
+
+// C3: Watcher records failure and marks last-install.json handled; restart does not double-count.
+#[test]
+fn c3_watcher_marks_last_install_handled_and_restart_does_not_double_count() {
+    use std::os::windows::io::IntoRawHandle;
+    use std::sync::atomic::AtomicBool;
+    use windows::Win32::Foundation::HANDLE;
+
+    let dir = TempDir::new("upd-c3-dedupe");
+    let home = dir.path().join("home");
+    let host = make_test_host(&dir);
+    let (priv_pem, pub_pem) = gen_keypair();
+    let server = LocalHttpServer::start(HashMap::new());
+    let rel = make_signed_release(
+        "0.3.0",
+        "BetterRecall-Setup-0.3.0.exe",
+        vec![0x42u8; 1024],
+        &priv_pem,
+    );
+    let gh_rel = populate_release(&server, "v0.3.0", &rel, ReleaseOpts::signed());
+    server.set_file("/releases", serde_json::to_vec(&vec![gh_rel]).unwrap());
+
+    let report_utc = "2026-11-24T15:12:12.148Z";
+    let updates_dir = DataPaths::updates_dir(&home);
+    let updates_dir_c = updates_dir.clone();
+    let hook: br_agent::host::InstallerLauncher = Arc::new(move |_path, _args| {
+        let report = serde_json::json!({
+            "version": "0.3.0",
+            "exitCode": 5,
+            "utc": report_utc,
+        });
+        fs::write(
+            updates_dir_c.join("last-install.json"),
+            serde_json::to_vec(&report).unwrap(),
+        )?;
+        let child = std::process::Command::new("cmd")
+            .args(["/c", "exit", "5"])
+            .spawn()?;
+        let raw = child.into_raw_handle();
+        Ok(Some(HANDLE(raw as *mut _)))
+    });
+
+    host.set_update_test_config(Some(UpdateTestConfig {
+        feed_url: server.feed_url(),
+        allowed_prefix: server.release_prefix(),
+        public_key_pem: Some(pub_pem),
+        current_version: Some("0.2.0".to_string()),
+        fast_retries: true,
+        launcher: Some(hook),
+    }));
+
+    host.update_check(&CancelToken::none()).expect("check ok");
+    host.update_download(&mut |_| {}, &CancelToken::none())
+        .expect("download ok");
+    host.update_apply().expect("apply ok");
+
+    assert!(
+        until(
+            || host.update_status().unwrap().state == "error",
+            Duration::from_secs(5),
+        ),
+        "watcher never transitioned state to error"
+    );
+
+    let state_path = updates_dir.join("state.json");
+    let state_json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+    assert_eq!(state_json["failedVersion"], "0.3.0");
+    assert_eq!(state_json["failedCount"], 1);
+    assert_eq!(state_json["lastInstallHandledUtc"], report_utc);
+
+    // New manager on the same home must not count the same report again.
+    let mgr2 = br_agent::host::UpdateManager::new_with_version(
+        home,
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+        "0.2.0",
+    );
+    let st2 = mgr2.status(false);
+    assert_eq!(st2.state, "ready");
+    assert!(st2.error.is_none());
+
+    let state_json2: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+    assert_eq!(state_json2["failedCount"], 1);
+
+    host.shutdown();
+}
+
+// C3: A report whose utc is older than lastInstallHandledUtc (backward clock step) but different
+// is still handled once.
+#[test]
+fn c3_older_but_different_utc_report_is_handled_once() {
+    use std::sync::atomic::AtomicBool;
+
+    let dir = TempDir::new("upd-c3-clock-back");
+    let home = dir.path().join("home");
+    let updates_dir = DataPaths::updates_dir(&home);
+    fs::create_dir_all(&updates_dir).unwrap();
+
+    let state_path = updates_dir.join("state.json");
+    let state_data = serde_json::json!({
+        "downloaded": "0.4.0",
+        "failedVersion": "0.4.0",
+        "failedCount": 1,
+        "failedAt": "2026-11-24T15:00:00Z",
+        "lastInstallHandledUtc": "2026-11-24T15:00:00Z"
+    });
+    fs::write(&state_path, serde_json::to_vec(&state_data).unwrap()).unwrap();
+
+    let older_utc = "2026-11-24T14:00:00Z";
+    let report = serde_json::json!({
+        "version": "0.4.0",
+        "exitCode": 6,
+        "utc": older_utc
+    });
+    fs::write(
+        updates_dir.join("last-install.json"),
+        serde_json::to_vec(&report).unwrap(),
+    )
+    .unwrap();
+
+    let mgr1 = br_agent::host::UpdateManager::new_with_version(
+        home.clone(),
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+        "0.3.0",
+    );
+    let st1 = mgr1.status(false);
+    assert_eq!(st1.state, "error");
+    assert!(
+        st1.error
+            .as_deref()
+            .unwrap_or("")
+            .contains("setup exit code 6")
+    );
+
+    let state_json1: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+    assert_eq!(state_json1["failedCount"], 2);
+    assert_eq!(state_json1["lastInstallHandledUtc"], older_utc);
+
+    // Second start with the same older utc must not handle it again.
+    let mgr2 = br_agent::host::UpdateManager::new_with_version(
+        home,
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+        "0.3.0",
+    );
+    assert_eq!(mgr2.status(false).state, "ready");
+    let state_json2: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+    assert_eq!(state_json2["failedCount"], 2);
+}
+
+// C4: At start, a non-zero report whose version equals the running version does not set error
+// or record a failure, and marks the report handled.
+#[test]
+fn c4_post_swap_failure_matching_running_version_is_ignored_and_handled() {
+    use std::sync::atomic::AtomicBool;
+
+    let dir = TempDir::new("upd-c4-post-swap");
+    let home = dir.path().join("home");
+    let updates_dir = DataPaths::updates_dir(&home);
+    fs::create_dir_all(&updates_dir).unwrap();
+
+    let state_path = updates_dir.join("state.json");
+    let state_data = serde_json::json!({
+        "downloaded": "0.3.0-dev"
+    });
+    fs::write(&state_path, serde_json::to_vec(&state_data).unwrap()).unwrap();
+
+    let report_utc = "2026-11-24T15:20:00Z";
+    let report = serde_json::json!({
+        "version": "0.3.0-dev",
+        "exitCode": 1,
+        "utc": report_utc
+    });
+    fs::write(
+        updates_dir.join("last-install.json"),
+        serde_json::to_vec(&report).unwrap(),
+    )
+    .unwrap();
+
+    let mgr = br_agent::host::UpdateManager::new_with_version(
+        home,
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+        "0.3.0-dev",
+    );
+    let st = mgr.status(false);
+    assert_ne!(st.state, "error");
+    assert!(st.error.is_none());
+
+    let state_json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+    assert!(state_json["failedVersion"].is_null());
+    assert_eq!(state_json["failedCount"], 0);
+    assert_eq!(state_json["lastInstallHandledUtc"], report_utc);
+}
+
+// C4: cleanup_on_start clears install-failure error state once running version >= failed version.
+#[test]
+fn c4_cleanup_on_start_clears_install_error_when_running_reaches_failed_version() {
+    use std::sync::atomic::AtomicBool;
+
+    let dir = TempDir::new("upd-c4-cleanup");
+    let home = dir.path().join("home");
+    let updates_dir = DataPaths::updates_dir(&home);
+    fs::create_dir_all(&updates_dir).unwrap();
+
+    let state_path = updates_dir.join("state.json");
+    fs::write(
+        &state_path,
+        serde_json::to_vec(&serde_json::json!({ "downloaded": "0.3.0" })).unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        updates_dir.join("last-install.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "version": "0.3.0",
+            "exitCode": 5,
+            "utc": "2026-11-24T15:25:00Z"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let mgr = br_agent::host::UpdateManager::new_with_version(
+        home,
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+        "0.2.0",
+    );
+    assert_eq!(mgr.status(false).state, "error");
+    assert!(mgr.status(false).error.is_some());
+
+    mgr.set_test_config(Some(UpdateTestConfig {
+        feed_url: "http://127.0.0.1:1/releases".to_string(),
+        allowed_prefix: "http://127.0.0.1:1/releases/".to_string(),
+        public_key_pem: None,
+        current_version: Some("0.3.0".to_string()),
+        fast_retries: true,
+        launcher: None,
+    }));
+    mgr.cleanup_on_start();
+
+    let st = mgr.status(false);
+    assert_eq!(st.state, "idle");
+    assert!(st.error.is_none());
+
+    let state_json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+    assert!(state_json["failedVersion"].is_null());
+    assert_eq!(state_json["failedCount"], 0);
+}
+
+// D3: check_at keeps an install-failure error while latest is still the failed version,
+// and clears it when a newer release appears.
+#[test]
+fn d3_check_at_keeps_install_error_until_newer_version_appears() {
+    let dir = TempDir::new("upd-d3-error");
+    let home = dir.path().join("home");
+    let updates_dir = DataPaths::updates_dir(&home);
+    fs::create_dir_all(&updates_dir).unwrap();
+
+    fs::write(
+        updates_dir.join("state.json"),
+        serde_json::to_vec(&serde_json::json!({ "downloaded": "0.3.0" })).unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        updates_dir.join("last-install.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "version": "0.3.0",
+            "exitCode": 5,
+            "utc": "2026-11-24T15:30:00Z"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let host = make_test_host(&dir);
+    let (priv_pem, pub_pem) = gen_keypair();
+    let server = LocalHttpServer::start(HashMap::new());
+    let rel_030 = make_signed_release(
+        "0.3.0",
+        "BetterRecall-Setup-0.3.0.exe",
+        vec![0x42u8; 1024],
+        &priv_pem,
+    );
+    let entry_030 = populate_release(&server, "v0.3.0", &rel_030, ReleaseOpts::signed());
+    server.set_file("/releases", serde_json::to_vec(&vec![entry_030]).unwrap());
+
+    host.set_update_test_config(Some(UpdateTestConfig {
+        feed_url: server.feed_url(),
+        allowed_prefix: server.release_prefix(),
+        public_key_pem: Some(pub_pem),
+        current_version: Some("0.2.0".to_string()),
+        fast_retries: true,
+        launcher: None,
+    }));
+
+    let before = host.update_status().unwrap();
+    assert_eq!(before.state, "error");
+    assert!(
+        before
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("setup exit code 5")
+    );
+
+    // Check against the same failed version -> install error is kept.
+    let after_same = host.update_check(&CancelToken::none()).unwrap();
+    assert_eq!(after_same.state, "error");
+    assert_eq!(after_same.error, before.error);
+
+    // Newer version appears -> install error is cleared.
+    let rel_040 = make_signed_release(
+        "0.4.0",
+        "BetterRecall-Setup-0.4.0.exe",
+        vec![0x43u8; 1024],
+        &priv_pem,
+    );
+    let entry_040 = populate_release(&server, "v0.4.0", &rel_040, ReleaseOpts::signed());
+    server.set_file("/releases", serde_json::to_vec(&vec![entry_040]).unwrap());
+
+    let after_newer = host.update_check(&CancelToken::none()).unwrap();
+    assert_eq!(after_newer.state, "idle");
+    assert!(after_newer.error.is_none());
+
+    host.shutdown();
+}
+
+// D3: check_at does not overwrite `applying` state.
+#[test]
+fn d3_check_at_keeps_applying_state() {
+    let dir = TempDir::new("upd-d3-applying");
+    let host = make_test_host(&dir);
+    let (priv_pem, pub_pem) = gen_keypair();
+    let server = LocalHttpServer::start(HashMap::new());
+    let rel = make_signed_release(
+        "0.3.0",
+        "BetterRecall-Setup-0.3.0.exe",
+        vec![0x42u8; 1024],
+        &priv_pem,
+    );
+    let gh_rel = populate_release(&server, "v0.3.0", &rel, ReleaseOpts::signed());
+    server.set_file("/releases", serde_json::to_vec(&vec![gh_rel]).unwrap());
+
+    let (_launches, hook) = make_launcher();
+    host.set_update_test_config(Some(UpdateTestConfig {
+        feed_url: server.feed_url(),
+        allowed_prefix: server.release_prefix(),
+        public_key_pem: Some(pub_pem),
+        current_version: Some("0.2.0".to_string()),
+        fast_retries: true,
+        launcher: Some(hook),
+    }));
+
+    host.update_check(&CancelToken::none()).unwrap();
+    host.update_download(&mut |_| {}, &CancelToken::none())
+        .unwrap();
+    let applied = host.update_apply().unwrap();
+    assert_eq!(applied.state, "applying");
+
+    let after_check = host.update_check(&CancelToken::none()).unwrap();
+    assert_eq!(after_check.state, "applying");
+    assert!(after_check.error.is_none());
+
+    host.shutdown();
+}
+
+// D3: Two concurrent apply calls with the launcher seam produce exactly one launch.
+#[test]
+fn d3_concurrent_apply_calls_launch_once() {
+    use std::sync::Barrier;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let dir = TempDir::new("upd-d3-concurrent");
+    let host = make_test_host(&dir);
+    let (priv_pem, pub_pem) = gen_keypair();
+    let server = LocalHttpServer::start(HashMap::new());
+    let rel = make_signed_release(
+        "0.3.0",
+        "BetterRecall-Setup-0.3.0.exe",
+        vec![0x42u8; 1024],
+        &priv_pem,
+    );
+    let gh_rel = populate_release(&server, "v0.3.0", &rel, ReleaseOpts::signed());
+    server.set_file("/releases", serde_json::to_vec(&vec![gh_rel]).unwrap());
+
+    let launch_count = Arc::new(AtomicUsize::new(0));
+    let launch_count_c = Arc::clone(&launch_count);
+    let hook: br_agent::host::InstallerLauncher = Arc::new(move |_path, _args| {
+        launch_count_c.fetch_add(1, Ordering::SeqCst);
+        thread::sleep(Duration::from_millis(150));
+        Ok(None)
+    });
+
+    host.set_update_test_config(Some(UpdateTestConfig {
+        feed_url: server.feed_url(),
+        allowed_prefix: server.release_prefix(),
+        public_key_pem: Some(pub_pem),
+        current_version: Some("0.2.0".to_string()),
+        fast_retries: true,
+        launcher: Some(hook),
+    }));
+
+    host.update_check(&CancelToken::none()).unwrap();
+    host.update_download(&mut |_| {}, &CancelToken::none())
+        .unwrap();
+
+    let barrier = Arc::new(Barrier::new(2));
+    let (r1, r2) = thread::scope(|s| {
+        let b1 = Arc::clone(&barrier);
+        let h1 = host.clone();
+        let t1 = s.spawn(move || {
+            b1.wait();
+            h1.update_apply()
+        });
+        let b2 = Arc::clone(&barrier);
+        let h2 = host.clone();
+        let t2 = s.spawn(move || {
+            b2.wait();
+            h2.update_apply()
+        });
+        (t1.join().unwrap(), t2.join().unwrap())
+    });
+
+    let ok_count = usize::from(r1.is_ok()) + usize::from(r2.is_ok());
+    let err_count = usize::from(matches!(r1, Err(AgentError::InvalidOperation(_))))
+        + usize::from(matches!(r2, Err(AgentError::InvalidOperation(_))));
+    assert_eq!(ok_count, 1, "expected exactly one Ok, got r1={r1:?} r2={r2:?}");
+    assert_eq!(
+        err_count, 1,
+        "expected exactly one InvalidOperation, got r1={r1:?} r2={r2:?}"
+    );
+    assert_eq!(launch_count.load(Ordering::SeqCst), 1);
+
+    host.shutdown();
+}

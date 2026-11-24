@@ -811,3 +811,100 @@ fn stalled_provider_stream_idle_timeout_emits_error_event_e1() {
     );
     assert!(!retry_reply.line.contains("\"code\":\"busy\""), "chat was still busy: {}", retry_reply.line);
 }
+
+#[test]
+fn silent_before_first_byte_does_not_hit_idle_timeout_e3() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let server = std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut buf = [0u8; 1024];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            use std::io::Write;
+            let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.flush();
+            // Silent longer than the 250 ms test idle timeout before sending the first body byte.
+            std::thread::sleep(Duration::from_millis(700));
+            let body = format!("{}data: [DONE]\n\n", openai_delta_sse("Hi"));
+            let _ = stream.write_all(body.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+
+    let home = TempHome::new(Some("dpapi"));
+    let settings = Arc::new(SettingsStore::load(home.path()));
+    assert!(
+        settings
+            .try_update(&json!({
+                "ai": {
+                    "enabled": true,
+                    "provider": "openai-compatible",
+                    "endpoint": format!("http://{addr}/v1"),
+                    "model": "gpt-fake"
+                }
+            }))
+            .is_none()
+    );
+    let s_for_v = settings.clone();
+    let vault = Arc::new(KeyVault::new(
+        home.path(),
+        move || s_for_v.current(),
+        None,
+        false,
+    ));
+    let _ = vault.try_load_silent();
+    let ai_key = Arc::new(ApiKeyStore::new(home.path()));
+    ai_key.set("sk-fake-key", &settings.current().ai).unwrap();
+
+    let mut t = TempStore::new();
+    let store = Arc::new(t.store.take().unwrap());
+    let st_clone = store.clone();
+    let p = CommandProcessor::new(CommandDeps {
+        settings: settings.clone(),
+        store: Arc::new(move || Some(st_clone.clone())),
+        keys: vault,
+        agent: Arc::new(FakeAgent::new()),
+        embedder: Arc::new(FakeEmbedder::new()),
+        thumbnailer: Arc::new(FakeThumbs::new()),
+        purge_all: Arc::new(|_| 0),
+        purge_all_undeleted: None,
+        blobs: None,
+        home: Some(home.path().to_path_buf()),
+        password: None,
+        ai_key: Some(ai_key),
+        describer: None,
+        redactor: None,
+        chat_http: None,
+        chat_providers: None,
+    });
+
+    // Short idle timeout (250 ms); server is silent 700 ms before the first body byte.
+    p.set_chat_idle_timeout_for_test(Duration::from_millis(250));
+
+    let mut ui = ClientSession::new(PipeKind::Ui, 1, "ui.exe");
+    let reply = p.handle(
+        &mut ui,
+        r#"chat send {"text":"Thinking model test"}"#,
+        &CancelToken::none(),
+    );
+    let producer = reply.stream.expect("streaming reply");
+    let mut lines = Vec::new();
+    producer(&mut |l| lines.push(l));
+    let _ = server.join();
+
+    assert!(
+        !lines
+            .iter()
+            .any(|l| l.contains("The AI provider stopped responding.")),
+        "unexpected idle timeout before first byte: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("\"text\":\"Hi\"")),
+        "expected streamed text 'Hi', got: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("\"type\":\"done\"")),
+        "expected done event, got: {lines:?}"
+    );
+}

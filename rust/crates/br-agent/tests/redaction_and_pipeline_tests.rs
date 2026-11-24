@@ -70,6 +70,7 @@ fn white_grab(
         secrets,
         bounds: Rect::new(0, 0, w * 2, h * 2),
         mask_only: false,
+        bench: false,
     };
     let mut g = KeyframeGrab::alloc(monitor, req, w, h, 0);
     g.pixels_mut().fill(255);
@@ -105,6 +106,7 @@ fn non_forced_grab(
         secrets: None,
         bounds: Rect::new(0, 0, w, h),
         mask_only: false,
+        bench: false,
     };
     let mut g = KeyframeGrab::alloc(monitor, req, w, h, 0);
     g.pixels_mut().fill(255);
@@ -2578,4 +2580,73 @@ fn a2_seam_unrelated_purge_through_agent_keeps_describe_redactor_bytes_intact() 
     sup.dispose();
     agent.shutdown();
     core.shutdown();
+}
+
+// D4: bench keyframe requests must never reach the real keyframe store path and pending bench
+// requests must be cleared when the benchmark ends.
+#[test]
+fn d4_bench_keyframe_request_is_refused_by_pipeline_and_cleared_on_output() {
+    use br_agent::capture::{GpuDeviceCache, OutputCapture, OutputInfo};
+
+    let store = FakeStore::new();
+    let s_ref = store.clone();
+    let pipe = KeyframePipeline::new(
+        Arc::new(move || Some(s_ref.clone() as Arc<dyn KeyframeStore>)),
+        Arc::new(Settings::default),
+        Arc::new(|_| {}),
+        None,
+        None,
+        None,
+    );
+
+    let mut grab = white_grab(0, 64, 64, None, 1, None);
+    grab.request.bench = true;
+    pipe.post(grab);
+    // Post a normal grab to ensure the pipeline thread has cycled past any earlier work.
+    pipe.post(white_grab(0, 64, 64, None, 2, None));
+    assert!(
+        until(
+            || store.inner.lock().unwrap().screens.len() == 1,
+            Duration::from_secs(10)
+        ),
+        "only the non-bench grab should be stored"
+    );
+    assert_eq!(1, store.inner.lock().unwrap().screens.len());
+    pipe.stop();
+
+    // OutputCapture::clear_pending_bench_keyframe clears bench requests but keeps normal ones.
+    let out = OutputCapture::new(
+        OutputInfo {
+            index: 0,
+            device_name: "D0".to_string(),
+            adapter_luid: 0,
+            vendor_id: 0,
+            adapter_name: "test".to_string(),
+            left: 0,
+            top: 0,
+            width: 1920,
+            height: 1080,
+            monitor: 0,
+            refresh_hz: 60,
+        },
+        Arc::new(GpuDeviceCache::new()),
+        Arc::new(|_| {}),
+    );
+    let mut bench_req = white_grab(0, 64, 64, None, 3, None).request.clone();
+    bench_req.bench = true;
+    out.set_pending_keyframe(Some(bench_req));
+    assert!(out.pending_keyframe().is_some());
+    out.clear_pending_bench_keyframe();
+    assert!(
+        out.pending_keyframe().is_none(),
+        "bench pending request must be cleared"
+    );
+
+    let normal_req = white_grab(0, 64, 64, None, 4, None).request.clone();
+    out.set_pending_keyframe(Some(normal_req));
+    out.clear_pending_bench_keyframe();
+    assert!(
+        out.pending_keyframe().is_some(),
+        "normal pending request must not be cleared by bench cleanup"
+    );
 }

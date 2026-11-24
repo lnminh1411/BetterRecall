@@ -32,9 +32,11 @@ pub use extract::{
 };
 pub use install::{
     InstallOpts, ModelMode, ModelsResult, ModifyOpts, Outcome, SETUP_EXE, SETUP_LOCK, SETUP_MUTEX,
-    UninstallOpts, compare_versions, install, install_with_progress, install_with_space,
-    modify_with_progress, report_last_install, resolve_models_dir, schedule_old_folder_cleanup,
-    uninstall, uninstall_with_progress, validate_delete_data_home,
+    TestHookEvent, TestHookGuard, UninstallOpts, compare_versions, detect_existing_model_mode,
+    effective_model_mode, install, install_with_progress, install_with_space,
+    installed_full_only_components, modify_with_progress, present_full_only_components,
+    report_last_install, resolve_models_dir, schedule_old_folder_cleanup, uninstall,
+    uninstall_with_progress, validate_delete_data_home,
 };
 pub use log::log_line;
 pub use payload::{

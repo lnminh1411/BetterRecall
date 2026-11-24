@@ -658,7 +658,7 @@ impl PipeHarness {
             panic!("unexpected eof or timeout waiting for reply");
         };
         let resp: WorkerResponse = serde_json::from_slice(&h).expect("deserialize WorkerResponse");
-        (resp, p)
+        (resp, p.to_vec())
     }
 
     pub fn close_server(&mut self) {

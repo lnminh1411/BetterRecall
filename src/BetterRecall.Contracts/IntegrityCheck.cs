@@ -138,7 +138,7 @@ public static partial class IntegrityCheck
         }
 
         // Pass 3: walk the install root and reject any unlisted file.
-        var listed = new HashSet<string>(entries.Count, StringComparer.OrdinalIgnoreCase);
+        var listed = new HashSet<string>(entries.Count, AsciiIgnoreCaseComparer.Instance);
         foreach (var entry in entries) listed.Add(entry.Path);
 
         return CheckUnlisted(root, "", listed);
@@ -304,7 +304,7 @@ public static partial class IntegrityCheck
 
                 if (prevPath is not null)
                 {
-                    int cmp = string.Compare(prevPath, path, StringComparison.OrdinalIgnoreCase);
+                    int cmp = AsciiIgnoreCaseComparer.Instance.Compare(prevPath, path);
                     if (cmp == 0)
                         return (null, IntegrityResult.Fail(IntegrityErrorKind.BadManifest, IntegrityJsonName, $"bad manifest: duplicate path '{path}'"));
                     if (cmp > 0)
@@ -332,7 +332,7 @@ public static partial class IntegrityCheck
             return IntegrityResult.Fail(IntegrityErrorKind.Io, label, $"I/O error on {label}: {ex.Message}");
         }
 
-        children.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase));
+        children.Sort((a, b) => AsciiIgnoreCaseComparer.Instance.Compare(a.Name, b.Name));
 
         foreach (var child in children)
         {
@@ -433,4 +433,48 @@ public static partial class IntegrityCheck
 
     [LibraryImport("user32.dll", StringMarshalling = StringMarshalling.Utf16)]
     private static partial int MessageBoxW(nint hwnd, string text, string caption, uint type);
+}
+
+/// <summary>
+/// Path order and equality shared with the Rust checker (<c>br-integrity</c> <c>cmp_ordinal_ignore_case</c>):
+/// Unicode scalar values compared after ASCII-only lower-casing. <see cref="StringComparison.OrdinalIgnoreCase"/>
+/// upper-cases instead, so it orders <c>[ \ ] ^ _</c> and the backtick differently from letters (sweep 7 F2).
+/// </summary>
+public sealed class AsciiIgnoreCaseComparer : IComparer<string>, IEqualityComparer<string>
+{
+    public static readonly AsciiIgnoreCaseComparer Instance = new();
+
+    private AsciiIgnoreCaseComparer()
+    {
+    }
+
+    public int Compare(string? x, string? y)
+    {
+        if (ReferenceEquals(x, y)) return 0;
+        if (x is null) return -1;
+        if (y is null) return 1;
+        var ex = x.EnumerateRunes();
+        var ey = y.EnumerateRunes();
+        while (true)
+        {
+            bool hx = ex.MoveNext();
+            bool hy = ey.MoveNext();
+            if (!hx) return hy ? -1 : 0;
+            if (!hy) return 1;
+            int cx = Lower(ex.Current.Value);
+            int cy = Lower(ey.Current.Value);
+            if (cx != cy) return cx < cy ? -1 : 1;
+        }
+    }
+
+    public bool Equals(string? x, string? y) => Compare(x, y) == 0;
+
+    public int GetHashCode(string obj)
+    {
+        var h = new HashCode();
+        foreach (var r in obj.EnumerateRunes()) h.Add(Lower(r.Value));
+        return h.ToHashCode();
+    }
+
+    private static int Lower(int c) => c is >= 'A' and <= 'Z' ? c + 32 : c;
 }

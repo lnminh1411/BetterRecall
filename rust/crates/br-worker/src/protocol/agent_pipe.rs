@@ -408,7 +408,8 @@ impl PipeIo for AgentPipe {
                 self.read_exact_wait(&mut header)?;
                 self.read_exact_wait(&mut len_buf)?;
                 let payload_len = BinaryFrame::validate_payload_len(u32::from_le_bytes(len_buf))?;
-                let mut payload = vec![0u8; payload_len];
+                // E2: wrap payload before reading so partial reads on error paths are also zeroized.
+                let mut payload = crate::ZeroOnDrop::new(vec![0u8; payload_len]);
                 self.read_exact_wait(&mut payload)?;
                 Ok(FrameRead::Frame(header, payload))
             }

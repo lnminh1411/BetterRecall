@@ -119,6 +119,17 @@ impl HostTensor {
     }
 }
 
+impl zeroize::Zeroize for HostTensor {
+    fn zeroize(&mut self) {
+        if let Some(ref mut f) = self.floats {
+            f.zeroize();
+        }
+        if let Some(ref mut l) = self.longs {
+            l.zeroize();
+        }
+    }
+}
+
 pub trait IInferenceSession: Send + Sync {
     fn device(&self) -> &DeviceInfo;
     fn inputs(&self) -> &[TensorSpec];

@@ -1495,7 +1495,8 @@ impl AgentHost {
     }
 
     fn storage_check(&self) {
-        let Ok(_gate) = self.storage_gate.try_lock() else {
+        // D1: recover if a previous panic poisoned the gate instead of skipping every future tick.
+        let Some(_gate) = crate::util::try_lock_recover(&self.storage_gate, "storage_gate") else {
             return;
         };
         let Some(sg) = self
@@ -1650,7 +1651,15 @@ impl AgentHost {
     }
 
     /// Pure decision: whether a purge reaches the live replay buffers (`AgentHost.ReachesRing`).
-    pub fn reaches_ring(n: &PurgeNotice, now: DateTime<Utc>, replay_seconds: i32) -> bool {
+    /// A1: considers what replay actually holds (oldest packet in the ring and oldest replay
+    /// sample) in addition to the wall-clock window, so range purges while paused still clear.
+    pub fn reaches_ring(
+        n: &PurgeNotice,
+        now: DateTime<Utc>,
+        replay_seconds: i32,
+        oldest_ring: Option<DateTime<Utc>>,
+        oldest_sample: Option<DateTime<Utc>>,
+    ) -> bool {
         if !n.by_user() {
             return false;
         }
@@ -1658,7 +1667,13 @@ impl AgentHost {
             return true;
         }
         let span = replay_seconds.clamp(15, 600) as i64 + Self::RING_SLACK_SECS;
-        let edge = now - ChronoDuration::seconds(span);
+        let mut edge = now - ChronoDuration::seconds(span);
+        if let Some(t) = oldest_ring {
+            edge = edge.min(t);
+        }
+        if let Some(t) = oldest_sample {
+            edge = edge.min(t);
+        }
         n.to.is_some_and(|to| to >= edge) || n.newest.is_some_and(|newest| newest >= edge)
     }
 
@@ -1678,7 +1693,11 @@ impl AgentHost {
             let _ = sc.remove(&ids);
         }
         *self.stats_cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        if Self::reaches_ring(n, Utc::now(), self.settings().replay.seconds) {
+        let now = Utc::now();
+        let replay_seconds = self.settings().replay.seconds;
+        let oldest_ring = self.capture().and_then(|c| c.oldest_replay_time(now));
+        let oldest_sample = self.sampler.oldest_time();
+        if Self::reaches_ring(n, now, replay_seconds, oldest_ring, oldest_sample) {
             if let Some(c) = self.capture() {
                 c.forget_recent();
             }
@@ -1689,6 +1708,9 @@ impl AgentHost {
                 "purge ({}) reached the replay window: replay ring, samples and pending audio cleared",
                 n.reason
             ));
+        } else {
+            // A1: drop replay samples that aged out of the ring window while paused.
+            self.sampler.trim(replay_seconds);
         }
     }
 
@@ -2075,7 +2097,18 @@ impl AgentHost {
         self.models_downloading.load(Ordering::Acquire)
             || self.update_downloading.load(Ordering::Acquire)
             || self.core.is_export_running()
-            || self.bench_lock.try_lock().is_err()
+            // D1: recover poisoned bench_lock so a panicked benchmark does not block auto-updates forever.
+            || crate::util::try_lock_recover(&self.bench_lock, "bench_lock").is_none()
+    }
+
+    #[doc(hidden)]
+    pub fn set_capture_for_test(&self, cap: Arc<CaptureService>) {
+        *self.capture.lock().unwrap_or_else(|e| e.into_inner()) = Some(cap);
+    }
+
+    #[doc(hidden)]
+    pub fn sampler_for_test(&self) -> Arc<ReplaySampler> {
+        self.sampler.clone()
     }
 
     fn sync_auto_updater(self: &Arc<Self>) {
@@ -2488,7 +2521,9 @@ impl AgentControl for AgentHost {
         let capture = self.capture().ok_or_else(|| {
             AgentError::InvalidOperation("Capture is not running.".to_string())
         })?;
-        let Ok(_bench_guard) = self.bench_lock.try_lock() else {
+        // D1: recover poisoned bench_lock instead of rejecting every future benchmark as busy.
+        let Some(_bench_guard) = crate::util::try_lock_recover(&self.bench_lock, "bench_lock")
+        else {
             return Err(AgentError::InvalidOperation(
                 "A benchmark is already running.".to_string(),
             ));

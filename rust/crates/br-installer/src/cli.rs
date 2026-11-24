@@ -19,12 +19,11 @@ use windows::core::PCWSTR;
 use crate::ctx::Ctx;
 use crate::error::{InstallError, exit_code};
 use crate::install::{
-    InstallOpts, ModelMode, ModelsResult, ModifyOpts, Outcome, UninstallOpts, install,
-    modify_with_progress, uninstall,
+    InstallOpts, ModelMode, ModelsResult, ModifyOpts, Outcome, UninstallOpts,
+    detect_existing_model_mode, effective_model_mode, install, modify_with_progress, uninstall,
 };
 use crate::log::log_line;
 use crate::progress::NoProgress;
-use crate::registry::read_model_mode;
 use crate::running::{normalized_dir_prefix, path_is_under_prefix};
 use crate::strings;
 use crate::wizard;
@@ -344,7 +343,7 @@ pub fn dispatch_silent_for_exe(
         Action::Install => {
             let (model_mode, skip_model_download) = match args.model_mode {
                 Some(explicit) => (explicit, false),
-                None => match read_model_mode(ctx) {
+                None => match detect_existing_model_mode(ctx, dev_catalog.as_ref()) {
                     Some(existing) => (existing, true),
                     None => (ModelMode::Later, false),
                 },
@@ -369,10 +368,10 @@ pub fn dispatch_silent_for_exe(
             },
         )?,
         Action::Modify => {
+            // C2: without /models=, use the effective mode from disk + registry so nothing is removed.
             let model_mode = args
                 .model_mode
-                .or_else(|| read_model_mode(ctx))
-                .unwrap_or(ModelMode::Later);
+                .unwrap_or_else(|| effective_model_mode(ctx, dev_catalog.as_ref()));
             modify_with_progress(
                 ctx,
                 &ModifyOpts {
