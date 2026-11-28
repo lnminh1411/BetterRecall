@@ -41,9 +41,9 @@ Replay player memory (not in the WinUI baseline, which plays through `MediaPlaye
 
 | Commit | Fix |
 |---|---|
-| `8f884c7` | Compile errors against the real GPUI-CE 0.3.0 and `windows` APIs (64, the code had been written without a compiler); bin renamed to `br-ui`. |
-| `ddd1c44` | Player: the decoder read both streams at once, so audio buffering pushed video about 250 ms ahead and the 3-frame queue evicted every frame before it was due. Streams are now read separately. Frames are pulled on every vsync while playing (the 16 ms timer ran at about 32 Hz on the 15.6 ms system tick). Launcher window titled `BetterRecall`. |
-| `a4c5011` | Initial keyboard focus inside `Root`; WinUI 3 neutral colours. |
+| `52ed549` | Compile errors against the real GPUI-CE 0.3.0 and `windows` APIs (64, the code had been written without a compiler); bin renamed to `br-ui`. |
+| `0a6025e` | Player: the decoder read both streams at once, so audio buffering pushed video about 250 ms ahead and the 3-frame queue evicted every frame before it was due. Streams are now read separately. Frames are pulled on every vsync while playing (the 16 ms timer ran at about 32 Hz on the 15.6 ms system tick). Launcher window titled `BetterRecall`. |
+| `49e2c50` | Initial keyboard focus inside `Root`; WinUI 3 neutral colours. |
 | build | Release builds need `-C target-feature=+crt-static` (today `build_installer.py` builds only the installer, `br-sign` and the MCP relay that way; the agent, worker and CLI use the copied VC++ runtime). When br-ui is packaged, add it to the static build or copy the runtime into `ui\`. Without either, the exe fails on a clean Windows with 0xC0000135 (`vcruntime140.dll`). |
 
 ## Gaps for the port

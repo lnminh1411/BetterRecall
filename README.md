@@ -6,11 +6,10 @@
   <a href="https://github.com/lnminh1411/BetterRecall/releases">Download</a> ·
   <a href="docs/user-guide.md">User guide</a> ·
   <a href="#mcp-use-your-history-from-ai-tools">MCP</a> ·
-  <a href="https://github.com/lnminh1411/BetterRecall/issues">Report a problem</a> ·
-  BetterRecall contributors
+  <a href="https://github.com/lnminh1411/BetterRecall/issues">Report a problem</a>
 </p>
 
-BetterRecall is a local alternative to Windows Recall, made by BetterRecall contributors. It keeps an encrypted history of your screen, and of speech it hears, and lets you search it in your own words: "the invoice from Acme", "that flight to Tokyo", "what was said in standup". It also keeps an instant replay buffer, so you can save the last minutes of your screen as a video.
+BetterRecall is a local alternative to Windows Recall. It keeps an encrypted history of your screen, and of speech it hears, and lets you search it in your own words: "the invoice from Acme", "that flight to Tokyo", "what was said in standup". It also keeps an instant replay buffer, so you can save the last minutes of your screen as a video.
 
 <p align="center">
   <img src="docs/images/search-dark.png" width="49%" alt="Search window" />
@@ -112,7 +111,6 @@ Build the solution with `dotnet build BetterRecall.slnx`, or build a full layout
 
 ## Links
 
-- Source: [GitHub](https://github.com/lnminh1411/BetterRecall)
 - Source: [github.com/lnminh1411/BetterRecall](https://github.com/lnminh1411/BetterRecall)
 - Models: [huggingface.co/lnminh1411/BetterRecall-models](https://huggingface.co/lnminh1411/BetterRecall-models)
 - Docs: [`docs/`](docs/documentations_summary.md)

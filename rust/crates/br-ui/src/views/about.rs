@@ -189,14 +189,6 @@ impl Render for AboutView {
                         cx,
                     ))
                     .child(link_row(
-                        "about-website",
-                        "BetterRecall on GitHub",
-                        "Product updates and documentation",
-                        "Open",
-                        links::WEBSITE.to_string(),
-                        cx,
-                    ))
-                    .child(link_row(
                         "about-models",
                         "Models on Hugging Face",
                         "Local OCR, speech, and embedding weights",

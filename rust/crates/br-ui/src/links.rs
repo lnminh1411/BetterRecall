@@ -4,7 +4,6 @@
 use std::fmt::Write as _;
 
 pub const GITHUB: &str = "https://github.com/lnminh1411/BetterRecall";
-pub const WEBSITE: &str = "https://github.com/lnminh1411/BetterRecall";
 pub const MODELS: &str = "https://huggingface.co/lnminh1411/BetterRecall-models";
 pub const LICENCES: &str = "https://github.com/lnminh1411/BetterRecall/blob/main/LICENSING.md";
 pub const ISSUES_NEW: &str = "https://github.com/lnminh1411/BetterRecall/issues/new";
