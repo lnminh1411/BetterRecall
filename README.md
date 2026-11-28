@@ -43,7 +43,7 @@ Updates are checked against GitHub Releases and verified with the release signat
 
 ## First steps
 
-- `Ctrl+Alt+Space` opens search, `Ctrl+Alt+P` pauses capture, `Ctrl+Alt+R` saves the replay, `Ctrl+Alt+Shift+X` is the panic key: it stops capture, locks the history and deletes the last few minutes. All can be changed on the Shortcuts page.
+- `Ctrl+Alt+Space` opens search, `Ctrl+Alt+P` pauses capture, `Ctrl+Alt+R` saves the replay, `Ctrl+Alt+Shift+X` is the panic key: it stops capture, clears what is held in memory, locks the history and, if you set panic purge minutes, deletes that many recent minutes. All can be changed on the Shortcuts page.
 - The Home page shows what is running and turns features on and off.
 - Timeline browses your day; Replays holds saved clips.
 - The [user guide](docs/user-guide.md) walks through the rest.
