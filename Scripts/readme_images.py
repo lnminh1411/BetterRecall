@@ -2,7 +2,7 @@
 
 Shots: search (dark), home and timeline (dark), settings and home (light), plus the banner built from the search shot.
 Windows are captured with PrintWindow and cropped to the DWM frame (the window rect includes the invisible resize
-border, which showed up as black bars). Needs the UI built in Debug or Release and Python with pillow + uiautomation.
+border, which showed up as black bars). Needs the UI built in Debug (or Release with -p:BrDemoAssets=true) and Python with pillow + uiautomation.
 
 usage: python Scripts/readme_images.py [--exe PATH] [--out docs/images] [--only search,home,timeline,light,banner]
 """

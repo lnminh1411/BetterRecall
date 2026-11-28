@@ -7,7 +7,7 @@ use std::cmp::Ordering;
 use std::env;
 use std::ffi::OsString;
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -33,7 +33,9 @@ use crate::extract::{
     available_disk_space, extract_to_staging_with_progress_and_extra, read_install_marker,
 };
 use crate::log::log_line;
-use crate::payload::{read_setup_manifest, read_trailer, stub_len};
+use crate::payload::{
+    read_setup_manifest, read_trailer, stub_len, unsigned_stub_header_fixups,
+};
 use crate::progress::{NoProgress, Progress, Step};
 use crate::registry;
 use crate::running::{agent_running, close_running, normalized_dir_prefix, path_is_under_prefix};
@@ -1248,7 +1250,16 @@ fn compare_prerelease(a: &str, b: &str) -> Ordering {
     }
 }
 
-fn copy_stub_exe(exe: &Path, len: u64, install_dir: &Path) -> Result<(), InstallError> {
+/// Copies the first `len` bytes of the running installer (the PE stub) into
+/// `<install_dir>\BetterRecall-Setup.exe`.
+///
+/// When the running installer is Authenticode-signed, zeroes the PE optional header
+/// `CheckSum` and `IMAGE_DIRECTORY_ENTRY_SECURITY` data directory entry in the copy so it is
+/// byte-identical to the unsigned stub hashed in `integrity.json`. The installed
+/// `BetterRecall-Setup.exe` (invoked for Modify and Uninstall) is therefore unsigned; signing
+/// the stub before packing and restoring its original header values is tracked as a 1.0
+/// follow-up in `docs/release-signing.md`.
+pub fn copy_stub_exe(exe: &Path, len: u64, install_dir: &Path) -> Result<(), InstallError> {
     let tmp_path = install_dir.join(format!("{SETUP_EXE}.tmp"));
     let final_path = install_dir.join(SETUP_EXE);
 
@@ -1264,6 +1275,29 @@ fn copy_stub_exe(exe: &Path, len: u64, install_dir: &Path) -> Result<(), Install
             return Err(InstallError::Payload(format!(
                 "short read copying installer stub ({copied} of {len} bytes)"
             )));
+        }
+        if let Some(fixups) = unsigned_stub_header_fixups(&mut src)? {
+            if fixups
+                .checksum_offset
+                .checked_add(4)
+                .is_none_or(|end| end > len)
+                || fixups
+                    .security_dir_offset
+                    .checked_add(8)
+                    .is_none_or(|end| end > len)
+            {
+                return Err(InstallError::Payload(
+                    "PE header fixup offsets exceed stub length".to_string(),
+                ));
+            }
+            dst.seek(SeekFrom::Start(fixups.checksum_offset))
+                .map_err(|e| InstallError::io("seeking to stub PE CheckSum", e))?;
+            dst.write_all(&[0u8; 4])
+                .map_err(|e| InstallError::io("zeroing stub PE CheckSum", e))?;
+            dst.seek(SeekFrom::Start(fixups.security_dir_offset))
+                .map_err(|e| InstallError::io("seeking to stub PE security directory", e))?;
+            dst.write_all(&[0u8; 8])
+                .map_err(|e| InstallError::io("zeroing stub PE security directory", e))?;
         }
         dst.flush()
             .map_err(|e| InstallError::io("flushing installer stub", e))?;

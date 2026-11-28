@@ -420,7 +420,14 @@ fn mcp_clients_add_remove_snippet_and_unknown_id() {
     // mcp clients
     let mut out = Vec::new();
     let mut err = Vec::new();
-    let code = run_mcp_cli(&s(&["clients"]), &client_env, &relay, &mut out, &mut err);
+    let code = run_mcp_cli(
+        &s(&["clients"]),
+        &client_env,
+        &relay,
+        None,
+        &mut out,
+        &mut err,
+    );
     assert_eq!(code, 0);
     assert!(err.is_empty());
     let listing = String::from_utf8(out).unwrap();
@@ -430,7 +437,14 @@ fn mcp_clients_add_remove_snippet_and_unknown_id() {
     // mcp add cursor
     let mut out = Vec::new();
     let mut err = Vec::new();
-    let code = run_mcp_cli(&s(&["add", "cursor"]), &client_env, &relay, &mut out, &mut err);
+    let code = run_mcp_cli(
+        &s(&["add", "cursor"]),
+        &client_env,
+        &relay,
+        None,
+        &mut out,
+        &mut err,
+    );
     assert_eq!(code, 0);
     assert!(err.is_empty());
     assert!(String::from_utf8(out).unwrap().contains("cursor: added"));
@@ -443,6 +457,7 @@ fn mcp_clients_add_remove_snippet_and_unknown_id() {
         &s(&["snippet", "claude-code"]),
         &client_env,
         &relay,
+        None,
         &mut out,
         &mut err,
     );
@@ -459,6 +474,7 @@ fn mcp_clients_add_remove_snippet_and_unknown_id() {
         &s(&["remove", "cursor"]),
         &client_env,
         &relay,
+        None,
         &mut out,
         &mut err,
     );
@@ -473,6 +489,7 @@ fn mcp_clients_add_remove_snippet_and_unknown_id() {
         &s(&["add", "does-not-exist"]),
         &client_env,
         &relay,
+        None,
         &mut out,
         &mut err,
     );
@@ -483,7 +500,7 @@ fn mcp_clients_add_remove_snippet_and_unknown_id() {
     // bad mcp subcommand -> exit 1 with USAGE on stderr
     let mut out = Vec::new();
     let mut err = Vec::new();
-    let code = run_mcp_cli(&s(&[]), &client_env, &relay, &mut out, &mut err);
+    let code = run_mcp_cli(&s(&[]), &client_env, &relay, None, &mut out, &mut err);
     assert_eq!(code, 1);
     assert!(out.is_empty());
     assert_eq!(String::from_utf8(err).unwrap().trim(), USAGE);

@@ -39,6 +39,7 @@ pub const PROGRESS_HEADER_INSTALL: &str = "Installing BetterRecall";
 pub const PROGRESS_HEADER_MODIFY: &str = "Modifying BetterRecall";
 pub const PROGRESS_HEADER_UNINSTALL: &str = "Uninstalling BetterRecall";
 pub const PROGRESS_CANCELLING: &str = "Cancelling...";
+pub const PROGRESS_STOPPING_DOWNLOAD: &str = "Stopping the download...";
 
 pub const FINISH_HEADER_INSTALL: &str = "Installation Complete";
 pub const FINISH_HEADER_MODIFY: &str = "Modify Complete";
@@ -49,6 +50,9 @@ pub const FINISH_HEADER_ERROR: &str = "Setup Failed";
 pub const BTN_INSTALL: &str = "Install";
 pub const BTN_UNINSTALL: &str = "Uninstall";
 pub const BTN_NEXT: &str = "Next";
+pub const BTN_CANCEL: &str = "Cancel";
+/// Cancel button label while models download: it stops only the download.
+pub const BTN_STOP_DOWNLOAD: &str = "Stop download";
 
 pub const FINISH_MODIFIED: &str = "Model selection has been saved.";
 pub const FINISH_UNINSTALLED: &str = "BetterRecall has been uninstalled.";
@@ -58,7 +62,7 @@ pub const FINISH_CANCELLED: &str = "Setup was cancelled. Nothing was changed.";
 pub const FINISH_NOTHING_TO_DO: &str = "Nothing to modify.";
 
 pub const FINISH_MODELS_OFFLINE: &str = "Models were not downloaded because there is no internet connection. Add them later from the Models page or by running Setup again.";
-pub const FINISH_MODELS_CANCELLED: &str = "Model download was cancelled. BetterRecall is installed, and your model selection was saved. Run Setup again (Apps > Installed apps > Modify) or open the Models page in the app to finish downloading.";
+pub const FINISH_MODELS_CANCELLED: &str = "The model download was stopped. BetterRecall is installed and your model choice was saved. Partly downloaded models are kept: the Models page in the app resumes them, or run Setup again (Apps > Installed apps > Modify).";
 
 pub const HINT_IN_USE: &str = "Quit BetterRecall from the tray and run Setup again.";
 pub const HINT_ALREADY_RUNNING: &str =

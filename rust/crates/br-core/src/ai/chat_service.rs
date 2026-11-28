@@ -1089,6 +1089,7 @@ impl ChatService {
         let req = SearchRequest {
             q: cut_chars(&q, 512),
             limit: Some(limit),
+            offset: None,
             from: parse_chat_date(&arg_str(args, "from"), false),
             to: parse_chat_date(&arg_str(args, "to"), true),
             app: if app.is_empty() { None } else { Some(app) },

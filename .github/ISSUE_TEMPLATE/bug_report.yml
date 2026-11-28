@@ -1,0 +1,68 @@
+name: Bug report
+description: Something in BetterRecall does not work as it should.
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Please do not paste anything private: no screenshots of your history, no captured text, no keys.
+        Security problems go to a private advisory instead: https://github.com/lnminh1411/BetterRecall/security/advisories/new
+  - type: input
+    id: version
+    attributes:
+      label: BetterRecall version
+      description: Settings > Update shows it.
+      placeholder: 0.4.0-dev
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version and build
+      description: Run `winver`.
+      placeholder: Windows 11 24H2, build 26100.2314
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Install, update or uninstall
+        - Models download
+        - Capture (screen or audio)
+        - Search or timeline
+        - Replay
+        - Privacy, lock or delete
+        - MCP or CLI
+        - Settings or other UI
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open search with Ctrl+Alt+Space
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected and what happened
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics and logs (optional)
+      description: |
+        Logs are in %LOCALAPPDATA%\BetterRecall\logs; they contain no captured text but may contain app names. Read them before pasting and remove anything you do not want public.
+      render: text
+  - type: input
+    id: hardware
+    attributes:
+      label: CPU, GPU and NPU (optional)
+      placeholder: Intel Core Ultra 7 155H, Arc iGPU, NPU
