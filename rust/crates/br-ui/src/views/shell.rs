@@ -9,7 +9,7 @@ use gpui::{
     prelude::FluentBuilder as _, px,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::{ActiveTheme as _, TitleBar, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, Disableable as _, TitleBar, h_flex, v_flex};
 
 use crate::args::{LaunchArgs, Page};
 use crate::links;
@@ -116,7 +116,9 @@ impl MainShell {
     }
 
     fn go(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
-        self.show_first_run = false;
+        if self.show_first_run {
+            return;
+        }
         self.active_page = page;
         if page == Page::Player {
             let h = self.player_view.read(cx).focus_handle();
@@ -269,6 +271,7 @@ impl Render for MainShell {
                 .label(label)
                 .w_full()
                 .justify_start()
+                .disabled(show_first_run)
                 .when(is_active, |b| b.primary())
                 .when(!is_active, |b| b.ghost())
                 .on_click(cx.listener(move |this, _, window, cx| {

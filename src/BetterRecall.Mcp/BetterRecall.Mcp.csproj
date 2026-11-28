@@ -36,7 +36,7 @@
       <Output TaskParameter="ExitCode" PropertyName="_CargoCheckExit" />
     </Exec>
     <Error Condition="'$(_CargoCheckExit)' != '0'"
-           Text="cargo was not found on PATH. Install the Rust toolchain with rustup (https://rustup.rs) using the stable x86_64-pc-windows-msvc target." />
+           Text="cargo was not found on PATH. Install the Rust toolchain with rustup (https://rustup.rs) (the version pinned in rust\rust-toolchain.toml, x86_64-pc-windows-msvc target)." />
     <Exec WorkingDirectory="$(_RustDir)"
           Command="cargo build -p br-mcp $(_CargoProfileFlag) -j 4 --target-dir &quot;$(_CargoTargetDir)&quot;" />
     <Copy SourceFiles="$(_RustMcpExe)"

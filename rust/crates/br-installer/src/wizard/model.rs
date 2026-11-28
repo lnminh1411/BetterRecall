@@ -174,6 +174,7 @@ impl WizardModel {
         if matches!(
             step,
             Step::Swapping
+                | Step::SavingSettings
                 | Step::Registering
                 | Step::RemovingFiles
                 | Step::RemovingModels

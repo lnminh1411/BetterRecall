@@ -100,7 +100,7 @@ Estimates for 0.4.0-dev, from the code's defaults and the dev PC's measurements.
 Requirements on Windows x64:
 
 - .NET 10 SDK (`10.0.403` or later) and Visual Studio Build Tools with the C++ workload and a Windows 10/11 SDK (for Native AOT linking, the MSVC linker and `rc.exe`).
-- Rust toolchain via [`rustup`](https://rustup.rs): `stable` toolchain with the `x86_64-pc-windows-msvc` target. The agent (`BetterRecall.Agent.exe`, `rust\crates\br-agent` with `br-core`) and the inference worker (`BetterRecall.Worker.exe`, `rust\crates\br-worker`) are written in Rust and built automatically through `src\BetterRecall.Agent\BetterRecall.Agent.csproj` and `src\BetterRecall.Worker\BetterRecall.Worker.csproj`.
+- Rust toolchain via [`rustup`](https://rustup.rs): the toolchain pinned in `rust\rust-toolchain.toml` (1.100.1, `x86_64-pc-windows-msvc`); rustup installs it on the first build, or run `rustup toolchain install 1.100.1` beforehand on a machine that builds offline. The agent (`BetterRecall.Agent.exe`, `rust\crates\br-agent` with `br-core`) and the inference worker (`BetterRecall.Worker.exe`, `rust\crates\br-worker`) are written in Rust and built automatically through `src\BetterRecall.Agent\BetterRecall.Agent.csproj` and `src\BetterRecall.Worker\BetterRecall.Worker.csproj`.
 
 Build the solution with `dotnet build BetterRecall.slnx`, or build a full layout into `artifacts\dev\` with `python Scripts/dev_build.py` (add `--test` to run `cargo test` and the `.NET` test suites first). See `Scripts/models/prepare_all.py` or download the exported models from [Hugging Face](https://huggingface.co/lnminh1411/BetterRecall-models).
 

@@ -106,6 +106,10 @@ fn main() {
                 .open_window(launcher_opts, move |window, cx| {
                     // Same title as the WinUI launcher (App_Name); also what tools find the window by.
                     window.set_window_title("BetterRecall");
+                    window.on_window_should_close(cx, |window, _cx| {
+                        window.set_visible(false);
+                        false
+                    });
                     if let Some(hwnd) = platform::hwnd_from_window(window) {
                         platform::configure_launcher_hwnd(hwnd);
                         if show_launcher {
