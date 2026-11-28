@@ -180,7 +180,13 @@ fn format_time(ms: i64) -> String {
 }
 
 impl Render for PlayerView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // While playing, pull frames on every vsync: the 16 ms timer alone rounds up to the
+        // 15.6 ms system tick (about 32 Hz), which halved 60 fps clips.
+        if self.snapshot.playing {
+            self.tick(window, cx);
+            window.request_animation_frame();
+        }
         let theme = cx.theme();
         let ws_mb = if self.show_stats {
             platform::working_set_mb()

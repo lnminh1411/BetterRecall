@@ -16,7 +16,7 @@ use windows::Win32::Media::MediaFoundation::{
     IMFMediaType, IMFSourceReader, MF_MT_AUDIO_AVG_BYTES_PER_SECOND, MF_MT_AUDIO_BITS_PER_SAMPLE,
     MF_MT_AUDIO_BLOCK_ALIGNMENT, MF_MT_AUDIO_NUM_CHANNELS, MF_MT_AUDIO_SAMPLES_PER_SECOND,
     MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_PD_DURATION,
-    MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, MF_SOURCE_READER_ANY_STREAM,
+    MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS,
     MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_AUDIO_STREAM,
     MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READERF_ENDOFSTREAM,
     MF_SOURCE_READER_MEDIASOURCE, MF_VERSION, MFAudioFormat_Float, MFAudioFormat_PCM,
@@ -395,6 +395,7 @@ fn decode_loop(
 
     let mut playing = true;
     let mut eof = false;
+    let mut audio_eof = false;
     let mut mono_base_ms = start_offset_ms.clamp(0, duration_ms.max(start_offset_ms));
     let mut mono_start = Instant::now();
 
@@ -417,9 +418,6 @@ fn decode_loop(
     let mut fps_window_start = Instant::now();
     let mut fps_decoded_count: u32 = 0;
 
-    // Identify concrete stream indices once we see samples.
-    let mut video_stream_idx: Option<u32> = None;
-    let mut audio_stream_idx: Option<u32> = None;
 
     while !shared.stop.load(Ordering::Relaxed) {
         while let Ok(cmd) = cmd_rx.try_recv() {
@@ -433,6 +431,7 @@ fn decode_loop(
                         }
                         if eof {
                             eof = false;
+                            audio_eof = false;
                             mono_base_ms = 0;
                             let _ = seek_reader(&reader, 0);
                             if let Some(ref a) = audio {
@@ -461,6 +460,7 @@ fn decode_loop(
                     }
                     let _ = seek_reader(&reader, clamped);
                     eof = false;
+                    audio_eof = false;
                     mono_base_ms = clamped;
                     mono_start = Instant::now();
                     if let Some(ref a) = audio {
@@ -495,30 +495,38 @@ fn decode_loop(
             continue;
         }
 
-        // Throttle decoding when video queue is full (<= 3 frames) and audio buffer is healthy.
+        // Read each stream on its own: audio while its buffer is below ~250 ms, video only while the
+        // 3-frame queue has room. Reading MF_SOURCE_READER_ANY_STREAM let audio demand push video far
+        // ahead of the clock, so queued frames were evicted before they were ever due.
         let vq_len = shared.frames.lock().map(|q| q.len()).unwrap_or(0);
-        let audio_full = audio
-            .as_ref()
-            .map(|a| {
+        let audio_low = !audio_eof
+            && audio.as_ref().is_some_and(|a| {
                 let target = a.format.sample_rate as usize * a.format.block_align as usize / 4;
-                a.queued_bytes() >= target
-            })
-            .unwrap_or(true);
-        if vq_len >= MAX_QUEUED_FRAMES && audio_full {
+                a.queued_bytes() < target
+            });
+        let is_video = if audio_low {
+            false
+        } else if vq_len < MAX_QUEUED_FRAMES {
+            true
+        } else {
             thread::sleep(Duration::from_millis(4));
             continue;
-        }
+        };
+        let stream = if is_video {
+            MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32
+        } else {
+            MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32
+        };
 
-        let mut actual_idx = 0u32;
         let mut flags = 0u32;
         let mut ts_100ns = 0i64;
         let mut sample = None;
 
         let read_res = unsafe {
             reader.ReadSample(
-                MF_SOURCE_READER_ANY_STREAM.0 as u32,
+                stream,
                 0,
-                Some(&mut actual_idx),
+                None,
                 Some(&mut flags),
                 Some(&mut ts_100ns),
                 Some(&mut sample),
@@ -529,6 +537,10 @@ fn decode_loop(
         }
 
         if (flags & (MF_SOURCE_READERF_ENDOFSTREAM.0 as u32)) != 0 {
+            if !is_video {
+                audio_eof = true;
+                continue;
+            }
             eof = true;
             playing = false;
             if let Some(ref a) = audio {
@@ -538,26 +550,6 @@ fn decode_loop(
         }
 
         let Some(sample) = sample else {
-            continue;
-        };
-
-        // Classify stream index on first sample from each stream.
-        let is_video = if Some(actual_idx) == video_stream_idx {
-            true
-        } else if Some(actual_idx) == audio_stream_idx {
-            false
-        } else if let Ok(mt) = unsafe { reader.GetCurrentMediaType(actual_idx) } {
-            let major = unsafe { mt.GetGUID(&MF_MT_MAJOR_TYPE) }.ok();
-            if major == Some(MFMediaType_Video) {
-                video_stream_idx = Some(actual_idx);
-                true
-            } else if major == Some(MFMediaType_Audio) {
-                audio_stream_idx = Some(actual_idx);
-                false
-            } else {
-                continue;
-            }
-        } else {
             continue;
         };
 
