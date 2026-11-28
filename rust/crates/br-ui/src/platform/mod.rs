@@ -8,6 +8,8 @@ pub mod clipboard;
 #[cfg(windows)]
 pub mod events;
 #[cfg(windows)]
+pub mod shell;
+#[cfg(windows)]
 pub mod video;
 #[cfg(windows)]
 pub mod window;

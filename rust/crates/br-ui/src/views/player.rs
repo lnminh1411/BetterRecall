@@ -16,6 +16,7 @@ use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
 use crate::platform;
 use crate::platform::video::{MediaPlayer, PlayerSnapshot};
+use crate::views::tip::render_tip;
 
 pub struct PlayerView {
     player: Option<MediaPlayer>,
@@ -26,6 +27,7 @@ pub struct PlayerView {
     dragging_slider: bool,
     show_stats: bool,
     stats_to_stderr: bool,
+    tip_visible: bool,
     shown_frames_window: u32,
     shown_fps: f32,
     fps_window_start: Instant,
@@ -39,6 +41,7 @@ impl PlayerView {
         video_path: Option<PathBuf>,
         offset_ms: u64,
         stats_to_stderr: bool,
+        show_tip: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -101,6 +104,7 @@ impl PlayerView {
             dragging_slider: false,
             show_stats: stats_to_stderr,
             stats_to_stderr,
+            tip_visible: show_tip,
             shown_frames_window: 0,
             shown_fps: 0.0,
             fps_window_start: Instant::now(),
@@ -206,6 +210,10 @@ impl Render for PlayerView {
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _window, cx| {
                 match ev.keystroke.key.as_str() {
+                    "escape" if this.tip_visible => {
+                        this.tip_visible = false;
+                        cx.notify();
+                    }
                     "space" => this.toggle_play(cx),
                     "f2" => {
                         this.show_stats = !this.show_stats;
@@ -213,6 +221,18 @@ impl Render for PlayerView {
                     }
                     _ => {}
                 }
+            }))
+            .children(self.tip_visible.then(|| {
+                render_tip(
+                    "player-tip-dismiss",
+                    "Replay player",
+                    "Replays play here, from the moment you picked.",
+                    cx.listener(|this, _, _, cx| {
+                        this.tip_visible = false;
+                        cx.notify();
+                    }),
+                    cx,
+                )
             }))
             .child(
                 div()

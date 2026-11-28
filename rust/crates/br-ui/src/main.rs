@@ -4,6 +4,7 @@
 #![windows_subsystem = "windows"]
 
 mod args;
+mod links;
 mod motion;
 mod platform;
 mod theme;
@@ -61,6 +62,7 @@ fn main() {
             }
 
             let args_for_main = args.clone();
+            let assets_dir_for_main = assets_dir.clone();
             let _main_window = cx.open_window(main_opts, move |window, cx| {
                 if show_main
                     && let Some(hwnd) = platform::hwnd_from_window(window)
@@ -71,7 +73,9 @@ fn main() {
                     cx.quit();
                     true
                 });
-                let shell = cx.new(|cx| MainShell::new(&args_for_main, window, cx));
+                let shell = cx.new(|cx| {
+                    MainShell::new(&args_for_main, assets_dir_for_main, window, cx)
+                });
                 cx.new(|cx| Root::new(shell, window, cx))
             });
 

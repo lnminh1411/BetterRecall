@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 async-channel = "2"
 br-contracts = { path = "../br-contracts" }
+br-mcp-clients = { path = "../br-mcp-clients" }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 gpui = { package = "gpui-ce", version = "=0.3.0" }
 gpui_component = { package = "gpui_ce_components", version = "=0.3.0" }
@@ -38,7 +39,10 @@ features = [
     "Win32_System_DataExchange",
     "Win32_System_Memory",
     "Win32_System_ProcessStatus",
+    "Win32_System_Registry",
+    "Win32_System_SystemInformation",
     "Win32_System_Threading",
     "Win32_System_Variant",
+    "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ]
