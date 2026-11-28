@@ -196,13 +196,7 @@ impl ChatProvider for OpenAiChat {
                 Some("stop") => "end",
                 Some("length") => "max_tokens",
                 Some("content_filter") => "refusal",
-                None | Some("") => {
-                    if !sb_text.is_empty() {
-                        "end"
-                    } else {
-                        "other"
-                    }
-                }
+                None | Some("") if !sb_text.is_empty() => "end",
                 _ => "other",
             }
         }

@@ -218,7 +218,7 @@ impl<'a> RequestHandler<'a> {
                 }
                 // E2: zeroize decoded PCM buffer on drop (including early error returns).
                 let mut pcm = crate::ZeroOnDrop::new(Vec::with_capacity(payload.len() / 4));
-                for chunk in payload.chunks_exact(4) {
+                for chunk in payload.as_chunks::<4>().0 {
                     let x = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
                     if !x.is_finite() {
                         return Err(WorkerError::bad_request("pcm not finite"));

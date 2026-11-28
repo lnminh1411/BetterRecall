@@ -403,7 +403,7 @@ impl Jxl {
                     let mut px = pixels
                         .take()
                         .ok_or_else(|| "JPEG XL has no image.".to_string())?;
-                    for chunk in px.chunks_exact_mut(4) {
+                    for chunk in px.as_chunks_mut::<4>().0 {
                         chunk.swap(0, 2);
                     }
                     return Ok((px, width, height));

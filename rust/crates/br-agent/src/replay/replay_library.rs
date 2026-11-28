@@ -320,7 +320,7 @@ impl ReplayLibrary {
         let mut list = Vec::new();
         self.add_dir(&mut list, &self.encrypted_dir(), ".mp4.enc", true);
         self.add_dir(&mut list, &self.plain_dir(), ".mp4", false);
-        list.sort_by(|a, b| b.ts.cmp(&a.ts));
+        list.sort_by_key(|c| std::cmp::Reverse(c.ts));
         list
     }
 

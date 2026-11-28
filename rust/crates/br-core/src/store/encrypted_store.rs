@@ -566,8 +566,8 @@ impl EncryptedStore {
             let app_lc = stmt.get_string(5)?;
             let site = stmt.get_string(6)?;
             words.clear();
-            for chunk in bin.chunks_exact(8) {
-                words.push(u64::from_le_bytes(chunk.try_into().unwrap()));
+            for chunk in bin.as_chunks::<8>().0 {
+                words.push(u64::from_le_bytes(*chunk));
             }
             self.index
                 .upsert_bits(rid, &words, dim, ts, kind, &app_lc, &site);
@@ -3013,8 +3013,8 @@ fn safe_reason(reason: &str) -> String {
 
 fn to_floats(blob: &[u8]) -> Vec<f32> {
     let mut out = Vec::with_capacity(blob.len() / 4);
-    for chunk in blob.chunks_exact(4) {
-        out.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+    for chunk in blob.as_chunks::<4>().0 {
+        out.push(f32::from_le_bytes(*chunk));
     }
     out
 }

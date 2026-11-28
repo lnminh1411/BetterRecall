@@ -117,7 +117,7 @@ impl BpeTokenizer {
                 (k, u16_len, id)
             })
             .collect();
-        added.sort_by(|a, b| b.1.cmp(&a.1));
+        added.sort_by_key(|e| std::cmp::Reverse(e.1));
 
         let merges_arr = model
             .get("merges")

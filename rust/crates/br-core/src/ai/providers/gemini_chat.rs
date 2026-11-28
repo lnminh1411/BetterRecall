@@ -173,13 +173,7 @@ impl ChatProvider for GeminiChat {
                     "SAFETY" | "RECITATION" | "BLOCKLIST" | "PROHIBITED_CONTENT" | "SPII"
                     | "IMAGE_SAFETY",
                 ) => "refusal",
-                None | Some("") => {
-                    if !sb_text.is_empty() {
-                        "end"
-                    } else {
-                        "other"
-                    }
-                }
+                None | Some("") if !sb_text.is_empty() => "end",
                 _ => "other",
             }
         }

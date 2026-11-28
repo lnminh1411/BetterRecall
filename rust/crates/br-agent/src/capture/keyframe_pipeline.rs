@@ -860,7 +860,7 @@ fn apply_thread_eco_qos() {
 }
 
 fn add_f64_atomic(atom: &AtomicU64, delta: f64) {
-    let _ = atom.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |bits| {
+    let _ = atom.try_update(Ordering::Relaxed, Ordering::Relaxed, |bits| {
         Some((f64::from_bits(bits) + delta).to_bits())
     });
 }

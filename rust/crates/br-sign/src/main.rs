@@ -259,7 +259,7 @@ fn cmd_pack(args: &[String]) -> Result<(), String> {
 
     let mut rel_files: Vec<(String, PathBuf, u64)> = Vec::new();
     collect_layout_files(&layout, "", &mut rel_files)?;
-    rel_files.sort_by(|a, b| a.0.to_ascii_lowercase().cmp(&b.0.to_ascii_lowercase()));
+    rel_files.sort_by_key(|a| a.0.to_ascii_lowercase());
 
     let total_bytes: u64 = rel_files
         .iter()

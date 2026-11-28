@@ -245,7 +245,7 @@ impl ChatService {
             st.memory.values().map(summary_of).collect()
         };
         let mut all: Vec<ChatSummary> = saved.into_iter().chain(mem).collect();
-        all.sort_by(|a, b| b.updated.cmp(&a.updated));
+        all.sort_by_key(|s| std::cmp::Reverse(s.updated));
         all.truncate(limit.max(0) as usize);
         all
     }

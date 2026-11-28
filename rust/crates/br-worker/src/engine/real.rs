@@ -1754,7 +1754,7 @@ fn folder_hash(dir: &Path) -> String {
             .collect(),
         Err(_) => return String::new(),
     };
-    entries.sort_by(|a, b| a.0.to_ascii_lowercase().cmp(&b.0.to_ascii_lowercase()));
+    entries.sort_by_key(|a| a.0.to_ascii_lowercase());
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     for (name, len) in entries {
