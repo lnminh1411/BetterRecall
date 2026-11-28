@@ -30,14 +30,13 @@ Screenshots show the real app running on demo data (`--mock`).
 - Everything stays on your PC. Images and text are embedded on your NPU or GPU with EmbeddingGemma 2; nothing is uploaded for search.
 - The history is encrypted with a key held by the TPM behind Windows Hello (DPAPI or a passphrase without a TPM).
 - It skips private browser windows, apps you exclude and explicit images, and removes card numbers and similar details from stored text.
-- BetterRecall makes no network connections while cloud describe is off, which is the default. Turning cloud describe on ends that guarantee: a confirmation says so, and from then on BetterRecall can send a single image you have previewed to the AI provider you configured, only when you click Send. It also enables Ask, a chat that searches your history and answers with sources; each chat shows exactly which captures it would send, with sensitive details redacted, and sends them only after you allow it. Turn it off to restore the guarantee.
-- The only other network use is the update check (GitHub Releases) and model downloads (Hugging Face); automatic update checks can be turned off.
+- BetterRecall makes no network connections of its own except the ones you start: checking for updates (GitHub Releases) and downloading models (Hugging Face). Automatic update checks are off by default. Cloud describe is off by default too. Turning cloud describe on ends that guarantee: a confirmation says so, and from then on BetterRecall can send a single image you have previewed to the AI provider you configured, only when you click Send. It also enables Ask, a chat that searches your history and answers with sources; each chat shows exactly which captures it would send, with sensitive details redacted, and sends them only after you allow it. Turn it off to restore the guarantee.
 
 ## Install
 
-1. Download `BetterRecall-Setup.exe` from [Releases](https://github.com/lnminh1411/BetterRecall/releases).
+1. Download `BetterRecall-Setup-<version>.exe` from [Releases](https://github.com/lnminh1411/BetterRecall/releases).
 2. Run it. It installs for your user only (no admin rights) and asks how to get the models: all of them now (about 4 to 6 GB), the minimum set, or later from the Models page. Downloads resume where they stopped.
-3. BetterRecall starts after install and on every sign-in (you can turn that off). Open search with `Ctrl+Alt+Space`.
+3. BetterRecall starts after install and on every sign-in (turn that off in Task Manager > Startup apps). Open search with `Ctrl+Alt+Space`.
 
 Updates are checked against GitHub Releases and verified with the release signature before they install. Uninstall from Windows Settings > Apps; you choose whether your history is kept.
 
@@ -50,13 +49,13 @@ Updates are checked against GitHub Releases and verified with the release signat
 
 ## MCP: use your history from AI tools
 
-BetterRecall includes an MCP server, so AI tools on your PC can search your history when you ask them to. It is off by default; turn it on in Settings > MCP. The tools are read-only (`search_history`, `get_capture`, `recall_status`) and return text, never images. Results go only to the tool that asked.
+BetterRecall includes an MCP server, so AI tools on your PC can search your history when you ask them to. It is off by default; turn it on in Settings > IPC and MCP. The tools are read-only (`search_history`, `get_capture`, `recall_status`) and return text, never images. Results go only to the tool that asked.
 
-Set up a client from the command line (an in-app page follows in 0.4):
+Set up a client from the command line (an in-app page follows in 0.4). The CLI is installed at `%LOCALAPPDATA%\BetterRecall\app\bin\betterrecall.cmd`; it is not on `PATH`, so in PowerShell:
 
 ```powershell
-betterrecall mcp clients
-betterrecall mcp add cursor
+& "$env:LOCALAPPDATA\BetterRecall\app\bin\betterrecall.cmd" mcp clients
+& "$env:LOCALAPPDATA\BetterRecall\app\bin\betterrecall.cmd" mcp add cursor
 ```
 
 `add` writes a `betterrecall` entry into the client's own config file, leaves every other entry alone and keeps a backup next to it. `betterrecall mcp snippet <client>` prints the config to paste by hand instead.
@@ -109,7 +108,7 @@ Build the solution with `dotnet build BetterRecall.slnx`, or build a full layout
 
 - Bugs and ideas: [GitHub Issues](https://github.com/lnminh1411/BetterRecall/issues). Please paste logs only after reading them; they never contain captured text, but may contain app names.
 - Security problems: report them privately through [GitHub security advisories](https://github.com/lnminh1411/BetterRecall/security/advisories/new), not in public issues.
-- If BetterRecall is useful to you, you can [buy me a coffee](https://buymeacoffee.com/TODO). <!-- TODO(links): Buy Me A Coffee page -->
+- A donation link (Buy Me A Coffee) follows soon. <!-- TODO(links): Buy Me A Coffee page -->
 
 ## Links
 
