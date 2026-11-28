@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security problem privately
+    url: https://github.com/lnminh1411/BetterRecall/security/advisories/new
+    about: Vulnerabilities go to a private advisory, not a public issue.
+  - name: User guide
+    url: https://github.com/lnminh1411/BetterRecall/blob/main/docs/user-guide.md
+    about: How to install and use BetterRecall.
