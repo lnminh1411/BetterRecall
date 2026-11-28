@@ -3,7 +3,7 @@ name = "br-contracts"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
-license = "MIT"
+license = "AGPL-3.0-only"
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

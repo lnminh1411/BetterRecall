@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Pull request #12: replay export</title>
+<style>
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body {
+  width: 1280px; height: 720px; overflow: hidden;
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-size: 13px; line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+.mono { font-family: "Cascadia Mono", "Consolas", monospace; }
+.win-controls { display: flex; align-items: center; gap: 2px; margin-left: auto; }
+.win-btn {
+  width: 38px; height: 30px; display: flex; align-items: center; justify-content: center;
+  font-size: 11px; opacity: 0.78; user-select: none;
+}
+.win-btn.close:hover { background: #c42b1c; color: #fff; }
+
+
+body { background: #f3f5f8; color: #1f2328; display: flex; flex-direction: column; }
+.b-tabs {
+  height: 36px; background: #dee3ea; display: flex; align-items: flex-end;
+  padding: 0 0 0 10px; gap: 4px;
+}
+.b-tab {
+  height: 30px; min-width: 240px; max-width: 310px; background: #ffffff;
+  border-radius: 8px 8px 0 0; padding: 0 12px; display: flex; align-items: center; gap: 8px;
+  font-size: 12px; font-weight: 500; color: #1f2328;
+  box-shadow: 0 -1px 2px rgba(0,0,0,0.06);
+}
+.b-tab.inactive { background: transparent; box-shadow: none; color: #525c68; min-width: 150px; }
+.b-dot { width: 10px; height: 10px; border-radius: 50%; background: #24292f; flex-shrink: 0; }
+.b-tab-x { margin-left: auto; font-size: 10px; opacity: 0.55; }
+.b-bar {
+  height: 40px; background: #ffffff; border-bottom: 1px solid #dde2e8;
+  display: flex; align-items: center; padding: 0 14px; gap: 10px;
+}
+.b-nav { display: flex; gap: 10px; color: #5f6368; font-size: 14px; }
+.b-url {
+  flex: 1; height: 28px; background: #f1f3f4; border-radius: 14px;
+  display: flex; align-items: center; padding: 0 14px; gap: 8px;
+  font-size: 12.5px; color: #3c4043;
+}
+.b-lock { color: #188038; font-size: 11px; }
+.b-avatar {
+  width: 26px; height: 26px; border-radius: 50%; background: #24292f;
+  color: #fff; font-size: 11px; font-weight: 600;
+  display: flex; align-items: center; justify-content: center;
+}
+.b-body { flex: 1; display: flex; overflow: hidden; }
+
+.gh-wrap { flex: 1; display: flex; flex-direction: column; background: #ffffff; }
+.gh-head { background: #f6f8fa; border-bottom: 1px solid #d0d7de; padding: 14px 32px 0; }
+.gh-repo { font-size: 13px; color: #57606a; margin-bottom: 6px; }
+.gh-repo strong { color: #0969da; }
+.gh-title { font-size: 20px; font-weight: 600; color: #1f2328; display: flex; align-items: center; gap: 10px; }
+.gh-num { color: #57606a; font-weight: 400; }
+.gh-meta { display: flex; align-items: center; gap: 10px; margin: 8px 0 12px; font-size: 12.5px; color: #57606a; }
+.gh-open { background: #1f883d; color: #fff; font-weight: 600; padding: 2px 10px; border-radius: 14px; font-size: 12px; }
+.gh-branch { background: #ddf4ff; color: #0969da; padding: 1px 7px; border-radius: 6px; font-size: 12px; }
+.gh-tabs { display: flex; gap: 18px; font-size: 13px; color: #57606a; }
+.gh-tabs span { padding: 8px 4px; border-bottom: 2px solid transparent; }
+.gh-tabs .on { color: #1f2328; font-weight: 600; border-bottom-color: #fd8c73; }
+.gh-body { flex: 1; padding: 18px 32px; overflow: hidden; display: flex; flex-direction: column; gap: 14px; }
+.diff-box { border: 1px solid #d0d7de; border-radius: 6px; overflow: hidden; }
+.diff-head {
+  background: #f6f8fa; border-bottom: 1px solid #d0d7de; padding: 8px 14px;
+  display: flex; align-items: center; justify-content: space-between; font-size: 12.5px;
+}
+.diff-stat { font-weight: 600; }
+.diff-stat .add { color: #1a7f37; }
+.diff-stat .del { color: #cf222e; margin-left: 6px; }
+.diff-tbl { width: 100%; border-collapse: collapse; font-size: 12px; line-height: 1.55; }
+.diff-tbl td { padding: 1px 10px; white-space: pre; }
+.ln { width: 42px; text-align: right; color: #6e7781; user-select: none; border-right: 1px solid #eee; }
+.hunk { background: #ddf4ff; color: #57606a; }
+.ins { background: #dafbe1; color: #116329; }
+.rem { background: #ffebe9; color: #82071e; }
+.rev-note {
+  border: 1px solid #d0d7de; border-radius: 6px; padding: 12px 16px; background: #f6f8fa;
+  display: flex; justify-content: space-between; align-items: center; font-size: 12.5px;
+}
+
+
+</style>
+</head>
+<body>
+
+<div class="b-tabs">
+  <div class="b-tab"><span class="b-dot"></span><span>Pull request #12: replay export</span><span class="b-tab-x">&#x2715;</span></div>
+  <div class="b-tab inactive"><span>New Tab</span><span class="b-tab-x">&#x2715;</span></div>
+  <div class="win-controls" style="color:#333333"><div class="win-btn">&#x2014;</div><div class="win-btn">&#x25A1;</div><div class="win-btn close">&#x2715;</div></div>
+</div>
+<div class="b-bar">
+  <div class="b-nav"><span>&#x2190;</span><span>&#x2192;</span><span>&#x21BB;</span></div>
+  <div class="b-url"><span class="b-lock">&#x1F512;</span><span>https://github.com/contoso/betterrecall/pull/12/files</span></div>
+  <div class="b-avatar">U</div>
+</div>
+<div class="b-body">
+<div class="gh-wrap">
+  <div class="gh-head">
+    <div class="gh-repo">contoso / <strong>betterrecall</strong></div>
+    <div class="gh-title">Pull request #12: replay export <span class="gh-num">#12</span></div>
+    <div class="gh-meta">
+      <span class="gh-open">Open</span>
+      <span>maintainer wants to merge 3 commits into <span class="gh-branch mono">main</span> from <span class="gh-branch mono">feat/replay-export</span></span>
+    </div>
+    <div class="gh-tabs">
+      <span>Conversation 4</span><span>Commits 3</span><span>Checks 4</span><span class="on">Files changed 3</span>
+    </div>
+  </div>
+  <div class="gh-body">
+    <div class="diff-box">
+      <div class="diff-head">
+        <span class="mono">src/Replay/ReplayExporter.cs</span>
+        <span class="diff-stat mono"><span class="add">+28</span><span class="del">-6</span></span>
+      </div>
+      <table class="diff-tbl mono">
+        <tr class="hunk"><td class="ln">...</td><td class="ln">...</td><td>@@ -41,14 +41,24 @@ public sealed class ReplayExporter</td></tr>
+        <tr><td class="ln">41</td><td class="ln">41</td><td>     public async Task&lt;ExportResult&gt; ExportAsync(string clipId, string targetPath, CancellationToken ct)</td></tr>
+        <tr><td class="ln">42</td><td class="ln">42</td><td>     {</td></tr>
+        <tr class="rem"><td class="ln">43</td><td class="ln"></td><td>-        var raw = await File.ReadAllBytesAsync(clip.Path, ct);</td></tr>
+        <tr class="rem"><td class="ln">44</td><td class="ln"></td><td>-        await File.WriteAllBytesAsync(targetPath, raw, ct);</td></tr>
+        <tr class="ins"><td class="ln"></td><td class="ln">43</td><td>+        var tmp = targetPath + ".part";</td></tr>
+        <tr class="ins"><td class="ln"></td><td class="ln">44</td><td>+        try</td></tr>
+        <tr class="ins"><td class="ln"></td><td class="ln">45</td><td>+        {</td></tr>
+        <tr class="ins"><td class="ln"></td><td class="ln">46</td><td>+            await using var src = OpenDecryptedStream(clip);</td></tr>
+        <tr class="ins"><td class="ln"></td><td class="ln">47</td><td>+            await using var dst = File.Create(tmp);</td></tr>
+        <tr class="ins"><td class="ln"></td><td class="ln">48</td><td>+            await src.CopyToAsync(dst, bufferSize: 128 * 1024, ct);</td></tr>
+        <tr class="ins"><td class="ln"></td><td class="ln">49</td><td>+        }</td></tr>
+        <tr class="ins"><td class="ln"></td><td class="ln">50</td><td>+        catch { TryDelete(tmp); throw; }</td></tr>
+        <tr class="ins"><td class="ln"></td><td class="ln">51</td><td>+        File.Move(tmp, targetPath, overwrite: true);</td></tr>
+        <tr><td class="ln">45</td><td class="ln">52</td><td>         _audit.Record("replay export", 1);</td></tr>
+        <tr><td class="ln">46</td><td class="ln">53</td><td>         return new ExportResult(clip.Id, new FileInfo(targetPath).Length);</td></tr>
+        <tr><td class="ln">47</td><td class="ln">54</td><td>     }</td></tr>
+      </table>
+    </div>
+    <div class="rev-note">
+      <div><strong>reviewer</strong> approved these changes &mdash; &ldquo;Clean streaming path, no partial file left on cancel.&rdquo;</div>
+      <div style="background:#1f883d;color:#fff;padding:5px 14px;border-radius:6px;font-weight:600;">Merge pull request</div>
+    </div>
+  </div>
+</div>
+</div>
+
+</body>
+</html>

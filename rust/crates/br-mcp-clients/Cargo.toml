@@ -1,0 +1,15 @@
+[package]
+name = "br-mcp-clients"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license = "AGPL-3.0-only"
+
+[dependencies]
+jsonc-parser = { version = "0.26", features = ["cst"] }
+thiserror = "2.0"
+toml_edit = "0.23"
+
+[dev-dependencies]
+serde_json = "1.0"
+tempfile = "3"

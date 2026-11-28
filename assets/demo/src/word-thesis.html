@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Thesis draft v3.docx</title>
+<style>
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body {
+  width: 1280px; height: 720px; overflow: hidden;
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-size: 13px; line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+.mono { font-family: "Cascadia Mono", "Consolas", monospace; }
+.win-controls { display: flex; align-items: center; gap: 2px; margin-left: auto; }
+.win-btn {
+  width: 38px; height: 30px; display: flex; align-items: center; justify-content: center;
+  font-size: 11px; opacity: 0.78; user-select: none;
+}
+.win-btn.close:hover { background: #c42b1c; color: #fff; }
+
+
+body { background: #e6e9ef; color: #1f2328; display: flex; flex-direction: column; }
+.wd-title {
+  height: 36px; background: #185abd; color: #ffffff;
+  display: flex; align-items: center; padding-left: 16px; gap: 14px; font-size: 12.5px;
+}
+.wd-tabs {
+  height: 30px; background: #f3f6fb; border-bottom: 1px solid #d9dfe8;
+  display: flex; align-items: center; padding: 0 16px; gap: 18px; font-size: 12px; color: #374151;
+}
+.wd-tabs .on { color: #185abd; font-weight: 700; border-bottom: 2px solid #185abd; padding: 5px 0; }
+.wd-rib {
+  height: 44px; background: #ffffff; border-bottom: 1px solid #d9dfe8;
+  display: flex; align-items: center; padding: 0 20px; gap: 18px; font-size: 12px; color: #374151;
+}
+.wd-sep { width: 1px; height: 22px; background: #dde2ea; }
+.wd-canvas { flex: 1; display: flex; justify-content: center; padding: 18px 0 0; overflow: hidden; }
+.wd-page {
+  width: 780px; background: #ffffff; border: 1px solid #d1d6df;
+  box-shadow: 0 3px 12px rgba(0,0,0,0.08); padding: 40px 58px;
+}
+.wd-status {
+  height: 24px; background: #f3f3f3; border-top: 1px solid #d9dfe8;
+  padding: 0 16px; display: flex; align-items: center; justify-content: space-between;
+  font-size: 11.5px; color: #4b5563;
+}
+
+</style>
+</head>
+<body>
+
+<div class="wd-title">
+  <strong>Document</strong>
+  <span style="margin:0 auto;font-weight:500;">Thesis draft v3.docx &mdash; Saved</span>
+  <div class="win-controls" style="color:#d4d4d4"><div class="win-btn">&#x2014;</div><div class="win-btn">&#x25A1;</div><div class="win-btn close">&#x2715;</div></div>
+</div>
+<div class="wd-tabs">
+  <span>File</span><span class="on">Home</span><span>Insert</span><span>Layout</span><span>References</span><span>Review</span><span>View</span>
+</div>
+<div class="wd-rib">
+  <span>Segoe UI &#x25BE;</span><span>11 &#x25BE;</span><span class="wd-sep"></span>
+  <strong>B</strong><em>I</em><u>U</u><span class="wd-sep"></span>
+  <span>&#x2261; Left</span><span>&#x2022; Bullets</span><span class="wd-sep"></span>
+  <span style="color:#185abd;font-weight:600;">Heading 1</span><span>Normal</span>
+</div>
+<div class="wd-canvas"><div class="wd-page">
+<div style="font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:#6b7280;margin-bottom:6px;">Chapter 3</div>
+<h1 style="font-size:22px;font-weight:700;color:#111827;margin-bottom:14px;">Local-First Semantic Retrieval on Edge NPUs</h1>
+<p style="font-size:13.5px;line-height:1.7;color:#24292f;margin-bottom:14px;text-align:justify;">
+  Continuous desktop indexing presents a sharp trade-off between recall accuracy, power draw, and user privacy.
+  Offloading screen captures to remote inference clusters introduces unacceptable confidentiality risks for personal
+  documents, financial records, and private correspondence. In this chapter we evaluate a fully local hybrid retrieval
+  pipeline combining quantized multimodal embeddings with lexical full-text search.
+</p>
+<h2 style="font-size:15px;font-weight:700;color:#185abd;margin:16px 0 8px;">3.1 Hybrid Index Architecture</h2>
+<p style="font-size:13.5px;line-height:1.7;color:#24292f;margin-bottom:14px;text-align:justify;">
+  Each captured frame is processed asynchronously by an isolated worker process. Text extracted via on-device OCR
+  is tokenized into an encrypted FTS5 index, while dense visual embeddings are compressed to int8 vectors and scored
+  via reciprocal rank fusion (RRF) at query time.
+</p>
+<div style="background:#f6f8fc;border:1px solid #dbe4f0;border-radius:6px;padding:12px 18px;margin:14px 0;font-size:13px;" class="mono">
+  score(d, q) = w_lex &middot; BM25(d, q) + w_vec &middot; cos(e_d, e_q)
+</div>
+<h2 style="font-size:15px;font-weight:700;color:#185abd;margin:16px 0 8px;">3.2 Evaluation Methodology</h2>
+<p style="font-size:13.5px;line-height:1.7;color:#24292f;text-align:justify;">
+  We measure Recall@1, Mean Reciprocal Rank (MRR), and median query latency across a multilingual corpus of desktop
+  captures spanning code editors, spreadsheets, technical documentation, and messaging threads.
+</p>
+</div></div>
+<div class="wd-status"><span>Page 14 of 48 &nbsp;|&nbsp; 11,420 words &nbsp;|&nbsp; English</span><span>100%</span></div>
+
+</body>
+</html>

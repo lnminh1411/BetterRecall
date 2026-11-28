@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Daily standup | Team Chat</title>
+<style>
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body {
+  width: 1280px; height: 720px; overflow: hidden;
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-size: 13px; line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+.mono { font-family: "Cascadia Mono", "Consolas", monospace; }
+.win-controls { display: flex; align-items: center; gap: 2px; margin-left: auto; }
+.win-btn {
+  width: 38px; height: 30px; display: flex; align-items: center; justify-content: center;
+  font-size: 11px; opacity: 0.78; user-select: none;
+}
+.win-btn.close:hover { background: #c42b1c; color: #fff; }
+
+
+body { background: #f5f5f5; color: #242424; display: flex; flex-direction: column; }
+.ch-top {
+  height: 44px; background: #ebebeb; border-bottom: 1px solid #dcdcdc;
+  display: flex; align-items: center; padding-left: 16px; gap: 16px;
+}
+.ch-brand { font-weight: 700; color: #464eb8; font-size: 14px; }
+.ch-search {
+  width: 420px; height: 28px; background: #ffffff; border: 1px solid #d4d4d4;
+  border-radius: 6px; padding: 0 12px; display: flex; align-items: center; color: #616161; font-size: 12px;
+  margin-left: 180px;
+}
+.ch-main { flex: 1; display: flex; overflow: hidden; }
+.ch-rail {
+  width: 64px; background: #ebebeb; border-right: 1px solid #dedede;
+  display: flex; flex-direction: column; align-items: center; padding-top: 14px; gap: 18px;
+  font-size: 11px; color: #616161;
+}
+.ch-rail .on { color: #464eb8; font-weight: 600; }
+.ch-list { width: 256px; background: #f5f5f5; border-right: 1px solid #e0e0e0; padding: 14px 10px; }
+.ch-list h3 { font-size: 15px; font-weight: 700; padding: 0 8px 10px; color: #242424; }
+.ch-item { padding: 9px 10px; border-radius: 6px; margin-bottom: 3px; }
+.ch-item.active { background: #ffffff; box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
+.ch-item-t { font-weight: 600; font-size: 13px; color: #242424; }
+.ch-item-s { font-size: 11.5px; color: #616161; margin-top: 2px; }
+.ch-pane { flex: 1; background: #ffffff; display: flex; flex-direction: column; }
+.ch-pane-h {
+  height: 52px; border-bottom: 1px solid #e6e6e6; padding: 0 24px;
+  display: flex; align-items: center; justify-content: space-between;
+}
+.ch-pane-title { font-size: 16px; font-weight: 700; color: #242424; }
+.ch-msgs { flex: 1; padding: 20px 28px; display: flex; flex-direction: column; gap: 18px; overflow: hidden; }
+.msg { display: flex; gap: 12px; }
+.msg-av {
+  width: 34px; height: 34px; border-radius: 50%; color: #fff; font-weight: 700;
+  font-size: 12px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+}
+.msg-body { background: #f5f6fa; border: 1px solid #e6e8f0; border-radius: 8px; padding: 10px 14px; max-width: 720px; }
+.msg-head { display: flex; gap: 10px; align-items: baseline; margin-bottom: 4px; }
+.msg-name { font-weight: 600; font-size: 13px; color: #1f2328; }
+.msg-time { font-size: 11px; color: #6b7280; }
+.msg-text { font-size: 13px; color: #242424; line-height: 1.55; }
+.ch-compose {
+  margin: 12px 28px 18px; border: 1px solid #d1d5db; border-radius: 6px;
+  height: 44px; padding: 0 14px; display: flex; align-items: center; justify-content: space-between;
+  color: #6b7280; font-size: 13px; background: #fff;
+}
+
+</style>
+</head>
+<body>
+
+<div class="ch-top">
+  <div class="ch-brand">&#x1F4AC; Team Chat</div>
+  <div class="ch-search">&#x1F50D;&nbsp;&nbsp;Search messages and channels</div>
+  <div class="win-controls" style="color:#333333"><div class="win-btn">&#x2014;</div><div class="win-btn">&#x25A1;</div><div class="win-btn close">&#x2715;</div></div>
+</div>
+<div class="ch-main">
+  <div class="ch-rail">
+    <div>Activity</div>
+    <div class="on">Chat</div>
+    <div>Channels</div>
+    <div>Calendar</div>
+    <div>Files</div>
+  </div>
+  <div class="ch-list">
+    <h3>Channels &amp; Chats</h3>
+    <div class="ch-item active"><div class="ch-item-t"># Daily standup</div><div class="ch-item-s">Blockers: none</div></div><div class="ch-item"><div class="ch-item-t"># General</div><div class="ch-item-s">Release moved to Friday</div></div><div class="ch-item"><div class="ch-item-t"># Design review</div><div class="ch-item-s">Updated card density</div></div><div class="ch-item"><div class="ch-item-t"># Release 0.4</div><div class="ch-item-s">CI build #418 passed</div></div><div class="ch-item"><div class="ch-item-t"># Architecture</div><div class="ch-item-s">NPU benchmark notes</div></div>
+  </div>
+  <div class="ch-pane">
+    <div class="ch-pane-h">
+      <div class="ch-pane-title">Daily standup</div>
+      <div style="font-size:12px;color:#616161;">4 members &nbsp;&bull;&nbsp; Files &nbsp;&bull;&nbsp; Notes</div>
+    </div>
+    <div class="ch-msgs">
+<div class="msg">
+  <div class="msg-av" style="background:#4f46e5;">UI</div>
+  <div class="msg-body">
+    <div class="msg-head"><span class="msg-name">UI Engineer</span><span class="msg-time">09:02</span></div>
+    <div class="msg-text">
+      <strong>Daily standup</strong><br>
+      Yesterday: fixed the timeline paging test<br>
+      Today: text recognition settings page<br>
+      Blockers: none
+    </div>
+  </div>
+</div>
+<div class="msg">
+  <div class="msg-av" style="background:#0f766e;">DL</div>
+  <div class="msg-body">
+    <div class="msg-head"><span class="msg-name">Dev Lead</span><span class="msg-time">09:05</span></div>
+    <div class="msg-text">
+      Yesterday: replay export streaming path in PR #12<br>
+      Today: benchmark run on NPU and review settings search<br>
+      Blockers: none
+    </div>
+  </div>
+</div>
+<div class="msg">
+  <div class="msg-av" style="background:#b45309;">QA</div>
+  <div class="msg-body">
+    <div class="msg-head"><span class="msg-name">QA Engineer</span><span class="msg-time">09:08</span></div>
+    <div class="msg-text">
+      Yesterday: verified lock timeout and unlock flow<br>
+      Today: dark/light theme pass across Search and Settings<br>
+      Blockers: none
+    </div>
+  </div>
+</div>
+</div>
+    <div class="ch-compose"><span>Type a message...</span><span>&#x27A4;</span></div>
+  </div>
+</div>
+
+</body>
+</html>

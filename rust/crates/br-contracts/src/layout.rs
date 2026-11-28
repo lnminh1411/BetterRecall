@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) BetterRecall contributors
 
 use std::env;
@@ -324,6 +324,10 @@ impl DataPaths {
 
     pub fn agent_pid_file(home: &Path) -> PathBuf {
         home.join("agent.pid")
+    }
+
+    pub fn mcp_relay(home: &Path) -> PathBuf {
+        home.join("app").join("bin").join(InstallLayout::MCP_EXE)
     }
 }
 

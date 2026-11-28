@@ -7,7 +7,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use br_contracts::InstallLayout;
+use br_contracts::{DataPaths, InstallLayout};
 
 use crate::InstallError;
 use crate::ctx::Ctx;
@@ -30,7 +30,7 @@ pub fn bin_dir(home: &Path) -> PathBuf {
 
 /// Returns `<home>\app\bin\betterrecall-mcp.exe`.
 pub fn relay_path(home: &Path) -> PathBuf {
-    bin_dir(home).join(InstallLayout::MCP_EXE)
+    DataPaths::mcp_relay(home)
 }
 
 /// Returns `<home>\app\bin\betterrecall.cmd`.

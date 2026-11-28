@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AgentClient.cs - BetterRecall</title>
+<style>
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body {
+  width: 1280px; height: 720px; overflow: hidden;
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-size: 13px; line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+.mono { font-family: "Cascadia Mono", "Consolas", monospace; }
+.win-controls { display: flex; align-items: center; gap: 2px; margin-left: auto; }
+.win-btn {
+  width: 38px; height: 30px; display: flex; align-items: center; justify-content: center;
+  font-size: 11px; opacity: 0.78; user-select: none;
+}
+.win-btn.close:hover { background: #c42b1c; color: #fff; }
+
+
+body { background: #1e1e1e; color: #d4d4d4; display: flex; flex-direction: column; }
+.ce-title {
+  height: 32px; background: #2b2b2b; border-bottom: 1px solid #181818;
+  display: flex; align-items: center; padding-left: 12px; gap: 14px; font-size: 12px; color: #cccccc;
+}
+.ce-menus { display: flex; gap: 12px; color: #a9a9a9; }
+.ce-mid { margin: 0 auto; color: #d4d4d4; font-weight: 500; }
+.ce-main { flex: 1; display: flex; overflow: hidden; }
+.ce-act {
+  width: 48px; background: #252526; border-right: 1px solid #1b1b1b;
+  display: flex; flex-direction: column; align-items: center; padding-top: 12px; gap: 18px;
+  color: #858585; font-size: 17px;
+}
+.ce-act .on { color: #ffffff; border-left: 2px solid #007acc; width: 100%; text-align: center; padding: 4px 0; }
+.ce-side { width: 228px; background: #252526; border-right: 1px solid #1b1b1b; padding: 10px 0; font-size: 12.5px; }
+.ce-side-h { font-size: 11px; letter-spacing: 0.06em; color: #969696; padding: 0 14px 8px; text-transform: uppercase; }
+.ce-tree-item { padding: 4px 12px; color: #cccccc; white-space: nowrap; }
+.ce-tree-item.active { background: #37373d; color: #ffffff; }
+.ce-editor { flex: 1; display: flex; flex-direction: column; background: #1e1e1e; overflow: hidden; }
+.ce-tabs { height: 35px; background: #252526; display: flex; border-bottom: 1px solid #1b1b1b; }
+.ce-tab {
+  padding: 0 16px; display: flex; align-items: center; gap: 8px; font-size: 12.5px;
+  color: #969696; border-right: 1px solid #1b1b1b;
+}
+.ce-tab.active { background: #1e1e1e; color: #ffffff; border-top: 1px solid #007acc; }
+.ce-crumb { height: 24px; padding: 0 16px; display: flex; align-items: center; font-size: 11.5px; color: #8c8c8c; border-bottom: 1px solid #262626; }
+.ce-code-area { flex: 1; display: flex; overflow: hidden; }
+.ce-code { flex: 1; padding: 12px 16px; font-size: 13px; line-height: 1.58; white-space: pre; overflow: hidden; }
+.ce-ln { display: inline-block; width: 34px; color: #6e7681; text-align: right; margin-right: 16px; user-select: none; }
+.ce-status {
+  height: 24px; background: #007acc; color: #ffffff; font-size: 11.5px;
+  display: flex; align-items: center; padding: 0 12px; gap: 16px;
+}
+.ce-status .r { margin-left: auto; display: flex; gap: 16px; }
+.k { color: #569cd6; }
+.c { color: #6a9955; }
+.s { color: #ce9178; }
+.t { color: #4ec9b0; }
+.m { color: #dcdcaa; }
+.n { color: #b5cea8; }
+.p { color: #9cdcfe; }
+
+</style>
+</head>
+<body>
+
+<div class="ce-title">
+  <div class="ce-menus"><span>File</span><span>Edit</span><span>Selection</span><span>View</span><span>Go</span><span>Run</span></div>
+  <div class="ce-mid">AgentClient.cs &mdash; BetterRecall &mdash; Code editor</div>
+  <div class="win-controls" style="color:#d4d4d4"><div class="win-btn">&#x2014;</div><div class="win-btn">&#x25A1;</div><div class="win-btn close">&#x2715;</div></div>
+</div>
+<div class="ce-main">
+  <div class="ce-act">
+    <div class="on">&#x1F4C4;</div>
+    <div>&#x1F50D;</div>
+    <div>&#x2387;</div>
+    <div>&#x25B6;</div>
+  </div>
+  <div class="ce-side">
+    <div class="ce-side-h">Explorer: BetterRecall</div>
+    <div class="ce-tree-item" style="padding-left:14px">&#x25BE; src</div><div class="ce-tree-item" style="padding-left:28px">&#x25BE; BetterRecall.UI</div><div class="ce-tree-item" style="padding-left:42px">&#x25BE; Logic</div><div class="ce-tree-item" style="padding-left:56px">AgentApi.cs</div><div class="ce-tree-item active" style="padding-left:56px">AgentClient.cs</div><div class="ce-tree-item" style="padding-left:56px">Models.cs</div><div class="ce-tree-item" style="padding-left:56px">UnlockLogic.cs</div><div class="ce-tree-item" style="padding-left:56px">&#x25BE; Mock</div><div class="ce-tree-item" style="padding-left:70px">MockAgent.cs</div><div class="ce-tree-item" style="padding-left:28px">settings.json</div>
+  </div>
+  <div class="ce-editor">
+    <div class="ce-tabs"><div class="ce-tab active">AgentClient.cs</div><div class="ce-tab">AgentApi.cs</div><div class="ce-tab">MockAgent.cs</div></div>
+    <div class="ce-crumb">BetterRecall &rsaquo; AgentClient.cs</div>
+    <div class="ce-code-area"><div class="ce-code mono"><span class="ce-ln">1</span><span class="c">// SPDX-License-Identifier: AGPL-3.0-only</span>
+<span class="ce-ln">2</span><span class="k">using</span> System.IO.Pipes;
+<span class="ce-ln">3</span><span class="k">using</span> System.Text;
+<span class="ce-ln">4</span><span class="k">using</span> BetterRecall.Contracts;
+<span class="ce-ln">5</span>
+<span class="ce-ln">6</span><span class="k">namespace</span> BetterRecall.UI.Logic;
+<span class="ce-ln">7</span>
+<span class="ce-ln">8</span><span class="k">public sealed class</span> <span class="t">AgentClient</span> : <span class="t">IAgentClient</span>, <span class="t">IAsyncDisposable</span>
+<span class="ce-ln">9</span>{
+<span class="ce-ln">10</span>    <span class="k">private readonly</span> <span class="k">string</span> _pipeName;
+<span class="ce-ln">11</span>    <span class="k">private readonly</span> <span class="t">IServerTrust</span> _trust;
+<span class="ce-ln">12</span>    <span class="k">private readonly</span> <span class="t">TimeSpan</span> _timeout;
+<span class="ce-ln">13</span>    <span class="k">private</span> <span class="t">NamedPipeClientStream</span>? _pipe;
+<span class="ce-ln">14</span>
+<span class="ce-ln">15</span>    <span class="k">public async</span> <span class="t">Task</span>&lt;<span class="t">AgentResult</span>&gt; <span class="m">SendAsync</span>(<span class="k">string</span> line, <span class="t">CancellationToken</span> ct = <span class="k">default</span>)
+<span class="ce-ln">16</span>    {
+<span class="ce-ln">17</span>        <span class="k">if</span> (Encoding.UTF8.<span class="m">GetByteCount</span>(line) &gt; LineProtocol.MaxUiRequestBytes)
+<span class="ce-ln">18</span>            <span class="k">return</span> AgentResult.<span class="m">Fail</span>(AgentErrorKind.Client, LineProtocol.TooLongUiError);
+<span class="ce-ln">19</span>
+<span class="ce-ln">20</span>        <span class="k">await</span> <span class="m">EnsureConnectedAsync</span>(ct);
+<span class="ce-ln">21</span>        <span class="k">var</span> reply = <span class="k">await</span> <span class="m">WriteAndReadLineAsync</span>(line, ct);
+<span class="ce-ln">22</span>        <span class="k">if</span> (reply <span class="k">is null</span> &amp;&amp; <span class="m">IsReadOnly</span>(line))
+<span class="ce-ln">23</span>        {
+<span class="ce-ln">24</span>            <span class="m">ResetConnection</span>();
+<span class="ce-ln">25</span>            <span class="k">await</span> <span class="m">EnsureConnectedAsync</span>(ct);
+<span class="ce-ln">26</span>            reply = <span class="k">await</span> <span class="m">WriteAndReadLineAsync</span>(line, ct);
+<span class="ce-ln">27</span>        }
+<span class="ce-ln">28</span>        <span class="k">return</span> <span class="m">ParseEnvelope</span>(reply);
+<span class="ce-ln">29</span>    }
+<span class="ce-ln">30</span>}</div></div>
+  </div>
+</div>
+<div class="ce-status">
+  <span>&#x2387; main</span>
+  <span>&#x2297; 0 &nbsp; &#x26A0; 0</span>
+  <div class="r"><span>Ln 21, Col 34</span><span>Spaces: 4</span><span>UTF-8</span><span>C#</span></div>
+</div>
+
+</body>
+</html>

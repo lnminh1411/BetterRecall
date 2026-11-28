@@ -136,7 +136,7 @@ def light_shots(exe, out_dir):
 
 
 def banner(out_dir):
-    """Icon, name and tagline on a dark gradient, the search shot on the right."""
+    """Icon and name on a dark gradient, the search shot on the right."""
     W, H = 1600, 520
     bg = Image.new("RGB", (W, H))
     d = ImageDraw.Draw(bg)
@@ -161,14 +161,16 @@ def banner(out_dir):
     bg.alpha_composite(s, (x, y))
 
     icon = Image.open(os.path.join(ROOT, "assets", "icons", "app.png")).convert("RGBA").resize((128, 128), Image.LANCZOS)
-    bg.alpha_composite(icon, (80, 120))
     fonts = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts")
     title = ImageFont.truetype(os.path.join(fonts, "segoeuib.ttf"), 84)
-    sub = ImageFont.truetype(os.path.join(fonts, "segoeui.ttf"), 28)
     d = ImageDraw.Draw(bg)
-    d.text((80, 270), "BetterRecall", font=title, fill=(255, 255, 255))
-    d.text((84, 378), "Search everything you have seen and heard.", font=sub, fill=(200, 220, 235))
-    d.text((84, 420), "Local, encrypted, on your NPU.", font=sub, fill=(76, 194, 255))
+    bbox = d.textbbox((0, 0), "BetterRecall", font=title)
+    title_h = bbox[3] - bbox[1]
+    gap = 24
+    top = (H - (icon.height + gap + title_h)) // 2
+    bg.alpha_composite(icon, (80, top))
+    d = ImageDraw.Draw(bg)
+    d.text((80, top + icon.height + gap - bbox[1]), "BetterRecall", font=title, fill=(255, 255, 255))
     out = os.path.join(out_dir, "banner.png")
     bg.convert("RGB").save(out, optimize=True)
     print("banner", out)

@@ -10,11 +10,12 @@ members = [
     "crates/br-sign",
     "crates/br-cli",
     "crates/br-mcp",
+    "crates/br-mcp-clients",
 ]
 resolver = "3"
 
 [workspace.package]
-version = "0.3.0-dev"
+version = "0.4.0-dev"
 edition = "2024"
 authors = ["BetterRecall contributors"]
 

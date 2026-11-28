@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) BetterRecall contributors
 using System.ComponentModel;
 using BetterRecall.UI.Logic;

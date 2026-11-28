@@ -5,12 +5,14 @@
 //! single-connection two-step purge (`--yes` or console prompt), and streams `subscribe` lines.
 
 use std::io::Write;
+use std::path::Path;
 
 use br_contracts::{Envelope, LineError};
 use br_core::{CancelToken, CliPurge, CliPurgeOptions, PipeClient, PipeConnectResult};
+use br_mcp_clients::{ChangeKind, ClientEnv, ClientKind, EntryState};
 
-/// Usage line written to stderr when arguments do not match `ipc <words...>`.
-pub const USAGE: &str = "Usage: betterrecall ipc <words...>";
+/// Usage text written to stderr when arguments do not match a known command.
+pub const USAGE: &str = "Usage: betterrecall ipc <words...>\n       betterrecall mcp <clients|add <id>|remove <id>|snippet <id>>";
 
 /// Line written to stdout when the agent fails the client trust check.
 pub const ERR_NOT_TRUSTED: &str = "err BetterRecall not trusted";
@@ -134,4 +136,127 @@ where
         }
     }
     0
+}
+
+/// Runs the local `betterrecall mcp <subcommand>` grammar without connecting to the IPC pipe.
+/// `args` is the slice of arguments after `"mcp"`. Returns 0 on success and 1 on error.
+pub fn run_mcp_cli<W1, W2>(
+    args: &[String],
+    client_env: &ClientEnv,
+    relay: &Path,
+    stdout: &mut W1,
+    stderr: &mut W2,
+) -> i32
+where
+    W1: Write,
+    W2: Write,
+{
+    let Some(sub) = args.first().map(String::as_str) else {
+        let _ = writeln!(stderr, "{USAGE}");
+        return 1;
+    };
+
+    if sub.eq_ignore_ascii_case("clients") && args.len() == 1 {
+        for c in br_mcp_clients::list(client_env, relay) {
+            let detected = if c.detected { "yes" } else { "no" };
+            let state = match &c.state {
+                EntryState::Absent => "absent".to_string(),
+                EntryState::Present { matches: true, .. } => "present".to_string(),
+                EntryState::Present { matches: false, .. } => "outdated".to_string(),
+                EntryState::Unknown => "snippet".to_string(),
+                EntryState::Unreadable(msg) => format!("unreadable ({msg})"),
+            };
+            let target = match &c.kind {
+                ClientKind::File { path, .. } => path.display().to_string(),
+                ClientKind::Snippet => "snippet".to_string(),
+            };
+            let _ = writeln!(
+                stdout,
+                "{}\t{}\tdetected={detected}\tstate={state}\t{target}",
+                c.id, c.name
+            );
+        }
+        return 0;
+    }
+
+    if sub.eq_ignore_ascii_case("add") && args.len() == 2 {
+        let id = &args[1];
+        return match br_mcp_clients::add(client_env, id, relay) {
+            Ok(change) => {
+                let verb = match change.kind {
+                    ChangeKind::Added => "added",
+                    ChangeKind::Updated => "updated",
+                    ChangeKind::Unchanged => "unchanged",
+                    ChangeKind::Removed => "removed",
+                    ChangeKind::NotPresent => "not present",
+                };
+                if let Some(bak) = &change.backup {
+                    let _ = writeln!(
+                        stdout,
+                        "{id}: {verb} {} (backup: {})",
+                        change.path.display(),
+                        bak.display()
+                    );
+                } else {
+                    let _ = writeln!(stdout, "{id}: {verb} {}", change.path.display());
+                }
+                0
+            }
+            Err(e) => {
+                let _ = writeln!(stderr, "{e}");
+                1
+            }
+        };
+    }
+
+    if sub.eq_ignore_ascii_case("remove") && args.len() == 2 {
+        let id = &args[1];
+        return match br_mcp_clients::remove(client_env, id) {
+            Ok(change) => {
+                let verb = match change.kind {
+                    ChangeKind::Removed => "removed",
+                    ChangeKind::NotPresent => "not present",
+                    ChangeKind::Added => "added",
+                    ChangeKind::Updated => "updated",
+                    ChangeKind::Unchanged => "unchanged",
+                };
+                if let Some(bak) = &change.backup {
+                    let _ = writeln!(
+                        stdout,
+                        "{id}: {verb} {} (backup: {})",
+                        change.path.display(),
+                        bak.display()
+                    );
+                } else {
+                    let _ = writeln!(stdout, "{id}: {verb} {}", change.path.display());
+                }
+                0
+            }
+            Err(e) => {
+                let _ = writeln!(stderr, "{e}");
+                1
+            }
+        };
+    }
+
+    if sub.eq_ignore_ascii_case("snippet") && args.len() == 2 {
+        let id = &args[1];
+        return match br_mcp_clients::snippet(client_env, id, relay) {
+            Ok(snip) => {
+                if let Some(cmd) = &snip.command {
+                    let _ = writeln!(stdout, "Command: {cmd}");
+                }
+                let _ = writeln!(stdout, "Target: {}", snip.target_hint);
+                let _ = writeln!(stdout, "{}", snip.text);
+                0
+            }
+            Err(e) => {
+                let _ = writeln!(stderr, "{e}");
+                1
+            }
+        };
+    }
+
+    let _ = writeln!(stderr, "{USAGE}");
+    1
 }

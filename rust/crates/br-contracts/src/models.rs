@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) BetterRecall contributors
 
 use std::fmt;
@@ -786,7 +786,69 @@ pub struct McpTool {
     pub title: String,
     pub description: String,
     pub input_schema: McpInputSchema,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<McpOutputSchema>,
     pub annotations: McpToolAnnotations,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpOutputSchema {
+    #[serde(rename = "type")]
+    pub schema_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub properties: Option<McpOutputProperties>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required: Option<Vec<String>>,
+}
+
+/// Order-preserving JSON object for MCP `outputSchema.properties`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct McpOutputProperties(pub Vec<(String, McpOutputProperty)>);
+
+impl Serialize for McpOutputProperties {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(self.0.len()))?;
+        for (k, v) in &self.0 {
+            map.serialize_entry(k, v)?;
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for McpOutputProperties {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct PropsVisitor;
+        impl<'de> Visitor<'de> for PropsVisitor {
+            type Value = McpOutputProperties;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a JSON object of MCP output schema properties")
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut entries = Vec::new();
+                while let Some((k, v)) = map.next_entry::<String, McpOutputProperty>()? {
+                    entries.push((k, v));
+                }
+                Ok(McpOutputProperties(entries))
+            }
+        }
+        deserializer.deserialize_map(PropsVisitor)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpOutputProperty {
+    #[serde(rename = "type")]
+    pub prop_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub items: Option<McpSchemaItems>,
+    #[serde(rename = "enum", default, skip_serializing_if = "Option::is_none")]
+    pub enum_values: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

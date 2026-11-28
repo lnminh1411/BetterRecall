@@ -31,4 +31,8 @@
     <None Include="..\..\assets\icons\app.ico" Link="Assets\app.ico" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <None Include="..\..\assets\icons\app.png" Link="Assets\app.png" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\assets\demo\*.png" LogicalName="demo/%(Filename)%(Extension)" />
+    <EmbeddedResource Include="..\..\assets\demo\index.json" LogicalName="demo/index.json" Condition="Exists('..\..\assets\demo\index.json')" />
+  </ItemGroup>
 </Project>
