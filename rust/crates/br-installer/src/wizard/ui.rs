@@ -548,7 +548,12 @@ unsafe extern "system" fn progress_proc(
                 if let Some(state) = unsafe { page_state(hwnd) } {
                     if state.model.can_cancel() {
                         state.cancel_flag.store(true, Ordering::SeqCst);
-                        set_item_text(hwnd, IDC_PROGRESS_STATUS, strings::PROGRESS_CANCELLING);
+                        let label = if state.model.current_step == Some(Step::DownloadingModels) {
+                            strings::PROGRESS_STOPPING_DOWNLOAD
+                        } else {
+                            strings::PROGRESS_CANCELLING
+                        };
+                        set_item_text(hwnd, IDC_PROGRESS_STATUS, label);
                         set_sheet_cancel(hwnd, false, true);
                     }
                     // Always block immediate sheet close on Progress; the worker posts WM_APP_DONE
@@ -786,9 +791,21 @@ fn apply_buttons(hwnd: HWND, buttons: WizardButtons) {
             LPARAM(flags as isize),
         );
     }
+    let cancel_wide = to_wide_nul(buttons.cancel_label.unwrap_or(strings::BTN_CANCEL));
+    unsafe {
+        SendMessageW(
+            sheet,
+            PSM_SETBUTTONTEXTW,
+            Some(WPARAM(PSWIZB_CANCEL_BTN)),
+            Some(LPARAM(cancel_wide.as_ptr() as isize)),
+        );
+    }
     // N7: end pages (Finish, Cancelled, Uninstall Complete) show Finish alone, no dead Cancel.
     set_sheet_cancel(hwnd, buttons.cancel, !buttons.finish);
 }
+
+/// `PSWIZB_CANCEL`: the Cancel button for `PSM_SETBUTTONTEXTW`.
+const PSWIZB_CANCEL_BTN: usize = 0x10;
 
 fn set_sheet_cancel(hwnd: HWND, enabled: bool, visible: bool) {
     // Aero wizard buttons have no control id, so `GetDlgItem(sheet, IDCANCEL)` finds nothing
