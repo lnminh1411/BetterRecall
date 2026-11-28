@@ -137,6 +137,39 @@ def assert_no_vcruntime(path: Path) -> list[str]:
     return dlls
 
 
+def pe_checksum_and_security_dir(data: bytes) -> tuple[int, int, int] | None:
+    """(CheckSum, security directory offset, size) of a PE image, or None when it is not a PE."""
+    if len(data) < 0x40 or data[:2] != b"MZ":
+        return None
+    e_lfanew = int.from_bytes(data[0x3C:0x40], "little")
+    if e_lfanew + 24 > len(data) or data[e_lfanew:e_lfanew + 4] != b"PE\0\0":
+        return None
+    opt = e_lfanew + 24
+    magic = int.from_bytes(data[opt:opt + 2], "little")
+    dirs = opt + (96 if magic == 0x10B else 112)
+    if dirs + 5 * 8 > len(data):
+        return None
+    checksum = int.from_bytes(data[opt + 64:opt + 68], "little")
+    sec = dirs + 4 * 8
+    return (checksum, int.from_bytes(data[sec:sec + 4], "little"), int.from_bytes(data[sec + 4:sec + 8], "little"))
+
+
+def assert_unsigned_stub_header(path: Path) -> None:
+    """The installed BetterRecall-Setup.exe is the stub with CheckSum and the security directory
+    zeroed (br-installer copy_stub_exe); integrity.json hashes the stub as built. Both only match
+    when the built stub already has CheckSum 0 and no certificate table (checkpoint 5 C5)."""
+    info = pe_checksum_and_security_dir(path.read_bytes())
+    if info is None:
+        raise SystemExit(f"build_installer: {path} is not a PE image")
+    checksum, sec_off, sec_size = info
+    if checksum != 0 or sec_off != 0 or sec_size != 0:
+        raise SystemExit(
+            f"build_installer: {path} must be built with CheckSum 0 and no certificate table "
+            f"(found CheckSum {checksum:#x}, security directory {sec_off:#x}+{sec_size:#x}); "
+            "the installed setup copy would not match integrity.json"
+        )
+
+
 def sha256_file(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
@@ -300,6 +333,9 @@ def _self_test() -> None:
     # 3. PE import parser on the running Python executable itself.
     py_imports = pe_imports_file(Path(sys.executable))
     assert isinstance(py_imports, list) and all(isinstance(d, str) for d in py_imports)
+    # 4. Stub header guard: the synthetic PE has CheckSum 0 and no security directory.
+    assert pe_checksum_and_security_dir(pe_ok)[0] == 0
+    assert pe_checksum_and_security_dir(b"not a pe") is None
     print("build_installer self-test ok")
 
 
@@ -404,6 +440,7 @@ def main() -> None:
 
     assert_no_vcruntime(installer_stub)
     assert_no_vcruntime(layout_mcp)
+    assert_unsigned_stub_header(installer_stub)
 
     signed_layout_files: list[Path] = []
     if a.sign and signtool is not None:

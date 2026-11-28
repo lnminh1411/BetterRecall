@@ -445,7 +445,7 @@ Vector search needs no ANN library at v1 sizes: 30 days of 2 s keyframes after d
 
 ## 9. Build
 
-- .NET SDK 10.0.403, Rust toolchain via `rustup` (stable, `x86_64-pc-windows-msvc` target), `BetterRecall.slnx`, `Directory.Build.props` (nullable on, artifacts output under `artifacts\`, `win-x64`).
+- .NET SDK 10.0.403, Rust toolchain via `rustup` (pinned to 1.100.1 in `rust\rust-toolchain.toml`, `x86_64-pc-windows-msvc` target), `BetterRecall.slnx`, `Directory.Build.props` (nullable on, artifacts output under `artifacts\`, `win-x64`).
 - CLI, MCP and Stub publish Native AOT. Agent and Worker are Rust binaries built by their wrapper projects: `BetterRecall.Agent.csproj` runs `cargo build -p br-agent` and ships `BetterRecall.Agent.exe` (icon, version information and `app.manifest` embedded by `build.rs` through `rc.exe`) with `sqlite3mc.dll`, `libSkiaSharp.dll`, `libvpl.dll` and the codec DLLs; `BetterRecall.Worker.csproj` runs `cargo build -p br-worker` and ships `BetterRecall.Worker.exe` next to the OpenVINO and ONNX Runtime native DLLs. UI publishes unpackaged and self-contained (`WindowsPackageType=None`, `WindowsAppSDKSelfContained=true`).
 - Contracts is AOT and trim compatible: System.Text.Json source generation only. The agent, CLI and MCP all run `br-core`; the C# Core library is gone.
 - Build one project without rebuilding Contracts: `dotnet build src/<Project> -p:BuildProjectReferences=false`.

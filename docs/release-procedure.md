@@ -22,7 +22,7 @@ Output in `artifacts\release\`: `BetterRecall-Setup-<version>.exe`, its notices 
 ## 3. Test
 
 1. Windows Sandbox install test: `python Scripts/sandbox_installer_test.py` (fresh install, upgrade from the previous release, Modify, uninstall with and without data).
-2. With `--sign`: `Scripts\sandbox_sign_test.py` in the sandbox.
+2. With `--sign`: `Scripts\sandbox_sign_test.py` in the sandbox. It signs a copy of the unsigned installer with a throwaway certificate and checks the trailer and stub; it does not cover the layout signing of `build_installer.py --sign` or the agent's integrity check on signed binaries, so also run the installer sandbox test on the signed build.
 3. Start the installed app in the sandbox, run a search, save a replay, open every settings page.
 
 ## 4. VirusTotal
@@ -50,5 +50,5 @@ Unsigned builds are flagged more often by heuristic engines; that is one reason 
 
 ## 6. After release
 
-- Triage new GitHub issues daily for the first week (labels: `bug`, `enhancement`, `question`, `needs-info`, `release-blocker`; security reports go through private advisories, see `SECURITY.md`).
+- Triage new GitHub issues daily for the first week (labels: `bug`, `enhancement`, `question`, `needs-info`, `needs-triage`, `release-blocker`; the issue forms apply `needs-triage`, so the label must exist in the repository; security reports go through private advisories, see `SECURITY.md`).
 - If a release is broken, publish a fixed version rather than deleting the release: installed copies only ever move forward.

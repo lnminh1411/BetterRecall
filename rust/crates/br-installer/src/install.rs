@@ -476,7 +476,10 @@ where
             op: "install",
         };
 
-        if progress.cancelled() {
+        // Checkpoint 5 C1: the worker owns the point of no return. A Cancel that arrives after
+        // this commit (during launcher cleanup or the swap) is ignored instead of silently
+        // turning into a stopped model download.
+        if !progress.commit() {
             let _ = fs::remove_dir_all(&staged.dir);
             log_line(&ctx.home, "install cancelled before swap");
             return Err(InstallError::Cancelled);
@@ -521,6 +524,8 @@ where
         // C1: if any component was downloaded and the agent was started by this run, restart it
         // (holding SETUP_MUTEX only around close + start) so the worker loads the new models.
         if result == ModelsResult::Complete && downloaded_files > 0 && agent_started {
+            // Checkpoint 5 X1: leave DownloadingModels so "Stop download" no longer applies.
+            progress.step(Step::Closing);
             let _mutex = acquire_setup_mutex(&ctx.home)?;
             let _ = close_running_hooked(ctx)?;
             start_agent(ctx)?;
@@ -798,7 +803,8 @@ fn modify_with_progress_inner(
         return Err(InstallError::Integrity(e.to_string()));
     }
 
-    if progress.cancelled() {
+    // Checkpoint 5 X2: point of no return for Modify (see install).
+    if !progress.commit() {
         log_line(&ctx.home, "modify cancelled before saving settings");
         return Err(InstallError::Cancelled);
     }
@@ -831,7 +837,7 @@ fn modify_with_progress_inner(
             let (result, downloaded_files) = download_models_set(&ctx.home, &cat, set, progress);
 
             // F4: check cancel before the model removal step.
-            if result == ModelsResult::Cancelled || progress.cancelled() {
+            if result == ModelsResult::Cancelled || progress.stop_models_requested() {
                 if !full_only.is_empty() {
                     log_line(&ctx.home, "modify cancelled before removing full-only models");
                 }
@@ -979,7 +985,7 @@ fn download_models_set(
         &components,
         &fetch_opts,
         &bridge,
-        &|| progress.cancelled(),
+        &|| progress.stop_models_requested(),
     ) {
         Ok(report) => {
             log_line(

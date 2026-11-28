@@ -39,20 +39,25 @@ def sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+class QuotaError(Exception):
+    pass
+
+
 def request(method: str, url: str, key: str, body: bytes | None = None, ctype: str | None = None) -> dict | None:
-    req = urllib.request.Request(url, data=body, method=method, headers={"x-apikey": key, "accept": "application/json"})
-    if ctype:
-        req.add_header("content-type", ctype)
-    try:
-        with urllib.request.urlopen(req, timeout=120) as r:
-            return json.loads(r.read() or b"{}")
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            return None
-        if e.code == 429:
-            time.sleep(60)   # public API: 4 requests a minute
-            return request(method, url, key, body, ctype)
-        raise
+    for _ in range(5):
+        req = urllib.request.Request(url, data=body, method=method, headers={"x-apikey": key, "accept": "application/json"})
+        if ctype:
+            req.add_header("content-type", ctype)
+        try:
+            with urllib.request.urlopen(req, timeout=120) as r:
+                return json.loads(r.read() or b"{}")
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return None
+            if e.code != 429:
+                raise
+        time.sleep(60)   # public API: 4 requests a minute
+    raise QuotaError("VirusTotal kept answering 429 (quota used up?)")
 
 
 def multipart(path: Path) -> tuple[bytes, str]:
@@ -95,11 +100,23 @@ def main() -> int:
 
     files = [Path(a.installer)]
     if a.layout:
-        files += sorted(p for p in Path(a.layout).rglob("*") if p.suffix.lower() in PE_SUFFIXES)
+        layout = Path(a.layout)
+        if not layout.is_dir():
+            print(f"--layout is not a folder: {layout}", file=sys.stderr)
+            return 3
+        pes = sorted(p for p in layout.rglob("*") if p.suffix.lower() in PE_SUFFIXES)
+        if not pes:
+            print(f"--layout holds no .exe or .dll files: {layout}", file=sys.stderr)
+            return 3
+        files += pes
+    for path in files:
+        if not path.is_file():
+            print(f"not a file: {path}", file=sys.stderr)
+            return 3
     out, unknown, pending, dirty = {}, [], [], False
     for path in files:
-        digest = sha256(path)
         try:
+            digest = sha256(path)
             report = request("GET", f"{API}/files/{digest}", key)
             if report is None and a.upload:
                 print(f"upload  {path.name}")
@@ -110,15 +127,17 @@ def main() -> int:
                         break
                     time.sleep(30)
                     report = request("GET", f"{API}/files/{digest}", key)
-        except (urllib.error.URLError, OSError, KeyError) as e:
+            if report is not None:
+                v = verdict(report)
+        except (urllib.error.URLError, OSError, KeyError, ValueError, QuotaError) as e:
             print(f"error   {path.name}: {e}", file=sys.stderr)
             return 3
         if report is None:
             unknown.append(str(path))
             print(f"unknown {path.name} {digest}")
             continue
-        v = verdict(report)
-        if not v["stats"]:
+        # D4: no engine results yet means pending, whatever the stats say
+        if not v["stats"] or not report["data"]["attributes"].get("last_analysis_results"):
             pending.append(str(path))
             print(f"pending {path.name}")
             continue

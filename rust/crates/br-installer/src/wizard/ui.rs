@@ -7,7 +7,7 @@ use std::ffi::{OsString, c_void};
 use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
@@ -42,7 +42,7 @@ use crate::install::{
     present_full_only_components, resolve_models_dir, uninstall_with_progress,
 };
 use crate::payload::read_license_text;
-use crate::progress::{Progress, Step};
+use crate::progress::{CancelGate, Press, Progress, Step};
 use crate::strings;
 use crate::wizard::ids::{
     IDC_FINISH_DETAIL, IDC_FINISH_SUMMARY, IDC_LICENCE_ACCEPT, IDC_LICENCE_EDIT,
@@ -77,7 +77,7 @@ struct WizardState {
     catalog: Option<Catalog>,
     dev_catalog: Option<Catalog>,
     model: WizardModel,
-    cancel_flag: Arc<AtomicBool>,
+    gate: Arc<CancelGate>,
     bytes_done: Arc<AtomicU64>,
     bytes_total: Arc<AtomicU64>,
     download_start: Option<Instant>,
@@ -89,13 +89,14 @@ struct WizardState {
 
 struct WizardProgress {
     hwnd: isize,
-    cancel_flag: Arc<AtomicBool>,
+    gate: Arc<CancelGate>,
     bytes_done: Arc<AtomicU64>,
     bytes_total: Arc<AtomicU64>,
 }
 
 impl Progress for WizardProgress {
     fn step(&self, step: Step) {
+        self.gate.on_step(step);
         let hwnd = HWND(self.hwnd as *mut c_void);
         unsafe {
             let _ = PostMessageW(Some(hwnd), WM_APP_STEP, WPARAM(step as usize), LPARAM(0));
@@ -113,7 +114,15 @@ impl Progress for WizardProgress {
     }
 
     fn cancelled(&self) -> bool {
-        self.cancel_flag.load(Ordering::SeqCst)
+        self.gate.cancelled()
+    }
+
+    fn commit(&self) -> bool {
+        self.gate.commit()
+    }
+
+    fn stop_models_requested(&self) -> bool {
+        self.gate.stop_models_requested()
     }
 }
 
@@ -168,7 +177,7 @@ pub fn run_wizard(ctx: Ctx, args: CliArgs) -> i32 {
         catalog,
         dev_catalog,
         model,
-        cancel_flag: Arc::new(AtomicBool::new(false)),
+        gate: Arc::new(CancelGate::new()),
         bytes_done: Arc::new(AtomicU64::new(0)),
         bytes_total: Arc::new(AtomicU64::new(0)),
         download_start: None,
@@ -547,14 +556,16 @@ unsafe extern "system" fn progress_proc(
             if code == PSN_QUERYCANCEL {
                 if let Some(state) = unsafe { page_state(hwnd) } {
                     if state.model.can_cancel() {
-                        state.cancel_flag.store(true, Ordering::SeqCst);
-                        let label = if state.model.current_step == Some(Step::DownloadingModels) {
-                            strings::PROGRESS_STOPPING_DOWNLOAD
-                        } else {
-                            strings::PROGRESS_CANCELLING
+                        // Checkpoint 5 C1: route the press by the step the worker is really in.
+                        let label = match state.gate.press() {
+                            Press::StopDownload => Some(strings::PROGRESS_STOPPING_DOWNLOAD),
+                            Press::Cancel => Some(strings::PROGRESS_CANCELLING),
+                            Press::Ignored => None,
                         };
-                        set_item_text(hwnd, IDC_PROGRESS_STATUS, label);
-                        set_sheet_cancel(hwnd, false, true);
+                        if let Some(label) = label {
+                            set_item_text(hwnd, IDC_PROGRESS_STATUS, label);
+                            set_sheet_cancel(hwnd, false, true);
+                        }
                     }
                     // Always block immediate sheet close on Progress; the worker posts WM_APP_DONE
                     // once cleanup finishes and advances to the Finish page.
@@ -692,7 +703,7 @@ fn spawn_worker(hwnd: HWND, state: &mut WizardState) {
     let model_mode = state.model.model_mode;
     let delete_data = state.model.delete_data;
     let hwnd_raw = hwnd.0 as isize;
-    let cancel_flag = Arc::clone(&state.cancel_flag);
+    let gate = Arc::clone(&state.gate);
     let bytes_done = Arc::clone(&state.bytes_done);
     let bytes_total = Arc::clone(&state.bytes_total);
     let dev_catalog = state.dev_catalog.clone();
@@ -700,7 +711,7 @@ fn spawn_worker(hwnd: HWND, state: &mut WizardState) {
     let handle = thread::spawn(move || {
         let progress = WizardProgress {
             hwnd: hwnd_raw,
-            cancel_flag,
+            gate,
             bytes_done,
             bytes_total,
         };

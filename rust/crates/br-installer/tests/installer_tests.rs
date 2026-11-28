@@ -3287,3 +3287,127 @@ fn n2_delete_data_with_unknown_file_reports_folder_kept() {
         msg.detail
     );
 }
+
+// Checkpoint 5 C3: "Stop download" during an install stops only the models: the app is
+// installed, the run reports Installed { models: Cancelled } (exit 0), and the chosen model mode
+// is kept (the Finish page says the choice was saved and the Models page resumes it).
+#[test]
+fn cp5_stop_download_keeps_install_and_chosen_mode() {
+    let env = TestEnv::new("cp5-stop");
+    let exe = env.build_installer(
+        "setup",
+        b"MZ-STUB",
+        "0.4.0-dev",
+        &[(InstallLayout::AGENT_EXE, b"agent")],
+    );
+    let (_server, catalog) = start_tiny_model_server();
+
+    struct StopOnDownload {
+        downloading: AtomicBool,
+    }
+    impl Progress for StopOnDownload {
+        fn step(&self, step: Step) {
+            if step == Step::DownloadingModels {
+                self.downloading.store(true, AtomicOrdering::SeqCst);
+            }
+        }
+        fn bytes(&self, _done: u64, _total: u64) {}
+        fn cancelled(&self) -> bool {
+            false
+        }
+        fn stop_models_requested(&self) -> bool {
+            self.downloading.load(AtomicOrdering::SeqCst)
+        }
+    }
+
+    let out = install_with_progress(
+        &env.ctx,
+        &exe,
+        &InstallOpts {
+            allow_downgrade: false,
+            model_mode: ModelMode::Minimal,
+            skip_model_download: false,
+            catalog: Some(catalog),
+            integrity_key: None,
+        },
+        available_disk_space,
+        &StopOnDownload {
+            downloading: AtomicBool::new(false),
+        },
+    )
+    .expect("install with stopped download");
+    assert_eq!(
+        out,
+        Outcome::Installed {
+            version: "0.4.0-dev".to_string(),
+            models: ModelsResult::Cancelled,
+        }
+    );
+    assert_eq!(read_model_mode(&env.ctx), Some(ModelMode::Minimal));
+    assert!(env.ctx.install_dir.join(InstallLayout::AGENT_EXE).exists());
+}
+
+// Checkpoint 5 C1: a cancel that arrives after the point of no return is ignored; the run
+// completes and still downloads the models (no silent "download stopped").
+#[test]
+fn cp5_cancel_after_commit_is_ignored() {
+    use br_installer::progress::{CancelGate, Press};
+    let env = TestEnv::new("cp5-commit");
+    let exe = env.build_installer(
+        "setup",
+        b"MZ-STUB",
+        "0.4.0-dev",
+        &[(InstallLayout::AGENT_EXE, b"agent")],
+    );
+    let (_server, catalog) = start_tiny_model_server();
+
+    struct PressAfterSwap {
+        gate: CancelGate,
+        press: Mutex<Option<Press>>,
+    }
+    impl Progress for PressAfterSwap {
+        fn step(&self, step: Step) {
+            self.gate.on_step(step);
+            if step == Step::Swapping {
+                *self.press.lock().unwrap() = Some(self.gate.press());
+            }
+        }
+        fn bytes(&self, _done: u64, _total: u64) {}
+        fn cancelled(&self) -> bool {
+            self.gate.cancelled()
+        }
+        fn commit(&self) -> bool {
+            self.gate.commit()
+        }
+        fn stop_models_requested(&self) -> bool {
+            self.gate.stop_models_requested()
+        }
+    }
+
+    let p = PressAfterSwap {
+        gate: CancelGate::new(),
+        press: Mutex::new(None),
+    };
+    let out = install_with_progress(
+        &env.ctx,
+        &exe,
+        &InstallOpts {
+            allow_downgrade: false,
+            model_mode: ModelMode::Minimal,
+            skip_model_download: false,
+            catalog: Some(catalog),
+            integrity_key: None,
+        },
+        available_disk_space,
+        &p,
+    )
+    .expect("install completes");
+    assert_eq!(*p.press.lock().unwrap(), Some(Press::Ignored));
+    assert_eq!(
+        out,
+        Outcome::Installed {
+            version: "0.4.0-dev".to_string(),
+            models: ModelsResult::Complete,
+        }
+    );
+}
