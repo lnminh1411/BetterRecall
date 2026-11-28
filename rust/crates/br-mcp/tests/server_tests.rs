@@ -140,7 +140,15 @@ fn tool_calls_map_to_pipe_verbs() {
     let r = parse(s.handle(
         r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_history","arguments":{"q":"acme","limit":5,"evil":"x"}}}"#,
     ));
-    assert_eq!(sent.borrow().last().map(String::as_str), Some(r#"search {"q":"acme","limit":6}"#));
+    let sent_search = sent.borrow().last().expect("search call").clone();
+    let sent_json: Value =
+        serde_json::from_str(sent_search.strip_prefix("search ").expect("search verb"))
+            .expect("valid search json");
+    assert_eq!(sent_json["q"].as_str(), Some("acme"));
+    assert_eq!(sent_json["limit"].as_u64(), Some(5));
+    assert!(sent_json.get("evil").is_none());
+    assert!(sent_json.get("offset").is_none());
+    assert!(sent_json["to"].as_str().is_some_and(|s| s.ends_with('Z')));
     assert_eq!(r["result"]["isError"].as_bool(), Some(false));
     assert_eq!(
         r["result"]["content"][0]["text"].as_str(),
@@ -510,9 +518,11 @@ fn make_search_pipe_server(
         sent.borrow_mut().push(line.to_string());
         let json_part = line.strip_prefix("search ").expect("search verb");
         let req: Value = serde_json::from_str(json_part).expect("valid search json");
-        let limit = req["limit"].as_u64().unwrap_or(20) as usize;
-        let n = total.min(limit);
-        let results: Vec<Value> = (0..n)
+        let limit = req.get("limit").and_then(Value::as_u64).unwrap_or(20) as usize;
+        let offset = req.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
+        let start = offset.min(total);
+        let end = offset.saturating_add(limit).min(total);
+        let results: Vec<Value> = (start..end)
             .map(|i| {
                 serde_json::json!({
                     "id": format!("s_{i:03}"),
@@ -527,12 +537,18 @@ fn make_search_pipe_server(
                 })
             })
             .collect();
-        let body = serde_json::json!({
+        let has_more = end < total;
+        let mut body = serde_json::json!({
             "count": results.len(),
-            "truncated": total > n,
+            "truncated": false,
             "tookMs": 7,
             "results": results
         });
+        if has_more {
+            body.as_object_mut()
+                .unwrap()
+                .insert("hasMore".to_string(), Value::Bool(true));
+        }
         PipeAnswer::ok(serde_json::to_string(&body).unwrap())
     })
 }
@@ -598,7 +614,7 @@ fn search_history_paging_and_structured_content() {
     let sent = Rc::new(RefCell::new(Vec::new()));
     let mut s = make_search_pipe_server(5, Rc::clone(&sent));
 
-    // Page 1: limit 2 -> asks pipe for 0+2+1 = 3, returns [s_000, s_001] + nextCursor.
+    // Page 1: limit 2 -> forwards limit 2 (no offset), returns [s_000, s_001] + nextCursor.
     let p1 = parse(s.handle(
         r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_history","arguments":{"q":"invoice","limit":2}}}"#,
     ));
@@ -614,18 +630,25 @@ fn search_history_paging_and_structured_content() {
         .collect();
     assert_eq!(ids1, vec!["s_000", "s_001"]);
     assert_eq!(p1_text["count"].as_u64(), Some(2));
+    assert_eq!(p1_text["hasMore"].as_bool(), Some(true));
     let c1 = p1_text["nextCursor"]
         .as_str()
         .expect("nextCursor on page 1")
         .to_string();
 
-    // Pipe request never contains cursor and asks for offset+limit+1 = 3.
+    // Pipe request never contains cursor, forwards client limit 2, and sets anchor `to`.
     let req1_json: Value =
         serde_json::from_str(sent.borrow()[0].strip_prefix("search ").unwrap()).unwrap();
     assert!(req1_json.get("cursor").is_none());
-    assert_eq!(req1_json["limit"].as_u64(), Some(3));
+    assert!(req1_json.get("offset").is_none());
+    assert_eq!(req1_json["limit"].as_u64(), Some(2));
+    let anchor_to = req1_json["to"]
+        .as_str()
+        .expect("anchor to on page 1")
+        .to_string();
+    assert!(anchor_to.ends_with('Z'));
 
-    // Page 2: follow cursor -> asks pipe for 2+2+1 = 5, returns [s_002, s_003] + nextCursor.
+    // Page 2: follow cursor -> forwards offset 2, limit 2, and same anchor `to`.
     let p2 = parse(s.handle(&format!(
         r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"search_history","arguments":{{"q":"invoice","limit":2,"cursor":"{c1}"}}}}}}"#
     )));
@@ -649,9 +672,11 @@ fn search_history_paging_and_structured_content() {
     let req2_json: Value =
         serde_json::from_str(sent.borrow()[1].strip_prefix("search ").unwrap()).unwrap();
     assert!(req2_json.get("cursor").is_none());
-    assert_eq!(req2_json["limit"].as_u64(), Some(5));
+    assert_eq!(req2_json["offset"].as_u64(), Some(2));
+    assert_eq!(req2_json["limit"].as_u64(), Some(2));
+    assert_eq!(req2_json["to"].as_str(), Some(anchor_to.as_str()));
 
-    // Page 3 (last page): follow cursor -> asks pipe for 4+2+1 = 7, returns [s_004], no nextCursor.
+    // Page 3 (last page): follow cursor -> forwards offset 4, limit 2, returns [s_004], no nextCursor.
     let p3 = parse(s.handle(&format!(
         r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"search_history","arguments":{{"q":"invoice","limit":2,"cursor":"{c2}"}}}}}}"#
     )));
@@ -672,7 +697,92 @@ fn search_history_paging_and_structured_content() {
     let req3_json: Value =
         serde_json::from_str(sent.borrow()[2].strip_prefix("search ").unwrap()).unwrap();
     assert!(req3_json.get("cursor").is_none());
-    assert_eq!(req3_json["limit"].as_u64(), Some(7));
+    assert_eq!(req3_json["offset"].as_u64(), Some(4));
+    assert_eq!(req3_json["limit"].as_u64(), Some(2));
+    assert_eq!(req3_json["to"].as_str(), Some(anchor_to.as_str()));
+}
+
+#[test]
+fn search_history_omits_limit_by_default_and_reuses_anchor_to() {
+    let sent = Rc::new(RefCell::new(Vec::new()));
+    let mut s = make_search_pipe_server(25, Rc::clone(&sent));
+
+    // No limit supplied -> pipe request must omit `limit` so agent's ipc.defaultResults applies.
+    let p1 = parse(s.handle(
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_history","arguments":{"q":"invoice"}}}"#,
+    ));
+    assert_eq!(p1["result"]["isError"].as_bool(), Some(false));
+    let req1: Value =
+        serde_json::from_str(sent.borrow()[0].strip_prefix("search ").unwrap()).unwrap();
+    assert!(req1.get("limit").is_none(), "limit must not be defaulted: {req1}");
+    let anchor = req1["to"].as_str().expect("anchor to").to_string();
+
+    let c1 = p1["result"]["structuredContent"]["nextCursor"]
+        .as_str()
+        .expect("nextCursor when hasMore is true")
+        .to_string();
+
+    let p2 = parse(s.handle(&format!(
+        r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"search_history","arguments":{{"q":"invoice","cursor":"{c1}"}}}}}}"#
+    )));
+    assert_eq!(p2["result"]["isError"].as_bool(), Some(false));
+    let req2: Value =
+        serde_json::from_str(sent.borrow()[1].strip_prefix("search ").unwrap()).unwrap();
+    assert!(req2.get("limit").is_none());
+    assert_eq!(req2["offset"].as_u64(), Some(20));
+    assert_eq!(req2["to"].as_str(), Some(anchor.as_str()));
+    assert!(
+        p2["result"]["structuredContent"].get("nextCursor").is_none(),
+        "no nextCursor when hasMore is false"
+    );
+}
+
+#[test]
+fn search_history_degraded_change_between_pages_returns_error() {
+    let call_num = Rc::new(RefCell::new(0usize));
+    let call_num_c = Rc::clone(&call_num);
+    let mut s = McpServer::new(move |_line: &str| {
+        let mut n = call_num_c.borrow_mut();
+        *n += 1;
+        let body = if *n == 1 {
+            serde_json::json!({
+                "count": 2,
+                "truncated": false,
+                "tookMs": 5,
+                "results": [{"id": "s_1"}, {"id": "s_2"}],
+                "degraded": "vector",
+                "hasMore": true
+            })
+        } else {
+            serde_json::json!({
+                "count": 2,
+                "truncated": false,
+                "tookMs": 5,
+                "results": [{"id": "s_3"}, {"id": "s_4"}],
+                "hasMore": false
+            })
+        };
+        PipeAnswer::ok(serde_json::to_string(&body).unwrap())
+    });
+
+    let p1 = parse(s.handle(
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_history","arguments":{"q":"invoice","limit":2}}}"#,
+    ));
+    assert_eq!(p1["result"]["isError"].as_bool(), Some(false));
+    let cursor = p1["result"]["structuredContent"]["nextCursor"]
+        .as_str()
+        .expect("nextCursor")
+        .to_string();
+
+    let p2 = parse(s.handle(&format!(
+        r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"search_history","arguments":{{"q":"invoice","limit":2,"cursor":"{cursor}"}}}}}}"#
+    )));
+    assert_eq!(p2["result"]["isError"].as_bool(), Some(true));
+    assert_eq!(
+        p2["result"]["content"][0]["text"].as_str(),
+        Some("Search results changed; search again without cursor.")
+    );
+    assert!(p2["result"].get("structuredContent").is_none());
 }
 
 #[test]

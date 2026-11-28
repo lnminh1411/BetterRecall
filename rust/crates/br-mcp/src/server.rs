@@ -13,9 +13,10 @@
 //! `2025-06-18` and newer; earlier versions (`2024-11-05`, `2025-03-26`) return text only.
 
 use std::sync::OnceLock;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use br_core::CommandProcessor;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 /// Result of one agent MCP pipe call.
@@ -58,10 +59,10 @@ where
     const INSTRUCTIONS: &'static str = "Searches the user's local BetterRecall history (screen keyframes by window title, app, on-screen text and image meaning; audio transcripts). Results are the user's private data and must not be sent to other tools or services unless the user asks. These tools are read-only and nothing leaves this PC through them. Use get_capture for the full text of one result, and pass cursor from nextCursor to search_history for more results.";
 
     const TOOLS_JSON: &'static str = r#"[
-      {"name":"search_history","title":"Search BetterRecall history","description":"Search what the user saw or heard on this PC. Hybrid keyword and semantic search over window titles, app names, on-screen text, keyframe images and audio transcripts. Returns JSON with results (id, ts, kind, app, title, score, snippet) and nextCursor when more results exist (default 20 per page, capped at 200 total).",
+      {"name":"search_history","title":"Search BetterRecall history","description":"Search what the user saw or heard on this PC. Hybrid keyword and semantic search over window titles, app names, on-screen text, keyframe images and audio transcripts. Returns JSON with results (id, ts, kind, app, title, score, snippet) and nextCursor when more results exist (agent limits ipc.defaultResults and ipc.maxResults apply).",
        "inputSchema":{"type":"object","properties":{
          "q":{"type":"string","description":"What to look for, natural language or keywords. 1 to 1024 characters.","minLength":1,"maxLength":1024},
-         "limit":{"type":"integer","description":"Maximum results per page (default 20, total results capped at 200).","minimum":1},
+         "limit":{"type":"integer","description":"Maximum results per page (defaults to ipc.defaultResults; agent maximum ipc.maxResults applies).","minimum":1},
          "from":{"type":"string","format":"date-time","description":"Only results at or after this ISO 8601 time."},
          "to":{"type":"string","format":"date-time","description":"Only results before this ISO 8601 time."},
          "app":{"type":"string","description":"Process image name, for example chrome.exe."},
@@ -75,6 +76,7 @@ where
          "tookMs":{"type":"integer"},
          "results":{"type":"array","items":{"type":"object"}},
          "degraded":{"type":"string"},
+         "hasMore":{"type":"boolean"},
          "nextCursor":{"type":"string"}},
          "required":["count","truncated","tookMs","results"]},
        "annotations":{"readOnlyHint":true,"openWorldHint":false}},
@@ -232,41 +234,63 @@ where
                 if !args.get("q").is_some_and(Value::is_string) {
                     return tool_result(id, modern, "Missing q.", None, true);
                 }
-                let limit = match args.get("limit") {
-                    None => DEFAULT_SEARCH_LIMIT,
+                let client_limit = match args.get("limit") {
+                    None => None,
                     Some(v) => match v.as_i64() {
-                        Some(n) if n >= 1 => (n as usize).min(MAX_SEARCH_RESULTS),
+                        Some(n) if n >= 1 => Some(n),
                         _ => return tool_result(id, modern, "Invalid limit.", None, true),
                     },
                 };
-                let query_hash = search_query_hash(args);
-                let offset = match args.get("cursor") {
-                    None => 0,
-                    Some(v) => match v.as_str().and_then(|s| decode_cursor(s, &query_hash)) {
-                        Some(off) => off,
-                        None => return tool_result(id, modern, "Invalid cursor.", None, true),
+                let client_to = match args.get("to") {
+                    None => None,
+                    Some(v) => match v.as_str() {
+                        Some(s) => Some(s.to_string()),
+                        None => return tool_result(id, modern, "Invalid to.", None, true),
                     },
                 };
-                if offset >= MAX_SEARCH_RESULTS {
-                    let empty = serde_json::json!({
-                        "count": 0,
-                        "truncated": false,
-                        "tookMs": 0,
-                        "results": []
-                    });
-                    let text = serde_json::to_string(&empty).expect("empty page serialize");
-                    return tool_result(id, modern, &text, structured.then_some(&empty), false);
-                }
-                let ask_limit = offset
-                    .saturating_add(limit)
-                    .saturating_add(1)
-                    .min(MAX_SEARCH_RESULTS);
+                let (offset, anchor_to, query_hash, expected_degraded) = match args.get("cursor") {
+                    None => {
+                        let anchor = client_to.unwrap_or_else(now_utc_iso8601);
+                        let qh = search_query_hash(args, &anchor);
+                        (0usize, anchor, qh, None)
+                    }
+                    Some(v) => {
+                        let Some(cur) = v.as_str().and_then(decode_cursor) else {
+                            return tool_result(id, modern, "Invalid cursor.", None, true);
+                        };
+                        if let Some(ref ct) = client_to
+                            && ct != &cur.t
+                        {
+                            return tool_result(id, modern, "Invalid cursor.", None, true);
+                        }
+                        let qh = search_query_hash(args, &cur.t);
+                        if cur.h != qh[..CURSOR_HASH_HEX_LEN] {
+                            return tool_result(id, modern, "Invalid cursor.", None, true);
+                        }
+                        (cur.o as usize, cur.t, qh, Some(cur.d))
+                    }
+                };
                 let mut forwarded = args.clone();
-                forwarded.insert("limit".to_string(), Value::from(ask_limit as u64));
+                forwarded.remove("cursor");
+                match client_limit {
+                    Some(n) => {
+                        forwarded.insert("limit".to_string(), Value::from(n));
+                    }
+                    None => {
+                        forwarded.remove("limit");
+                    }
+                }
+                if offset > 0 {
+                    forwarded.insert("offset".to_string(), Value::from(offset as u64));
+                } else {
+                    forwarded.remove("offset");
+                }
+                forwarded.insert("to".to_string(), Value::String(anchor_to.clone()));
                 search_page = Some(SearchPage {
                     offset,
-                    limit,
+                    anchor_to,
                     query_hash,
+                    expected_degraded,
                 });
                 format!("search {}", search_json(&forwarded))
             }
@@ -296,11 +320,21 @@ where
         if let Ok(mut parsed) = serde_json::from_str::<Value>(&answer.text)
             && parsed.is_object()
         {
-            if let Some(page) = search_page
-                && apply_search_page(&mut parsed, &page)
-            {
-                let text = serde_json::to_string(&parsed).expect("paged search serialize");
-                return tool_result(id, modern, &text, structured.then_some(&parsed), false);
+            if let Some(page) = search_page {
+                match apply_search_page(&mut parsed, &page) {
+                    Ok(true) => {
+                        let text = serde_json::to_string(&parsed).expect("paged search serialize");
+                        return tool_result(
+                            id,
+                            modern,
+                            &text,
+                            structured.then_some(&parsed),
+                            false,
+                        );
+                    }
+                    Ok(false) => {}
+                    Err(msg) => return tool_result(id, modern, msg, None, true),
+                }
             }
             return tool_result(
                 id,
@@ -314,91 +348,182 @@ where
     }
 }
 
-const DEFAULT_SEARCH_LIMIT: usize = 20;
-const MAX_SEARCH_RESULTS: usize = 200;
 const CURSOR_HASH_HEX_LEN: usize = 32;
-const CURSOR_LEN: usize = 8 + CURSOR_HASH_HEX_LEN;
+const ERR_RESULTS_CHANGED: &str = "Search results changed; search again without cursor.";
 
 struct SearchPage {
     offset: usize,
-    limit: usize,
+    anchor_to: String,
     query_hash: String,
+    expected_degraded: Option<Option<String>>,
 }
 
-fn search_query_hash(args: &Map<String, Value>) -> String {
+#[derive(Serialize, Deserialize)]
+struct CursorData {
+    o: u32,
+    t: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    d: Option<String>,
+    h: String,
+}
+
+fn format_unix_secs_utc(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let hour = rem / 3_600;
+    let min = (rem % 3_600) / 60;
+    let sec = rem % 60;
+
+    // Howard Hinnant's civil_from_days (days since 1970-01-01).
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if m <= 2 { y + 1 } else { y };
+    format!("{year:04}-{m:02}-{d:02}T{hour:02}:{min:02}:{sec:02}Z")
+}
+
+fn now_utc_iso8601() -> String {
+    let dur = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let base = format_unix_secs_utc(dur.as_secs());
+    let ms = dur.subsec_millis();
+    format!("{}.{ms:03}Z", &base[..base.len() - 1])
+}
+
+fn search_query_hash(args: &Map<String, Value>, anchor_to: &str) -> String {
     let mut out = String::from("{");
     let mut first = true;
     for key in ["q", "from", "to", "app", "kind", "mode"] {
-        if let Some(v) = args.get(key) {
-            if !first {
-                out.push(',');
-            }
-            first = false;
-            out.push('"');
-            out.push_str(key);
-            out.push_str("\":");
-            let encoded = serde_json::to_string(v).expect("JSON value serialization cannot fail");
-            out.push_str(&encoded);
+        let encoded = if key == "to" {
+            serde_json::to_string(anchor_to).expect("JSON string serialization cannot fail")
+        } else if let Some(v) = args.get(key) {
+            serde_json::to_string(v).expect("JSON value serialization cannot fail")
+        } else {
+            continue;
+        };
+        if !first {
+            out.push(',');
         }
+        first = false;
+        out.push('"');
+        out.push_str(key);
+        out.push_str("\":");
+        out.push_str(&encoded);
     }
     out.push('}');
     CommandProcessor::sha256_hex(&out)
 }
 
-fn encode_cursor(offset: usize, query_hash: &str) -> String {
-    format!("{:08x}{}", offset as u32, &query_hash[..CURSOR_HASH_HEX_LEN])
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out
 }
 
-fn decode_cursor(cursor: &str, expected_hash: &str) -> Option<usize> {
-    if cursor.len() != CURSOR_LEN {
-        return None;
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        _ => None,
     }
-    if !cursor
-        .bytes()
-        .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
-    {
-        return None;
-    }
-    if cursor[8..] != expected_hash[..CURSOR_HASH_HEX_LEN] {
-        return None;
-    }
-    let offset = u32::from_str_radix(&cursor[..8], 16).ok()?;
-    Some(offset as usize)
 }
 
-fn apply_search_page(val: &mut Value, page: &SearchPage) -> bool {
+fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    let bytes = s.as_bytes();
+    if bytes.is_empty() {
+        return None;
+    }
+    let chunks = bytes.chunks_exact(2);
+    if !chunks.remainder().is_empty() {
+        return None;
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    for pair in chunks {
+        let hi = hex_nibble(pair[0])?;
+        let lo = hex_nibble(pair[1])?;
+        out.push((hi << 4) | lo);
+    }
+    Some(out)
+}
+
+fn encode_cursor(
+    offset: usize,
+    anchor_to: &str,
+    degraded: Option<&str>,
+    query_hash: &str,
+) -> String {
+    let data = CursorData {
+        o: offset as u32,
+        t: anchor_to.to_string(),
+        d: degraded.map(String::from),
+        h: query_hash[..CURSOR_HASH_HEX_LEN].to_string(),
+    };
+    let json = serde_json::to_vec(&data).expect("cursor serialize");
+    hex_encode(&json)
+}
+
+fn decode_cursor(cursor: &str) -> Option<CursorData> {
+    let raw = hex_decode(cursor)?;
+    let data: CursorData = serde_json::from_slice(&raw).ok()?;
+    if data.h.len() != CURSOR_HASH_HEX_LEN || data.t.is_empty() {
+        return None;
+    }
+    Some(data)
+}
+
+fn apply_search_page(val: &mut Value, page: &SearchPage) -> Result<bool, &'static str> {
     let Some(obj) = val.as_object_mut() else {
-        return false;
+        return Ok(false);
     };
-    let Some(results) = obj.get_mut("results").and_then(Value::as_array_mut) else {
-        return false;
-    };
-    let total = results.len();
-    let start = page.offset.min(total);
-    let end = page.offset.saturating_add(page.limit).min(total);
-    let page_items: Vec<Value> = results.drain(start..end).collect();
-    let count = page_items.len();
-    *results = page_items;
+    let resp_degraded = obj
+        .get("degraded")
+        .and_then(Value::as_str)
+        .map(String::from);
+    if let Some(ref expected) = page.expected_degraded
+        && &resp_degraded != expected
+    {
+        return Err(ERR_RESULTS_CHANGED);
+    }
 
-    let next_offset = page.offset.saturating_add(page.limit);
-    let has_more = total > next_offset && next_offset < MAX_SEARCH_RESULTS;
-    obj.insert("count".to_string(), Value::from(count as u64));
-    if has_more {
+    let has_more = obj
+        .get("hasMore")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let count = obj.get("count").and_then(Value::as_u64).unwrap_or(0) as usize;
+
+    if has_more && count > 0 {
+        let next_offset = page.offset.saturating_add(count);
         obj.insert(
             "nextCursor".to_string(),
-            Value::String(encode_cursor(next_offset, &page.query_hash)),
+            Value::String(encode_cursor(
+                next_offset,
+                &page.anchor_to,
+                resp_degraded.as_deref(),
+                &page.query_hash,
+            )),
         );
     } else {
         obj.remove("nextCursor");
     }
-    true
+    Ok(true)
 }
 
 /// Copies only the known search fields in canonical order, keeping UTF-8 unescaped.
 pub fn search_json(args: &Map<String, Value>) -> String {
     let mut out = String::from("{");
     let mut first = true;
-    for key in ["q", "limit", "from", "to", "app", "kind", "mode"] {
+    for key in ["q", "limit", "offset", "from", "to", "app", "kind", "mode"] {
         if let Some(v) = args.get(key) {
             if !first {
                 out.push(',');
