@@ -294,7 +294,7 @@ fn get_dev_prop(
         return None;
     }
     let words: Vec<u16> = buf
-        .chunks_exact(2)
+        .as_chunks::<2>().0.iter()
         .map(|c| u16::from_ne_bytes([c[0], c[1]]))
         .collect();
     let len = words.iter().position(|&c| c == 0).unwrap_or(words.len());

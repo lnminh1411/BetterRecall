@@ -138,12 +138,12 @@ impl EmbeddingTable {
             let row_bytes = &bytes[row_off..row_off + dim * elem];
             let out = &mut dst[t * dim..(t + 1) * dim];
             if self.bf16 {
-                for (i, chunk) in row_bytes.chunks_exact(2).enumerate() {
+                for (i, chunk) in row_bytes.as_chunks::<2>().0.iter().enumerate() {
                     let bits = u16::from_le_bytes([chunk[0], chunk[1]]) as u32;
                     out[i] = f32::from_bits(bits << 16) * scale;
                 }
             } else {
-                for (i, chunk) in row_bytes.chunks_exact(4).enumerate() {
+                for (i, chunk) in row_bytes.as_chunks::<4>().0.iter().enumerate() {
                     let v = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
                     out[i] = v * scale;
                 }

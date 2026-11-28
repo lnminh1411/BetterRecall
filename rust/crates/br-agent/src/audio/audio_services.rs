@@ -354,7 +354,7 @@ impl AudioReplayEncoder {
 
     /// Peak below about -54 dBFS on 16-bit PCM: dither and idle-device noise.
     pub fn is_near_silent_16(data: &[u8]) -> bool {
-        for chunk in data.chunks_exact(2) {
+        for chunk in data.as_chunks::<2>().0 {
             let v = i16::from_le_bytes([chunk[0], chunk[1]]);
             if !(-64..=64).contains(&v) {
                 return false;

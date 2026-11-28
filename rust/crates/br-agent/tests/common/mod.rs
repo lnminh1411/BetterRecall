@@ -1316,7 +1316,7 @@ impl Lcg {
 
 pub fn screen_flat(w: i32, h: i32, v: u8) -> Vec<u8> {
     let mut px = vec![0u8; (w as usize) * (h as usize) * 4];
-    for c in px.chunks_exact_mut(4) {
+    for c in px.as_chunks_mut::<4>().0 {
         c[0] = v;
         c[1] = v;
         c[2] = v;
@@ -1388,7 +1388,7 @@ pub fn screen_ui(w: i32, h: i32) -> Vec<u8> {
 pub fn mean_abs_diff(a: &[u8], b: &[u8]) -> f64 {
     let mut sum = 0u64;
     let mut n = 0u64;
-    for (ca, cb) in a.chunks_exact(4).zip(b.chunks_exact(4)) {
+    for (ca, cb) in a.as_chunks::<4>().0.iter().zip(b.as_chunks::<4>().0.iter()) {
         for c in 0..3 {
             sum += ca[c].abs_diff(cb[c]) as u64;
             n += 1;

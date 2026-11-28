@@ -1194,7 +1194,7 @@ fn thumbnailer_resizes_to_webp_and_caches_in_ram() {
     let mut settings = Settings::default();
     settings.keyframes.thumb_cache_mb = 8;
     let mut px = vec![0u8; 640 * 360 * 4];
-    for (idx, chunk) in px.chunks_exact_mut(4).enumerate() {
+    for (idx, chunk) in px.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         chunk[0] = ((idx * 4) % 251) as u8;
         chunk[1] = 80;
         chunk[2] = 160;

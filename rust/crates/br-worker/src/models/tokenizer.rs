@@ -115,7 +115,7 @@ impl CharsMap {
             return None;
         }
         let trie = blob[4..4 + trie_bytes]
-            .chunks_exact(4)
+            .as_chunks::<4>().0.iter()
             .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
         let pool = blob[4 + trie_bytes..].to_vec();
@@ -239,7 +239,7 @@ impl GemmaTokenizer {
             }
         }
         // Longest user-defined piece first when splitting raw input segments.
-        user_defined.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        user_defined.sort_by_key(|e| std::cmp::Reverse(e.0.len()));
 
         let charsmap = if model.precompiled_charsmap.is_empty() {
             None

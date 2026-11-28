@@ -1,0 +1,44 @@
+[package]
+name = "br-ui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license = "AGPL-3.0-only"
+
+[[bin]]
+name = "br-ui"
+path = "src/main.rs"
+
+[dependencies]
+async-channel = "2"
+br-contracts = { path = "../br-contracts" }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+gpui = { package = "gpui-ce", version = "=0.3.0" }
+gpui_component = { package = "gpui_ce_components", version = "=0.3.0" }
+gpui_platform = { package = "gpui_ce_platform", version = "=0.3.0" }
+image = { version = "0.25", default-features = false }
+native-theme = { version = "=0.7.2", features = ["windows", "watch"] }
+raw-window-handle = "0.6"
+smallvec = "1"
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.62"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_Media_Audio",
+    "Win32_Media_KernelStreaming",
+    "Win32_Media_MediaFoundation",
+    "Win32_Media_Multimedia",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_UI_WindowsAndMessaging",
+]

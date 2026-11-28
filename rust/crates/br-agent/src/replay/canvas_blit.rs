@@ -153,7 +153,7 @@ impl CanvasBlit {
                     unsafe {
                         let line = uv_base.add((ty * 8 + r) * nv12.pitch + tx * 16);
                         let slice = std::slice::from_raw_parts_mut(line, 16);
-                        for pair in slice.chunks_exact_mut(2) {
+                        for pair in slice.as_chunks_mut::<2>().0 {
                             pair[0] = u_val;
                             pair[1] = v_val;
                         }

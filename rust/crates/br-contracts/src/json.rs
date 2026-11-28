@@ -103,7 +103,7 @@ pub mod dotnet_base64 {
                 _ => Err("invalid base64 character"),
             }
         };
-        for (idx, chunk) in bytes.chunks_exact(4).enumerate() {
+        for (idx, chunk) in bytes.as_chunks::<4>().0.iter().enumerate() {
             let is_last = (idx + 1) * 4 == bytes.len();
             let v0 = val(chunk[0])?;
             let v1 = val(chunk[1])?;

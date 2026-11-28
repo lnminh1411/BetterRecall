@@ -444,12 +444,12 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
     if bytes.is_empty() {
         return None;
     }
-    let chunks = bytes.chunks_exact(2);
-    if !chunks.remainder().is_empty() {
+    let (pairs, rest) = bytes.as_chunks::<2>();
+    if !rest.is_empty() {
         return None;
     }
     let mut out = Vec::with_capacity(bytes.len() / 2);
-    for pair in chunks {
+    for pair in pairs {
         let hi = hex_nibble(pair[0])?;
         let lo = hex_nibble(pair[1])?;
         out.push((hi << 4) | lo);
