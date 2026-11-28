@@ -1,0 +1,22 @@
+name: Feature request
+description: Suggest something BetterRecall should do.
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What do you want to do?
+      description: The task or problem, in your own words. What you do today without the feature helps too.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: Your idea
+      description: How it could work. Rough is fine.
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy
+      options:
+        - label: The idea keeps everything on the PC (no new network use), or I explain below why it needs the network.

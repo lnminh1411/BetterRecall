@@ -83,6 +83,8 @@ pub struct WizardButtons {
     pub cancel: bool,
     /// Custom label for the Next button (`None` uses the standard `"Next"`).
     pub next_label: Option<&'static str>,
+    /// Custom label for the Cancel button (`None` uses the standard `"Cancel"`).
+    pub cancel_label: Option<&'static str>,
 }
 
 /// Inputs used to initialize [`WizardModel`].
@@ -191,6 +193,7 @@ impl WizardModel {
                 finish: false,
                 cancel: true,
                 next_label: None,
+                cancel_label: None,
             },
             PageId::Models => WizardButtons {
                 back: self.action == Action::Install,
@@ -198,6 +201,7 @@ impl WizardModel {
                 finish: false,
                 cancel: true,
                 next_label: None,
+                cancel_label: None,
             },
             PageId::Ready => WizardButtons {
                 back: true,
@@ -205,6 +209,7 @@ impl WizardModel {
                 finish: false,
                 cancel: true,
                 next_label: Some(strings::BTN_INSTALL),
+                cancel_label: None,
             },
             PageId::UninstallConfirm => WizardButtons {
                 back: false,
@@ -212,6 +217,7 @@ impl WizardModel {
                 finish: false,
                 cancel: true,
                 next_label: Some(strings::BTN_UNINSTALL),
+                cancel_label: None,
             },
             PageId::Progress => WizardButtons {
                 back: false,
@@ -219,6 +225,8 @@ impl WizardModel {
                 finish: false,
                 cancel: self.can_cancel(),
                 next_label: None,
+                cancel_label: (self.current_step == Some(Step::DownloadingModels) && !self.work_done)
+                    .then_some(strings::BTN_STOP_DOWNLOAD),
             },
             PageId::Finish => WizardButtons {
                 back: false,
@@ -226,6 +234,7 @@ impl WizardModel {
                 finish: true,
                 cancel: false,
                 next_label: None,
+                cancel_label: None,
             },
         }
     }
@@ -522,6 +531,10 @@ mod tests {
         m.on_step(Step::DownloadingModels);
         assert!(m.can_cancel());
         assert!(m.buttons_for(PageId::Progress).cancel);
+        assert_eq!(
+            m.buttons_for(PageId::Progress).cancel_label,
+            Some(strings::BTN_STOP_DOWNLOAD)
+        );
 
         m.on_step(Step::Done);
         assert!(!m.can_cancel());

@@ -27,6 +27,128 @@ pub const SETUP_JSON: &str = "setup.json";
 pub const LICENSE_ENTRY: &str = "LICENSE";
 
 const HASH_BUF_LEN: usize = 1024 * 1024;
+const DOS_HEADER_MIN_LEN: u64 = 0x40;
+const PE_SIGNATURE: &[u8; 4] = b"PE\0\0";
+const PE32_MAGIC: u16 = 0x010B;
+const PE32_PLUS_MAGIC: u16 = 0x020B;
+const PE_CHECKSUM_OFFSET: u64 = 64;
+const PE_SECURITY_DIR_INDEX: u32 = 4;
+const MAX_CERT_ALIGN_PAD: u64 = 7;
+
+/// File offsets of the PE header fields modified by Authenticode signing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StubHeaderFixups {
+    /// File offset of the 4-byte optional header `CheckSum` field.
+    pub checksum_offset: u64,
+    /// File offset of the 8-byte `IMAGE_DIRECTORY_ENTRY_SECURITY` data directory entry.
+    pub security_dir_offset: u64,
+    /// `(file_offset, size)` stored in `IMAGE_DIRECTORY_ENTRY_SECURITY`.
+    pub security_dir: (u64, u64),
+}
+
+/// Parses a PE32/PE32+ file to locate the Authenticode security directory
+/// (`IMAGE_DIRECTORY_ENTRY_SECURITY`, index 4) and the optional header `CheckSum` field.
+///
+/// Returns `Ok(None)` if the file is not a valid PE32/PE32+ image or has no non-zero
+/// security directory.
+pub fn unsigned_stub_header_fixups(file: &mut File) -> Result<Option<StubHeaderFixups>, InstallError> {
+    let file_len = file
+        .metadata()
+        .map_err(|e| InstallError::io("reading PE metadata", e))?
+        .len();
+    if file_len < DOS_HEADER_MIN_LEN {
+        return Ok(None);
+    }
+
+    file.seek(SeekFrom::Start(0))
+        .map_err(|e| InstallError::io("seeking to DOS header", e))?;
+    let mut dos = [0u8; DOS_HEADER_MIN_LEN as usize];
+    file.read_exact(&mut dos)
+        .map_err(|e| InstallError::io("reading DOS header", e))?;
+    if &dos[0..2] != b"MZ" {
+        return Ok(None);
+    }
+
+    let e_lfanew = u64::from(u32::from_le_bytes([
+        dos[0x3C], dos[0x3D], dos[0x3E], dos[0x3F],
+    ]));
+    let Some(opt_off) = e_lfanew.checked_add(24) else {
+        return Ok(None);
+    };
+    if opt_off > file_len {
+        return Ok(None);
+    }
+
+    file.seek(SeekFrom::Start(e_lfanew))
+        .map_err(|e| InstallError::io("seeking to PE header", e))?;
+    let mut pe_hdr = [0u8; 24];
+    file.read_exact(&mut pe_hdr)
+        .map_err(|e| InstallError::io("reading PE header", e))?;
+    if &pe_hdr[0..4] != PE_SIGNATURE {
+        return Ok(None);
+    }
+
+    let opt_size = u64::from(u16::from_le_bytes([pe_hdr[20], pe_hdr[21]]));
+    let Some(opt_end) = opt_off.checked_add(opt_size) else {
+        return Ok(None);
+    };
+    if opt_size < 2 || opt_end > file_len {
+        return Ok(None);
+    }
+
+    let mut magic_buf = [0u8; 2];
+    file.read_exact(&mut magic_buf)
+        .map_err(|e| InstallError::io("reading PE optional header magic", e))?;
+    let magic = u16::from_le_bytes(magic_buf);
+    let dd_rel: u64 = match magic {
+        PE32_MAGIC => 96,
+        PE32_PLUS_MAGIC => 112,
+        _ => return Ok(None),
+    };
+    let sec_rel = dd_rel + u64::from(PE_SECURITY_DIR_INDEX) * 8;
+    if opt_size < sec_rel + 8 {
+        return Ok(None);
+    }
+
+    let num_rva_off = opt_off + (dd_rel - 4);
+    file.seek(SeekFrom::Start(num_rva_off))
+        .map_err(|e| InstallError::io("seeking to PE NumberOfRvaAndSizes", e))?;
+    let mut num_rva_buf = [0u8; 4];
+    file.read_exact(&mut num_rva_buf)
+        .map_err(|e| InstallError::io("reading PE NumberOfRvaAndSizes", e))?;
+    let num_rva = u32::from_le_bytes(num_rva_buf);
+    if num_rva <= PE_SECURITY_DIR_INDEX {
+        return Ok(None);
+    }
+
+    let security_dir_offset = opt_off + sec_rel;
+    file.seek(SeekFrom::Start(security_dir_offset))
+        .map_err(|e| InstallError::io("seeking to PE security directory", e))?;
+    let mut sec_buf = [0u8; 8];
+    file.read_exact(&mut sec_buf)
+        .map_err(|e| InstallError::io("reading PE security directory", e))?;
+    let sec_offset = u64::from(u32::from_le_bytes([
+        sec_buf[0], sec_buf[1], sec_buf[2], sec_buf[3],
+    ]));
+    let sec_size = u64::from(u32::from_le_bytes([
+        sec_buf[4], sec_buf[5], sec_buf[6], sec_buf[7],
+    ]));
+    if sec_size == 0 {
+        return Ok(None);
+    }
+
+    Ok(Some(StubHeaderFixups {
+        checksum_offset: opt_off + PE_CHECKSUM_OFFSET,
+        security_dir_offset,
+        security_dir: (sec_offset, sec_size),
+    }))
+}
+
+/// Returns `Some((offset, size))` from `IMAGE_DIRECTORY_ENTRY_SECURITY` (data directory 4)
+/// when `file` is a PE32/PE32+ image with a non-zero security directory, or `None` otherwise.
+pub fn pe_security_dir(file: &mut File) -> Result<Option<(u64, u64)>, InstallError> {
+    Ok(unsigned_stub_header_fixups(file)?.map(|f| f.security_dir))
+}
 
 /// Parsed 64-byte trailer located at the end of the installer executable.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,7 +178,8 @@ pub fn stub_len(trailer: &Trailer) -> u64 {
     trailer.offset
 }
 
-/// Reads and validates the 64-byte trailer at the end of `path`.
+/// Reads and validates the 64-byte trailer at the end of `path` (or immediately before
+/// the trailing Authenticode certificate table, allowing 0..=7 zero alignment bytes).
 pub fn read_trailer(path: &Path) -> Result<Trailer, InstallError> {
     let mut file = File::open(path)
         .map_err(|e| InstallError::io(format!("opening {}", path.display()), e))?;
@@ -64,32 +187,81 @@ pub fn read_trailer(path: &Path) -> Result<Trailer, InstallError> {
         .metadata()
         .map_err(|e| InstallError::io(format!("reading metadata for {}", path.display()), e))?
         .len();
-    if file_len < TRAILER_LEN {
-        return Err(InstallError::Payload(
-            "file is shorter than the 64-byte trailer".to_string(),
-        ));
-    }
-    let trailer_pos = file_len - TRAILER_LEN;
-    file.seek(SeekFrom::Start(trailer_pos))
-        .map_err(|e| InstallError::io("seeking to payload trailer", e))?;
-    let mut buf = [0u8; TRAILER_LEN as usize];
-    file.read_exact(&mut buf)
-        .map_err(|e| InstallError::io("reading payload trailer", e))?;
 
-    if &buf[0..8] != TRAILER_MAGIC {
-        return Err(InstallError::Payload(
-            "missing BRSETUP1 payload trailer".to_string(),
-        ));
-    }
+    let (trailer_pos, buf) = match pe_security_dir(&mut file)? {
+        Some((sec_offset, sec_size)) => {
+            if sec_offset.checked_add(sec_size) != Some(file_len) {
+                return Err(InstallError::Payload(
+                    "certificate table is not at the end of the file".to_string(),
+                ));
+            }
+            if sec_offset < TRAILER_LEN {
+                return Err(InstallError::Payload(
+                    "file is shorter than the 64-byte trailer".to_string(),
+                ));
+            }
+            let max_pad = MAX_CERT_ALIGN_PAD.min(sec_offset - TRAILER_LEN);
+            let window_len = (TRAILER_LEN + max_pad) as usize;
+            let window_start = sec_offset - (window_len as u64);
+            file.seek(SeekFrom::Start(window_start))
+                .map_err(|e| InstallError::io("seeking to payload trailer", e))?;
+            let mut window = [0u8; (TRAILER_LEN + MAX_CERT_ALIGN_PAD) as usize];
+            file.read_exact(&mut window[..window_len])
+                .map_err(|e| InstallError::io("reading payload trailer", e))?;
+
+            let mut found = None;
+            for pad in 0..=(max_pad as usize) {
+                let end_in_window = window_len - pad;
+                if pad > 0 && window[end_in_window] != 0 {
+                    break;
+                }
+                let start_in_window = end_in_window - (TRAILER_LEN as usize);
+                if &window[start_in_window..start_in_window + 8] == TRAILER_MAGIC {
+                    let mut candidate = [0u8; TRAILER_LEN as usize];
+                    candidate.copy_from_slice(&window[start_in_window..end_in_window]);
+                    found = Some((window_start + (start_in_window as u64), candidate));
+                    break;
+                }
+            }
+            found.ok_or_else(|| {
+                InstallError::Payload("missing BRSETUP1 payload trailer".to_string())
+            })?
+        }
+        None => {
+            if file_len < TRAILER_LEN {
+                return Err(InstallError::Payload(
+                    "file is shorter than the 64-byte trailer".to_string(),
+                ));
+            }
+            let trailer_pos = file_len - TRAILER_LEN;
+            file.seek(SeekFrom::Start(trailer_pos))
+                .map_err(|e| InstallError::io("seeking to payload trailer", e))?;
+            let mut buf = [0u8; TRAILER_LEN as usize];
+            file.read_exact(&mut buf)
+                .map_err(|e| InstallError::io("reading payload trailer", e))?;
+            if &buf[0..8] != TRAILER_MAGIC {
+                return Err(InstallError::Payload(
+                    "missing BRSETUP1 payload trailer".to_string(),
+                ));
+            }
+            (trailer_pos, buf)
+        }
+    };
+
     if !buf[56..64].iter().all(|&b| b == 0) {
         return Err(InstallError::Payload(
             "non-zero padding in payload trailer".to_string(),
         ));
     }
 
-    let offset = u64::from_le_bytes(buf[8..16].try_into().unwrap());
-    let length = u64::from_le_bytes(buf[16..24].try_into().unwrap());
-    let sha256: [u8; 32] = buf[24..56].try_into().unwrap();
+    let offset = u64::from_le_bytes([
+        buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
+    ]);
+    let length = u64::from_le_bytes([
+        buf[16], buf[17], buf[18], buf[19], buf[20], buf[21], buf[22], buf[23],
+    ]);
+    let mut sha256 = [0u8; 32];
+    sha256.copy_from_slice(&buf[24..56]);
 
     if length == 0 {
         return Err(InstallError::Payload("payload length is zero".to_string()));
@@ -120,10 +292,40 @@ pub fn verify(path: &Path, trailer: &Trailer) -> Result<(), InstallError> {
         .checked_add(trailer.length)
         .and_then(|end| end.checked_add(TRAILER_LEN))
         .ok_or_else(|| InstallError::Payload("payload length overflow".to_string()))?;
-    if file_len != expected_end {
-        return Err(InstallError::Payload(
-            "file length no longer matches trailer".to_string(),
-        ));
+
+    match pe_security_dir(&mut file)? {
+        Some((sec_offset, sec_size)) => {
+            if sec_offset.checked_add(sec_size) != Some(file_len) {
+                return Err(InstallError::Payload(
+                    "certificate table is not at the end of the file".to_string(),
+                ));
+            }
+            if expected_end > sec_offset || sec_offset - expected_end > MAX_CERT_ALIGN_PAD {
+                return Err(InstallError::Payload(
+                    "file length no longer matches trailer".to_string(),
+                ));
+            }
+            let pad_len = (sec_offset - expected_end) as usize;
+            if pad_len > 0 {
+                file.seek(SeekFrom::Start(expected_end))
+                    .map_err(|e| InstallError::io("seeking to certificate alignment padding", e))?;
+                let mut pad = [0u8; MAX_CERT_ALIGN_PAD as usize];
+                file.read_exact(&mut pad[..pad_len])
+                    .map_err(|e| InstallError::io("reading certificate alignment padding", e))?;
+                if !pad[..pad_len].iter().all(|&b| b == 0) {
+                    return Err(InstallError::Payload(
+                        "file length no longer matches trailer".to_string(),
+                    ));
+                }
+            }
+        }
+        None => {
+            if file_len != expected_end {
+                return Err(InstallError::Payload(
+                    "file length no longer matches trailer".to_string(),
+                ));
+            }
+        }
     }
 
     file.seek(SeekFrom::Start(trailer.offset))

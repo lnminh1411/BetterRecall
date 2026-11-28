@@ -3,10 +3,13 @@
 r"""Build and pack the BetterRecall per-user offline installer (R6/R8/R9).
 
 Usage:
-  python Scripts/build_installer.py [--pubkey public.pem --key private.pem] [--payload-version V] [--out DIR] [--skip-build]
+  python Scripts/build_installer.py [--pubkey public.pem --key private.pem] [--sign] [--sign-no-timestamp] [--payload-version V] [--out DIR] [--skip-build]
   python Scripts/build_installer.py --self-test
 
 Without --pubkey and --key, builds an unsigned dev installer (no integrity.json, no update.json).
+With --sign, Authenticode-signs BetterRecall's own binaries in the layout and the packed installer
+using signtool.exe and certificate settings from the environment (BR_SIGN_THUMBPRINT or
+BR_SIGN_DLIB + BR_SIGN_METADATA).
 """
 import argparse
 import hashlib
@@ -149,6 +152,101 @@ def run(cmd: list[str], env: dict[str, str], cwd: Path = ROOT) -> None:
         raise SystemExit(f"build_installer: command failed ({r.returncode}): {' '.join(cmd)}")
 
 
+DEFAULT_TIMESTAMP_URL = "http://timestamp.acs.microsoft.com"
+
+
+def find_signtool(env: dict[str, str]) -> Path:
+    override = env.get("BR_SIGNTOOL", "").strip()
+    if override:
+        p = Path(override)
+        if not p.is_file():
+            raise SystemExit(f"build_installer: BR_SIGNTOOL not found: {p}")
+        return p
+
+    pf86 = Path(env.get("ProgramFiles(x86)", r"C:\Program Files (x86)"))
+    kits_bin = pf86 / "Windows Kits" / "10" / "bin"
+    if kits_bin.is_dir():
+        cands = sorted(
+            kits_bin.glob("*/x64/signtool.exe"),
+            key=lambda p: [int(x) if x.isdigit() else 0 for x in p.parent.parent.name.split(".")],
+        )
+        if cands:
+            return cands[-1]
+
+    on_path = shutil.which("signtool.exe")
+    if on_path:
+        return Path(on_path)
+
+    raise SystemExit(
+        "build_installer: signtool.exe not found under Windows Kits\\10\\bin\\*\\x64\\ "
+        "(install the Windows SDK or set BR_SIGNTOOL)"
+    )
+
+
+def signtool_sign_args(env: dict[str, str], no_timestamp: bool) -> list[str]:
+    thumb = env.get("BR_SIGN_THUMBPRINT", "").strip()
+    dlib = env.get("BR_SIGN_DLIB", "").strip()
+    dmdf = env.get("BR_SIGN_METADATA", "").strip()
+
+    if thumb and (dlib or dmdf):
+        raise SystemExit(
+            "build_installer: set either BR_SIGN_THUMBPRINT or BR_SIGN_DLIB+BR_SIGN_METADATA, not both"
+        )
+    if thumb:
+        args = ["sign", "/fd", "SHA256", "/sha1", thumb]
+    elif dlib or dmdf:
+        if not (dlib and dmdf):
+            raise SystemExit(
+                "build_installer: BR_SIGN_DLIB and BR_SIGN_METADATA must both be set for Azure Trusted Signing"
+            )
+        args = ["sign", "/fd", "SHA256", "/dlib", dlib, "/dmdf", dmdf]
+    else:
+        raise SystemExit(
+            "build_installer: --sign requires BR_SIGN_THUMBPRINT or BR_SIGN_DLIB + BR_SIGN_METADATA"
+        )
+
+    if not no_timestamp:
+        ts_url = env.get("BR_SIGN_TIMESTAMP", "").strip() or DEFAULT_TIMESTAMP_URL
+        args += ["/tr", ts_url, "/td", "SHA256"]
+    return args
+
+
+def is_authenticode_signed(signtool: Path, path: Path, env: dict[str, str]) -> bool:
+    r = subprocess.run(
+        [str(signtool), "verify", "/pa", str(path)],
+        env=env,
+        capture_output=True,
+    )
+    return r.returncode == 0
+
+
+def sign_layout_binaries(
+    signtool: Path,
+    sign_args: list[str],
+    layout_dir: Path,
+    env: dict[str, str],
+) -> list[Path]:
+    """Authenticode-signs BetterRecall's own .exe/.dll files in layout_dir.
+
+    Skips third-party binaries already signed by their vendor (signtool verify /pa passes)
+    and skips BetterRecall-Setup.exe (the stub copy must remain unsigned so copy_stub_exe
+    matches integrity.json).
+    """
+    signed_files: list[Path] = []
+    for p in sorted(layout_dir.rglob("*")):
+        if not p.is_file():
+            continue
+        if p.suffix.lower() not in {".exe", ".dll"}:
+            continue
+        if p.name.lower() == SETUP_EXE.lower():
+            continue
+        if is_authenticode_signed(signtool, p, env):
+            continue
+        run([str(signtool), *sign_args, str(p)], env)
+        signed_files.append(p.relative_to(layout_dir))
+    return signed_files
+
+
 def crt_static_target_dir(env: dict[str, str]) -> Path:
     base = Path(env["CARGO_TARGET_DIR"]) if env.get("CARGO_TARGET_DIR") else (ROOT / "artifacts" / "cargo")
     return base.resolve() / "crt-static"
@@ -209,6 +307,12 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Build and pack the BetterRecall offline installer.")
     ap.add_argument("--pubkey", default="", help="ECDSA P-256 public key PEM (requires --key)")
     ap.add_argument("--key", default="", help="ECDSA P-256 private key PEM (requires --pubkey)")
+    ap.add_argument("--sign", action="store_true", help="Authenticode-sign binaries and packed installer via signtool")
+    ap.add_argument(
+        "--sign-no-timestamp",
+        action="store_true",
+        help="omit /tr and /td timestamp flags when --sign is used (offline sandbox tests)",
+    )
     ap.add_argument("--payload-version", default="", help="override version written to setup.json (test only)")
     ap.add_argument("--out", default=str(ROOT / "artifacts" / "release"), help="output folder (default: artifacts/release)")
     ap.add_argument("--skip-build", action="store_true", help="skip dev_build.py and static-CRT cargo builds")
@@ -242,6 +346,12 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     env = os.environ.copy()
+    signtool: Path | None = None
+    sign_args: list[str] = []
+    if a.sign:
+        signtool = find_signtool(env)
+        sign_args = signtool_sign_args(env, a.sign_no_timestamp)
+
     static_target = crt_static_target_dir(env)
     static_release = static_target / "release"
     installer_stub = static_release / "br-installer.exe"
@@ -295,6 +405,13 @@ def main() -> None:
     assert_no_vcruntime(installer_stub)
     assert_no_vcruntime(layout_mcp)
 
+    signed_layout_files: list[Path] = []
+    if a.sign and signtool is not None:
+        signed_layout_files = sign_layout_binaries(signtool, sign_args, layout_dir, env)
+        print(f"build_installer: Authenticode-signed {len(signed_layout_files)} layout file(s):", flush=True)
+        for rel in signed_layout_files:
+            print(f"  signed: {rel.as_posix()}", flush=True)
+
     layout_setup = layout_dir / SETUP_EXE
     if signed and pubkey_path is not None and key_path is not None:
         # Include BetterRecall-Setup.exe in the layout before signing so integrity.json hashes it;
@@ -330,6 +447,10 @@ def main() -> None:
         env,
     )
 
+    if a.sign and signtool is not None:
+        run([str(signtool), *sign_args, str(setup_out)], env)
+        print(f"build_installer: Authenticode-signed installer: {setup_out.name}", flush=True)
+
     notices_out = out_dir / f"BetterRecall-Setup-{payload_version}.notices.txt"
     release_layout.write_installer_notices(notices_out)
 
@@ -353,6 +474,8 @@ def main() -> None:
     size = setup_out.stat().st_size
     digest = sha256_file(setup_out)
     status = "signed" if signed else "UNSIGNED dev build"
+    if a.sign:
+        status += " + Authenticode"
     print(f"\ninstaller: {setup_out}")
     print(f"size:      {size} bytes")
     print(f"sha256:    {digest}")
