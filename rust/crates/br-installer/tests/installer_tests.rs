@@ -3018,9 +3018,11 @@ fn f4_uninstall_cancel_stops_before_removal() {
     );
 }
 
-// F4: Modify cancelled before the model removal step leaves Full-only models untouched.
+// Checkpoint 5b C2 (replaces F4 for Modify): after the point of no return only "Stop download"
+// can end the download early; it stops the models, and Modify to Minimal still removes the
+// Full-only components so the files match the saved mode.
 #[test]
-fn f4_modify_cancelled_before_removal_keeps_full_models() {
+fn cp5b_modify_stop_still_removes_full_only_models() {
     let env = TestEnv::new("f4-mod-cancel");
     let exe = env.build_installer(
         "setup",
@@ -3073,17 +3075,21 @@ fn f4_modify_cancelled_before_removal_keeps_full_models() {
             flag: AtomicBool::new(false),
         },
     )
-    .expect("modify cancelled during download");
-    assert_eq!(
-        out,
-        Outcome::Modified {
-            mode: ModelMode::Minimal,
-            models: ModelsResult::Cancelled,
-        }
-    );
+    .expect("modify with stopped download");
     assert!(
-        comp_full_dir.exists(),
-        "Full-only models must not be removed when Modify is cancelled before removal"
+        matches!(
+            out,
+            Outcome::Modified {
+                mode: ModelMode::Minimal,
+                ..
+            }
+        ),
+        "{out:?}"
+    );
+    assert_eq!(read_model_mode(&env.ctx), Some(ModelMode::Minimal));
+    assert!(
+        !comp_full_dir.exists(),
+        "Full-only models must be removed after Stop download during Modify to Minimal"
     );
 }
 
@@ -3410,4 +3416,67 @@ fn cp5_cancel_after_commit_is_ignored() {
             models: ModelsResult::Complete,
         }
     );
+}
+
+// Checkpoint 5b C4: a Stop after some components finished still restarts the agent the install
+// started, so the worker loads the finished components without waiting for the next restart.
+#[test]
+fn cp5b_stop_after_a_component_finished_restarts_agent() {
+    use br_installer::{TestHookEvent, TestHookGuard};
+    let env = TestEnv::new("cp5b-c4");
+    let exe = env.build_installer(
+        "setup",
+        b"MZ-STUB",
+        "0.4.0-dev",
+        &[(InstallLayout::AGENT_EXE, b"agent")],
+    );
+    let (_server, catalog) = start_tiny_model_server();
+    let models_dir = resolve_models_dir(&env.ctx.home);
+
+    struct StopAfterFirst {
+        models_dir: PathBuf,
+    }
+    impl Progress for StopAfterFirst {
+        fn step(&self, _step: Step) {}
+        fn bytes(&self, _done: u64, _total: u64) {}
+        fn cancelled(&self) -> bool {
+            false
+        }
+        fn stop_models_requested(&self) -> bool {
+            ["comp-min", "comp-full"]
+                .iter()
+                .any(|c| self.models_dir.join(c).join("manifest.json").is_file())
+        }
+    }
+
+    let mut ctx = env.ctx.clone();
+    ctx.start_after = true;
+    let guard = TestHookGuard::install(true);
+    let out = install_with_progress(
+        &ctx,
+        &exe,
+        &InstallOpts {
+            allow_downgrade: false,
+            model_mode: ModelMode::Full,
+            skip_model_download: false,
+            catalog: Some(catalog),
+            integrity_key: None,
+        },
+        available_disk_space,
+        &StopAfterFirst { models_dir },
+    )
+    .expect("install with stop after first component");
+    assert_eq!(
+        out,
+        Outcome::Installed {
+            version: "0.4.0-dev".to_string(),
+            models: ModelsResult::Cancelled,
+        }
+    );
+    let starts = guard
+        .events()
+        .iter()
+        .filter(|e| **e == TestHookEvent::StartAgent)
+        .count();
+    assert_eq!(starts, 2, "start after install + restart for the finished component: {:?}", guard.events());
 }

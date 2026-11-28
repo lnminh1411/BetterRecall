@@ -61,12 +61,43 @@ impl Default for LaunchArgs {
     }
 }
 
+pub const USAGE: &str = "Usage: br-ui --mock [--page home|settings|player|mcp|about|help] [--hidden] \
+    [--mock-query <text>] [--video <abs-path>] [--offset-ms <n>] \
+    [--motion system|full|limited] [--assets <abs-path>] [--mock-capturable] [--stats] \
+    [--mock-mcp-home <abs-path>] [--mock-no-shell] [--mock-days-used <n>] \
+    [--mock-firstrun] [--mock-tips]";
+
+fn next_value(flag: &str, it: &mut impl Iterator<Item = String>) -> Result<String, String> {
+    match it.next() {
+        None => Err(format!("{flag} requires a value")),
+        Some(val) if val.starts_with("--") => {
+            Err(format!("{flag} requires a value (got flag '{val}')"))
+        }
+        Some(val) => Ok(val),
+    }
+}
+
+fn next_abs_path(flag: &str, it: &mut impl Iterator<Item = String>) -> Result<PathBuf, String> {
+    let val = next_value(flag, it)?;
+    let path = PathBuf::from(&val);
+    if !path.is_absolute() {
+        return Err(format!("{flag} requires an absolute path (got '{val}')"));
+    }
+    Ok(path)
+}
+
 impl LaunchArgs {
     pub fn parse_from_env() -> Self {
-        Self::parse(std::env::args().skip(1))
+        match Self::try_parse(std::env::args().skip(1)) {
+            Ok(args) => args,
+            Err(err) => {
+                eprintln!("error: {err}\n{USAGE}");
+                std::process::exit(2);
+            }
+        }
     }
 
-    pub fn parse<I: IntoIterator<Item = String>>(iter: I) -> Self {
+    pub fn try_parse<I: IntoIterator<Item = String>>(iter: I) -> Result<Self, String> {
         let mut args = Self::default();
         let mut it = iter.into_iter();
         while let Some(arg) = it.next() {
@@ -79,56 +110,52 @@ impl LaunchArgs {
                 "--mock-firstrun" => args.mock_firstrun = true,
                 "--mock-tips" => args.mock_tips = true,
                 "--page" => {
-                    if let Some(val) = it.next() {
-                        args.page = match val.to_ascii_lowercase().as_str() {
-                            "settings" => Page::Settings,
-                            "player" => Page::Player,
-                            "mcp" => Page::Mcp,
-                            "about" => Page::About,
-                            "help" => Page::Help,
-                            _ => Page::Home,
-                        };
-                    }
+                    let val = next_value("--page", &mut it)?;
+                    args.page = match val.to_ascii_lowercase().as_str() {
+                        "settings" => Page::Settings,
+                        "player" => Page::Player,
+                        "mcp" => Page::Mcp,
+                        "about" => Page::About,
+                        "help" => Page::Help,
+                        _ => Page::Home,
+                    };
                 }
                 "--mock-query" => {
-                    args.mock_query = it.next();
+                    args.mock_query = Some(next_value("--mock-query", &mut it)?);
                 }
                 "--mock-mcp-home" => {
-                    args.mock_mcp_home = it.next().map(PathBuf::from);
+                    args.mock_mcp_home = Some(next_abs_path("--mock-mcp-home", &mut it)?);
                 }
                 "--mock-days-used" => {
-                    if let Some(val) = it.next()
-                        && let Ok(days) = val.parse::<u32>()
-                    {
-                        args.mock_days_used = days;
-                    }
+                    let val = next_value("--mock-days-used", &mut it)?;
+                    args.mock_days_used = val.parse::<u32>().map_err(|_| {
+                        format!("--mock-days-used expects a non-negative integer (got '{val}')")
+                    })?;
                 }
                 "--video" => {
-                    args.video = it.next().map(PathBuf::from);
+                    args.video = Some(next_abs_path("--video", &mut it)?);
                 }
                 "--offset-ms" => {
-                    if let Some(val) = it.next()
-                        && let Ok(ms) = val.parse::<u64>()
-                    {
-                        args.offset_ms = ms;
-                    }
+                    let val = next_value("--offset-ms", &mut it)?;
+                    args.offset_ms = val.parse::<u64>().map_err(|_| {
+                        format!("--offset-ms expects a non-negative integer (got '{val}')")
+                    })?;
                 }
                 "--motion" => {
-                    if let Some(val) = it.next() {
-                        args.motion = match val.to_ascii_lowercase().as_str() {
-                            "full" => MotionArg::Full,
-                            "limited" => MotionArg::Limited,
-                            _ => MotionArg::System,
-                        };
-                    }
+                    let val = next_value("--motion", &mut it)?;
+                    args.motion = match val.to_ascii_lowercase().as_str() {
+                        "full" => MotionArg::Full,
+                        "limited" => MotionArg::Limited,
+                        _ => MotionArg::System,
+                    };
                 }
                 "--assets" => {
-                    args.assets_dir = it.next().map(PathBuf::from);
+                    args.assets_dir = Some(next_abs_path("--assets", &mut it)?);
                 }
                 _ => {}
             }
         }
-        args
+        Ok(args)
     }
 }
 
@@ -166,16 +193,16 @@ pub fn resolve_demo_assets_dir(explicit: Option<&PathBuf>) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
-    fn parse_slice(items: &[&str]) -> LaunchArgs {
-        LaunchArgs::parse(items.iter().map(|s| (*s).to_string()))
+    fn parse_slice(items: &[&str]) -> Result<LaunchArgs, String> {
+        LaunchArgs::try_parse(items.iter().map(|s| (*s).to_string()))
     }
 
     #[test]
     fn parses_new_pages() {
-        assert_eq!(parse_slice(&["--page", "mcp"]).page, Page::Mcp);
-        assert_eq!(parse_slice(&["--page", "about"]).page, Page::About);
-        assert_eq!(parse_slice(&["--page", "help"]).page, Page::Help);
-        assert_eq!(parse_slice(&["--page", "MCP"]).page, Page::Mcp);
+        assert_eq!(parse_slice(&["--page", "mcp"]).unwrap().page, Page::Mcp);
+        assert_eq!(parse_slice(&["--page", "about"]).unwrap().page, Page::About);
+        assert_eq!(parse_slice(&["--page", "help"]).unwrap().page, Page::Help);
+        assert_eq!(parse_slice(&["--page", "MCP"]).unwrap().page, Page::Mcp);
     }
 
     #[test]
@@ -189,7 +216,8 @@ mod tests {
             "21",
             "--mock-firstrun",
             "--mock-tips",
-        ]);
+        ])
+        .expect("valid args");
         assert!(args.mock);
         assert_eq!(
             args.mock_mcp_home,
@@ -203,11 +231,45 @@ mod tests {
 
     #[test]
     fn defaults_for_new_flags() {
-        let args = parse_slice(&["--mock"]);
+        let args = parse_slice(&["--mock"]).expect("valid args");
         assert_eq!(args.mock_mcp_home, None);
         assert!(!args.mock_no_shell);
         assert_eq!(args.mock_days_used, 0);
         assert!(!args.mock_firstrun);
         assert!(!args.mock_tips);
+    }
+
+    #[test]
+    fn rejects_flag_swallowed_as_value() {
+        assert!(parse_slice(&["--mock-mcp-home", "--mock-no-shell"]).is_err());
+        assert!(parse_slice(&["--video", "--stats"]).is_err());
+        assert!(parse_slice(&["--assets", "--mock"]).is_err());
+        assert!(parse_slice(&["--page", "--mock"]).is_err());
+        assert!(parse_slice(&["--mock-query", "--hidden"]).is_err());
+        assert!(parse_slice(&["--mock-days-used", "--mock"]).is_err());
+        assert!(parse_slice(&["--offset-ms", "--stats"]).is_err());
+        assert!(parse_slice(&["--motion", "--mock"]).is_err());
+        assert!(parse_slice(&["--mock-mcp-home"]).is_err());
+    }
+
+    #[test]
+    fn requires_absolute_paths_for_path_flags() {
+        assert!(parse_slice(&["--mock-mcp-home", r"relative\dir"]).is_err());
+        assert!(parse_slice(&["--video", "clip.mp4"]).is_err());
+        assert!(parse_slice(&["--assets", r"assets\demo"]).is_err());
+
+        let ok = parse_slice(&[
+            "--mock",
+            "--mock-mcp-home",
+            r"K:\scratch\mcp",
+            "--video",
+            r"K:\scratch\clip.mp4",
+            "--assets",
+            r"K:\scratch\assets",
+        ])
+        .expect("absolute paths should succeed");
+        assert_eq!(ok.mock_mcp_home, Some(PathBuf::from(r"K:\scratch\mcp")));
+        assert_eq!(ok.video, Some(PathBuf::from(r"K:\scratch\clip.mp4")));
+        assert_eq!(ok.assets_dir, Some(PathBuf::from(r"K:\scratch\assets")));
     }
 }

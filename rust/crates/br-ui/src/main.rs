@@ -33,14 +33,21 @@ fn main() {
     };
 
     let (sig_tx, sig_rx) = async_channel::bounded::<AppSignal>(8);
-    let _event_listener = EventListener::start(sig_tx).ok();
+    let _event_listener = match EventListener::start(sig_tx) {
+        Ok(listener) => Some(listener),
+        Err(err) => {
+            eprintln!("br-ui: named-event listener failed to start: {err}");
+            None
+        }
+    };
+    let has_event_listener = _event_listener.is_some();
 
     gpui_platform::application()
         .with_quit_mode(QuitMode::Explicit)
         .run(move |cx: &mut App| {
             gpui_component::init(cx);
             theme::apply_system_theme(cx);
-            let _theme_watcher = theme::start_theme_watcher(cx);
+            theme::start_theme_watcher(cx);
             motion::init(args.motion.into(), cx);
 
             let cursor_display = platform::display_for_cursor(cx);
@@ -48,6 +55,7 @@ fn main() {
             let capturable = args.mock_capturable;
 
             // 1. Main window (1400x900, min 640x480, MicaBackdrop, transparent title bar).
+            // Open hidden first so WDA_EXCLUDEFROMCAPTURE is applied before the first show.
             let show_main = !args.hidden && args.mock_query.is_none();
             let main_bounds = Bounds::centered(cursor_display, size(px(1400.0), px(900.0)), cx);
             let mut main_opts = TitleBar::window_options();
@@ -55,8 +63,8 @@ fn main() {
             main_opts.window_min_size = Some(size(px(640.0), px(480.0)));
             main_opts.windows_window_background = WindowsWindowBackground::MicaBackdrop;
             main_opts.display_id = cursor_display;
-            main_opts.show = show_main;
-            main_opts.focus = show_main;
+            main_opts.show = false;
+            main_opts.focus = false;
             if let Some(ref mut tb) = main_opts.titlebar {
                 tb.title = Some("BetterRecall".into());
             }
@@ -64,9 +72,7 @@ fn main() {
             let args_for_main = args.clone();
             let assets_dir_for_main = assets_dir.clone();
             let _main_window = cx.open_window(main_opts, move |window, cx| {
-                if show_main
-                    && let Some(hwnd) = platform::hwnd_from_window(window)
-                {
+                if let Some(hwnd) = platform::hwnd_from_window(window) {
                     platform::apply_display_affinity(hwnd, capturable);
                 }
                 window.on_window_should_close(cx, |_window, cx| {
@@ -74,12 +80,19 @@ fn main() {
                     true
                 });
                 let shell = cx.new(|cx| {
-                    MainShell::new(&args_for_main, assets_dir_for_main, window, cx)
+                    MainShell::new(&args_for_main, show_main, assets_dir_for_main, window, cx)
                 });
+                if show_main {
+                    if let Some(hwnd) = platform::hwnd_from_window(window) {
+                        platform::show_hwnd(hwnd);
+                    }
+                    window.activate();
+                }
                 cx.new(|cx| Root::new(shell, window, cx))
             });
 
             // 2. Launcher window (warm, borderless resizable ~1200x720, hidden unless --mock-query).
+            // Always open hidden so WDA_EXCLUDEFROMCAPTURE is applied before the first show.
             let show_launcher = args.mock_query.is_some();
             let launcher_bounds =
                 Bounds::centered(cursor_display, size(px(1200.0), px(720.0)), cx);
@@ -91,8 +104,8 @@ fn main() {
                 windows_window_background: WindowsWindowBackground::Opaque,
                 display_id: cursor_display,
                 is_resizable: true,
-                show: show_launcher,
-                focus: show_launcher,
+                show: false,
+                focus: false,
                 ..Default::default()
             };
 
@@ -112,14 +125,16 @@ fn main() {
                     });
                     if let Some(hwnd) = platform::hwnd_from_window(window) {
                         platform::configure_launcher_hwnd(hwnd);
-                        if show_launcher {
-                            platform::set_launcher_topmost(hwnd);
-                            platform::apply_display_affinity(hwnd, capturable);
-                        }
+                        platform::apply_display_affinity(hwnd, capturable);
                     }
                     let view =
                         cx.new(|cx| LauncherView::new(initial_query, assets_dir, window, cx));
                     if show_launcher {
+                        if let Some(hwnd) = platform::hwnd_from_window(window) {
+                            platform::set_launcher_topmost(hwnd);
+                            platform::show_hwnd(hwnd);
+                        }
+                        window.activate();
                         view.update(cx, |v, cx| v.focus_search(window, cx));
                     }
                     *launcher_view_slot_init.borrow_mut() = Some(view.clone());
@@ -131,37 +146,37 @@ fn main() {
                 cx.activate(true);
             }
 
-            // Keep theme watcher alive inside the background signal task.
-            cx.spawn(async move |cx| {
-                let _keep_watcher = _theme_watcher;
-                while let Ok(sig) = sig_rx.recv().await {
-                    match sig {
-                        AppSignal::ShowLauncher => {
-                            if let Some(handle) = launcher_window {
-                                let view_opt = launcher_view_slot.borrow().clone();
-                                let _ = cx.update_window(handle.into(), |_, window, cx| {
-                                    window.set_visible(true);
-                                    if let Some(hwnd) = platform::hwnd_from_window(window) {
-                                        platform::configure_launcher_hwnd(hwnd);
-                                        platform::set_launcher_topmost(hwnd);
-                                        platform::apply_display_affinity(hwnd, capturable);
-                                    }
-                                    window.activate();
-                                    if let Some(view) = view_opt {
-                                        view.update(cx, |v, cx| {
-                                            v.show_with_query(Some("invoice"), window, cx);
-                                        });
-                                    }
-                                });
+            if has_event_listener {
+                cx.spawn(async move |cx| {
+                    while let Ok(sig) = sig_rx.recv().await {
+                        match sig {
+                            AppSignal::ShowLauncher => {
+                                if let Some(handle) = launcher_window {
+                                    let view_opt = launcher_view_slot.borrow().clone();
+                                    let _ = cx.update_window(handle.into(), |_, window, cx| {
+                                        if let Some(hwnd) = platform::hwnd_from_window(window) {
+                                            platform::configure_launcher_hwnd(hwnd);
+                                            platform::apply_display_affinity(hwnd, capturable);
+                                            platform::set_launcher_topmost(hwnd);
+                                            platform::show_hwnd(hwnd);
+                                        }
+                                        window.activate();
+                                        if let Some(view) = view_opt {
+                                            view.update(cx, |v, cx| {
+                                                v.show_with_query(Some("invoice"), window, cx);
+                                            });
+                                        }
+                                    });
+                                }
+                            }
+                            AppSignal::Quit => {
+                                cx.update(|cx| cx.quit());
+                                break;
                             }
                         }
-                        AppSignal::Quit => {
-                            cx.update(|cx| cx.quit());
-                            break;
-                        }
                     }
-                }
-            })
-            .detach();
+                })
+                .detach();
+            }
         });
 }

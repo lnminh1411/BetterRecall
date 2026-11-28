@@ -523,7 +523,8 @@ where
         let (result, downloaded_files) = download_models_set(&ctx.home, cat, set, progress);
         // C1: if any component was downloaded and the agent was started by this run, restart it
         // (holding SETUP_MUTEX only around close + start) so the worker loads the new models.
-        if result == ModelsResult::Complete && downloaded_files > 0 && agent_started {
+        // Checkpoint 5b C4: also after a Stop or failure that left newly completed components.
+        if downloaded_files > 0 && agent_started {
             // Checkpoint 5 X1: leave DownloadingModels so "Stop download" no longer applies.
             progress.step(Step::Closing);
             let _mutex = acquire_setup_mutex(&ctx.home)?;
@@ -836,15 +837,19 @@ fn modify_with_progress_inner(
             progress.step(Step::DownloadingModels);
             let (result, downloaded_files) = download_models_set(&ctx.home, &cat, set, progress);
 
-            // F4: check cancel before the model removal step.
-            if result == ModelsResult::Cancelled || progress.stop_models_requested() {
-                if !full_only.is_empty() {
-                    log_line(&ctx.home, "modify cancelled before removing full-only models");
-                }
-                ModelsResult::Cancelled
-            } else {
+            // Checkpoint 5b C2: after the point of no return only "Stop download" can end the
+            // download early. It stops the models, not the Modify: the Full-only components are
+            // still removed so the files match the saved Minimal mode.
+            if result == ModelsResult::Cancelled && !full_only.is_empty() {
+                log_line(
+                    &ctx.home,
+                    "modify: download stopped; still removing full-only models",
+                );
+            }
+            {
                 let need_remove = !full_only.is_empty();
-                let need_reload = result == ModelsResult::Complete && downloaded_files > 0;
+                // Checkpoint 5b C4: reload also when components finished before a Stop.
+                let need_reload = downloaded_files > 0;
 
                 // F1: close/start at most once; if nothing is removed and nothing was downloaded,
                 // do not close the app at all.
@@ -965,6 +970,20 @@ fn download_models_set(
     record_hook(TestHookEvent::DownloadModels);
     let models_dir = resolve_models_dir(home);
     let components = catalog.components_for(set);
+    // Checkpoint 5b C4: components complete (manifest.json) before the download, so a Stop or
+    // failure can still report the components that finished during this run.
+    let complete = |c: &br_fetch::Component| models_dir.join(&c.id).join("manifest.json").is_file();
+    let before: Vec<&str> = components
+        .iter()
+        .filter(|c| complete(c))
+        .map(|c| c.id.as_str())
+        .collect();
+    let newly_complete = || {
+        components
+            .iter()
+            .filter(|c| complete(c) && !before.contains(&c.id.as_str()))
+            .count() as u64
+    };
     let fetch_opts = InstallOptions::for_catalog(catalog);
     let bridge = InstallerFetchProgress {
         progress,
@@ -1002,12 +1021,20 @@ fn download_models_set(
             (ModelsResult::Offline, 0)
         }
         Err(FetchError::Cancelled) => {
-            log_line(home, "model download cancelled by user");
-            (ModelsResult::Cancelled, 0)
+            let n = newly_complete();
+            log_line(
+                home,
+                &format!("model download stopped by user ({n} components completed first)"),
+            );
+            (ModelsResult::Cancelled, n)
         }
         Err(e) => {
-            log_line(home, &format!("model download failed: {e}"));
-            (ModelsResult::Failed(e.to_string()), 0)
+            let n = newly_complete();
+            log_line(
+                home,
+                &format!("model download failed: {e} ({n} components completed first)"),
+            );
+            (ModelsResult::Failed(e.to_string()), n)
         }
     }
 }

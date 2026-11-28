@@ -7,16 +7,15 @@ use std::mem::size_of;
 use gpui::{App, DisplayId, Window};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::Win32::Foundation::{HWND, POINT};
-use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
-};
+use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONEAREST, MonitorFromPoint};
 use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
 use windows::Win32::System::Threading::GetCurrentProcess;
 use windows::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, GetCursorPos, GetWindowLongPtrW, HWND_TOPMOST, SPI_GETCLIENTAREAANIMATION,
-    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
     SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetWindowDisplayAffinity, SetWindowLongPtrW, SetWindowPos,
-    SystemParametersInfoW, WDA_EXCLUDEFROMCAPTURE, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+    SW_SHOWNORMAL, SetForegroundWindow, ShowWindow, SystemParametersInfoW, WDA_EXCLUDEFROMCAPTURE,
+    WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
 };
 
 /// Extract the Win32 `HWND` from a GPUI `Window` via `HasWindowHandle`.
@@ -31,60 +30,23 @@ pub fn hwnd_from_window(window: &Window) -> Option<HWND> {
 /// Find the GPUI `DisplayId` of the monitor currently under the mouse cursor.
 pub fn display_for_cursor(cx: &App) -> Option<DisplayId> {
     let mut pt = POINT::default();
-    let ok = unsafe { GetCursorPos(&mut pt) }.is_ok();
-    if !ok {
+    if unsafe { GetCursorPos(&mut pt) }.is_err() {
         return None;
     }
-
-    let hmon = unsafe { MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST) };
-    let mut info = MONITORINFO {
-        cbSize: size_of::<MONITORINFO>() as u32,
-        ..Default::default()
-    };
-    let has_info = unsafe { GetMonitorInfoW(hmon, &mut info) }.as_bool();
 
     let displays = cx.displays();
     if displays.is_empty() {
         return None;
     }
 
-    // Match by monitor origin/bounds containing the cursor in logical/physical coordinates.
-    if has_info {
-        let m_left = info.rcMonitor.left as f32;
-        let m_top = info.rcMonitor.top as f32;
-        let m_right = info.rcMonitor.right as f32;
-        let m_bottom = info.rcMonitor.bottom as f32;
-        let cx_pt = pt.x as f32;
-        let cy_pt = pt.y as f32;
-
-        // First try exact physical containment against GPUI display bounds.
-        for d in &displays {
-            let b = d.bounds();
-            let left = f32::from(b.origin.x);
-            let top = f32::from(b.origin.y);
-            let right = left + f32::from(b.size.width);
-            let bottom = top + f32::from(b.size.height);
-            if cx_pt >= left && cx_pt < right && cy_pt >= top && cy_pt < bottom {
-                return Some(d.id());
-            }
+    // Match by Win32 HMONITOR handle directly (GPUI WindowsDisplay encodes HMONITOR as DisplayId),
+    // avoiding physical-vs-logical coordinate mixing on mixed-DPI setups.
+    let hmon = unsafe { MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST) };
+    if !hmon.is_invalid() {
+        let target_id = hmon.0 as u64;
+        if let Some(d) = displays.iter().find(|d| u64::from(d.id()) == target_id) {
+            return Some(d.id());
         }
-        // Fallback: closest monitor center to the Win32 monitor center.
-        let target_x = (m_left + m_right) * 0.5;
-        let target_y = (m_top + m_bottom) * 0.5;
-        return displays
-            .iter()
-            .min_by(|a, b| {
-                let ab = a.bounds();
-                let bb = b.bounds();
-                let ax = f32::from(ab.origin.x) + f32::from(ab.size.width) * 0.5;
-                let ay = f32::from(ab.origin.y) + f32::from(ab.size.height) * 0.5;
-                let bx = f32::from(bb.origin.x) + f32::from(bb.size.width) * 0.5;
-                let by = f32::from(bb.origin.y) + f32::from(bb.size.height) * 0.5;
-                let da = (ax - target_x).powi(2) + (ay - target_y).powi(2);
-                let db = (bx - target_x).powi(2) + (by - target_y).powi(2);
-                da.total_cmp(&db)
-            })
-            .map(|d| d.id());
     }
 
     displays.first().map(|d| d.id())
@@ -112,7 +74,7 @@ pub fn configure_launcher_hwnd(hwnd: HWND) {
     }
 }
 
-/// Re-assert `HWND_TOPMOST` on the launcher each time it is shown.
+/// Re-assert `HWND_TOPMOST` on the launcher without showing it prematurely.
 pub fn set_launcher_topmost(hwnd: HWND) {
     unsafe {
         let _ = SetWindowPos(
@@ -122,19 +84,31 @@ pub fn set_launcher_topmost(hwnd: HWND) {
             0,
             0,
             0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         );
     }
 }
 
 /// Apply `WDA_EXCLUDEFROMCAPTURE` unless `capturable` is true.
-/// Must only be called when the window is visible (never on a hidden window).
+/// Called before the window's first show so no frame can be captured.
 pub fn apply_display_affinity(hwnd: HWND, capturable: bool) {
     if capturable {
         return;
     }
     unsafe {
         let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
+    }
+}
+
+/// Show a window that GPUI created hidden (`show: false`) and bring it to the foreground.
+///
+/// GPUI keeps the placement of a hidden-created window and `Window::set_visible(true)` only
+/// re-applies that placement, which leaves the window hidden (checkpoint 5b sandbox run). The
+/// display affinity must be applied before this call so the first frame is excluded too.
+pub fn show_hwnd(hwnd: HWND) {
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
+        let _ = SetForegroundWindow(hwnd);
     }
 }
 

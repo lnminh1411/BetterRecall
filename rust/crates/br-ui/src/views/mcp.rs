@@ -10,7 +10,7 @@ use br_mcp_clients::{
     Snippet,
 };
 use gpui::{
-    AppContext as _, Context, InteractiveElement as _, IntoElement, KeyDownEvent,
+    AppContext as _, Context, FocusHandle, InteractiveElement as _, IntoElement, KeyDownEvent,
     ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
@@ -20,6 +20,32 @@ use crate::platform;
 use crate::views::tip::render_tip;
 
 pub const MOCK_RELAY_PATH: &str = r"%LOCALAPPDATA%\BetterRecall\app\bin\betterrecall-mcp.exe";
+
+fn detect_zed(env: &ClientEnv) -> bool {
+    let xdg_zed = env
+        .xdg_config_home
+        .as_deref()
+        .map(|p| p.join("zed"))
+        .unwrap_or_else(|| env.home.join(".config").join("zed"));
+    env.appdata.join("Zed").exists() || xdg_zed.exists()
+}
+
+fn detect_cline(env: &ClientEnv) -> bool {
+    env.appdata
+        .join("Code")
+        .join("User")
+        .join("globalStorage")
+        .join("saoudrizwan.claude-dev")
+        .exists()
+        || env
+            .appdata
+            .join("Code - Insiders")
+            .join("User")
+            .join("globalStorage")
+            .join("saoudrizwan.claude-dev")
+            .exists()
+        || env.home.join(".cline").exists()
+}
 
 /// Abstraction over `br_mcp_clients` so mock mode never touches real user config files.
 pub trait McpBackend: Send + Sync {
@@ -60,7 +86,17 @@ impl RealMcpBackend {
 
 impl McpBackend for RealMcpBackend {
     fn list(&self) -> Vec<ClientStatus> {
-        br_mcp_clients::list(&self.env, &self.relay, None)
+        let mut statuses = br_mcp_clients::list(&self.env, &self.relay, None);
+        for status in &mut statuses {
+            if !status.detected {
+                match status.id {
+                    "zed" => status.detected = detect_zed(&self.env),
+                    "cline" => status.detected = detect_cline(&self.env),
+                    _ => {}
+                }
+            }
+        }
+        statuses
     }
 
     fn add(&self, id: &str) -> Result<Change, ClientError> {
@@ -208,22 +244,19 @@ impl McpBackend for FakeMcpBackend {
 
     fn snippet(&self, id: &str) -> Result<Snippet, ClientError> {
         let guard = self.clients.lock().expect("fake mcp lock");
-        let client = guard
+        let _client = guard
             .iter()
             .find(|c| c.id == id)
             .ok_or_else(|| ClientError::UnknownClient(id.to_string()))?;
+        drop(guard);
 
-        let text = format!(
-            "{{\n  \"mcpServers\": {{\n    \"betterrecall\": {{\n      \"command\": \"{}\"\n    }}\n  }}\n}}",
-            self.relay.replace('\\', "\\\\")
-        );
-        let command = (client.id == "claude-code")
-            .then(|| format!("claude mcp add --scope user betterrecall -- \"{}\"", self.relay));
-        Ok(Snippet {
-            text,
-            command,
-            target_hint: client.name.to_string(),
-        })
+        let fake_env = ClientEnv {
+            home: PathBuf::from("%USERPROFILE%"),
+            appdata: PathBuf::from("%APPDATA%"),
+            xdg_config_home: None,
+            codex_home: None,
+        };
+        br_mcp_clients::snippet(&fake_env, id, Path::new(&self.relay), None)
     }
 }
 
@@ -251,6 +284,27 @@ fn format_change_message(change: &Change) -> String {
     }
 }
 
+fn detected_status_label(client: &ClientStatus) -> &'static str {
+    if client.id == "other" {
+        "Manual"
+    } else if client.detected {
+        "Detected"
+    } else {
+        "Not found"
+    }
+}
+
+fn add_or_update_label(client: &ClientStatus) -> Option<&'static str> {
+    if !matches!(client.kind, ClientKind::File { .. }) || !client.detected {
+        return None;
+    }
+    match client.state {
+        EntryState::Absent => Some("Add"),
+        EntryState::Present { matches: false, .. } => Some("Update"),
+        _ => None,
+    }
+}
+
 fn entry_state_label(client: &ClientStatus) -> String {
     if matches!(client.kind, ClientKind::Snippet) {
         return "Copy the config".to_string();
@@ -264,47 +318,104 @@ fn entry_state_label(client: &ClientStatus) -> String {
     }
 }
 
+fn collect_clients_and_hints(
+    backend: &dyn McpBackend,
+) -> (Vec<ClientStatus>, HashMap<&'static str, String>) {
+    let clients = backend.list();
+    let mut hints = HashMap::with_capacity(clients.len());
+    for client in &clients {
+        if let Ok(snip) = backend.snippet(client.id)
+            && !snip.target_hint.is_empty()
+        {
+            hints.insert(client.id, snip.target_hint);
+        }
+    }
+    (clients, hints)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BusyAction {
+    Primary,
+    Remove,
+}
+
 pub struct McpView {
     backend: Arc<dyn McpBackend>,
     clients: Vec<ClientStatus>,
+    target_hints: HashMap<&'static str, String>,
     row_messages: HashMap<&'static str, (bool, String)>,
-    busy_id: Option<&'static str>,
+    busy_action: Option<(&'static str, BusyAction)>,
+    refresh_gen: u64,
     tip_visible: bool,
+    focus_handle: FocusHandle,
 }
 
 impl McpView {
-    pub fn new(mock_mcp_home: Option<&Path>, show_tip: bool) -> Self {
+    pub fn new(mock_mcp_home: Option<&Path>, show_tip: bool, cx: &mut Context<Self>) -> Self {
         let backend = build_mock_backend(mock_mcp_home);
-        let clients = backend.list();
+        let (clients, target_hints) = collect_clients_and_hints(backend.as_ref());
+        let focus_handle = cx.focus_handle();
         Self {
             backend,
             clients,
+            target_hints,
             row_messages: HashMap::new(),
-            busy_id: None,
+            busy_action: None,
+            refresh_gen: 0,
             tip_visible: show_tip,
+            focus_handle,
         }
     }
 
-    fn run_add(&mut self, id: &'static str, cx: &mut Context<Self>) {
-        if self.busy_id.is_some() {
+    pub fn focus_handle(&self) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+
+    /// Re-read the client list whenever the MCP page is opened so external edits are reflected.
+    pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        if self.busy_action.is_some() {
             return;
         }
-        self.busy_id = Some(id);
+        self.refresh_gen = self.refresh_gen.wrapping_add(1);
+        let epoch = self.refresh_gen;
+        let backend = self.backend.clone();
+        cx.spawn(async move |weak, cx| {
+            let (clients, hints) = cx
+                .background_spawn(async move { collect_clients_and_hints(backend.as_ref()) })
+                .await;
+            let _ = weak.update(cx, |this, cx| {
+                if this.refresh_gen == epoch && this.busy_action.is_none() {
+                    this.clients = clients;
+                    this.target_hints = hints;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn run_add(&mut self, id: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy_action.is_some() {
+            return;
+        }
+        self.refresh_gen = self.refresh_gen.wrapping_add(1);
+        self.busy_action = Some((id, BusyAction::Primary));
         cx.notify();
 
         let backend = self.backend.clone();
-        cx.spawn(async move |weak, cx| {
-            let (res, refreshed) = cx
+        cx.spawn_in(window, async move |weak, cx| {
+            let (res, refreshed, hints) = cx
                 .background_spawn(async move {
                     let res = backend.add(id);
-                    let refreshed = backend.list();
-                    (res, refreshed)
+                    let (refreshed, hints) = collect_clients_and_hints(backend.as_ref());
+                    (res, refreshed, hints)
                 })
                 .await;
 
-            let _ = weak.update(cx, |this, cx| {
+            let _ = weak.update_in(cx, |this, window, cx| {
                 this.clients = refreshed;
-                this.busy_id = None;
+                this.target_hints = hints;
+                this.busy_action = None;
                 match res {
                     Ok(change) => {
                         this.row_messages
@@ -314,32 +425,49 @@ impl McpView {
                         this.row_messages.insert(id, (true, e.to_string()));
                     }
                 }
+                // If the primary button slot no longer exists for this row, move focus to the page.
+                let has_primary = this.clients.iter().find(|c| c.id == id).is_some_and(|c| {
+                    add_or_update_label(c).is_some()
+                        || (matches!(c.kind, ClientKind::File { .. })
+                            && matches!(c.state, EntryState::Present { matches: true, .. }))
+                });
+                if !has_primary {
+                    window.focus(&this.focus_handle, cx);
+                }
                 cx.notify();
             });
         })
         .detach();
     }
 
-    fn run_remove(&mut self, id: &'static str, cx: &mut Context<Self>) {
-        if self.busy_id.is_some() {
+    fn run_remove(
+        &mut self,
+        id: &'static str,
+        slot: BusyAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.busy_action.is_some() {
             return;
         }
-        self.busy_id = Some(id);
+        self.refresh_gen = self.refresh_gen.wrapping_add(1);
+        self.busy_action = Some((id, slot));
         cx.notify();
 
         let backend = self.backend.clone();
-        cx.spawn(async move |weak, cx| {
-            let (res, refreshed) = cx
+        cx.spawn_in(window, async move |weak, cx| {
+            let (res, refreshed, hints) = cx
                 .background_spawn(async move {
                     let res = backend.remove(id);
-                    let refreshed = backend.list();
-                    (res, refreshed)
+                    let (refreshed, hints) = collect_clients_and_hints(backend.as_ref());
+                    (res, refreshed, hints)
                 })
                 .await;
 
-            let _ = weak.update(cx, |this, cx| {
+            let _ = weak.update_in(cx, |this, window, cx| {
                 this.clients = refreshed;
-                this.busy_id = None;
+                this.target_hints = hints;
+                this.busy_action = None;
                 match res {
                     Ok(change) => {
                         this.row_messages
@@ -348,6 +476,16 @@ impl McpView {
                     Err(e) => {
                         this.row_messages.insert(id, (true, e.to_string()));
                     }
+                }
+                // If the clicked secondary Remove button disappeared (or primary slot is gone),
+                // move focus to the page handle so keyboard users keep a focus position.
+                let has_primary = this.clients.iter().find(|c| c.id == id).is_some_and(|c| {
+                    add_or_update_label(c).is_some()
+                        || (matches!(c.kind, ClientKind::File { .. })
+                            && matches!(c.state, EntryState::Present { matches: true, .. }))
+                });
+                if slot == BusyAction::Remove || !has_primary {
+                    window.focus(&this.focus_handle, cx);
                 }
                 cx.notify();
             });
@@ -399,7 +537,8 @@ impl Render for McpView {
                 .child(div().text_sm().text_color(muted_fg).child(value))
         };
 
-        let busy_any = self.busy_id.is_some();
+        let busy_action = self.busy_action;
+        let busy_any = busy_action.is_some();
 
         let client_cards: Vec<_> = self
             .clients
@@ -408,20 +547,21 @@ impl Render for McpView {
             .map(|(idx, client)| {
                 let id = client.id;
                 let is_file = matches!(client.kind, ClientKind::File { .. });
-                let show_add = is_file
-                    && client.detected
-                    && matches!(
-                        client.state,
-                        EntryState::Absent | EntryState::Present { matches: false, .. }
-                    );
-                let show_remove = is_file && matches!(client.state, EntryState::Present { .. });
-                let detected_label = if client.detected {
-                    "Detected"
-                } else {
-                    "Not found"
-                };
+                let add_label = add_or_update_label(client);
+                let is_present = is_file && matches!(client.state, EntryState::Present { .. });
+                // When only Add/Update OR only Remove is shown, both reuse the same primary id
+                // slot ("mcp-primary", idx) so keyboard focus stays on the replacing button.
+                let primary_is_remove = add_label.is_none() && is_present;
+                let show_secondary_remove = add_label.is_some() && is_present;
+                let detected_label = detected_status_label(client);
                 let state_label = entry_state_label(client);
+                let target_hint = self.target_hints.get(id).cloned();
                 let inline_msg = self.row_messages.get(id).cloned();
+
+                let primary_loading = busy_action == Some((id, BusyAction::Primary));
+                let primary_disabled = busy_any && !primary_loading;
+                let remove_loading = busy_action == Some((id, BusyAction::Remove));
+                let remove_disabled = busy_any && !remove_loading;
 
                 v_flex()
                     .id(("mcp-client-row", idx))
@@ -444,38 +584,74 @@ impl Render for McpView {
                                     .min_w_0()
                                     .gap_0p5()
                                     .child(
-                                        div()
-                                            .text_sm()
-                                            .font_weight(gpui::FontWeight::MEDIUM)
-                                            .child(client.name),
+                                        h_flex()
+                                            .gap_2()
+                                            .items_center()
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                                    .child(client.name),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(muted_fg)
+                                                    .child(format!(
+                                                        "{detected_label} · {state_label}"
+                                                    )),
+                                            ),
                                     )
-                                    .child(
+                                    .children(target_hint.map(|hint| {
                                         div()
                                             .text_xs()
                                             .text_color(muted_fg)
-                                            .child(format!("{detected_label} · {state_label}")),
-                                    ),
+                                            .truncate()
+                                            .child(hint)
+                                    })),
                             )
                             .child(
                                 h_flex()
                                     .gap_2()
                                     .items_center()
-                                    .children(show_add.then(|| {
-                                        Button::new(("mcp-add", idx))
+                                    .children(add_label.map(|label| {
+                                        Button::new(("mcp-primary", idx))
                                             .primary()
-                                            .disabled(busy_any)
-                                            .label("Add")
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.run_add(id, cx);
+                                            .loading(primary_loading)
+                                            .disabled(primary_disabled)
+                                            .label(label)
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.run_add(id, window, cx);
                                             }))
                                     }))
-                                    .children(show_remove.then(|| {
+                                    .children(primary_is_remove.then(|| {
+                                        Button::new(("mcp-primary", idx))
+                                            .danger()
+                                            .loading(primary_loading)
+                                            .disabled(primary_disabled)
+                                            .label("Remove")
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.run_remove(
+                                                    id,
+                                                    BusyAction::Primary,
+                                                    window,
+                                                    cx,
+                                                );
+                                            }))
+                                    }))
+                                    .children(show_secondary_remove.then(|| {
                                         Button::new(("mcp-remove", idx))
                                             .danger()
-                                            .disabled(busy_any)
+                                            .loading(remove_loading)
+                                            .disabled(remove_disabled)
                                             .label("Remove")
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.run_remove(id, cx);
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.run_remove(
+                                                    id,
+                                                    BusyAction::Remove,
+                                                    window,
+                                                    cx,
+                                                );
                                             }))
                                     }))
                                     .child(
@@ -499,12 +675,14 @@ impl Render for McpView {
 
         div()
             .id("mcp-scroll")
+            .track_focus(&self.focus_handle)
             .size_full()
             .overflow_y_scroll()
             .p_6()
-            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                 if ev.keystroke.key == "escape" && this.tip_visible {
                     this.tip_visible = false;
+                    window.focus(&this.focus_handle, cx);
                     cx.notify();
                 }
             }))
@@ -517,8 +695,9 @@ impl Render for McpView {
                             "mcp-tip-dismiss",
                             "MCP clients",
                             "Connect an AI app to your history. Nothing is changed until you press Add.",
-                            cx.listener(|this, _, _, cx| {
+                            cx.listener(|this, _, window, cx| {
                                 this.tip_visible = false;
+                                window.focus(&this.focus_handle, cx);
                                 cx.notify();
                             }),
                             cx,
@@ -642,5 +821,93 @@ mod tests {
         assert!(!contents_after_remove.contains("betterrecall"));
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn detects_zed_and_cline_in_mock_home_and_marks_other_manual() {
+        let root = make_temp_dir("zed-cline");
+        let home = root.join("home");
+        let appdata = root.join("appdata");
+        std::fs::create_dir_all(&home).expect("create home");
+        std::fs::create_dir_all(&appdata).expect("create appdata");
+
+        let relay = PathBuf::from(MOCK_RELAY_PATH);
+        let backend = RealMcpBackend::from_mock_home(&root, relay);
+
+        let before = backend.list();
+        assert!(!before.iter().find(|c| c.id == "zed").unwrap().detected);
+        assert!(!before.iter().find(|c| c.id == "cline").unwrap().detected);
+        let other = before.iter().find(|c| c.id == "other").unwrap();
+        assert_eq!(detected_status_label(other), "Manual");
+
+        std::fs::create_dir_all(appdata.join("Zed")).expect("create Zed dir");
+        std::fs::create_dir_all(
+            appdata
+                .join("Code")
+                .join("User")
+                .join("globalStorage")
+                .join("saoudrizwan.claude-dev"),
+        )
+        .expect("create Cline dir");
+
+        let after = backend.list();
+        let zed = after.iter().find(|c| c.id == "zed").unwrap();
+        let cline = after.iter().find(|c| c.id == "cline").unwrap();
+        assert!(zed.detected);
+        assert!(cline.detected);
+        assert_eq!(detected_status_label(zed), "Detected");
+        assert_eq!(detected_status_label(cline), "Detected");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn mismatched_entry_shows_update_label() {
+        let absent = ClientStatus {
+            id: "cursor",
+            name: "Cursor",
+            kind: ClientKind::File {
+                path: PathBuf::from("mcp.json"),
+                format: ConfigFormat::Json,
+            },
+            detected: true,
+            state: EntryState::Absent,
+        };
+        assert_eq!(add_or_update_label(&absent), Some("Add"));
+
+        let mismatched = ClientStatus {
+            state: EntryState::Present {
+                command: Some("old.exe".into()),
+                matches: false,
+            },
+            ..absent.clone()
+        };
+        assert_eq!(add_or_update_label(&mismatched), Some("Update"));
+
+        let matched = ClientStatus {
+            state: EntryState::Present {
+                command: Some(MOCK_RELAY_PATH.into()),
+                matches: true,
+            },
+            ..absent
+        };
+        assert_eq!(add_or_update_label(&matched), None);
+    }
+
+    #[test]
+    fn fake_claude_code_snippet_matches_br_mcp_clients_exactly() {
+        let backend = FakeMcpBackend::new(MOCK_RELAY_PATH);
+        let fake_snip = backend.snippet("claude-code").expect("fake snippet");
+        let env = ClientEnv {
+            home: PathBuf::from("%USERPROFILE%"),
+            appdata: PathBuf::from("%APPDATA%"),
+            xdg_config_home: None,
+            codex_home: None,
+        };
+        let real_snip = br_mcp_clients::snippet(&env, "claude-code", Path::new(MOCK_RELAY_PATH), None)
+            .expect("real snippet");
+        assert_eq!(fake_snip.text, real_snip.text);
+        assert_eq!(fake_snip.command, real_snip.command);
+        assert_eq!(fake_snip.target_hint, real_snip.target_hint);
     }
 }

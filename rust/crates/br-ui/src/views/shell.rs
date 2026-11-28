@@ -35,7 +35,7 @@ pub struct MainShell {
     no_shell: bool,
     days_used: u32,
     support_dismissed: bool,
-    support_status: Option<String>,
+    support_status: Option<(bool, String)>,
     /// Keeps the window's focus path inside Root, so Tab / Shift+Tab reach the first tab stop.
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
@@ -44,6 +44,7 @@ pub struct MainShell {
 impl MainShell {
     pub fn new(
         args: &LaunchArgs,
+        show_main: bool,
         assets_dir: Option<PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -61,18 +62,20 @@ impl MainShell {
         });
         let mcp_home = args.mock_mcp_home.clone();
         let show_tips = args.mock_tips;
-        let mcp_view = cx.new(|_| McpView::new(mcp_home.as_deref(), show_tips));
+        let mcp_view = cx.new(|cx| McpView::new(mcp_home.as_deref(), show_tips, cx));
         let no_shell = args.mock_no_shell;
         let about_view = cx.new(|_| AboutView::new(no_shell));
         let help_view = cx.new(|_| HelpView::new(no_shell));
         let first_run_view = cx.new(|cx| FirstRunView::new(assets_dir, window, cx));
 
         let mut subscriptions = Vec::new();
-        subscriptions.push(cx.subscribe(
+        subscriptions.push(cx.subscribe_in(
             &first_run_view,
-            |this, _, _ev: &FirstRunEvent, cx| {
+            window,
+            |this, _, _ev: &FirstRunEvent, window, cx| {
                 this.show_first_run = false;
                 this.active_page = Page::Home;
+                window.focus(&this.focus_handle, cx);
                 cx.notify();
             },
         ));
@@ -81,16 +84,31 @@ impl MainShell {
             window,
             |this, _, ev: &HelpEvent, window, cx| match ev {
                 HelpEvent::ShowIntroduction => {
+                    if this.active_page == Page::Player {
+                        this.player_view.update(cx, |p, cx| p.on_leave(cx));
+                    }
                     this.first_run_view.update(cx, |v, cx| v.reset(window, cx));
                     this.show_first_run = true;
+                    let h = this.first_run_view.read(cx).focus_handle();
+                    window.focus(&h, cx);
                     cx.notify();
                 }
             },
         ));
 
+        if show_main && !args.mock_firstrun && args.page == Page::Player {
+            player_view.update(cx, |p, cx| p.on_enter(cx));
+        }
+
         let focus_handle = cx.focus_handle();
-        if !args.mock_firstrun && args.page == Page::Player {
+        if args.mock_firstrun {
+            let h = first_run_view.read(cx).focus_handle();
+            window.focus(&h, cx);
+        } else if args.page == Page::Player {
             let h = player_view.read(cx).focus_handle();
+            window.focus(&h, cx);
+        } else if args.page == Page::Mcp {
+            let h = mcp_view.read(cx).focus_handle();
             window.focus(&h, cx);
         } else {
             window.focus(&focus_handle, cx);
@@ -119,9 +137,18 @@ impl MainShell {
         if self.show_first_run {
             return;
         }
+        let prev = self.active_page;
+        if prev == Page::Player && page != Page::Player {
+            self.player_view.update(cx, |p, cx| p.on_leave(cx));
+        }
         self.active_page = page;
         if page == Page::Player {
+            self.player_view.update(cx, |p, cx| p.on_enter(cx));
             let h = self.player_view.read(cx).focus_handle();
+            window.focus(&h, cx);
+        } else if page == Page::Mcp {
+            self.mcp_view.update(cx, |v, cx| v.refresh(cx));
+            let h = self.mcp_view.read(cx).focus_handle();
             window.focus(&h, cx);
         }
         cx.notify();
@@ -196,30 +223,56 @@ impl MainShell {
                                 Button::new("home-support-open")
                                     .primary()
                                     .label("Support")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        if let Err(e) =
-                                            links::open_url(links::SUPPORT, this.no_shell)
-                                        {
-                                            this.support_status =
-                                                Some(format!("Could not open link: {e}"));
-                                            cx.notify();
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        match links::open_url(links::SUPPORT, this.no_shell) {
+                                            Ok(()) => {
+                                                this.support_dismissed = true;
+                                                this.support_status = if this.no_shell {
+                                                    Some((
+                                                        false,
+                                                        format!(
+                                                            "Link logged (--mock-no-shell): {}",
+                                                            links::SUPPORT
+                                                        ),
+                                                    ))
+                                                } else {
+                                                    None
+                                                };
+                                                window.focus(&this.focus_handle, cx);
+                                            }
+                                            Err(e) => {
+                                                this.support_status = Some((
+                                                    true,
+                                                    format!("Could not open link: {e}"),
+                                                ));
+                                            }
                                         }
+                                        cx.notify();
                                     })),
                             )
                             .child(
                                 Button::new("home-support-dismiss")
                                     .secondary()
                                     .label("Not now")
-                                    .on_click(cx.listener(|this, _, _, cx| {
+                                    .on_click(cx.listener(|this, _, window, cx| {
                                         // Session-only dismissal; persistence comes with the real settings store.
                                         this.support_dismissed = true;
+                                        this.support_status = None;
+                                        window.focus(&this.focus_handle, cx);
                                         cx.notify();
                                     })),
-                            )
-                            .children(self.support_status.clone().map(|msg| {
-                                div().text_xs().text_color(theme.danger).child(msg)
-                            })),
+                            ),
                     )
+            }))
+            .children(self.support_status.clone().map(|(is_err, msg)| {
+                div()
+                    .text_xs()
+                    .text_color(if is_err {
+                        theme.danger
+                    } else {
+                        theme.muted_foreground
+                    })
+                    .child(msg)
             }))
             .child(
                 v_flex()
@@ -244,6 +297,7 @@ impl MainShell {
                                     .label("Open Settings Demo")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.go(Page::Settings, window, cx);
+                                        window.focus(&this.focus_handle, cx);
                                     })),
                             )
                             .child(

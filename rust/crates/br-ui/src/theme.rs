@@ -251,15 +251,25 @@ fn apply_resolved(resolved: &ResolvedTheme, is_dark: bool, high_contrast: bool, 
     });
 }
 
-/// Start the `native-theme` OS watcher and re-apply theme + system motion live on change.
-/// Returns the watcher subscription handle (must stay alive for the app lifetime).
-pub fn start_theme_watcher(cx: &mut App) -> Option<native_theme::watch::ThemeSubscription> {
-    let (tx, rx) = async_channel::bounded::<()>(4);
-    let sub = native_theme::watch::on_theme_change(move |_event| {
-        let _ = tx.try_send(());
-    })
-    .ok()?;
+struct ThemeWatcherGuard(#[allow(dead_code)] native_theme::watch::ThemeSubscription);
 
+impl Global for ThemeWatcherGuard {}
+
+/// Start the `native-theme` OS watcher and re-apply theme + system motion live on change.
+/// Stores the subscription in GPUI globals so it stays alive independently of other tasks.
+pub fn start_theme_watcher(cx: &mut App) {
+    let (tx, rx) = async_channel::bounded::<()>(4);
+    let sub = match native_theme::watch::on_theme_change(move |_event| {
+        let _ = tx.try_send(());
+    }) {
+        Ok(sub) => sub,
+        Err(err) => {
+            eprintln!("br-ui: theme watcher failed to start: {err}");
+            return;
+        }
+    };
+
+    cx.set_global(ThemeWatcherGuard(sub));
     cx.spawn(async move |cx| {
         while rx.recv().await.is_ok() {
             cx.update(|cx| {
@@ -270,6 +280,4 @@ pub fn start_theme_watcher(cx: &mut App) -> Option<native_theme::watch::ThemeSub
         }
     })
     .detach();
-
-    Some(sub)
 }

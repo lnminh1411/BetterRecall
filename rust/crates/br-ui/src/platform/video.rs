@@ -88,12 +88,17 @@ impl MediaPlayer {
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let bg_shared = Arc::clone(&shared);
 
-        let thread = thread::Builder::new()
+        let thread = match thread::Builder::new()
             .name("br-ui-mf-decode".into())
             .spawn(move || {
                 run_decode_thread(path, start_offset_ms as i64, bg_shared, cmd_rx);
-            })
-            .ok();
+            }) {
+            Ok(handle) => Some(handle),
+            Err(e) => {
+                set_error(&shared, format!("Failed to start decode thread: {e}"));
+                None
+            }
+        };
 
         Self {
             shared,
@@ -396,6 +401,14 @@ fn read_duration_ms(reader: &IMFSourceReader) -> i64 {
     (val_100ns / 10_000) as i64
 }
 
+pub(crate) fn clamp_offset_ms(offset_ms: i64, duration_ms: i64) -> i64 {
+    if duration_ms > 0 {
+        offset_ms.clamp(0, duration_ms)
+    } else {
+        offset_ms.max(0)
+    }
+}
+
 fn seek_reader(reader: &IMFSourceReader, target_ms: i64) -> Result<(), String> {
     let pos_100ns = target_ms.max(0).saturating_mul(10_000);
     let prop = PROPVARIANT {
@@ -469,7 +482,7 @@ fn decode_loop(
     let mut playing = true;
     let mut eof = false;
     let mut audio_eof = audio.is_none();
-    let mut mono_base_ms = start_offset_ms.clamp(0, duration_ms.max(start_offset_ms));
+    let mut mono_base_ms = clamp_offset_ms(start_offset_ms, duration_ms);
     let mut mono_start = Instant::now();
 
     if mono_base_ms > 0 {
@@ -528,11 +541,7 @@ fn decode_loop(
                     }
                 }
                 DecodeCmd::Seek(target) => {
-                    let clamped = if duration_ms > 0 {
-                        target.clamp(0, duration_ms)
-                    } else {
-                        target.max(0)
-                    };
+                    let clamped = clamp_offset_ms(target, duration_ms);
                     if let Ok(mut q) = shared.frames.lock() {
                         q.clear();
                     }
@@ -758,5 +767,26 @@ fn current_clock_ms(
         mono_base_ms + mono_start.elapsed().as_millis() as i64
     } else {
         mono_base_ms
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clamp_offset_ms;
+
+    #[test]
+    fn clamp_offset_respects_known_duration() {
+        assert_eq!(clamp_offset_ms(-500, 10_000), 0);
+        assert_eq!(clamp_offset_ms(0, 10_000), 0);
+        assert_eq!(clamp_offset_ms(4_200, 10_000), 4_200);
+        assert_eq!(clamp_offset_ms(10_000, 10_000), 10_000);
+        assert_eq!(clamp_offset_ms(25_000, 10_000), 10_000);
+    }
+
+    #[test]
+    fn clamp_offset_allows_non_negative_when_duration_unknown() {
+        assert_eq!(clamp_offset_ms(-100, 0), 0);
+        assert_eq!(clamp_offset_ms(7_500, 0), 7_500);
+        assert_eq!(clamp_offset_ms(7_500, -1), 7_500);
     }
 }

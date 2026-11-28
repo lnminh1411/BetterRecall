@@ -34,6 +34,8 @@ During install, `copy_stub_exe` extracts the first `trailer.offset` bytes of the
 
 That means the installed `<install>\BetterRecall-Setup.exe` is unsigned in 0.4, which is acceptable because Modify/Uninstall run from an already-installed local folder.
 
+**Smart App Control and Modify/Uninstall (checkpoint 5 C8):** until the 1.0 follow-up below lands, the installed `BetterRecall-Setup.exe` is unsigned even when the downloaded installer is signed. On a PC with Smart App Control in enforcement mode, Windows can block that unsigned copy, so "Modify" and "Uninstall" from Settings > Apps would fail while the downloaded, signed installer still works (`BetterRecall-Setup-<version>.exe /modify` or `/uninstall`). This has not been tested: Windows Sandbox has Smart App Control off. Release notes for signed builds before 1.0 must say so.
+
 **1.0 follow-up**: sign `br-installer.exe` *before* step 2 (so `integrity.json` hashes a signed stub), record its original `CheckSum` and `IMAGE_DIRECTORY_ENTRY_SECURITY` values (or embed them in the trailer), and restore them when copying the stub—while also copying the stub's own certificate table—so the installed `BetterRecall-Setup.exe` retains a valid Authenticode signature.
 
 ## Relation to the release key (`docs/key-trust.md`)
