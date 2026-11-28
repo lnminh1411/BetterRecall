@@ -36,6 +36,8 @@ pub const MODEL_MODE_VALUE: &str = "ModelMode";
 pub const DISPLAY_NAME: &str = "BetterRecall";
 pub const PUBLISHER: &str = "BetterRecall contributors";
 pub const URL_INFO_ABOUT: &str = "https://github.com/lnminh1411/BetterRecall";
+/// Uninstall `HelpLink`: where users report problems.
+pub const HELP_LINK: &str = "https://github.com/lnminh1411/BetterRecall/issues";
 
 /// Writes the Uninstall key, Run value, and `Software\BetterRecall\InstallPath` under `HKCU\<reg_prefix>`.
 pub fn register(ctx: &Ctx, version: &str) -> Result<(), InstallError> {
@@ -63,6 +65,7 @@ pub fn register(ctx: &Ctx, version: &str) -> Result<(), InstallError> {
         set_reg_dword(hkey.0, "NoRepair", 1)?;
         set_reg_dword(hkey.0, "EstimatedSize", estimated_kib)?;
         set_reg_sz(hkey.0, "URLInfoAbout", URL_INFO_ABOUT)?;
+        set_reg_sz(hkey.0, "HelpLink", HELP_LINK)?;
     }
 
     let run_key = ctx.reg_key(RUN_SUBKEY);
