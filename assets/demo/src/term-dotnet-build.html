@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>dotnet build - Terminal</title>
+<style>
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body {
+  width: 1280px; height: 720px; overflow: hidden;
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-size: 13px; line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+.mono { font-family: "Cascadia Mono", "Consolas", monospace; }
+.win-controls { display: flex; align-items: center; gap: 2px; margin-left: auto; }
+.win-btn {
+  width: 38px; height: 30px; display: flex; align-items: center; justify-content: center;
+  font-size: 11px; opacity: 0.78; user-select: none;
+}
+.win-btn.close:hover { background: #c42b1c; color: #fff; }
+
+
+body { background: #0c0c0c; color: #e5e5e5; display: flex; flex-direction: column; }
+.wt-tabs {
+  height: 36px; background: #1f1f1f; display: flex; align-items: flex-end; padding-left: 8px; gap: 4px;
+}
+.wt-tab {
+  height: 30px; min-width: 200px; background: #0c0c0c; color: #ffffff;
+  border-radius: 6px 6px 0 0; padding: 0 12px; display: flex; align-items: center; gap: 8px; font-size: 12px;
+}
+.wt-tab.off { background: transparent; color: #9a9a9a; min-width: 170px; }
+.wt-body {
+  flex: 1; padding: 18px 22px; font-size: 13.5px; line-height: 1.58; white-space: pre; overflow: hidden;
+}
+.g { color: #4ec9b0; }
+.ok { color: #6ccb5f; font-weight: 600; }
+.y { color: #f9e2af; }
+.b { color: #61afef; }
+.dim { color: #8b949e; }
+.cyn { color: #56b6c2; }
+.mag { color: #c678dd; }
+.cur { display: inline-block; width: 8px; height: 15px; background: #e5e5e5; vertical-align: -2px; }
+
+</style>
+</head>
+<body>
+
+<div class="wt-tabs">
+  <div class="wt-tab"><span>&gt;_</span><span>dotnet build</span><span style="margin-left:auto;font-size:10px;opacity:0.6;">&#x2715;</span></div>
+  <div class="wt-tab off"><span>&gt;_</span><span>git log</span></div>
+  <div class="win-controls" style="color:#d4d4d4"><div class="win-btn">&#x2014;</div><div class="win-btn">&#x25A1;</div><div class="win-btn close">&#x2715;</div></div>
+</div>
+<div class="wt-body mono"><span class="b">PS E:\Projects\BetterRecall&gt;</span> dotnet build -c Release
+<span class="dim">MSBuild version 17.14.0+1a2b3c for .NET</span>
+  Determining projects to restore...
+  All projects are up-to-date for restore.
+  BetterRecall.Contracts -&gt; E:\Projects\BetterRecall\artifacts\bin\BetterRecall.Contracts\release\BetterRecall.Contracts.dll
+  BetterRecall.UI -&gt; E:\Projects\BetterRecall\artifacts\bin\BetterRecall.UI\release_win-x64\BetterRecall.UI.dll
+  BetterRecall.UI.Tests -&gt; E:\Projects\BetterRecall\artifacts\bin\BetterRecall.UI.Tests\release\BetterRecall.UI.Tests.dll
+
+<span class="ok">Build succeeded.</span>
+    <span class="ok">0 Warning(s)</span>
+    <span class="ok">0 Error(s)</span>
+
+Time Elapsed 00:00:04.82
+
+<span class="b">PS E:\Projects\BetterRecall&gt;</span> dotnet test tests\BetterRecall.UI.Tests --no-build -c Release
+  Determining projects to restore...
+  Test run for BetterRecall.UI.Tests.dll (.NET 10.0)
+  Starting test execution, please wait...
+  A total of 1 test files matched the specified pattern.
+
+<span class="ok">Passed!</span>  - Failed:     0, Passed:   142, Skipped:     0, Total:   142, Duration: 2 s
+
+<span class="b">PS E:\Projects\BetterRecall&gt;</span> <span class="cur"></span></div>
+
+</body>
+</html>

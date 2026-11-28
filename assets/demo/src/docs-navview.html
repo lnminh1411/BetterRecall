@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>NavigationView class - Docs</title>
+<style>
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body {
+  width: 1280px; height: 720px; overflow: hidden;
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-size: 13px; line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+.mono { font-family: "Cascadia Mono", "Consolas", monospace; }
+.win-controls { display: flex; align-items: center; gap: 2px; margin-left: auto; }
+.win-btn {
+  width: 38px; height: 30px; display: flex; align-items: center; justify-content: center;
+  font-size: 11px; opacity: 0.78; user-select: none;
+}
+.win-btn.close:hover { background: #c42b1c; color: #fff; }
+
+
+body { background: #f3f5f8; color: #1f2328; display: flex; flex-direction: column; }
+.b-tabs {
+  height: 36px; background: #dee3ea; display: flex; align-items: flex-end;
+  padding: 0 0 0 10px; gap: 4px;
+}
+.b-tab {
+  height: 30px; min-width: 240px; max-width: 310px; background: #ffffff;
+  border-radius: 8px 8px 0 0; padding: 0 12px; display: flex; align-items: center; gap: 8px;
+  font-size: 12px; font-weight: 500; color: #1f2328;
+  box-shadow: 0 -1px 2px rgba(0,0,0,0.06);
+}
+.b-tab.inactive { background: transparent; box-shadow: none; color: #525c68; min-width: 150px; }
+.b-dot { width: 10px; height: 10px; border-radius: 50%; background: #0078d4; flex-shrink: 0; }
+.b-tab-x { margin-left: auto; font-size: 10px; opacity: 0.55; }
+.b-bar {
+  height: 40px; background: #ffffff; border-bottom: 1px solid #dde2e8;
+  display: flex; align-items: center; padding: 0 14px; gap: 10px;
+}
+.b-nav { display: flex; gap: 10px; color: #5f6368; font-size: 14px; }
+.b-url {
+  flex: 1; height: 28px; background: #f1f3f4; border-radius: 14px;
+  display: flex; align-items: center; padding: 0 14px; gap: 8px;
+  font-size: 12.5px; color: #3c4043;
+}
+.b-lock { color: #188038; font-size: 11px; }
+.b-avatar {
+  width: 26px; height: 26px; border-radius: 50%; background: #0078d4;
+  color: #fff; font-size: 11px; font-weight: 600;
+  display: flex; align-items: center; justify-content: center;
+}
+.b-body { flex: 1; display: flex; overflow: hidden; }
+
+.doc-shell { flex: 1; display: flex; flex-direction: column; background: #ffffff; }
+.doc-top {
+  height: 46px; border-bottom: 1px solid #e1e4e8; padding: 0 24px;
+  display: flex; align-items: center; gap: 22px; background: #fafbfc;
+}
+.doc-brand { font-weight: 700; font-size: 15px; color: #111827; }
+.doc-top-nav { display: flex; gap: 18px; font-size: 12.5px; color: #4b5563; }
+.doc-top-search { margin-left: auto; width: 240px; height: 28px; border: 1px solid #d1d5db; border-radius: 4px; background: #fff; padding: 0 10px; display: flex; align-items: center; color: #6b7280; font-size: 12px; }
+.doc-cols { flex: 1; display: flex; overflow: hidden; }
+.doc-toc { width: 245px; border-right: 1px solid #e5e7eb; padding: 16px 14px; font-size: 12.5px; color: #374151; background: #fcfcfd; }
+.toc-h { font-weight: 700; color: #111827; margin-bottom: 8px; }
+.toc-i { padding: 5px 10px; border-radius: 4px; margin-bottom: 2px; }
+.toc-i.sub { padding-left: 22px; color: #4b5563; }
+.toc-i.active { background: #e8f0fe; color: #0b57d0; font-weight: 600; border-left: 3px solid #0b57d0; }
+.doc-main { flex: 1; padding: 24px 36px; overflow: hidden; }
+.doc-crumb { font-size: 11.5px; color: #6b7280; margin-bottom: 8px; }
+.doc-main h1 { font-size: 26px; font-weight: 700; color: #111827; margin-bottom: 6px; }
+.doc-ns { font-size: 12px; color: #4b5563; margin-bottom: 14px; }
+.doc-code {
+  background: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 6px;
+  padding: 12px 16px; font-size: 12.5px; color: #1f2937; margin: 12px 0 18px;
+}
+.kw { color: #0550ae; font-weight: 600; }
+.tp { color: #0a7b66; }
+.prop-tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.prop-tbl th { text-align: left; padding: 7px 10px; border-bottom: 2px solid #d1d5db; color: #374151; }
+.prop-tbl td { padding: 8px 10px; border-bottom: 1px solid #edf0f3; vertical-align: top; }
+.prop-name { color: #0b57d0; font-weight: 600; }
+.doc-right { width: 190px; border-left: 1px solid #eef0f3; padding: 20px 16px; font-size: 12px; color: #4b5563; }
+.doc-right h4 { font-size: 11px; text-transform: uppercase; color: #6b7280; margin-bottom: 10px; }
+.doc-right div { padding: 4px 0; }
+
+
+</style>
+</head>
+<body>
+
+<div class="b-tabs">
+  <div class="b-tab"><span class="b-dot"></span><span>NavigationView class - Docs</span><span class="b-tab-x">&#x2715;</span></div>
+  <div class="b-tab inactive"><span>New Tab</span><span class="b-tab-x">&#x2715;</span></div>
+  <div class="win-controls" style="color:#333333"><div class="win-btn">&#x2014;</div><div class="win-btn">&#x25A1;</div><div class="win-btn close">&#x2715;</div></div>
+</div>
+<div class="b-bar">
+  <div class="b-nav"><span>&#x2190;</span><span>&#x2192;</span><span>&#x21BB;</span></div>
+  <div class="b-url"><span class="b-lock">&#x1F512;</span><span>https://learn.microsoft.com/en-us/windows/apps/api/navigationview</span></div>
+  <div class="b-avatar">U</div>
+</div>
+<div class="b-body">
+<div class="doc-shell">
+  <div class="doc-top">
+    <div class="doc-brand">Developer Docs</div>
+    <div class="doc-top-nav"><span>Windows Apps</span><span>API Reference</span><span>Design</span><span>Samples</span></div>
+    <div class="doc-top-search">Filter by title...</div>
+  </div>
+  <div class="doc-cols">
+    <div class="doc-toc">
+      <div class="toc-h">UI.Xaml.Controls</div>
+      <div class="toc-i">AppBarButton</div>
+      <div class="toc-i">BreadcrumbBar</div>
+      <div class="toc-i">ContentDialog</div>
+      <div class="toc-i active">NavigationView</div>
+      <div class="toc-i sub">Constructors</div>
+      <div class="toc-i sub">Properties</div>
+      <div class="toc-i sub">Methods</div>
+      <div class="toc-i sub">Events</div>
+      <div class="toc-i">NavigationViewItem</div>
+      <div class="toc-i">TabView</div>
+    </div>
+    <div class="doc-main">
+      <div class="doc-crumb">Docs / Windows / API / UI.Xaml.Controls / NavigationView</div>
+      <h1>NavigationView Class</h1>
+      <div class="doc-ns">Namespace: <span class="mono">UI.Xaml.Controls</span> &nbsp;&bull;&nbsp; Assembly: <span class="mono">WinUI.Controls.dll</span></div>
+      <p style="font-size:13.5px;color:#374151;margin-bottom:12px;">
+        Represents a container that enables navigation of app content. It has a header, a view for the main content,
+        and a menu pane for navigation commands that adapts across compact, minimal, and expanded window widths.
+      </p>
+      <div class="doc-code mono">
+        <span class="kw">public class</span> <span class="tp">NavigationView</span> : <span class="tp">ContentControl</span>
+      </div>
+      <h2 style="font-size:16px;margin:14px 0 8px;">Properties</h2>
+      <table class="prop-tbl">
+        <thead><tr><th style="width:32%">Name</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td class="prop-name mono">PaneDisplayMode</td><td>Gets or sets how and where the navigation pane is shown (Auto, Left, LeftCompact, Top).</td></tr>
+          <tr><td class="prop-name mono">MenuItems</td><td>Gets the collection of menu items displayed in the navigation menu.</td></tr>
+          <tr><td class="prop-name mono">SelectedItem</td><td>Gets or sets the currently selected item in the navigation pane.</td></tr>
+          <tr><td class="prop-name mono">IsBackButtonVisible</td><td>Gets or sets a value that indicates whether the back button is shown.</td></tr>
+          <tr><td class="prop-name mono">CompactModeThresholdWidth</td><td>Minimum window width at which the pane switches from Minimal to Compact mode.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="doc-right">
+      <h4>In this article</h4>
+      <div style="color:#0b57d0;font-weight:600;">Definition</div>
+      <div>Examples</div>
+      <div>Constructors</div>
+      <div>Properties</div>
+      <div>Methods</div>
+      <div>Events</div>
+    </div>
+  </div>
+</div>
+</div>
+
+</body>
+</html>

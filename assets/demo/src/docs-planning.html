@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Quarterly planning - Docs</title>
+<style>
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body {
+  width: 1280px; height: 720px; overflow: hidden;
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-size: 13px; line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+.mono { font-family: "Cascadia Mono", "Consolas", monospace; }
+.win-controls { display: flex; align-items: center; gap: 2px; margin-left: auto; }
+.win-btn {
+  width: 38px; height: 30px; display: flex; align-items: center; justify-content: center;
+  font-size: 11px; opacity: 0.78; user-select: none;
+}
+.win-btn.close:hover { background: #c42b1c; color: #fff; }
+
+
+body { background: #f3f5f8; color: #1f2328; display: flex; flex-direction: column; }
+.b-tabs {
+  height: 36px; background: #dee3ea; display: flex; align-items: flex-end;
+  padding: 0 0 0 10px; gap: 4px;
+}
+.b-tab {
+  height: 30px; min-width: 240px; max-width: 310px; background: #ffffff;
+  border-radius: 8px 8px 0 0; padding: 0 12px; display: flex; align-items: center; gap: 8px;
+  font-size: 12px; font-weight: 500; color: #1f2328;
+  box-shadow: 0 -1px 2px rgba(0,0,0,0.06);
+}
+.b-tab.inactive { background: transparent; box-shadow: none; color: #525c68; min-width: 150px; }
+.b-dot { width: 10px; height: 10px; border-radius: 50%; background: #2563eb; flex-shrink: 0; }
+.b-tab-x { margin-left: auto; font-size: 10px; opacity: 0.55; }
+.b-bar {
+  height: 40px; background: #ffffff; border-bottom: 1px solid #dde2e8;
+  display: flex; align-items: center; padding: 0 14px; gap: 10px;
+}
+.b-nav { display: flex; gap: 10px; color: #5f6368; font-size: 14px; }
+.b-url {
+  flex: 1; height: 28px; background: #f1f3f4; border-radius: 14px;
+  display: flex; align-items: center; padding: 0 14px; gap: 8px;
+  font-size: 12.5px; color: #3c4043;
+}
+.b-lock { color: #188038; font-size: 11px; }
+.b-avatar {
+  width: 26px; height: 26px; border-radius: 50%; background: #2563eb;
+  color: #fff; font-size: 11px; font-weight: 600;
+  display: flex; align-items: center; justify-content: center;
+}
+.b-body { flex: 1; display: flex; overflow: hidden; }
+
+.docs-wrap { flex: 1; display: flex; flex-direction: column; background: #f0f4f9; }
+.docs-head { background: #fff; border-bottom: 1px solid #dde3ea; padding: 8px 18px 6px; }
+.docs-title-row { display: flex; align-items: center; gap: 10px; }
+.docs-ico { width: 26px; height: 26px; border-radius: 5px; background: #2b6cb0; color: #fff; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 13px; }
+.docs-name { font-size: 16px; font-weight: 600; color: #1f2937; }
+.docs-menus { display: flex; gap: 14px; font-size: 12px; color: #4b5563; margin-top: 2px; }
+.docs-toolbar {
+  margin: 8px 18px 0; background: #edf2fa; border-radius: 18px; height: 34px;
+  display: flex; align-items: center; padding: 0 16px; gap: 14px; font-size: 12.5px; color: #374151;
+}
+.docs-sep { width: 1px; height: 18px; background: #c7d0dc; }
+.docs-workspace { flex: 1; display: flex; overflow: hidden; padding: 14px 18px 0; gap: 18px; }
+.docs-outline { width: 200px; padding: 8px 6px; font-size: 12px; color: #4b5563; }
+.docs-outline h4 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #6b7280; margin-bottom: 10px; }
+.docs-outline div { padding: 5px 8px; border-radius: 6px; }
+.docs-outline .act { background: #dbeafe; color: #1d4ed8; font-weight: 600; }
+.docs-page {
+  flex: 1; max-width: 780px; background: #ffffff; border: 1px solid #d7dde6;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.06); padding: 36px 52px; color: #1f2937;
+}
+.docs-page h1 { font-size: 24px; font-weight: 700; margin-bottom: 6px; color: #111827; }
+.docs-meta { font-size: 12.5px; color: #6b7280; margin-bottom: 18px; display: flex; gap: 20px; }
+.docs-callout { background: #eff6ff; border-left: 4px solid #2563eb; padding: 10px 14px; border-radius: 0 6px 6px 0; margin-bottom: 18px; font-size: 13.5px; }
+.docs-page h2 { font-size: 15px; font-weight: 700; margin: 16px 0 8px; color: #1e3a8a; }
+.plan-tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 6px; }
+.plan-tbl th { background: #f3f6fb; text-align: left; padding: 7px 10px; border: 1px solid #dbe2ec; color: #374151; }
+.plan-tbl td { padding: 7px 10px; border: 1px solid #e5eaf1; }
+.pill { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+.pill.green { background: #dcfce7; color: #166534; }
+.pill.blue { background: #dbeafe; color: #1e40af; }
+.pill.amber { background: #fef3c7; color: #92400e; }
+
+
+</style>
+</head>
+<body>
+
+<div class="b-tabs">
+  <div class="b-tab"><span class="b-dot"></span><span>Quarterly planning - Docs</span><span class="b-tab-x">&#x2715;</span></div>
+  <div class="b-tab inactive"><span>New Tab</span><span class="b-tab-x">&#x2715;</span></div>
+  <div class="win-controls" style="color:#333333"><div class="win-btn">&#x2014;</div><div class="win-btn">&#x25A1;</div><div class="win-btn close">&#x2715;</div></div>
+</div>
+<div class="b-bar">
+  <div class="b-nav"><span>&#x2190;</span><span>&#x2192;</span><span>&#x21BB;</span></div>
+  <div class="b-url"><span class="b-lock">&#x1F512;</span><span>https://docs.google.com/document/d/q4-quarterly-planning/edit</span></div>
+  <div class="b-avatar">U</div>
+</div>
+<div class="b-body">
+<div class="docs-wrap">
+  <div class="docs-head">
+    <div class="docs-title-row">
+      <div class="docs-ico">D</div>
+      <div>
+        <div class="docs-name">Quarterly planning</div>
+        <div class="docs-menus"><span>File</span><span>Edit</span><span>View</span><span>Insert</span><span>Format</span><span>Tools</span></div>
+      </div>
+      <div style="margin-left:auto;background:#c2e7ff;color:#001d35;padding:6px 16px;border-radius:16px;font-weight:600;font-size:12.5px;">Share</div>
+    </div>
+  </div>
+  <div class="docs-toolbar">
+    <span>&#x21A9;</span><span>&#x21AA;</span><span class="docs-sep"></span>
+    <span>Normal text &#x25BE;</span><span class="docs-sep"></span>
+    <span>Segoe UI &#x25BE;</span><span>11</span><span class="docs-sep"></span>
+    <strong>B</strong><em>I</em><u>U</u><span class="docs-sep"></span>
+    <span>&#x2261;</span><span>&#x2022; List</span>
+  </div>
+  <div class="docs-workspace">
+    <div class="docs-outline">
+      <h4>Outline</h4>
+      <div class="act">Quarterly planning</div>
+      <div>1. Goals</div>
+      <div>2. Milestone schedule</div>
+      <div>3. Open questions</div>
+    </div>
+    <div class="docs-page">
+      <h1>Quarterly planning</h1>
+      <div class="docs-meta">
+        <span><strong>Owner:</strong> design team</span>
+        <span><strong>Review on Friday</strong></span>
+        <span>Status: Draft v2</span>
+      </div>
+      <div class="docs-callout">
+        <strong>Goals:</strong> ship replay export, settings search and text recognition
+      </div>
+      <h2>1. Milestone schedule</h2>
+      <table class="plan-tbl">
+        <thead><tr><th>Workstream</th><th>Owner</th><th>Target</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr><td>Replay export (.mp4 &amp; encrypted archive)</td><td>Core runtime</td><td>Week 2</td><td><span class="pill green">In review</span></td></tr>
+          <tr><td>Settings search &amp; deep links</td><td>Design team</td><td>Week 3</td><td><span class="pill blue">In progress</span></td></tr>
+          <tr><td>Text recognition settings &amp; script packs</td><td>ML pipeline</td><td>Week 4</td><td><span class="pill blue">In progress</span></td></tr>
+          <tr><td>Unlock flow &amp; high-contrast polish</td><td>UI team</td><td>Week 5</td><td><span class="pill amber">Planned</span></td></tr>
+        </tbody>
+      </table>
+      <h2>2. Review on Friday</h2>
+      <p style="font-size:13px;color:#374151;line-height:1.6;">
+        Walk through the updated settings search layout, confirm the default retention window for exported clips,
+        and sign off on the OCR language selector copy before freeze.
+      </p>
+    </div>
+  </div>
+</div>
+</div>
+
+</body>
+</html>

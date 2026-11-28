@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Music Player</title>
+<style>
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body {
+  width: 1280px; height: 720px; overflow: hidden;
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-size: 13px; line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+.mono { font-family: "Cascadia Mono", "Consolas", monospace; }
+.win-controls { display: flex; align-items: center; gap: 2px; margin-left: auto; }
+.win-btn {
+  width: 38px; height: 30px; display: flex; align-items: center; justify-content: center;
+  font-size: 11px; opacity: 0.78; user-select: none;
+}
+.win-btn.close:hover { background: #c42b1c; color: #fff; }
+
+
+body { background: #121212; color: #ffffff; display: flex; flex-direction: column; }
+.mp-top {
+  height: 36px; background: #0a0a0a; display: flex; align-items: center; padding-left: 14px; font-size: 12px; color: #b3b3b3;
+}
+.mp-main { flex: 1; display: flex; overflow: hidden; }
+.mp-side {
+  width: 230px; background: #000000; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px;
+}
+.mp-brand { font-size: 16px; font-weight: 700; color: #1ed760; margin-bottom: 6px; }
+.mp-nav { font-size: 13.5px; color: #b3b3b3; padding: 4px 0; font-weight: 600; }
+.mp-nav.on { color: #ffffff; }
+.mp-div { height: 1px; background: #242424; margin: 6px 0; }
+.mp-pl { font-size: 12.5px; color: #a7a7a7; padding: 3px 0; }
+.mp-content {
+  flex: 1; background: linear-gradient(180deg, #1f332c 0%, #121212 38%);
+  padding: 22px 28px; overflow: hidden;
+}
+.mp-h1 { font-size: 26px; font-weight: 700; margin-bottom: 16px; }
+.mp-quick { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 24px; }
+.mp-qcard {
+  height: 54px; background: rgba(255,255,255,0.08); border-radius: 6px;
+  display: flex; align-items: center; gap: 12px; overflow: hidden; font-weight: 600; font-size: 13px;
+}
+.mp-qart { width: 54px; height: 54px; flex-shrink: 0; }
+.mp-h2 { font-size: 18px; font-weight: 700; margin-bottom: 14px; }
+.mp-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 16px; }
+.mp-card { background: #181818; border-radius: 8px; padding: 12px; }
+.mp-cover { height: 148px; border-radius: 6px; margin-bottom: 10px; display: flex; align-items: flex-end; padding: 10px; font-weight: 700; font-size: 13px; }
+.mp-ctitle { font-weight: 600; font-size: 13.5px; margin-bottom: 3px; }
+.mp-csub { font-size: 12px; color: #a7a7a7; }
+.mp-bar {
+  height: 74px; background: #181818; border-top: 1px solid #282828;
+  display: flex; align-items: center; padding: 0 20px; justify-content: space-between;
+}
+.mp-now { display: flex; align-items: center; gap: 12px; width: 280px; }
+.mp-now-art { width: 48px; height: 48px; border-radius: 4px; background: linear-gradient(135deg, #0ea5e9, #1e3a8a); }
+.mp-ctrl { display: flex; flex-direction: column; align-items: center; gap: 6px; width: 420px; }
+.mp-btns { display: flex; align-items: center; gap: 22px; font-size: 16px; color: #d4d4d4; }
+.mp-play { width: 32px; height: 32px; border-radius: 50%; background: #ffffff; color: #000; display: flex; align-items: center; justify-content: center; font-size: 13px; }
+.mp-prog { width: 100%; display: flex; align-items: center; gap: 10px; font-size: 11px; color: #a7a7a7; }
+.mp-track { flex: 1; height: 4px; background: #4d4d4d; border-radius: 2px; overflow: hidden; }
+.mp-fill { width: 44%; height: 100%; background: #1ed760; }
+.mp-vol { width: 180px; display: flex; align-items: center; justify-content: flex-end; gap: 10px; color: #b3b3b3; }
+
+</style>
+</head>
+<body>
+
+<div class="mp-top">
+  <span>Music Player</span>
+  <div class="win-controls" style="color:#d4d4d4"><div class="win-btn">&#x2014;</div><div class="win-btn">&#x25A1;</div><div class="win-btn close">&#x2715;</div></div>
+</div>
+<div class="mp-main">
+  <div class="mp-side">
+    <div class="mp-brand">&#x266B; Music</div>
+    <div class="mp-nav on">Home</div>
+    <div class="mp-nav">Search</div>
+    <div class="mp-nav">Your Library</div>
+    <div class="mp-div"></div>
+    <div class="mp-pl">Deep Focus</div>
+    <div class="mp-pl">Lo-Fi Coding</div>
+    <div class="mp-pl">Synthwave Drive</div>
+    <div class="mp-pl">Acoustic Morning</div>
+    <div class="mp-pl">Late Night Ambient</div>
+  </div>
+  <div class="mp-content">
+    <div class="mp-h1">Good evening</div>
+    <div class="mp-quick"><div class="mp-qcard"><div class="mp-qart" style="background:linear-gradient(135deg,#0f766e,#14b8a6);"></div><span>Deep Focus</span></div><div class="mp-qcard"><div class="mp-qart" style="background:linear-gradient(135deg,#4338ca,#818cf8);"></div><span>Lo-Fi Coding</span></div><div class="mp-qcard"><div class="mp-qart" style="background:linear-gradient(135deg,#be185d,#f97316);"></div><span>Synthwave Drive</span></div><div class="mp-qcard"><div class="mp-qart" style="background:linear-gradient(135deg,#b45309,#fbbf24);"></div><span>Acoustic Morning</span></div><div class="mp-qcard"><div class="mp-qart" style="background:linear-gradient(135deg,#1e293b,#38bdf8);"></div><span>Late Night Ambient</span></div><div class="mp-qcard"><div class="mp-qart" style="background:linear-gradient(135deg,#3f6212,#84cc16);"></div><span>Piano Instrumentals</span></div></div>
+    <div class="mp-h2">Made for focus</div>
+    <div class="mp-grid"><div class="mp-card"><div class="mp-cover" style="background:linear-gradient(135deg,#0ea5e9,#1e3a8a);">Northern Drift</div><div class="mp-ctitle">Northern Drift</div><div class="mp-csub">Glass Harbor</div></div><div class="mp-card"><div class="mp-cover" style="background:linear-gradient(135deg,#9333ea,#ec4899);">Static Bloom</div><div class="mp-ctitle">Static Bloom</div><div class="mp-csub">Velour</div></div><div class="mp-card"><div class="mp-cover" style="background:linear-gradient(135deg,#f59e0b,#b91c1c);">Night Tram</div><div class="mp-ctitle">Night Tram</div><div class="mp-csub">Kestrel</div></div><div class="mp-card"><div class="mp-cover" style="background:linear-gradient(135deg,#10b981,#065f46);">Paper Lanterns</div><div class="mp-ctitle">Paper Lanterns</div><div class="mp-csub">Sora Ensemble</div></div><div class="mp-card"><div class="mp-cover" style="background:linear-gradient(135deg,#3b82f6,#111827);">Cobalt Tape</div><div class="mp-ctitle">Cobalt Tape</div><div class="mp-csub">Signal North</div></div></div>
+  </div>
+</div>
+<div class="mp-bar">
+  <div class="mp-now">
+    <div class="mp-now-art"></div>
+    <div>
+      <div style="font-weight:600;font-size:13px;">Northern Drift</div>
+      <div style="font-size:11.5px;color:#a7a7a7;">Glass Harbor</div>
+    </div>
+  </div>
+  <div class="mp-ctrl">
+    <div class="mp-btns"><span>&#x23EE;</span><div class="mp-play">&#x23F8;</div><span>&#x23ED;</span></div>
+    <div class="mp-prog"><span>1:42</span><div class="mp-track"><div class="mp-fill"></div></div><span>3:58</span></div>
+  </div>
+  <div class="mp-vol"><span>&#x1F50A;</span><div class="mp-track" style="max-width:96px;"><div class="mp-fill" style="width:70%;"></div></div></div>
+</div>
+
+</body>
+</html>
