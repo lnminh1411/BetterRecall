@@ -140,7 +140,7 @@ fn tool_calls_map_to_pipe_verbs() {
     let r = parse(s.handle(
         r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_history","arguments":{"q":"acme","limit":5,"evil":"x"}}}"#,
     ));
-    assert_eq!(sent.borrow().last().map(String::as_str), Some(r#"search {"q":"acme","limit":5}"#));
+    assert_eq!(sent.borrow().last().map(String::as_str), Some(r#"search {"q":"acme","limit":6}"#));
     assert_eq!(r["result"]["isError"].as_bool(), Some(false));
     assert_eq!(
         r["result"]["content"][0]["text"].as_str(),
@@ -500,4 +500,244 @@ fn invalid_utf8_line_does_not_end_mcp_session_f3() {
     let r2: Value = serde_json::from_str(lines[2]).unwrap();
     assert_eq!(r2["id"].as_i64(), Some(3));
     assert_eq!(r2["result"], serde_json::json!({}));
+}
+
+fn make_search_pipe_server(
+    total: usize,
+    sent: Rc<RefCell<Vec<String>>>,
+) -> McpServer<impl FnMut(&str) -> PipeAnswer> {
+    McpServer::new(move |line: &str| {
+        sent.borrow_mut().push(line.to_string());
+        let json_part = line.strip_prefix("search ").expect("search verb");
+        let req: Value = serde_json::from_str(json_part).expect("valid search json");
+        let limit = req["limit"].as_u64().unwrap_or(20) as usize;
+        let n = total.min(limit);
+        let results: Vec<Value> = (0..n)
+            .map(|i| {
+                serde_json::json!({
+                    "id": format!("s_{i:03}"),
+                    "ts": "2026-11-21T09:30:00Z",
+                    "kind": "screen",
+                    "app": "chrome.exe",
+                    "title": format!("Hit {i}"),
+                    "score": 0.9,
+                    "snippet": format!("snippet {i}"),
+                    "hasThumb": true,
+                    "site": ""
+                })
+            })
+            .collect();
+        let body = serde_json::json!({
+            "count": results.len(),
+            "truncated": total > n,
+            "tookMs": 7,
+            "results": results
+        });
+        PipeAnswer::ok(serde_json::to_string(&body).unwrap())
+    })
+}
+
+#[test]
+fn tools_list_output_schema_depends_on_protocol_version() {
+    // 2025-06-18 and 2025-11-25 include outputSchema for all three tools.
+    for ver in ["2025-06-18", "2025-11-25"] {
+        let sent = Rc::new(RefCell::new(Vec::new()));
+        let mut s = make_server(true, "{}", sent);
+        let _ = parse(s.handle(&format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"{ver}","capabilities":{{}},"clientInfo":{{"name":"t","version":"1"}}}}}}"#
+        )));
+        let list = parse(s.handle(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#));
+        let tools = list["result"]["tools"].as_array().expect("tools array");
+        assert_eq!(tools.len(), 3);
+        for t in tools {
+            assert_eq!(
+                t["outputSchema"]["type"].as_str(),
+                Some("object"),
+                "missing outputSchema for {} under {ver}",
+                t["name"]
+            );
+        }
+    }
+
+    // Modern (2026-07-28) includes outputSchema for all three tools.
+    {
+        let sent = Rc::new(RefCell::new(Vec::new()));
+        let mut s = make_server(true, "{}", sent);
+        let list = parse(s.handle(
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}"#,
+        ));
+        let tools = list["result"]["tools"].as_array().expect("tools array");
+        assert_eq!(tools.len(), 3);
+        for t in tools {
+            assert_eq!(t["outputSchema"]["type"].as_str(), Some("object"));
+        }
+    }
+
+    // 2024-11-05 and 2025-03-26 omit outputSchema.
+    for ver in ["2024-11-05", "2025-03-26"] {
+        let sent = Rc::new(RefCell::new(Vec::new()));
+        let mut s = make_server(true, "{}", sent);
+        let _ = parse(s.handle(&format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"{ver}","capabilities":{{}},"clientInfo":{{"name":"t","version":"1"}}}}}}"#
+        )));
+        let list = parse(s.handle(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#));
+        let tools = list["result"]["tools"].as_array().expect("tools array");
+        assert_eq!(tools.len(), 3);
+        for t in tools {
+            assert!(
+                t.get("outputSchema").is_none(),
+                "unexpected outputSchema for {} under {ver}",
+                t["name"]
+            );
+        }
+    }
+}
+
+#[test]
+fn search_history_paging_and_structured_content() {
+    let sent = Rc::new(RefCell::new(Vec::new()));
+    let mut s = make_search_pipe_server(5, Rc::clone(&sent));
+
+    // Page 1: limit 2 -> asks pipe for 0+2+1 = 3, returns [s_000, s_001] + nextCursor.
+    let p1 = parse(s.handle(
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_history","arguments":{"q":"invoice","limit":2}}}"#,
+    ));
+    assert_eq!(p1["result"]["isError"].as_bool(), Some(false));
+    let p1_text: Value =
+        serde_json::from_str(p1["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(p1["result"]["structuredContent"], p1_text);
+    let ids1: Vec<&str> = p1_text["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids1, vec!["s_000", "s_001"]);
+    assert_eq!(p1_text["count"].as_u64(), Some(2));
+    let c1 = p1_text["nextCursor"]
+        .as_str()
+        .expect("nextCursor on page 1")
+        .to_string();
+
+    // Pipe request never contains cursor and asks for offset+limit+1 = 3.
+    let req1_json: Value =
+        serde_json::from_str(sent.borrow()[0].strip_prefix("search ").unwrap()).unwrap();
+    assert!(req1_json.get("cursor").is_none());
+    assert_eq!(req1_json["limit"].as_u64(), Some(3));
+
+    // Page 2: follow cursor -> asks pipe for 2+2+1 = 5, returns [s_002, s_003] + nextCursor.
+    let p2 = parse(s.handle(&format!(
+        r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"search_history","arguments":{{"q":"invoice","limit":2,"cursor":"{c1}"}}}}}}"#
+    )));
+    assert_eq!(p2["result"]["isError"].as_bool(), Some(false));
+    let p2_text: Value =
+        serde_json::from_str(p2["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(p2["result"]["structuredContent"], p2_text);
+    let ids2: Vec<&str> = p2_text["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids2, vec!["s_002", "s_003"]);
+    assert_eq!(p2_text["count"].as_u64(), Some(2));
+    let c2 = p2_text["nextCursor"]
+        .as_str()
+        .expect("nextCursor on page 2")
+        .to_string();
+
+    let req2_json: Value =
+        serde_json::from_str(sent.borrow()[1].strip_prefix("search ").unwrap()).unwrap();
+    assert!(req2_json.get("cursor").is_none());
+    assert_eq!(req2_json["limit"].as_u64(), Some(5));
+
+    // Page 3 (last page): follow cursor -> asks pipe for 4+2+1 = 7, returns [s_004], no nextCursor.
+    let p3 = parse(s.handle(&format!(
+        r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"search_history","arguments":{{"q":"invoice","limit":2,"cursor":"{c2}"}}}}}}"#
+    )));
+    assert_eq!(p3["result"]["isError"].as_bool(), Some(false));
+    let p3_text: Value =
+        serde_json::from_str(p3["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(p3["result"]["structuredContent"], p3_text);
+    let ids3: Vec<&str> = p3_text["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids3, vec!["s_004"]);
+    assert_eq!(p3_text["count"].as_u64(), Some(1));
+    assert!(p3_text.get("nextCursor").is_none());
+
+    let req3_json: Value =
+        serde_json::from_str(sent.borrow()[2].strip_prefix("search ").unwrap()).unwrap();
+    assert!(req3_json.get("cursor").is_none());
+    assert_eq!(req3_json["limit"].as_u64(), Some(7));
+}
+
+#[test]
+fn invalid_and_mismatched_cursors_return_tool_error() {
+    let sent = Rc::new(RefCell::new(Vec::new()));
+    let mut s = make_search_pipe_server(5, Rc::clone(&sent));
+
+    let p1 = parse(s.handle(
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_history","arguments":{"q":"invoice","limit":2}}}"#,
+    ));
+    let cursor = p1["result"]["structuredContent"]["nextCursor"]
+        .as_str()
+        .expect("nextCursor")
+        .to_string();
+
+    // Reusing cursor with a different query q -> Invalid cursor.
+    let changed_q = parse(s.handle(&format!(
+        r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"search_history","arguments":{{"q":"other","limit":2,"cursor":"{cursor}"}}}}}}"#
+    )));
+    assert_eq!(changed_q["result"]["isError"].as_bool(), Some(true));
+    assert_eq!(
+        changed_q["result"]["content"][0]["text"].as_str(),
+        Some("Invalid cursor.")
+    );
+    assert!(changed_q["result"].get("structuredContent").is_none());
+
+    // Garbage cursor -> Invalid cursor.
+    let garbage = parse(s.handle(
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_history","arguments":{"q":"invoice","cursor":"not-a-valid-cursor!"}}}"#,
+    ));
+    assert_eq!(garbage["result"]["isError"].as_bool(), Some(true));
+    assert_eq!(
+        garbage["result"]["content"][0]["text"].as_str(),
+        Some("Invalid cursor.")
+    );
+    assert!(garbage["result"].get("structuredContent").is_none());
+
+    // Only the first valid call hit the pipe.
+    assert_eq!(sent.borrow().len(), 1);
+}
+
+#[test]
+fn agent_error_has_no_structured_content() {
+    let sent = Rc::new(RefCell::new(Vec::new()));
+    let mut s = make_server(false, "Store is locked.", sent);
+    let r = parse(s.handle(
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"recall_status","arguments":{}}}"#,
+    ));
+    assert_eq!(r["result"]["isError"].as_bool(), Some(true));
+    assert!(r["result"].get("structuredContent").is_none());
+}
+
+#[test]
+fn legacy_2024_11_05_call_omits_structured_content() {
+    let sent = Rc::new(RefCell::new(Vec::new()));
+    let mut s = make_search_pipe_server(3, sent);
+    let _ = parse(s.handle(
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#,
+    ));
+    let r = parse(s.handle(
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_history","arguments":{"q":"invoice","limit":2}}}"#,
+    ));
+    assert_eq!(r["result"]["isError"].as_bool(), Some(false));
+    assert!(r["result"].get("structuredContent").is_none());
+    let text_json: Value =
+        serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(text_json["count"].as_u64(), Some(2));
 }

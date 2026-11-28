@@ -8,7 +8,9 @@
 //!   `server/discover`, results carry `resultType: "complete"`.
 //! - legacy (`2025-11-25`, `2025-06-18`, `2025-03-26`, `2024-11-05`): `initialize` handshake.
 //!
-//! Tools: `search_history`, `get_capture`, `recall_status`. Tool results are text.
+//! Tools: `search_history`, `get_capture`, `recall_status`. Tool results carry both a text block
+//! and `structuredContent` (with matching `outputSchema` in `tools/list`) on protocol versions
+//! `2025-06-18` and newer; earlier versions (`2024-11-05`, `2025-03-26`) return text only.
 
 use std::sync::OnceLock;
 
@@ -53,25 +55,63 @@ where
     pub const LEGACY_VERSIONS: [&'static str; 4] =
         ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
     const META_VERSION: &'static str = "io.modelcontextprotocol/protocolVersion";
-    const INSTRUCTIONS: &'static str = "Searches the user's local BetterRecall history (screen keyframes by window title, app, on-screen text and image meaning; audio transcripts). Results are private data of the user.";
+    const INSTRUCTIONS: &'static str = "Searches the user's local BetterRecall history (screen keyframes by window title, app, on-screen text and image meaning; audio transcripts). Results are the user's private data and must not be sent to other tools or services unless the user asks. These tools are read-only and nothing leaves this PC through them. Use get_capture for the full text of one result, and pass cursor from nextCursor to search_history for more results.";
 
     const TOOLS_JSON: &'static str = r#"[
-      {"name":"search_history","title":"Search BetterRecall history","description":"Search what the user saw or heard on this PC. Hybrid keyword and semantic search over window titles, app names, on-screen text, keyframe images and audio transcripts. Returns JSON with results (id, ts, kind, app, title, score, snippet).",
+      {"name":"search_history","title":"Search BetterRecall history","description":"Search what the user saw or heard on this PC. Hybrid keyword and semantic search over window titles, app names, on-screen text, keyframe images and audio transcripts. Returns JSON with results (id, ts, kind, app, title, score, snippet) and nextCursor when more results exist (default 20 per page, capped at 200 total).",
        "inputSchema":{"type":"object","properties":{
          "q":{"type":"string","description":"What to look for, natural language or keywords. 1 to 1024 characters.","minLength":1,"maxLength":1024},
-         "limit":{"type":"integer","description":"Maximum results.","minimum":1},
+         "limit":{"type":"integer","description":"Maximum results per page (default 20, total results capped at 200).","minimum":1},
          "from":{"type":"string","format":"date-time","description":"Only results at or after this ISO 8601 time."},
          "to":{"type":"string","format":"date-time","description":"Only results before this ISO 8601 time."},
          "app":{"type":"string","description":"Process image name, for example chrome.exe."},
          "kind":{"type":"array","items":{"type":"string","enum":["screen","audio"]},"description":"Capture kinds to include."},
-         "mode":{"type":"string","enum":["hybrid","text","vector"],"description":"Search mode, default hybrid."}},
+         "mode":{"type":"string","enum":["hybrid","text","vector"],"description":"Search mode, default hybrid."},
+         "cursor":{"type":"string","description":"Opaque pagination cursor from a previous search_history nextCursor."}},
          "required":["q"],"additionalProperties":false},
+       "outputSchema":{"type":"object","properties":{
+         "count":{"type":"integer"},
+         "truncated":{"type":"boolean"},
+         "tookMs":{"type":"integer"},
+         "results":{"type":"array","items":{"type":"object"}},
+         "degraded":{"type":"string"},
+         "nextCursor":{"type":"string"}},
+         "required":["count","truncated","tookMs","results"]},
        "annotations":{"readOnlyHint":true,"openWorldHint":false}},
       {"name":"get_capture","title":"Get one capture","description":"Full stored text of one search result: the on-screen text (private details removed) for screen captures, or the window title when no text was read; the transcript for audio.",
        "inputSchema":{"type":"object","properties":{"id":{"type":"string","description":"Result id from search_history."}},"required":["id"],"additionalProperties":false},
+       "outputSchema":{"type":"object","properties":{
+         "id":{"type":"string"},
+         "ts":{"type":"string","format":"date-time"},
+         "kind":{"type":"string","enum":["screen","audio","replay"]},
+         "app":{"type":"string"},
+         "title":{"type":"string"},
+         "text":{"type":"string"},
+         "hasThumb":{"type":"boolean"},
+         "durationS":{"type":"integer"},
+         "site":{"type":"string"},
+         "replayId":{"type":"string"},
+         "replayOffsetMs":{"type":"integer"}},
+         "required":["id","ts","kind","app","title","text","hasThumb","site"]},
        "annotations":{"readOnlyHint":true,"openWorldHint":false}},
       {"name":"recall_status","title":"BetterRecall status","description":"Whether BetterRecall is capturing, paused or locked, and store statistics.",
        "inputSchema":{"type":"object","additionalProperties":false},
+       "outputSchema":{"type":"object","properties":{
+         "capturing":{"type":"boolean"},
+         "paused":{"type":"boolean"},
+         "pausedUntil":{"type":"string","format":"date-time"},
+         "pauseReason":{"type":"string"},
+         "locked":{"type":"boolean"},
+         "unlockedUntil":{"type":"string","format":"date-time"},
+         "audio":{"type":"object"},
+         "queue":{"type":"object"},
+         "device":{"type":"string"},
+         "store":{"type":"object"},
+         "retentionDays":{"type":"integer"},
+         "hotkeysFailed":{"type":"array","items":{"type":"string"}},
+         "warnings":{"type":"array","items":{"type":"string"}},
+         "userPaused":{"type":"boolean"}},
+         "required":["capturing","paused","locked","audio","queue","device","store","retentionDays","userPaused"]},
        "annotations":{"readOnlyHint":true,"openWorldHint":false}}
     ]"#;
 
@@ -80,6 +120,10 @@ where
             pipe,
             legacy_version: None,
         }
+    }
+
+    fn supports_structured(&self, modern: bool) -> bool {
+        modern || !matches!(self.legacy_version, Some("2024-11-05" | "2025-03-26"))
     }
 
     /// Handles one input line. Returns the response line, or `None` for notifications.
@@ -126,7 +170,11 @@ where
             "initialize" => Some(self.initialize(id, params)),
             "server/discover" => Some(discover_reply(id)),
             "ping" => Some(ping_reply(id, modern)),
-            "tools/list" => Some(tools_list_reply(id, modern)),
+            "tools/list" => Some(tools_list_reply(
+                id,
+                modern,
+                self.supports_structured(modern),
+            )),
             "tools/call" => Some(self.call(id, params, modern)),
             _ => Some(error_reply(id, -32601, "Method not found")),
         }
@@ -173,26 +221,64 @@ where
             return error_reply(id, -32602, "Invalid params");
         };
         let args = p.get("arguments").and_then(Value::as_object);
+        let structured = self.supports_structured(modern);
 
+        let mut search_page: Option<SearchPage> = None;
         let request = match name {
             "search_history" => {
                 let Some(args) = args else {
-                    return tool_result(id, modern, "Missing q.", true);
+                    return tool_result(id, modern, "Missing q.", None, true);
                 };
                 if !args.get("q").is_some_and(Value::is_string) {
-                    return tool_result(id, modern, "Missing q.", true);
+                    return tool_result(id, modern, "Missing q.", None, true);
                 }
-                format!("search {}", search_json(args))
+                let limit = match args.get("limit") {
+                    None => DEFAULT_SEARCH_LIMIT,
+                    Some(v) => match v.as_i64() {
+                        Some(n) if n >= 1 => (n as usize).min(MAX_SEARCH_RESULTS),
+                        _ => return tool_result(id, modern, "Invalid limit.", None, true),
+                    },
+                };
+                let query_hash = search_query_hash(args);
+                let offset = match args.get("cursor") {
+                    None => 0,
+                    Some(v) => match v.as_str().and_then(|s| decode_cursor(s, &query_hash)) {
+                        Some(off) => off,
+                        None => return tool_result(id, modern, "Invalid cursor.", None, true),
+                    },
+                };
+                if offset >= MAX_SEARCH_RESULTS {
+                    let empty = serde_json::json!({
+                        "count": 0,
+                        "truncated": false,
+                        "tookMs": 0,
+                        "results": []
+                    });
+                    let text = serde_json::to_string(&empty).expect("empty page serialize");
+                    return tool_result(id, modern, &text, structured.then_some(&empty), false);
+                }
+                let ask_limit = offset
+                    .saturating_add(limit)
+                    .saturating_add(1)
+                    .min(MAX_SEARCH_RESULTS);
+                let mut forwarded = args.clone();
+                forwarded.insert("limit".to_string(), Value::from(ask_limit as u64));
+                search_page = Some(SearchPage {
+                    offset,
+                    limit,
+                    query_hash,
+                });
+                format!("search {}", search_json(&forwarded))
             }
             "get_capture" => {
                 let cid = args.and_then(|a| a.get("id")).and_then(Value::as_str);
                 let Some(cid) = cid else {
-                    return tool_result(id, modern, "Missing or bad id.", true);
+                    return tool_result(id, modern, "Missing or bad id.", None, true);
                 };
                 if cid.trim().is_empty()
                     || cid.chars().any(|c| c.is_whitespace() || c.is_control())
                 {
-                    return tool_result(id, modern, "Missing or bad id.", true);
+                    return tool_result(id, modern, "Missing or bad id.", None, true);
                 }
                 format!("get {cid}")
             }
@@ -201,11 +287,111 @@ where
         };
 
         if request.len() > 4000 {
-            return tool_result(id, modern, "Request too long.", true);
+            return tool_result(id, modern, "Request too long.", None, true);
         }
         let answer = (self.pipe)(&request);
-        tool_result(id, modern, &answer.text, !answer.ok)
+        if !answer.ok {
+            return tool_result(id, modern, &answer.text, None, true);
+        }
+        if let Ok(mut parsed) = serde_json::from_str::<Value>(&answer.text)
+            && parsed.is_object()
+        {
+            if let Some(page) = search_page
+                && apply_search_page(&mut parsed, &page)
+            {
+                let text = serde_json::to_string(&parsed).expect("paged search serialize");
+                return tool_result(id, modern, &text, structured.then_some(&parsed), false);
+            }
+            return tool_result(
+                id,
+                modern,
+                &answer.text,
+                structured.then_some(&parsed),
+                false,
+            );
+        }
+        tool_result(id, modern, &answer.text, None, false)
     }
+}
+
+const DEFAULT_SEARCH_LIMIT: usize = 20;
+const MAX_SEARCH_RESULTS: usize = 200;
+const CURSOR_HASH_HEX_LEN: usize = 32;
+const CURSOR_LEN: usize = 8 + CURSOR_HASH_HEX_LEN;
+
+struct SearchPage {
+    offset: usize,
+    limit: usize,
+    query_hash: String,
+}
+
+fn search_query_hash(args: &Map<String, Value>) -> String {
+    let mut out = String::from("{");
+    let mut first = true;
+    for key in ["q", "from", "to", "app", "kind", "mode"] {
+        if let Some(v) = args.get(key) {
+            if !first {
+                out.push(',');
+            }
+            first = false;
+            out.push('"');
+            out.push_str(key);
+            out.push_str("\":");
+            let encoded = serde_json::to_string(v).expect("JSON value serialization cannot fail");
+            out.push_str(&encoded);
+        }
+    }
+    out.push('}');
+    CommandProcessor::sha256_hex(&out)
+}
+
+fn encode_cursor(offset: usize, query_hash: &str) -> String {
+    format!("{:08x}{}", offset as u32, &query_hash[..CURSOR_HASH_HEX_LEN])
+}
+
+fn decode_cursor(cursor: &str, expected_hash: &str) -> Option<usize> {
+    if cursor.len() != CURSOR_LEN {
+        return None;
+    }
+    if !cursor
+        .bytes()
+        .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
+    {
+        return None;
+    }
+    if cursor[8..] != expected_hash[..CURSOR_HASH_HEX_LEN] {
+        return None;
+    }
+    let offset = u32::from_str_radix(&cursor[..8], 16).ok()?;
+    Some(offset as usize)
+}
+
+fn apply_search_page(val: &mut Value, page: &SearchPage) -> bool {
+    let Some(obj) = val.as_object_mut() else {
+        return false;
+    };
+    let Some(results) = obj.get_mut("results").and_then(Value::as_array_mut) else {
+        return false;
+    };
+    let total = results.len();
+    let start = page.offset.min(total);
+    let end = page.offset.saturating_add(page.limit).min(total);
+    let page_items: Vec<Value> = results.drain(start..end).collect();
+    let count = page_items.len();
+    *results = page_items;
+
+    let next_offset = page.offset.saturating_add(page.limit);
+    let has_more = total > next_offset && next_offset < MAX_SEARCH_RESULTS;
+    obj.insert("count".to_string(), Value::from(count as u64));
+    if has_more {
+        obj.insert(
+            "nextCursor".to_string(),
+            Value::String(encode_cursor(next_offset, &page.query_hash)),
+        );
+    } else {
+        obj.remove("nextCursor");
+    }
+    true
 }
 
 /// Copies only the known search fields in canonical order, keeping UTF-8 unescaped.
@@ -412,7 +598,22 @@ fn ping_reply(id: Option<&Value>, modern: bool) -> String {
     out
 }
 
-fn tools_list_reply(id: Option<&Value>, modern: bool) -> String {
+fn compact_tools_json_no_output_schema() -> &'static str {
+    static COMPACT_LEGACY: OnceLock<String> = OnceLock::new();
+    COMPACT_LEGACY.get_or_init(|| {
+        let mut tools: Vec<Value> =
+            serde_json::from_str(McpServer::<fn(&str) -> PipeAnswer>::TOOLS_JSON)
+                .expect("TOOLS_JSON is valid JSON");
+        for tool in &mut tools {
+            if let Some(obj) = tool.as_object_mut() {
+                obj.remove("outputSchema");
+            }
+        }
+        serde_json::to_string(&tools).expect("legacy tools serialize")
+    })
+}
+
+fn tools_list_reply(id: Option<&Value>, modern: bool, structured: bool) -> String {
     let mut out = String::new();
     write_head(&mut out, id);
     out.push_str(r#","result":{"#);
@@ -420,12 +621,22 @@ fn tools_list_reply(id: Option<&Value>, modern: bool) -> String {
         out.push_str(r#""resultType":"complete","#);
     }
     out.push_str(r#""tools":"#);
-    out.push_str(compact_tools_json());
+    out.push_str(if structured {
+        compact_tools_json()
+    } else {
+        compact_tools_json_no_output_schema()
+    });
     out.push_str("}}");
     out
 }
 
-fn tool_result(id: Option<&Value>, modern: bool, text: &str, is_error: bool) -> String {
+fn tool_result(
+    id: Option<&Value>,
+    modern: bool,
+    text: &str,
+    structured: Option<&Value>,
+    is_error: bool,
+) -> String {
     #[derive(Serialize)]
     struct TextContent<'a> {
         #[serde(rename = "type")]
@@ -438,6 +649,8 @@ fn tool_result(id: Option<&Value>, modern: bool, text: &str, is_error: bool) -> 
         #[serde(skip_serializing_if = "Option::is_none")]
         result_type: Option<&'static str>,
         content: [TextContent<'a>; 1],
+        #[serde(skip_serializing_if = "Option::is_none")]
+        structured_content: Option<&'a Value>,
         is_error: bool,
     }
 
@@ -446,6 +659,7 @@ fn tool_result(id: Option<&Value>, modern: bool, text: &str, is_error: bool) -> 
         &ToolBody {
             result_type: modern.then_some("complete"),
             content: [TextContent { kind: "text", text }],
+            structured_content: structured,
             is_error,
         },
     )
