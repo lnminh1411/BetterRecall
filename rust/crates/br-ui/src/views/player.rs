@@ -6,8 +6,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    Context, Entity, FocusHandle, InteractiveElement as _, IntoElement, KeyDownEvent, ObjectFit,
-    ParentElement as _, Render, RenderImage, Styled as _, Subscription, Window, div, img, px,
+    AppContext as _, ColorExt as _, Context, Entity, FocusHandle, InteractiveElement as _,
+    IntoElement, KeyDownEvent, ObjectFit, ParentElement as _, Render, RenderImage, Styled as _,
+    StyledImage as _, Subscription, Window, div, img, px,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::slider::{Slider, SliderEvent, SliderState, SliderValue};

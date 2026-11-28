@@ -3,7 +3,7 @@
 
 use std::collections::VecDeque;
 use std::os::windows::ffi::OsStrExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
@@ -18,13 +18,16 @@ use windows::Win32::Media::MediaFoundation::{
     MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_PD_DURATION,
     MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, MF_SOURCE_READER_ANY_STREAM,
     MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_AUDIO_STREAM,
-    MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READER_FLAG_ENDOFSTREAM,
+    MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READERF_ENDOFSTREAM,
     MF_SOURCE_READER_MEDIASOURCE, MF_VERSION, MFAudioFormat_Float, MFAudioFormat_PCM,
     MFCreateAttributes, MFCreateMediaType, MFCreateSourceReaderFromURL, MFMediaType_Audio,
     MFMediaType_Video, MFShutdown, MFStartup, MFSTARTUP_NOSOCKET, MFVideoFormat_RGB32,
 };
+use windows::Win32::System::Com::StructuredStorage::{
+    PROPVARIANT, PROPVARIANT_0, PROPVARIANT_0_0, PROPVARIANT_0_0_0, PropVariantClear,
+};
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
-use windows::Win32::System::Variant::PROPVARIANT;
+use windows::Win32::System::Variant::{VT_I8, VT_UI8};
 use windows::core::{GUID, PCWSTR};
 
 use super::audio::WasapiPlayer;
@@ -201,7 +204,7 @@ fn run_decode_thread(
     }
 }
 
-fn create_source_reader(path: &PathBuf) -> Result<IMFSourceReader, String> {
+fn create_source_reader(path: &Path) -> Result<IMFSourceReader, String> {
     let mut attrs = None;
     unsafe { MFCreateAttributes(&mut attrs, 2) }
         .map_err(|e| format!("MFCreateAttributes: {e}"))?;
@@ -311,21 +314,42 @@ fn configure_audio_stream(reader: &IMFSourceReader) -> Option<WasapiPlayer> {
 }
 
 fn read_duration_ms(reader: &IMFSourceReader) -> i64 {
-    let Ok(prop) = unsafe {
+    let Ok(mut prop) = (unsafe {
         reader.GetPresentationAttribute(
             MF_SOURCE_READER_MEDIASOURCE.0 as u32,
             &MF_PD_DURATION,
         )
-    } else {
+    }) else {
         return 0;
     };
-    let val_100ns = u64::try_from(&prop).unwrap_or(0);
+    let val_100ns = unsafe {
+        let inner = &prop.Anonymous.Anonymous;
+        let v = if inner.vt == VT_UI8 {
+            inner.Anonymous.uhVal
+        } else if inner.vt == VT_I8 {
+            inner.Anonymous.hVal.max(0) as u64
+        } else {
+            0
+        };
+        let _ = PropVariantClear(&mut prop);
+        v
+    };
     (val_100ns / 10_000) as i64
 }
 
 fn seek_reader(reader: &IMFSourceReader, target_ms: i64) -> Result<(), String> {
     let pos_100ns = target_ms.max(0).saturating_mul(10_000);
-    let prop = PROPVARIANT::from(pos_100ns);
+    let prop = PROPVARIANT {
+        Anonymous: PROPVARIANT_0 {
+            Anonymous: std::mem::ManuallyDrop::new(PROPVARIANT_0_0 {
+                vt: VT_I8,
+                wReserved1: 0,
+                wReserved2: 0,
+                wReserved3: 0,
+                Anonymous: PROPVARIANT_0_0_0 { hVal: pos_100ns },
+            }),
+        },
+    };
     unsafe { reader.SetCurrentPosition(&GUID::zeroed(), &prop) }
         .map_err(|e| format!("SetCurrentPosition({target_ms}ms): {e}"))
 }
@@ -348,7 +372,7 @@ fn rgb32_to_render_image(src: &[u8], width: u32, height: u32, stride: i32) -> Op
         let drow = &mut dst[y * row_bytes..(y + 1) * row_bytes];
         drow.copy_from_slice(srow);
         // MFVideoFormat_RGB32 leaves the 4th byte as 0 (XRGB); force alpha = 0xFF for GPUI BGRA.
-        for px in drow.chunks_exact_mut(4) {
+        for px in drow.as_chunks_mut::<4>().0 {
             px[3] = 0xFF;
         }
     }
@@ -359,7 +383,7 @@ fn rgb32_to_render_image(src: &[u8], width: u32, height: u32, stride: i32) -> Op
 }
 
 fn decode_loop(
-    path: &PathBuf,
+    path: &Path,
     start_offset_ms: i64,
     shared: &Arc<SharedState>,
     cmd_rx: &mpsc::Receiver<DecodeCmd>,
@@ -504,7 +528,7 @@ fn decode_loop(
             return Err(format!("IMFSourceReader::ReadSample: {e}"));
         }
 
-        if (flags & (MF_SOURCE_READER_FLAG_ENDOFSTREAM.0 as u32)) != 0 {
+        if (flags & (MF_SOURCE_READERF_ENDOFSTREAM.0 as u32)) != 0 {
             eof = true;
             playing = false;
             if let Some(ref a) = audio {
@@ -577,19 +601,19 @@ fn decode_loop(
                 let _ = buffer.Unlock();
             }
 
-            if let Some(image) = rendered {
-                if let Ok(mut q) = shared.frames.lock() {
-                    while q.len() >= MAX_QUEUED_FRAMES {
-                        q.pop_front();
-                        if let Ok(mut snap) = shared.snapshot.lock() {
-                            snap.dropped_frames += 1;
-                        }
-                    }
-                    q.push_back(DecodedFrame { image, pts_ms });
-                    let qlen = q.len();
+            if let Some(image) = rendered
+                && let Ok(mut q) = shared.frames.lock()
+            {
+                while q.len() >= MAX_QUEUED_FRAMES {
+                    q.pop_front();
                     if let Ok(mut snap) = shared.snapshot.lock() {
-                        snap.queue_len = qlen;
+                        snap.dropped_frames += 1;
                     }
+                }
+                q.push_back(DecodedFrame { image, pts_ms });
+                let qlen = q.len();
+                if let Ok(mut snap) = shared.snapshot.lock() {
+                    snap.queue_len = qlen;
                 }
             }
         } else {

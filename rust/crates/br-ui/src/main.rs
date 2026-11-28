@@ -10,8 +10,8 @@ mod theme;
 mod views;
 
 use gpui::{
-    App, AppContext as _, Bounds, QuitMode, WindowBackgroundAppearance, WindowBounds,
-    WindowDecorations, WindowOptions, px, size,
+    App, AppContext as _, Bounds, QuitMode, WindowBounds, WindowDecorations, WindowOptions,
+    WindowsWindowBackground, px, size,
 };
 use gpui_component::{Root, TitleBar};
 
@@ -52,7 +52,7 @@ fn main() {
             let mut main_opts = TitleBar::window_options();
             main_opts.window_bounds = Some(WindowBounds::Windowed(main_bounds));
             main_opts.window_min_size = Some(size(px(640.0), px(480.0)));
-            main_opts.window_background = WindowBackgroundAppearance::MicaBackdrop;
+            main_opts.windows_window_background = WindowsWindowBackground::MicaBackdrop;
             main_opts.display_id = cursor_display;
             main_opts.show = show_main;
             main_opts.focus = show_main;
@@ -84,7 +84,7 @@ fn main() {
                 window_min_size: Some(size(px(720.0), px(480.0))),
                 titlebar: None,
                 window_decorations: Some(WindowDecorations::Client),
-                window_background: WindowBackgroundAppearance::Opaque,
+                windows_window_background: WindowsWindowBackground::Opaque,
                 display_id: cursor_display,
                 is_resizable: true,
                 show: show_launcher,
@@ -110,7 +110,7 @@ fn main() {
                     let view =
                         cx.new(|cx| LauncherView::new(initial_query, assets_dir, window, cx));
                     if show_launcher {
-                        view.read(cx).focus_search(window, cx);
+                        view.update(cx, |v, cx| v.focus_search(window, cx));
                     }
                     *launcher_view_slot_init.borrow_mut() = Some(view.clone());
                     cx.new(|cx| Root::new(view, window, cx))
@@ -136,7 +136,7 @@ fn main() {
                                         platform::set_launcher_topmost(hwnd);
                                         platform::apply_display_affinity(hwnd, capturable);
                                     }
-                                    window.activate_window();
+                                    window.activate();
                                     if let Some(view) = view_opt {
                                         view.update(cx, |v, cx| {
                                             v.show_with_query(Some("invoice"), window, cx);
@@ -146,7 +146,7 @@ fn main() {
                             }
                         }
                         AppSignal::Quit => {
-                            let _ = cx.update(|cx| cx.quit());
+                            cx.update(|cx| cx.quit());
                             break;
                         }
                     }

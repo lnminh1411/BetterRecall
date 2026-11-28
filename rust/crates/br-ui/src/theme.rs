@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) BetterRecall contributors
 
-use gpui::{App, Global, Hsla, Rgba, SharedString, px};
+use gpui::{App, Global, Hsla, Rgba, SharedString, hsla_to_rgba, px, rgb_to_hsla};
 use gpui_component::{Theme, ThemeMode};
 use native_theme::color::Rgba as NtRgba;
 use native_theme::theme::ColorMode;
@@ -18,28 +18,24 @@ impl Global for NativeThemeInfo {}
 
 fn nt_to_hsla(c: NtRgba) -> Hsla {
     let [r, g, b, a] = c.to_f32_array();
-    Hsla::from(Rgba { r, g, b, a })
+    rgb_to_hsla(Rgba::new(r, g, b, a))
 }
 
 fn blend_hsla(a: Hsla, b: Hsla, t: f32) -> Hsla {
-    let ar: Rgba = a.into();
-    let br: Rgba = b.into();
+    let ar = hsla_to_rgba(a);
+    let br = hsla_to_rgba(b);
     let inv = 1.0 - t;
-    Hsla::from(Rgba {
-        r: ar.r * inv + br.r * t,
-        g: ar.g * inv + br.g * t,
-        b: ar.b * inv + br.b * t,
-        a: ar.a * inv + br.a * t,
-    })
+    rgb_to_hsla(Rgba::new(
+        ar.color.red * inv + br.color.red * t,
+        ar.color.green * inv + br.color.green * t,
+        ar.color.blue * inv + br.color.blue * t,
+        ar.alpha * inv + br.alpha * t,
+    ))
 }
 
-fn adjust_lightness(c: Hsla, delta: f32) -> Hsla {
-    Hsla {
-        h: c.h,
-        s: c.s,
-        l: (c.l + delta).clamp(0.0, 1.0),
-        a: c.a,
-    }
+fn adjust_lightness(mut c: Hsla, delta: f32) -> Hsla {
+    c.color.lightness = (c.color.lightness + delta).clamp(0.0, 1.0);
+    c
 }
 
 /// Read the active OS theme via `native-theme` and apply it to `gpui_component::Theme`.
@@ -257,7 +253,7 @@ pub fn start_theme_watcher(cx: &mut App) -> Option<native_theme::watch::ThemeSub
 
     cx.spawn(async move |cx| {
         while rx.recv().await.is_ok() {
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 native_theme::detect::invalidate_caches();
                 apply_system_theme(cx);
                 crate::motion::refresh_from_system(cx);

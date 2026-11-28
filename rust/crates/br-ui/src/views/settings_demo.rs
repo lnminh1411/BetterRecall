@@ -2,8 +2,9 @@
 // Copyright (c) BetterRecall contributors
 
 use gpui::{
-    Context, Entity, FocusHandle, InteractiveElement as _, IntoElement, KeyDownEvent,
-    ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div, px,
+    AppContext as _, ColorExt as _, Context, Entity, FocusHandle, InteractiveElement as _,
+    IntoElement, KeyDownEvent, ParentElement as _, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
 };
 use gpui_component::accordion::Accordion;
 use gpui_component::button::{Button, ButtonVariant, ButtonVariants as _};
@@ -104,7 +105,7 @@ impl SettingsDemoView {
 
         let date_picker = cx.new(|cx| DatePickerState::new(window, cx));
         let time_field =
-            cx.new(|cx| TimeFieldState::new(window, cx).hour_cycle(HourCycle::H24));
+            cx.new(|cx| TimeFieldState::new(window, cx).hour_cycle(HourCycle::H23));
 
         let mut subscriptions = Vec::new();
         subscriptions.push(cx.subscribe(
@@ -191,7 +192,7 @@ impl Render for SettingsDemoView {
         };
 
         let ticks = h_flex().w_full().justify_between().px_1().children(
-            (0..=10).map(|i| {
+            (0..=10u32).map(|i| {
                 div()
                     .w(px(1.0))
                     .h(px(6.0))

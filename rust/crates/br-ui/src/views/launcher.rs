@@ -4,8 +4,10 @@
 use std::path::PathBuf;
 
 use gpui::{
-    Context, Entity, Focusable as _, InteractiveElement as _, IntoElement, KeyDownEvent, ObjectFit,
-    ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div, img, px,
+    AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _, IntoElement,
+    KeyDownEvent, ObjectFit, ParentElement as _, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, StyledImage as _, Subscription, Window, div,
+    img, px,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState};
@@ -141,13 +143,11 @@ impl LauncherView {
         cx.notify();
     }
 
-    pub fn focus_search(&self, window: &mut Window, cx: &mut App) {
+    pub fn focus_search(&self, window: &mut Window, cx: &mut Context<Self>) {
         let handle = self.search_input.read(cx).focus_handle(cx);
         window.focus(&handle, cx);
     }
 }
-
-use gpui::App;
 
 impl Render for LauncherView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

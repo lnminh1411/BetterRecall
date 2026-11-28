@@ -2,8 +2,8 @@
 // Copyright (c) BetterRecall contributors
 
 use gpui::{
-    Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Render, Styled as _,
-    Window, div, prelude::FluentBuilder as _, px,
+    AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
+    Render, Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::{ActiveTheme as _, TitleBar, h_flex, v_flex};

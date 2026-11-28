@@ -13,8 +13,8 @@ use windows::Win32::Media::Audio::{
     IAudioRenderClient, IMMDeviceEnumerator, MMDeviceEnumerator, WAVEFORMATEX,
     WAVEFORMATEXTENSIBLE, eConsole, eRender,
 };
-use windows::Win32::Media::KernelStreaming::{KSDATAFORMAT_SUBTYPE_IEEE_FLOAT, WAVE_FORMAT_EXTENSIBLE};
-use windows::Win32::Media::Multimedia::WAVE_FORMAT_IEEE_FLOAT;
+use windows::Win32::Media::KernelStreaming::WAVE_FORMAT_EXTENSIBLE;
+use windows::Win32::Media::Multimedia::{KSDATAFORMAT_SUBTYPE_IEEE_FLOAT, WAVE_FORMAT_IEEE_FLOAT};
 use windows::Win32::System::Com::{
     CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
     CoUninitialize,
@@ -156,6 +156,15 @@ fn parse_mix_format(fmt_ptr: *const WAVEFORMATEX) -> AudioMixFormat {
     }
 }
 
+type WasapiSetup = (
+    IAudioClient,
+    IAudioRenderClient,
+    Option<IAudioClock>,
+    AudioMixFormat,
+    u32,
+    windows::Win32::Foundation::HANDLE,
+);
+
 fn run_wasapi_thread(
     init_tx: mpsc::Sender<Result<AudioMixFormat, String>>,
     cmd_rx: mpsc::Receiver<AudioCmd>,
@@ -163,7 +172,7 @@ fn run_wasapi_thread(
 ) {
     let com_ok = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
 
-    let setup = (|| -> Result<(IAudioClient, IAudioRenderClient, Option<IAudioClock>, AudioMixFormat, u32, windows::Win32::Foundation::HANDLE), String> {
+    let setup = (|| -> Result<WasapiSetup, String> {
         let enumerator: IMMDeviceEnumerator =
             unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }
                 .map_err(|e| format!("CoCreateInstance(MMDeviceEnumerator): {e}"))?;

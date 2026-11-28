@@ -57,7 +57,8 @@ pub fn init(mode: MotionMode, cx: &mut App) {
 
 pub fn set_mode(mode: MotionMode, cx: &mut App) {
     let reduced = compute_reduced(mode);
-    if let Some(state) = cx.try_global_mut::<MotionState>() {
+    if cx.has_global::<MotionState>() {
+        let state = cx.global_mut::<MotionState>();
         state.mode = mode;
         state.reduced = reduced;
     } else {
@@ -74,8 +75,8 @@ pub fn refresh_from_system(cx: &mut App) {
         .unwrap_or(MotionMode::System);
     if mode == MotionMode::System {
         let reduced = compute_reduced(mode);
-        if let Some(state) = cx.try_global_mut::<MotionState>() {
-            state.reduced = reduced;
+        if cx.has_global::<MotionState>() {
+            cx.global_mut::<MotionState>().reduced = reduced;
         }
         cx.set_reduce_motion(reduced);
         cx.refresh_windows();
