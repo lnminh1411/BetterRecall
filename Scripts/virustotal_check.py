@@ -9,7 +9,8 @@ never from tests or CI.
 
 usage: python Scripts/virustotal_check.py --installer PATH [--layout DIR] [--upload] [--json OUT]
 exit codes: 0 clean (no engine flags anything), 1 detections found, 2 unknown files left (not on VirusTotal and not
-uploaded) or analysis still pending, 3 usage or network error
+uploaded) or analysis still pending, 3 error (bad arguments, VT_API_KEY not set, missing file, --layout not a folder
+or without PE files, network or parse error, quota used up)
 """
 from __future__ import annotations
 
@@ -85,8 +86,17 @@ def verdict(report: dict) -> dict:
             "major": sorted(n for n in flagged if n in MAJOR), "link": f"https://www.virustotal.com/gui/file/{report['data']['id']}"}
 
 
+class _Parser(argparse.ArgumentParser):
+    """argparse exits 2 on bad arguments, which here means "unknown files"; use 3 (error) instead."""
+
+    def error(self, message: str):
+        self.print_usage(sys.stderr)
+        print(f"{self.prog}: error: {message}", file=sys.stderr)
+        sys.exit(3)
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = _Parser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--installer", required=True)
     ap.add_argument("--layout", help="release layout folder; every .exe and .dll in it is checked too")
     ap.add_argument("--upload", action="store_true", help="upload files VirusTotal does not know (makes them public)")

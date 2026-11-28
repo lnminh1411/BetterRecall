@@ -36,7 +36,7 @@ python Scripts/virustotal_check.py --installer artifacts\release\BetterRecall-Se
 
 - The script first looks files up by SHA-256 only. Files VirusTotal has never seen are listed as `unknown`.
 - `--upload` sends unknown files for analysis. An upload makes the file public on VirusTotal, so upload only the final build you are about to publish.
-- Exit 0: no engine flags anything. Exit 1: detections. Exit 2: files still unknown or pending.
+- Exit 0: no engine flags anything. Exit 1: detections. Exit 2: files still unknown or pending. Exit 3: the check did not run to the end (bad arguments, `VT_API_KEY` not set, a missing file, a `--layout` that is not a folder or holds no `.exe`/`.dll`, a network or parse error, or the API quota used up); fix the cause and run it again. Only exit 0 allows a release.
 
 Release rule: publish only when no major engine (Microsoft, Kaspersky, BitDefender, ESET, Avast/AVG, Sophos, Symantec, Trend Micro, McAfee, CrowdStrike, SentinelOne, Malwarebytes, Google) flags a file. A detection by another engine is allowed only when it is written down in the release notes and reported to that vendor as a false positive (most vendors have a web form; attach the VirusTotal link). Keep the `--json` output with the release files.
 
