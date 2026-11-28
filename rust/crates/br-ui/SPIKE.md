@@ -75,3 +75,14 @@ BetterRecall.UI.Gpui.exe --mock --mock-query "invoice"
 # 7. Replay player with offset and 1 Hz stderr stats
 BetterRecall.UI.Gpui.exe --mock --page player --video "C:\path\to\clip.mp4" --offset-ms 5000 --stats
 ```
+
+## 4b pages
+
+Added sidebar pages **MCP**, **About**, and **Help** (`--page mcp|about|help`), the 6-step first-start introduction flow, the dismissible Home support card, and reusable first-visit tips on Player and MCP.
+
+New mock flags:
+- `--mock-mcp-home <DIR>`: point the MCP page at `<DIR>\home` and `<DIR>\appdata` via `br-mcp-clients` (created if missing); without it, an in-memory fake backend is used so real client configs are never touched.
+- `--mock-no-shell`: log `open-url <url>` and `clipboard-diagnostics <n> bytes` to stderr instead of launching the browser.
+- `--mock-days-used <N>`: mock usage days for the Home "Support development" card (shown at `>= 14` until dismissed).
+- `--mock-firstrun`: launch directly into the 6-step first-start flow (logs `firstrun-done {...}` to stderr on Finish/Skip and returns to Home).
+- `--mock-tips`: show the first-visit tip cards on Player and MCP (dismissed via "Got it" or Escape).

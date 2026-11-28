@@ -958,6 +958,7 @@ version = "0.4.0-dev"
 dependencies = [
  "async-channel",
  "br-contracts",
+ "br-mcp-clients",
  "chrono",
  "gpui-ce",
  "gpui_ce_components",
