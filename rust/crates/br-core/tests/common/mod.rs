@@ -259,6 +259,7 @@ pub fn find(
         &SearchRequest {
             q: q.to_string(),
             limit: Some(max),
+            offset: None,
             from: None,
             to: None,
             app: None,

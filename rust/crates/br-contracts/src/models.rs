@@ -195,6 +195,8 @@ pub struct SearchRequest {
     pub q: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<i32>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -250,6 +252,10 @@ pub struct SearchHit {
     pub replay_offset_ms: Option<i32>,
 }
 
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchResponse {
@@ -259,6 +265,8 @@ pub struct SearchResponse {
     pub results: Vec<SearchHit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub degraded: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub has_more: bool,
 }
 
 /// Result of `get`: hit plus full stored text.

@@ -140,19 +140,30 @@ pub enum ClientError {
 }
 
 /// Lists all known MCP clients along with their detection status and `betterrecall` entry state.
-pub fn list(env: &ClientEnv, relay: &Path) -> Vec<ClientStatus> {
+/// When `server_env` is `Some((key, value))`, matching requires `env.<key> == <value>`.
+pub fn list(
+    env: &ClientEnv,
+    relay: &Path,
+    server_env: Option<(&str, &str)>,
+) -> Vec<ClientStatus> {
     let relay_str = relay.to_string_lossy();
     clients::ALL_CLIENTS
         .iter()
-        .map(|spec| clients::inspect_client(spec, env, &relay_str))
+        .map(|spec| clients::inspect_client(spec, env, &relay_str, server_env))
         .collect()
 }
 
 /// Adds or updates the `betterrecall` MCP server entry for the given writable client.
-pub fn add(env: &ClientEnv, id: &str, relay: &Path) -> Result<Change, ClientError> {
+/// When `server_env` is `Some((key, value))`, sets `env.<key> = <value>` while preserving other keys.
+pub fn add(
+    env: &ClientEnv,
+    id: &str,
+    relay: &Path,
+    server_env: Option<(&str, &str)>,
+) -> Result<Change, ClientError> {
     let spec = clients::find_client(id).ok_or_else(|| ClientError::UnknownClient(id.to_string()))?;
     let relay_str = relay.to_string_lossy();
-    clients::add_client(spec, env, &relay_str)
+    clients::add_client(spec, env, &relay_str, server_env)
 }
 
 /// Removes the `betterrecall` MCP server entry from the given writable client.
@@ -162,8 +173,14 @@ pub fn remove(env: &ClientEnv, id: &str) -> Result<Change, ClientError> {
 }
 
 /// Returns a copy-pasteable configuration snippet (and optional CLI command) for the given client.
-pub fn snippet(env: &ClientEnv, id: &str, relay: &Path) -> Result<Snippet, ClientError> {
+/// When `server_env` is `Some((key, value))`, includes that environment variable in the snippet.
+pub fn snippet(
+    env: &ClientEnv,
+    id: &str,
+    relay: &Path,
+    server_env: Option<(&str, &str)>,
+) -> Result<Snippet, ClientError> {
     let spec = clients::find_client(id).ok_or_else(|| ClientError::UnknownClient(id.to_string()))?;
     let relay_str = relay.to_string_lossy();
-    Ok(clients::build_snippet(spec, env, &relay_str))
+    Ok(clients::build_snippet(spec, env, &relay_str, server_env))
 }

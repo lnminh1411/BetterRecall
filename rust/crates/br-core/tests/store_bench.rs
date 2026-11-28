@@ -101,6 +101,7 @@ fn search_latency_at_250k_rows() {
                     &SearchRequest {
                         q: "invoice".to_string(),
                         limit: Some(20),
+                        offset: None,
                         from: None,
                         to: None,
                         app: app_filter.clone(),

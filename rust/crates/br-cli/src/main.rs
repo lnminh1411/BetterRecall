@@ -49,7 +49,17 @@ fn main() {
             std::process::exit(1);
         };
         let relay = DataPaths::mcp_relay(&home);
-        let code = run_mcp_cli(&args[1..], &client_env, &relay, &mut stdout, &mut stderr);
+        let home_str = home.to_string_lossy().into_owned();
+        let server_env = (!DataPaths::is_default_home(&home))
+            .then_some((DataPaths::HOME_ENV, home_str.as_str()));
+        let code = run_mcp_cli(
+            &args[1..],
+            &client_env,
+            &relay,
+            server_env,
+            &mut stdout,
+            &mut stderr,
+        );
         std::process::exit(code);
     }
 

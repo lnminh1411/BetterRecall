@@ -1617,6 +1617,8 @@ impl EncryptedStore {
         let sw = Instant::now();
         let max_results = max_results.max(1);
         let limit = request.limit.unwrap_or(max_results).clamp(1, max_results) as usize;
+        let offset = request.offset.unwrap_or(0).max(0) as usize;
+        let max_results_usize = max_results as usize;
         let from = request.from.map_or(i64::MIN, |d| d.timestamp_millis());
         let to = request.to.map_or(i64::MAX, |d| d.timestamp_millis());
         let kind_mask = match request.kind.as_deref() {
@@ -1699,11 +1701,15 @@ impl EncryptedStore {
         }
         let mut top: Vec<(i64, f64)> = fused.into_iter().collect();
         top.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
-        top.truncate(limit);
+        let total_capped = top.len().min(max_results_usize);
+        let start = offset.min(total_capped);
+        let end = offset.saturating_add(limit).min(total_capped);
+        let had_more_after_slice = end < total_capped;
+        let page_top = &top[start..end];
 
-        let mut hits = Vec::with_capacity(top.len());
-        if !top.is_empty() {
-            let rids: Vec<i64> = top.iter().map(|&(rid, _)| rid).collect();
+        let mut hits = Vec::with_capacity(page_top.len());
+        if !page_top.is_empty() {
+            let rids: Vec<i64> = page_top.iter().map(|&(rid, _)| rid).collect();
             let mut meta = HashMap::with_capacity(rids.len());
             {
                 let rl = self.rl.lock().expect("rl");
@@ -1733,7 +1739,7 @@ impl EncryptedStore {
                 }
             }
             let tokens = Self::tokens(&request.q);
-            for (rid, score) in top {
+            for &(rid, score) in page_top {
                 let Some((id, ts, kind_i, app, title, text, kf, dur, site, replay, offset)) =
                     meta.remove(&rid)
                 else {
@@ -1778,6 +1784,7 @@ impl EncryptedStore {
                 took_ms: sw.elapsed().as_millis() as i64,
                 results: Vec::new(),
                 degraded: None,
+                has_more: true,
             };
             let empty_len = CoreJson::to_string(&empty)?.len();
             let budget = (max_response_bytes as i64) - (empty_len as i64) - 64;
@@ -1796,6 +1803,7 @@ impl EncryptedStore {
                 truncated = true;
             }
         }
+        let has_more = had_more_after_slice || truncated;
         let total_ms = sw.elapsed().as_secs_f64() * 1000.0;
         *self.last_timings.lock().expect("timings") = Some(format!(
             "vec {t_vec_ms:.1} text {t_text_ms:.1} meta {t_meta_ms:.1} total {total_ms:.1}"
@@ -1806,6 +1814,7 @@ impl EncryptedStore {
             took_ms: sw.elapsed().as_millis() as i64,
             results: hits,
             degraded: None,
+            has_more,
         })
     }
 

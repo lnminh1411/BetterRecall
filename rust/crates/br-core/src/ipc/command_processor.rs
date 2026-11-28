@@ -1177,6 +1177,7 @@ impl CommandProcessor {
             return Ok(SearchRequest {
                 q: text.to_string(),
                 limit: Some(default_limit),
+                offset: None,
                 from: None,
                 to: None,
                 app: None,
@@ -1191,6 +1192,7 @@ impl CommandProcessor {
         };
         let mut q: Option<String> = None;
         let mut limit = default_limit;
+        let mut offset: Option<i32> = None;
         let mut from: Option<DateTime<Utc>> = None;
         let mut to: Option<DateTime<Utc>> = None;
         let mut app: Option<String> = None;
@@ -1214,6 +1216,15 @@ impl CommandProcessor {
                         return Err("Invalid limit.");
                     }
                     limit = l.min(max_limit as i64) as i32;
+                }
+                "offset" => {
+                    let Some(o) = v.as_i64() else {
+                        return Err("Invalid offset.");
+                    };
+                    if !(0..=10_000).contains(&o) {
+                        return Err("Invalid offset.");
+                    }
+                    offset = Some(o as i32);
                 }
                 "from" => {
                     let Some(s) = v.as_str() else {
@@ -1311,6 +1322,7 @@ impl CommandProcessor {
         Ok(SearchRequest {
             q: q_val,
             limit: Some(limit),
+            offset,
             from,
             to,
             app,
@@ -1444,6 +1456,7 @@ impl CommandProcessor {
                 took_ms: 0,
                 results: Vec::new(),
                 degraded: None,
+                has_more: false,
             }
         } else {
             match store.search(&req, &qv, max, self.max_response_bytes(s.kind)) {
@@ -2952,6 +2965,7 @@ impl CommandProcessor {
                 &SearchRequest {
                     q: "x".to_string(),
                     limit: Some(10),
+                    offset: None,
                     from: None,
                     to: None,
                     app: None,
@@ -2970,6 +2984,7 @@ impl CommandProcessor {
                 &SearchRequest {
                     q: Self::BENCH_WORDS[i % Self::BENCH_WORDS.len()].to_string(),
                     limit: Some(10),
+                    offset: None,
                     from: None,
                     to: None,
                     app: None,

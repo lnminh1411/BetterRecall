@@ -144,6 +144,7 @@ pub fn run_mcp_cli<W1, W2>(
     args: &[String],
     client_env: &ClientEnv,
     relay: &Path,
+    server_env: Option<(&str, &str)>,
     stdout: &mut W1,
     stderr: &mut W2,
 ) -> i32
@@ -157,7 +158,7 @@ where
     };
 
     if sub.eq_ignore_ascii_case("clients") && args.len() == 1 {
-        for c in br_mcp_clients::list(client_env, relay) {
+        for c in br_mcp_clients::list(client_env, relay, server_env) {
             let detected = if c.detected { "yes" } else { "no" };
             let state = match &c.state {
                 EntryState::Absent => "absent".to_string(),
@@ -181,7 +182,7 @@ where
 
     if sub.eq_ignore_ascii_case("add") && args.len() == 2 {
         let id = &args[1];
-        return match br_mcp_clients::add(client_env, id, relay) {
+        return match br_mcp_clients::add(client_env, id, relay, server_env) {
             Ok(change) => {
                 let verb = match change.kind {
                     ChangeKind::Added => "added",
@@ -241,7 +242,7 @@ where
 
     if sub.eq_ignore_ascii_case("snippet") && args.len() == 2 {
         let id = &args[1];
-        return match br_mcp_clients::snippet(client_env, id, relay) {
+        return match br_mcp_clients::snippet(client_env, id, relay, server_env) {
             Ok(snip) => {
                 if let Some(cmd) = &snip.command {
                     let _ = writeln!(stdout, "Command: {cmd}");
