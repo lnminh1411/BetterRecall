@@ -106,6 +106,15 @@ impl LauncherView {
             |this, state, ev: &InputEvent, _window, cx| {
                 if matches!(ev, InputEvent::Change) {
                     this.query_text = state.read(cx).value().to_string();
+                    // Test aid (IME/Telex checks): echo the query as UTF-16 code points.
+                    if std::env::var_os("BR_UI_TRACE_INPUT").is_some() {
+                        let cps: Vec<String> = this
+                            .query_text
+                            .encode_utf16()
+                            .map(|u| format!("{u:04X}"))
+                            .collect();
+                        eprintln!("input {} [{}]", this.query_text, cps.join(" "));
+                    }
                     cx.notify();
                 }
             },

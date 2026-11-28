@@ -21,9 +21,11 @@ use crate::views::tip::render_tip;
 pub struct PlayerView {
     player: Option<MediaPlayer>,
     video_path: Option<PathBuf>,
+    initial_offset_ms: u64,
     current_frame: Option<Arc<RenderImage>>,
     snapshot: PlayerSnapshot,
     seek_slider: Entity<SliderState>,
+    slider_focus: FocusHandle,
     dragging_slider: bool,
     show_stats: bool,
     stats_to_stderr: bool,
@@ -45,10 +47,6 @@ impl PlayerView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let player = video_path
-            .clone()
-            .map(|p| MediaPlayer::open(p, offset_ms));
-
         let seek_slider = cx.new(|_| {
             SliderState::new()
                 .min(0.0)
@@ -57,6 +55,7 @@ impl PlayerView {
                 .default_value(0.0)
         });
         let focus_handle = cx.focus_handle().tab_stop(true);
+        let slider_focus = cx.focus_handle().tab_stop(true);
 
         let mut subscriptions = Vec::new();
         subscriptions.push(cx.subscribe(
@@ -96,11 +95,13 @@ impl PlayerView {
         .detach();
 
         Self {
-            player,
+            player: None,
             video_path,
+            initial_offset_ms: offset_ms,
             current_frame: None,
             snapshot: PlayerSnapshot::default(),
             seek_slider,
+            slider_focus,
             dragging_slider: false,
             show_stats: stats_to_stderr,
             stats_to_stderr,
@@ -114,8 +115,49 @@ impl PlayerView {
         }
     }
 
+    /// Start playback lazily the first time the Player page is shown.
+    /// Does not auto-resume if the player was previously paused on page leave.
+    pub fn on_enter(&mut self, cx: &mut Context<Self>) {
+        if self.player.is_none()
+            && let Some(path) = self.video_path.clone()
+        {
+            let player = MediaPlayer::open(path, self.initial_offset_ms);
+            self.snapshot = player.snapshot();
+            self.player = Some(player);
+            cx.notify();
+        }
+    }
+
+    /// Pause playback when leaving the Player page (resuming is an explicit user action).
+    pub fn on_leave(&mut self, cx: &mut Context<Self>) {
+        if let Some(ref player) = self.player {
+            player.pause();
+            self.snapshot.playing = false;
+            cx.notify();
+        }
+    }
+
     pub fn focus_handle(&self) -> FocusHandle {
         self.focus_handle.clone()
+    }
+
+    fn seek_relative(&mut self, delta_ms: i64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ref player) = self.player else {
+            return;
+        };
+        let target = crate::platform::video::clamp_offset_ms(
+            self.snapshot.position_ms.saturating_add(delta_ms),
+            self.snapshot.duration_ms,
+        );
+        player.seek_ms(target);
+        self.snapshot.position_ms = target;
+        if self.snapshot.duration_ms > 0 {
+            let ratio = (target as f32 / self.snapshot.duration_ms as f32).clamp(0.0, 1.0);
+            self.seek_slider.update(cx, |s, cx| {
+                s.set_value(SliderValue::Single(ratio * 1000.0), window, cx);
+            });
+        }
+        cx.notify();
     }
 
     fn tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -209,13 +251,16 @@ impl Render for PlayerView {
             .p_4()
             .gap_3()
             .track_focus(&self.focus_handle)
-            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _window, cx| {
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                 match ev.keystroke.key.as_str() {
                     "escape" if this.tip_visible => {
                         this.tip_visible = false;
+                        window.focus(&this.focus_handle, cx);
                         cx.notify();
                     }
                     "space" => this.toggle_play(cx),
+                    "left" => this.seek_relative(-5_000, window, cx),
+                    "right" => this.seek_relative(5_000, window, cx),
                     "f2" => {
                         this.show_stats = !this.show_stats;
                         cx.notify();
@@ -228,8 +273,9 @@ impl Render for PlayerView {
                     "player-tip-dismiss",
                     "Replay player",
                     "Replays play here, from the moment you picked.",
-                    cx.listener(|this, _, _, cx| {
+                    cx.listener(|this, _, window, cx| {
                         this.tip_visible = false;
+                        window.focus(&this.focus_handle, cx);
                         cx.notify();
                     }),
                     cx,
@@ -325,7 +371,18 @@ impl Render for PlayerView {
                                 format_time(self.snapshot.duration_ms)
                             )),
                     )
-                    .child(div().flex_1().child(Slider::new(&self.seek_slider)))
+                    .child(
+                        div()
+                            .id("player-seek-slider-wrapper")
+                            .flex_1()
+                            .p_1()
+                            .rounded(theme.radius)
+                            .border_1()
+                            .border_color(theme.transparent)
+                            .track_focus(&self.slider_focus)
+                            .focus_visible(|s| s.border_color(theme.ring))
+                            .child(Slider::new(&self.seek_slider)),
+                    )
                     .child(
                         Button::new("player-stats-toggle")
                             .ghost()

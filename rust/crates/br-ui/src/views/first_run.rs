@@ -4,13 +4,15 @@
 use std::path::PathBuf;
 
 use gpui::{
-    AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
-    ObjectFit, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, StyledImage as _, Subscription, Window, div, img, px,
+    AppContext as _, Context, Entity, EventEmitter, FocusHandle, InteractiveElement as _,
+    IntoElement, ObjectFit, ParentElement as _, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, StyledImage as _, Subscription, Window, div, img,
+    px,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputState};
-use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectState};
+use gpui_component::searchable_list::SearchableListChange;
+use gpui_component::select::{Select, SelectDelegate, SelectEvent, SelectItem, SelectState};
 use gpui_component::switch::Switch;
 use gpui_component::{ActiveTheme as _, Disableable as _, IndexPath, h_flex, v_flex};
 
@@ -27,13 +29,6 @@ impl UnlockMethod {
         match self {
             Self::WindowsHello => "windows_hello",
             Self::Password => "password",
-        }
-    }
-
-    pub fn from_label(label: &str) -> Self {
-        match label {
-            "Password" => Self::Password,
-            _ => Self::WindowsHello,
         }
     }
 }
@@ -128,6 +123,87 @@ impl FirstRunState {
     }
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct UnlockOption {
+    method: UnlockMethod,
+    label: SharedString,
+    disabled: bool,
+}
+
+impl SelectItem for UnlockOption {
+    type Value = UnlockMethod;
+
+    fn title(&self) -> SharedString {
+        self.label.clone()
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.method
+    }
+
+    fn disabled(&self) -> bool {
+        self.disabled
+    }
+}
+
+struct UnlockSelectDelegate {
+    items: Vec<UnlockOption>,
+}
+
+impl SelectDelegate for UnlockSelectDelegate {
+    type Item = UnlockOption;
+
+    fn items_count(&self, _section: usize) -> usize {
+        self.items.len()
+    }
+
+    fn item(&self, ix: IndexPath) -> Option<&Self::Item> {
+        self.items.get(ix.row)
+    }
+
+    fn position<V>(&self, value: &V) -> Option<IndexPath>
+    where
+        Self::Item: SelectItem<Value = V>,
+        V: PartialEq,
+    {
+        self.items
+            .iter()
+            .position(|item| item.value() == value)
+            .map(IndexPath::new)
+    }
+
+    fn on_will_change(
+        &mut self,
+        selection: &mut Vec<(IndexPath, Self::Item)>,
+        changes: &[SearchableListChange],
+    ) {
+        // Veto selecting any disabled option (such as Password before one is configured).
+        let selects_disabled = changes.iter().any(|change| match change {
+            SearchableListChange::Select { index } => {
+                self.item(*index).is_some_and(SelectItem::disabled)
+            }
+            SearchableListChange::Deselect { .. } => false,
+        });
+        if selects_disabled {
+            return;
+        }
+        for change in changes {
+            match change {
+                SearchableListChange::Select { index } => {
+                    if let Some(item) = self.item(*index)
+                        && !selection.iter().any(|(_, cur)| cur.value() == item.value())
+                    {
+                        selection.push((*index, item.clone()));
+                    }
+                }
+                SearchableListChange::Deselect { index } => {
+                    selection.retain(|(cur_ix, _)| cur_ix != index);
+                }
+            }
+        }
+    }
+}
+
 pub enum FirstRunEvent {
     Done,
 }
@@ -136,7 +212,8 @@ pub struct FirstRunView {
     state: FirstRunState,
     assets_dir: Option<PathBuf>,
     demo_search_input: Entity<InputState>,
-    unlock_select: Entity<SelectState<SearchableVec<SharedString>>>,
+    unlock_select: Entity<SelectState<UnlockSelectDelegate>>,
+    focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -156,7 +233,20 @@ impl FirstRunView {
 
         let unlock_select = cx.new(|cx| {
             SelectState::new(
-                SearchableVec::new(vec!["Windows Hello".into(), "Password".into()]),
+                UnlockSelectDelegate {
+                    items: vec![
+                        UnlockOption {
+                            method: UnlockMethod::WindowsHello,
+                            label: "Windows Hello".into(),
+                            disabled: false,
+                        },
+                        UnlockOption {
+                            method: UnlockMethod::Password,
+                            label: "Password".into(),
+                            disabled: true,
+                        },
+                    ],
+                },
                 Some(IndexPath::new(0)),
                 window,
                 cx,
@@ -166,21 +256,30 @@ impl FirstRunView {
         let mut subscriptions = Vec::new();
         subscriptions.push(cx.subscribe(
             &unlock_select,
-            |this, _, ev: &SelectEvent<SearchableVec<SharedString>>, cx| {
-                if let SelectEvent::Confirm(Some(label)) = ev {
-                    this.state.choices.unlock = UnlockMethod::from_label(label.as_ref());
+            |this, _, ev: &SelectEvent<UnlockSelectDelegate>, cx| {
+                if let SelectEvent::Confirm(Some(method)) = ev
+                    && *method != UnlockMethod::Password
+                {
+                    this.state.choices.unlock = *method;
                     cx.notify();
                 }
             },
         ));
+
+        let focus_handle = cx.focus_handle();
 
         Self {
             state: FirstRunState::new(),
             assets_dir,
             demo_search_input,
             unlock_select,
+            focus_handle,
             _subscriptions: subscriptions,
         }
+    }
+
+    pub fn focus_handle(&self) -> FocusHandle {
+        self.focus_handle.clone()
     }
 
     pub fn reset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -294,14 +393,34 @@ impl FirstRunView {
                             div()
                                 .text_sm()
                                 .text_color(muted_fg)
-                                .child("• Excluded apps, folders, and window titles"),
+                                .child("• Apps you exclude are never captured (including password managers and remote desktop apps by default)"),
                         )
-                        .child(div().text_sm().text_color(muted_fg).child("• Password fields"))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(muted_fg)
+                                .child("• Excluded folders and window titles"),
+                        )
                         .child(
                             div()
                                 .text_sm()
                                 .text_color(muted_fg)
                                 .child("• BetterRecall itself"),
+                        ),
+                )
+                .child(
+                    card()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child("Blacked out automatically"),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(muted_fg)
+                                .child("• Password fields and detected sensitive data are blacked out before storage"),
                         ),
                 )
                 .into_any_element(),
@@ -335,7 +454,7 @@ impl FirstRunView {
                                 .child("Exclusions"),
                         )
                         .child(div().text_xs().text_color(muted_fg).child(
-                            "Exclude specific apps, folders, or window titles so they are never recorded.",
+                            "Apps you exclude are never captured, along with excluded folders and window titles.",
                         )),
                 )
                 .child(
@@ -380,7 +499,10 @@ impl FirstRunView {
                             .child(hotkey_row("Ctrl+Alt+Space", "Open search launcher"))
                             .child(hotkey_row("Ctrl+Alt+P", "Pause or resume capture"))
                             .child(hotkey_row("Ctrl+Alt+R", "Save instant replay"))
-                            .child(hotkey_row("Ctrl+Alt+Shift+X", "Panic (pause & lock)")),
+                            .child(hotkey_row(
+                                "Ctrl+Alt+Shift+X",
+                                "Panic: pauses capture, clears memory, and locks immediately",
+                            )),
                     )
                     .into_any_element()
             }
@@ -560,6 +682,12 @@ impl FirstRunView {
                                             .text_xs()
                                             .text_color(muted_fg)
                                             .child("Choose how to unlock your local vault"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(muted_fg)
+                                            .child("Set a password in Settings > Security first"),
                                     ),
                             )
                             .child(
@@ -593,6 +721,7 @@ impl Render for FirstRunView {
 
         div()
             .id("firstrun-scroll")
+            .track_focus(&self.focus_handle)
             .size_full()
             .overflow_y_scroll()
             .p_6()
@@ -631,27 +760,29 @@ impl Render for FirstRunView {
                                             .secondary()
                                             .disabled(!can_back)
                                             .label("Back")
-                                            .on_click(cx.listener(|this, _, _, cx| {
+                                            .on_click(cx.listener(|this, _, window, cx| {
                                                 this.state.back();
+                                                if !this.state.can_go_back() {
+                                                    window.focus(&this.focus_handle, cx);
+                                                }
                                                 cx.notify();
                                             })),
                                     )
-                                    .child(if is_last {
-                                        Button::new("firstrun-finish")
+                                    .child(
+                                        // Share one button id slot so keyboard focus stays on the
+                                        // primary action when Next turns into Finish on the last step.
+                                        Button::new("firstrun-primary")
                                             .primary()
-                                            .label("Finish")
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.finish_flow(false, cx);
-                                            }))
-                                    } else {
-                                        Button::new("firstrun-next")
-                                            .primary()
-                                            .label("Next")
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.state.next();
-                                                cx.notify();
-                                            }))
-                                    }),
+                                            .label(if is_last { "Finish" } else { "Next" })
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                if is_last {
+                                                    this.finish_flow(false, cx);
+                                                } else {
+                                                    this.state.next();
+                                                    cx.notify();
+                                                }
+                                            })),
+                                    ),
                             ),
                     ),
             )

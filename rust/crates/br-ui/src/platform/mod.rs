@@ -17,5 +17,5 @@ pub mod window;
 #[cfg(windows)]
 pub use window::{
     apply_display_affinity, client_area_animation_enabled, configure_launcher_hwnd,
-    display_for_cursor, hwnd_from_window, set_launcher_topmost, working_set_mb,
+    display_for_cursor, hwnd_from_window, set_launcher_topmost, show_hwnd, working_set_mb,
 };

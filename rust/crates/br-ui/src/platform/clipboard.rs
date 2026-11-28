@@ -41,37 +41,71 @@ fn set_clipboard_bytes(format: u32, bytes: &[u8]) -> Result<(), String> {
 /// Copy `text` to the Windows clipboard and mark it excluded from clipboard history,
 /// cloud sync, and monitor processing.
 pub fn copy_text_excluded(text: &str) -> Result<(), String> {
-    unsafe { OpenClipboard(None) }.map_err(|e| format!("OpenClipboard: {e}"))?;
+    let mut last_err = None;
+    let mut opened = false;
+    for attempt in 0..5 {
+        match unsafe { OpenClipboard(None) } {
+            Ok(()) => {
+                opened = true;
+                break;
+            }
+            Err(e) => {
+                last_err = Some(e);
+                if attempt + 1 < 5 {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            }
+        }
+    }
+    if !opened {
+        let msg = last_err
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "unknown error".to_string());
+        return Err(format!("OpenClipboard: {msg}"));
+    }
+
+    if let Err(e) = unsafe { EmptyClipboard() } {
+        unsafe {
+            let _ = CloseClipboard();
+        }
+        return Err(format!("EmptyClipboard: {e}"));
+    }
 
     let res = (|| -> Result<(), String> {
-        unsafe { EmptyClipboard() }.map_err(|e| format!("EmptyClipboard: {e}"))?;
+        let zero_dword = 0u32.to_le_bytes();
+
+        let fmt_exclude =
+            unsafe { RegisterClipboardFormatW(w!("ExcludeClipboardContentFromMonitorProcessing")) };
+        if fmt_exclude == 0 {
+            return Err("RegisterClipboardFormatW(ExcludeClipboardContentFromMonitorProcessing) failed".into());
+        }
+        set_clipboard_bytes(fmt_exclude, &zero_dword)?;
+
+        let fmt_history = unsafe { RegisterClipboardFormatW(w!("CanIncludeInClipboardHistory")) };
+        if fmt_history == 0 {
+            return Err("RegisterClipboardFormatW(CanIncludeInClipboardHistory) failed".into());
+        }
+        set_clipboard_bytes(fmt_history, &zero_dword)?;
+
+        let fmt_cloud = unsafe { RegisterClipboardFormatW(w!("CanUploadToCloudClipboard")) };
+        if fmt_cloud == 0 {
+            return Err("RegisterClipboardFormatW(CanUploadToCloudClipboard) failed".into());
+        }
+        set_clipboard_bytes(fmt_cloud, &zero_dword)?;
 
         let utf16: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
         let text_bytes =
             unsafe { std::slice::from_raw_parts(utf16.as_ptr().cast::<u8>(), utf16.len() * 2) };
         set_clipboard_bytes(u32::from(CF_UNICODETEXT.0), text_bytes)?;
 
-        let zero_dword = 0u32.to_le_bytes();
-
-        let fmt_exclude =
-            unsafe { RegisterClipboardFormatW(w!("ExcludeClipboardContentFromMonitorProcessing")) };
-        if fmt_exclude != 0 {
-            set_clipboard_bytes(fmt_exclude, &zero_dword)?;
-        }
-
-        let fmt_history = unsafe { RegisterClipboardFormatW(w!("CanIncludeInClipboardHistory")) };
-        if fmt_history != 0 {
-            set_clipboard_bytes(fmt_history, &zero_dword)?;
-        }
-
-        let fmt_cloud = unsafe { RegisterClipboardFormatW(w!("CanUploadToCloudClipboard")) };
-        if fmt_cloud != 0 {
-            set_clipboard_bytes(fmt_cloud, &zero_dword)?;
-        }
-
         Ok(())
     })();
 
+    if res.is_err() {
+        unsafe {
+            let _ = EmptyClipboard();
+        }
+    }
     unsafe {
         let _ = CloseClipboard();
     }

@@ -11,7 +11,6 @@ path = "src/main.rs"
 
 [dependencies]
 async-channel = "2"
-br-contracts = { path = "../br-contracts" }
 br-mcp-clients = { path = "../br-mcp-clients" }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 gpui = { package = "gpui-ce", version = "=0.3.0" }
