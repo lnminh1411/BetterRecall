@@ -26,7 +26,7 @@ use br_installer::{
     APP_SUBKEY, Action, CLEANUP_VALUE_NAME, Ctx, DISPLAY_NAME, InstallError, InstallOpts, LICENSE_ENTRY, ModelMode,
     ModelsResult, ModifyOpts, OLD_PREFIX, Outcome, PUBLISHER, ProcInfo, Progress, RUNONCE_SUBKEY, RUN_SUBKEY,
     SETUP_EXE, SETUP_JSON, STAGING_PREFIX, SetupManifest, Step, TRAILER_LEN, UNINSTALL_SUBKEY,
-    URL_INFO_ABOUT, UninstallOpts, append_payload, available_disk_space, close_running,
+    URL_INFO_ABOUT, HELP_LINK, UninstallOpts, append_payload, available_disk_space, close_running,
     compare_versions, create_shortcut, delete_key_tree, exit_code, extract_to_staging,
     extract_to_staging_with_space, install, install_with_progress, install_with_space,
     is_uninstall_temp_file_name, modify_with_progress, parse_args, pick_processes_to_end, read_install_marker,
@@ -479,6 +479,10 @@ fn registry_register_and_unregister_preserves_other_run_value() {
             .unwrap()
             .as_deref(),
         Some(URL_INFO_ABOUT)
+    );
+    assert_eq!(
+        read_reg_sz(&uninstall_key, "HelpLink").unwrap().as_deref(),
+        Some(HELP_LINK)
     );
     assert_eq!(
         read_reg_sz(&run_key, "BetterRecall").unwrap().as_deref(),

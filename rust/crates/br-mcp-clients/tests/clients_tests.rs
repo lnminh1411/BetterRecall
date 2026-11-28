@@ -107,7 +107,7 @@ fn all_writable_clients_missing_file_lifecycle() {
         let env = env_in(tmp.path());
 
         // Undetected: add fails with NotDetected and creates nothing.
-        let err = add(&env, id, &relay).unwrap_err();
+        let err = add(&env, id, &relay, None).unwrap_err();
         assert!(
             matches!(err, ClientError::NotDetected(_)),
             "{id}: expected NotDetected, got {err:?}"
@@ -123,14 +123,14 @@ fn all_writable_clients_missing_file_lifecycle() {
         fs::create_dir_all(detect_dir_for(&env, id)).expect("create detect dir");
 
         // Add into missing file -> Added, no backup.
-        let added = add(&env, id, &relay).expect("add into missing file");
+        let added = add(&env, id, &relay, None).expect("add into missing file");
         assert_eq!(added.kind, ChangeKind::Added, "{id}");
         assert!(added.backup.is_none(), "{id}");
         assert!(added.path.is_file(), "{id}");
         assert_no_temp_files(added.path.parent().expect("parent"));
 
         // list reports detected + Present + matches: true.
-        let statuses = list(&env, &relay);
+        let statuses = list(&env, &relay, None);
         let st = statuses.iter().find(|s| s.id == id).expect("client in list");
         assert!(st.detected, "{id}");
         assert_eq!(
@@ -143,7 +143,7 @@ fn all_writable_clients_missing_file_lifecycle() {
         );
 
         // Add twice -> Unchanged, no backup.
-        let again = add(&env, id, &relay).expect("second add");
+        let again = add(&env, id, &relay, None).expect("second add");
         assert_eq!(again.kind, ChangeKind::Unchanged, "{id}");
         assert!(again.backup.is_none(), "{id}");
 
@@ -154,7 +154,7 @@ fn all_writable_clients_missing_file_lifecycle() {
         assert!(removed.path.is_file(), "{id}");
 
         // list now reports Absent.
-        let statuses_after = list(&env, &relay);
+        let statuses_after = list(&env, &relay, None);
         let st_after = statuses_after
             .iter()
             .find(|s| s.id == id)
@@ -204,7 +204,7 @@ fn json_preserves_other_servers_unknown_keys_and_order() {
     );
     fs::write(&cfg, original).unwrap();
 
-    let res = add(&env, "cursor", &relay).expect("add cursor");
+    let res = add(&env, "cursor", &relay, None).expect("add cursor");
     assert_eq!(res.kind, ChangeKind::Added);
     let bak = res.backup.expect("backup created");
     assert_eq!(fs::read_to_string(&bak).unwrap(), original);
@@ -263,7 +263,7 @@ fn vscode_jsonc_preserves_comments_and_other_servers() {
     );
     fs::write(&cfg, original).unwrap();
 
-    let res = add(&env, "vscode", &relay).expect("add vscode");
+    let res = add(&env, "vscode", &relay, None).expect("add vscode");
     assert_eq!(res.kind, ChangeKind::Added);
     let text = fs::read_to_string(&cfg).unwrap();
     assert!(text.contains("// top-level comment"));
@@ -274,7 +274,7 @@ fn vscode_jsonc_preserves_comments_and_other_servers() {
     assert!(text.contains("\"inputs\": []"));
 
     // Verify list sees it as Present + matches.
-    let st = list(&env, &relay)
+    let st = list(&env, &relay, None)
         .into_iter()
         .find(|s| s.id == "vscode")
         .unwrap();
@@ -318,7 +318,7 @@ fn codex_toml_preserves_comments_unknown_keys_and_codex_home() {
     );
     fs::write(&cfg, original).unwrap();
 
-    let res = add(&env, "codex", &relay).expect("add codex");
+    let res = add(&env, "codex", &relay, None).expect("add codex");
     assert_eq!(res.kind, ChangeKind::Added);
     assert_eq!(res.path, cfg);
     assert_eq!(fs::read_to_string(res.backup.unwrap()).unwrap(), original);
@@ -331,7 +331,7 @@ fn codex_toml_preserves_comments_unknown_keys_and_codex_home() {
     assert!(text.contains("[mcp_servers.betterrecall]"));
 
     // Verify round-trip of relay path with spaces and backslashes.
-    let st = list(&env, &relay)
+    let st = list(&env, &relay, None)
         .into_iter()
         .find(|s| s.id == "codex")
         .unwrap();
@@ -344,7 +344,10 @@ fn codex_toml_preserves_comments_unknown_keys_and_codex_home() {
     );
 
     // Second add is Unchanged.
-    assert_eq!(add(&env, "codex", &relay).unwrap().kind, ChangeKind::Unchanged);
+    assert_eq!(
+        add(&env, "codex", &relay, None).unwrap().kind,
+        ChangeKind::Unchanged
+    );
 
     // Remove leaves existing server and comments untouched.
     let rem = remove(&env, "codex").expect("remove codex");
@@ -369,7 +372,7 @@ fn muse_code_schema_version_and_xdg_config_home() {
     let relay = sample_relay();
 
     // New file gets schema_version: 1.
-    let res = add(&env, "muse-code", &relay).expect("add muse-code");
+    let res = add(&env, "muse-code", &relay, None).expect("add muse-code");
     assert_eq!(res.kind, ChangeKind::Added);
     let created: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&res.path).unwrap()).unwrap();
@@ -387,7 +390,7 @@ fn muse_code_schema_version_and_xdg_config_home() {
     // Existing file with custom schema_version: 2 must never be changed.
     let existing = "{\n  \"schema_version\": 2,\n  \"other\": true\n}\n";
     fs::write(&res.path, existing).unwrap();
-    let res2 = add(&env, "muse-code", &relay).expect("add into existing muse-code");
+    let res2 = add(&env, "muse-code", &relay, None).expect("add into existing muse-code");
     assert_eq!(res2.kind, ChangeKind::Added);
     let updated: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&res.path).unwrap()).unwrap();
@@ -410,7 +413,7 @@ fn bom_and_crlf_preserved_json_and_toml() {
     json_bytes.extend_from_slice(b"{\r\n  \"mcpServers\": {}\r\n}\r\n");
     fs::write(&cursor_cfg, &json_bytes).unwrap();
 
-    add(&env, "cursor", &relay).expect("add cursor bom+crlf");
+    add(&env, "cursor", &relay, None).expect("add cursor bom+crlf");
     let out_json = fs::read(&cursor_cfg).unwrap();
     assert!(out_json.starts_with(b"\xEF\xBB\xBF"), "JSON BOM lost");
     let out_json_str = std::str::from_utf8(&out_json[3..]).unwrap();
@@ -428,7 +431,7 @@ fn bom_and_crlf_preserved_json_and_toml() {
     toml_bytes.extend_from_slice(b"model = \"o3\"\r\n");
     fs::write(&codex_cfg, &toml_bytes).unwrap();
 
-    add(&env, "codex", &relay).expect("add codex bom+crlf");
+    add(&env, "codex", &relay, None).expect("add codex bom+crlf");
     let out_toml = fs::read(&codex_cfg).unwrap();
     assert!(out_toml.starts_with(b"\xEF\xBB\xBF"), "TOML BOM lost");
     let out_toml_str = std::str::from_utf8(&out_toml[3..]).unwrap();
@@ -452,13 +455,13 @@ fn malformed_files_return_malformed_untouched_no_backup_no_temp() {
     let broken_json = "{ not valid json";
     fs::write(&cursor_cfg, broken_json).unwrap();
 
-    let err = add(&env, "cursor", &relay).unwrap_err();
+    let err = add(&env, "cursor", &relay, None).unwrap_err();
     assert!(matches!(err, ClientError::Malformed { .. }));
     assert_eq!(fs::read_to_string(&cursor_cfg).unwrap(), broken_json);
     assert!(!cursor_dir.join("mcp.json.bak-betterrecall").exists());
     assert_no_temp_files(&cursor_dir);
 
-    let st = list(&env, &relay)
+    let st = list(&env, &relay, None)
         .into_iter()
         .find(|s| s.id == "cursor")
         .unwrap();
@@ -468,7 +471,7 @@ fn malformed_files_return_malformed_untouched_no_backup_no_temp() {
     let bad_servers = r#"{"mcpServers": ["not", "an", "object"]}"#;
     fs::write(&cursor_cfg, bad_servers).unwrap();
     assert!(matches!(
-        add(&env, "cursor", &relay),
+        add(&env, "cursor", &relay, None),
         Err(ClientError::Malformed { .. })
     ));
     assert!(matches!(
@@ -486,7 +489,7 @@ fn malformed_files_return_malformed_untouched_no_backup_no_temp() {
     let bad_toml = "mcp_servers = \"nope\"\n";
     fs::write(&codex_cfg, bad_toml).unwrap();
     assert!(matches!(
-        add(&env, "codex", &relay),
+        add(&env, "codex", &relay, None),
         Err(ClientError::Malformed { .. })
     ));
     assert!(matches!(
@@ -507,9 +510,9 @@ fn stale_entry_reports_matches_false_and_add_updates_it() {
 
     let dir = env.appdata.join("Claude");
     fs::create_dir_all(&dir).unwrap();
-    add(&env, "claude-desktop", &old_relay).expect("add old");
+    add(&env, "claude-desktop", &old_relay, None).expect("add old");
 
-    let st = list(&env, &new_relay)
+    let st = list(&env, &new_relay, None)
         .into_iter()
         .find(|s| s.id == "claude-desktop")
         .unwrap();
@@ -521,11 +524,11 @@ fn stale_entry_reports_matches_false_and_add_updates_it() {
         }
     );
 
-    let upd = add(&env, "claude-desktop", &new_relay).expect("update");
+    let upd = add(&env, "claude-desktop", &new_relay, None).expect("update");
     assert_eq!(upd.kind, ChangeKind::Updated);
     assert!(upd.backup.is_some());
 
-    let st2 = list(&env, &new_relay)
+    let st2 = list(&env, &new_relay, None)
         .into_iter()
         .find(|s| s.id == "claude-desktop")
         .unwrap();
@@ -546,7 +549,7 @@ fn snippet_clients_detection_errors_and_content() {
     let relay_str = relay.to_string_lossy().into_owned();
 
     // Initially none detected.
-    for st in list(&env, &relay) {
+    for st in list(&env, &relay, None) {
         assert!(!st.detected, "{} should not be detected", st.id);
         if matches!(st.kind, ClientKind::Snippet) {
             assert_eq!(st.state, EntryState::Unknown);
@@ -558,7 +561,7 @@ fn snippet_clients_detection_errors_and_content() {
     fs::write(env.home.join(".claude.json"), "{}").unwrap();
     fs::create_dir_all(env.home.join(".dsh")).unwrap();
 
-    let statuses = list(&env, &relay);
+    let statuses = list(&env, &relay, None);
     assert!(statuses.iter().find(|s| s.id == "claude-code").unwrap().detected);
     assert!(statuses.iter().find(|s| s.id == "deepseek-harness").unwrap().detected);
     assert!(!statuses.iter().find(|s| s.id == "zed").unwrap().detected);
@@ -567,13 +570,16 @@ fn snippet_clients_detection_errors_and_content() {
 
     // add/remove on snippet clients return SnippetOnly.
     for id in ["claude-code", "deepseek-harness", "zed", "cline", "other"] {
-        assert!(matches!(add(&env, id, &relay), Err(ClientError::SnippetOnly(_))));
+        assert!(matches!(
+            add(&env, id, &relay, None),
+            Err(ClientError::SnippetOnly(_))
+        ));
         assert!(matches!(remove(&env, id), Err(ClientError::SnippetOnly(_))));
     }
 
     // Unknown id returns UnknownClient.
     assert!(matches!(
-        add(&env, "nonexistent", &relay),
+        add(&env, "nonexistent", &relay, None),
         Err(ClientError::UnknownClient(_))
     ));
     assert!(matches!(
@@ -581,12 +587,12 @@ fn snippet_clients_detection_errors_and_content() {
         Err(ClientError::UnknownClient(_))
     ));
     assert!(matches!(
-        snippet(&env, "nonexistent", &relay),
+        snippet(&env, "nonexistent", &relay, None),
         Err(ClientError::UnknownClient(_))
     ));
 
     // Verify snippet contents.
-    let cc = snippet(&env, "claude-code", &relay).unwrap();
+    let cc = snippet(&env, "claude-code", &relay, None).unwrap();
     let cmd = cc.command.expect("claude-code has command");
     assert_eq!(
         cmd,
@@ -594,7 +600,7 @@ fn snippet_clients_detection_errors_and_content() {
     );
     assert!(cc.text.contains(&relay_str));
 
-    let dsh = snippet(&env, "deepseek-harness", &relay).unwrap();
+    let dsh = snippet(&env, "deepseek-harness", &relay, None).unwrap();
     assert!(dsh.command.is_none());
     assert!(dsh.text.contains("- insert:"));
     assert!(dsh.text.contains("@deepseek-ai/dsh-mcp-client"));
@@ -604,16 +610,305 @@ fn snippet_clients_detection_errors_and_content() {
     assert!(dsh.text.to_lowercase().contains("merge"));
     assert!(dsh.target_hint.contains("cordis.patch.yml"));
 
-    let zed = snippet(&env, "zed", &relay).unwrap();
+    let zed = snippet(&env, "zed", &relay, None).unwrap();
     assert!(zed.text.contains("\"context_servers\""));
     assert!(zed.text.contains("\"betterrecall\""));
     assert!(zed.text.contains(&relay_str.replace('\\', "\\\\")));
 
-    let cline = snippet(&env, "cline", &relay).unwrap();
+    let cline = snippet(&env, "cline", &relay, None).unwrap();
     let cline_json: serde_json::Value = serde_json::from_str(&cline.text).expect("valid json");
     assert_eq!(cline_json["mcpServers"]["betterrecall"]["command"], relay_str);
 
-    let other = snippet(&env, "other", &relay).unwrap();
+    let other = snippet(&env, "other", &relay, None).unwrap();
     let other_json: serde_json::Value = serde_json::from_str(&other.text).expect("valid json");
     assert_eq!(other_json["mcpServers"]["betterrecall"]["command"], relay_str);
+}
+
+#[test]
+fn add_preserves_user_keys_in_json_jsonc_and_toml() {
+    let tmp = new_test_dir("br-mcp-userkeys-");
+    let env = env_in(tmp.path());
+    let old_relay = PathBuf::from(r"C:\Old\betterrecall-mcp.exe");
+    let new_relay = sample_relay();
+    let old_esc = old_relay.to_string_lossy().replace('\\', "\\\\");
+    let new_str = new_relay.to_string_lossy().into_owned();
+
+    // 1. JSON (Cursor): env + disabled survive both Unchanged and Updated.
+    let cursor_dir = env.home.join(".cursor");
+    fs::create_dir_all(&cursor_dir).unwrap();
+    let cursor_cfg = cursor_dir.join("mcp.json");
+    let json_init = format!(
+        "{{\n  \"mcpServers\": {{\n    \"betterrecall\": {{\n      \"command\": \"{old_esc}\",\n      \"args\": [],\n      \"env\": {{\"CUSTOM\": \"keep\"}},\n      \"disabled\": true\n    }}\n  }}\n}}\n"
+    );
+    fs::write(&cursor_cfg, &json_init).unwrap();
+
+    // Matching old_relay -> Unchanged despite extra keys.
+    assert_eq!(
+        add(&env, "cursor", &old_relay, None).unwrap().kind,
+        ChangeKind::Unchanged
+    );
+    // Updating to new_relay -> Updated, user keys survive.
+    assert_eq!(
+        add(&env, "cursor", &new_relay, None).unwrap().kind,
+        ChangeKind::Updated
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&cursor_cfg).unwrap()).unwrap();
+    assert_eq!(parsed["mcpServers"]["betterrecall"]["command"], new_str);
+    assert_eq!(parsed["mcpServers"]["betterrecall"]["args"], serde_json::json!([]));
+    assert_eq!(parsed["mcpServers"]["betterrecall"]["disabled"], true);
+    assert_eq!(parsed["mcpServers"]["betterrecall"]["env"]["CUSTOM"], "keep");
+
+    // 2. JSONC (VS Code): comments + env + disabled survive.
+    let vscode_dir = env.appdata.join("Code").join("User");
+    fs::create_dir_all(&vscode_dir).unwrap();
+    let vscode_cfg = vscode_dir.join("mcp.json");
+    let jsonc_init = format!(
+        "{{\n  \"servers\": {{\n    \"betterrecall\": {{\n      // user comment\n      \"type\": \"stdio\",\n      \"command\": \"{old_esc}\",\n      \"args\": [],\n      \"env\": {{\"TOKEN\": \"abc\"}},\n      \"disabled\": true\n    }}\n  }}\n}}\n"
+    );
+    fs::write(&vscode_cfg, &jsonc_init).unwrap();
+
+    assert_eq!(
+        add(&env, "vscode", &old_relay, None).unwrap().kind,
+        ChangeKind::Unchanged
+    );
+    assert_eq!(
+        add(&env, "vscode", &new_relay, None).unwrap().kind,
+        ChangeKind::Updated
+    );
+    let vscode_after = fs::read_to_string(&vscode_cfg).unwrap();
+    assert!(vscode_after.contains("// user comment"));
+    assert!(vscode_after.contains("\"disabled\": true"));
+    assert!(vscode_after.contains("\"TOKEN\": \"abc\""));
+    assert!(vscode_after.contains("\"type\": \"stdio\""));
+    assert_eq!(
+        add(&env, "vscode", &new_relay, None).unwrap().kind,
+        ChangeKind::Unchanged
+    );
+
+    // 3. TOML (Codex): enabled = false + env + comments survive.
+    let codex_dir = env.home.join(".codex");
+    fs::create_dir_all(&codex_dir).unwrap();
+    let codex_cfg = codex_dir.join("config.toml");
+    let toml_init = format!(
+        "[mcp_servers.betterrecall]\n# keep user note\ncommand = \"{old_esc}\"\nargs = []\nenabled = false\nenv = {{ FOO = \"bar\" }}\n"
+    );
+    fs::write(&codex_cfg, &toml_init).unwrap();
+
+    assert_eq!(
+        add(&env, "codex", &old_relay, None).unwrap().kind,
+        ChangeKind::Unchanged
+    );
+    assert_eq!(
+        add(&env, "codex", &new_relay, None).unwrap().kind,
+        ChangeKind::Updated
+    );
+    let toml_after = fs::read_to_string(&codex_cfg).unwrap();
+    assert!(toml_after.contains("# keep user note"));
+    assert!(toml_after.contains("enabled = false"));
+    assert!(toml_after.contains("FOO = \"bar\""));
+    assert_eq!(
+        add(&env, "codex", &new_relay, None).unwrap().kind,
+        ChangeKind::Unchanged
+    );
+}
+
+#[test]
+fn backup_keeps_original_content_and_ignores_readonly_existing_backup() {
+    let tmp = new_test_dir("br-mcp-bak-");
+    let env = env_in(tmp.path());
+    let relay = sample_relay();
+
+    let dir = env.home.join(".cursor");
+    fs::create_dir_all(&dir).unwrap();
+    let cfg = dir.join("mcp.json");
+    let original = "{\n  \"mcpServers\": {},\n  \"original\": true\n}\n";
+    fs::write(&cfg, original).unwrap();
+
+    let added = add(&env, "cursor", &relay, None).expect("first add");
+    let bak = added.backup.expect("backup created");
+    assert_eq!(fs::read_to_string(&bak).unwrap(), original);
+
+    // Mark the backup read-only to verify subsequent writes leave it untouched without error.
+    let mut perms = fs::metadata(&bak).unwrap().permissions();
+    perms.set_readonly(true);
+    fs::set_permissions(&bak, perms).unwrap();
+
+    let removed = remove(&env, "cursor").expect("remove with readonly backup");
+    assert_eq!(removed.kind, ChangeKind::Removed);
+
+    let readded = add(&env, "cursor", &relay, None).expect("second add with readonly backup");
+    assert_eq!(readded.kind, ChangeKind::Added);
+    assert_eq!(fs::read_to_string(&bak).unwrap(), original);
+
+    // Clear read-only before TempDir drop.
+    let mut perms = fs::metadata(&bak).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)] // Windows only: clears FILE_ATTRIBUTE_READONLY
+    perms.set_readonly(false);
+    fs::set_permissions(&bak, perms).unwrap();
+}
+
+#[test]
+fn write_through_symlink_preserves_symlink_and_backs_up_next_to_target() {
+    let tmp = new_test_dir("br-mcp-sym-");
+    let env = env_in(tmp.path());
+    let relay = sample_relay();
+
+    let target_dir = tmp.path().join("dotfiles");
+    fs::create_dir_all(&target_dir).unwrap();
+    let target = target_dir.join("cursor-mcp.json");
+    let original = "{\n  \"mcpServers\": {}\n}\n";
+    fs::write(&target, original).unwrap();
+
+    let cursor_dir = env.home.join(".cursor");
+    fs::create_dir_all(&cursor_dir).unwrap();
+    let link = cursor_dir.join("mcp.json");
+
+    if let Err(e) = std::os::windows::fs::symlink_file(&target, &link) {
+        eprintln!("skipping symlink test (symlink_file unavailable): {e}");
+        return;
+    }
+
+    let res = add(&env, "cursor", &relay, None).expect("add through symlink");
+    assert_eq!(res.kind, ChangeKind::Added);
+    assert!(
+        fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "symlink was replaced with a regular file"
+    );
+
+    let target_text = fs::read_to_string(&target).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&target_text).unwrap();
+    assert_eq!(
+        parsed["mcpServers"]["betterrecall"]["command"],
+        relay.to_string_lossy().as_ref()
+    );
+
+    let target_bak = target_dir.join("cursor-mcp.json.bak-betterrecall");
+    assert!(target_bak.is_file(), "backup not next to target");
+    assert_eq!(fs::read_to_string(&target_bak).unwrap(), original);
+    assert!(
+        !cursor_dir.join("mcp.json.bak-betterrecall").exists(),
+        "backup should not be next to symlink"
+    );
+    assert_no_temp_files(&target_dir);
+    assert_no_temp_files(&cursor_dir);
+}
+
+#[test]
+fn non_default_home_env_in_json_toml_and_snippets() {
+    let tmp = new_test_dir("br-mcp-homeenv-");
+    let env = env_in(tmp.path());
+    let relay = sample_relay();
+    let custom_home = r"K:\Custom Home\BetterRecall";
+    let server_env = Some(("BETTERRECALL_HOME", custom_home));
+
+    // 1. JSON (Cursor): new entry + preserving existing env keys on update.
+    let cursor_dir = env.home.join(".cursor");
+    fs::create_dir_all(&cursor_dir).unwrap();
+    let cursor_cfg = cursor_dir.join("mcp.json");
+    let relay_esc = relay.to_string_lossy().replace('\\', "\\\\");
+    let initial = format!(
+        "{{\n  \"mcpServers\": {{\n    \"betterrecall\": {{\n      \"command\": \"{relay_esc}\",\n      \"args\": [],\n      \"env\": {{\"KEEP_ME\": \"1\"}}\n    }}\n  }}\n}}\n"
+    );
+    fs::write(&cursor_cfg, &initial).unwrap();
+
+    // Missing BETTERRECALL_HOME -> matches is false, add updates in place keeping KEEP_ME.
+    let st = list(&env, &relay, server_env)
+        .into_iter()
+        .find(|s| s.id == "cursor")
+        .unwrap();
+    assert_eq!(
+        st.state,
+        EntryState::Present {
+            command: Some(relay.to_string_lossy().into_owned()),
+            matches: false,
+        }
+    );
+    assert_eq!(
+        add(&env, "cursor", &relay, server_env).unwrap().kind,
+        ChangeKind::Updated
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&cursor_cfg).unwrap()).unwrap();
+    assert_eq!(
+        parsed["mcpServers"]["betterrecall"]["env"]["BETTERRECALL_HOME"],
+        custom_home
+    );
+    assert_eq!(parsed["mcpServers"]["betterrecall"]["env"]["KEEP_ME"], "1");
+    assert_eq!(
+        add(&env, "cursor", &relay, server_env).unwrap().kind,
+        ChangeKind::Unchanged
+    );
+
+    // 2. TOML (Codex): writes env = { BETTERRECALL_HOME = "..." } and preserves other env keys.
+    let codex_dir = env.home.join(".codex");
+    fs::create_dir_all(&codex_dir).unwrap();
+    let codex_cfg = codex_dir.join("config.toml");
+    let toml_init = format!(
+        "[mcp_servers.betterrecall]\ncommand = \"{relay_esc}\"\nargs = []\nenv = {{ OTHER = \"yes\" }}\n"
+    );
+    fs::write(&codex_cfg, &toml_init).unwrap();
+
+    assert_eq!(
+        add(&env, "codex", &relay, server_env).unwrap().kind,
+        ChangeKind::Updated
+    );
+    let toml_after = fs::read_to_string(&codex_cfg).unwrap();
+    assert!(toml_after.contains("OTHER = \"yes\""));
+    assert!(toml_after.contains("BETTERRECALL_HOME"));
+    assert_eq!(
+        add(&env, "codex", &relay, server_env).unwrap().kind,
+        ChangeKind::Unchanged
+    );
+
+    // 3. Snippets carry BETTERRECALL_HOME.
+    let cc = snippet(&env, "claude-code", &relay, server_env).unwrap();
+    let cmd = cc.command.expect("claude-code command");
+    assert!(cmd.contains(&format!("-e BETTERRECALL_HOME=\"{custom_home}\"")));
+
+    let dsh = snippet(&env, "deepseek-harness", &relay, server_env).unwrap();
+    assert!(dsh.text.contains("env:"));
+    assert!(dsh.text.contains("BETTERRECALL_HOME:"));
+    assert!(dsh.text.contains(custom_home));
+
+    let zed = snippet(&env, "zed", &relay, server_env).unwrap();
+    assert!(zed.text.contains("\"env\""));
+    assert!(zed.text.contains("\"BETTERRECALL_HOME\""));
+
+    let cline = snippet(&env, "cline", &relay, server_env).unwrap();
+    let cline_json: serde_json::Value = serde_json::from_str(&cline.text).expect("valid json");
+    assert_eq!(
+        cline_json["mcpServers"]["betterrecall"]["env"]["BETTERRECALL_HOME"],
+        custom_home
+    );
+}
+
+#[test]
+fn gemini_cli_accepts_and_preserves_jsonc_comments() {
+    let tmp = new_test_dir("br-mcp-gemini-");
+    let env = env_in(tmp.path());
+    let relay = sample_relay();
+
+    let dir = env.home.join(".gemini");
+    fs::create_dir_all(&dir).unwrap();
+    let cfg = dir.join("settings.json");
+    let original = concat!(
+        "// Gemini CLI settings\n",
+        "{\n",
+        "  /* theme comment */\n",
+        "  \"theme\": \"dark\",\n",
+        "  \"mcpServers\": {}\n",
+        "}\n"
+    );
+    fs::write(&cfg, original).unwrap();
+
+    let res = add(&env, "gemini-cli", &relay, None).expect("add gemini-cli with comments");
+    assert_eq!(res.kind, ChangeKind::Added);
+    let after = fs::read_to_string(&cfg).unwrap();
+    assert!(after.contains("// Gemini CLI settings"));
+    assert!(after.contains("/* theme comment */"));
+    assert!(after.contains("\"betterrecall\""));
 }

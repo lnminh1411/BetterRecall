@@ -47,7 +47,7 @@ pub use payload::{
 pub use progress::{NoProgress, Progress, Step};
 pub use registry::{
     APP_SUBKEY, CLEANUP_VALUE_NAME, DISPLAY_NAME, MODEL_MODE_VALUE, PUBLISHER, RUNONCE_SUBKEY,
-    RUN_SUBKEY, UNINSTALL_SUBKEY, URL_INFO_ABOUT, delete_key_if_empty, delete_key_tree,
+    RUN_SUBKEY, UNINSTALL_SUBKEY, URL_INFO_ABOUT, HELP_LINK, delete_key_if_empty, delete_key_tree,
     read_model_mode, read_reg_dword, read_reg_sz, register, unregister, write_model_mode,
     write_reg_sz, write_run_once_cleanup,
 };

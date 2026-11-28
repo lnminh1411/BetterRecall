@@ -353,6 +353,7 @@ fn search_filters_time_app_and_kind() {
         run(SearchRequest {
             q: "report".to_string(),
             limit: None,
+            offset: None,
             from: Some(t0 + ChronoDuration::minutes(45)),
             to: None,
             app: None,
@@ -366,6 +367,7 @@ fn search_filters_time_app_and_kind() {
         run(SearchRequest {
             q: "report".to_string(),
             limit: None,
+            offset: None,
             from: None,
             to: None,
             app: Some("WORD.EXE".to_string()),
@@ -379,6 +381,7 @@ fn search_filters_time_app_and_kind() {
         run(SearchRequest {
             q: "report".to_string(),
             limit: None,
+            offset: None,
             from: None,
             to: None,
             app: None,
@@ -392,6 +395,7 @@ fn search_filters_time_app_and_kind() {
         run(SearchRequest {
             q: "report".to_string(),
             limit: None,
+            offset: None,
             from: None,
             to: None,
             app: Some("nothere.exe".to_string()),
@@ -420,6 +424,7 @@ fn max_response_bytes_trims_from_the_end_and_sets_truncated() {
     let req = SearchRequest {
         q: "common".to_string(),
         limit: Some(40),
+        offset: None,
         from: None,
         to: None,
         app: None,
@@ -430,15 +435,139 @@ fn max_response_bytes_trims_from_the_end_and_sets_truncated() {
     let full = t.store().search(&req, &[], 40, 1 << 20).expect("full");
     assert_eq!(full.count, 40);
     assert!(!full.truncated);
+    assert!(!full.has_more);
 
     let cut = t.store().search(&req, &[], 40, 4096).expect("cut");
     assert!(cut.truncated);
+    assert!(cut.has_more);
     assert!(cut.count < 40);
     let full_ids: Vec<&str> = full.results.iter().take(cut.count as usize).map(|x| x.id.as_str()).collect();
     let cut_ids: Vec<&str> = cut.results.iter().map(|x| x.id.as_str()).collect();
     assert_eq!(full_ids, cut_ids);
     let json = Envelope::ok_raw(&CoreJson::to_string(&cut).expect("json"));
     assert!(json.len() <= 4096);
+}
+
+#[test]
+fn offset_paging_applies_byte_budget_per_page_and_respects_max_results() {
+    let t = TempStore::new();
+    let t0 = Utc::now() - ChronoDuration::hours(2);
+    for i in 0..25 {
+        add_ready(
+            t.store(),
+            t0 + ChronoDuration::seconds(i),
+            &format!("Paged item {i:02} {}", "y".repeat(220)),
+            &vec_seeded(i as i32),
+            "chrome.exe",
+            true,
+        );
+    }
+
+    let max_results = 20;
+    let baseline = t
+        .store()
+        .search(
+            &SearchRequest {
+                q: "paged".to_string(),
+                limit: Some(max_results),
+                offset: None,
+                from: None,
+                to: None,
+                app: None,
+                kind: None,
+                mode: SearchMode::Text,
+                site: None,
+            },
+            &[],
+            max_results,
+            1 << 20,
+        )
+        .expect("baseline");
+    assert_eq!(baseline.count, 20);
+    assert!(!baseline.has_more);
+    let expected_ids: Vec<String> = baseline.results.iter().map(|h| h.id.clone()).collect();
+
+    // Page through with a tight 4096-byte budget per page; every hit up to max_results is reachable.
+    let mut collected: Vec<String> = Vec::new();
+    let mut offset = 0i32;
+    let mut pages = 0usize;
+    loop {
+        pages += 1;
+        assert!(pages <= 20, "pagination did not terminate");
+        let page = t
+            .store()
+            .search(
+                &SearchRequest {
+                    q: "paged".to_string(),
+                    limit: Some(10),
+                    offset: Some(offset),
+                    from: None,
+                    to: None,
+                    app: None,
+                    kind: None,
+                    mode: SearchMode::Text,
+                    site: None,
+                },
+                &[],
+                max_results,
+                4096,
+            )
+            .expect("page");
+        let wire = Envelope::ok_raw(&CoreJson::to_string(&page).expect("json"));
+        assert!(wire.len() <= 4096, "page exceeded budget: {}", wire.len());
+        assert!(page.count > 0, "expected progress at offset {offset}");
+        collected.extend(page.results.iter().map(|h| h.id.clone()));
+        offset += page.count;
+        if !page.has_more {
+            break;
+        }
+    }
+    assert!(pages >= 3, "expected multiple pages under 4096-byte budget");
+    assert_eq!(collected, expected_ids);
+
+    // Offset past max_results returns empty with has_more == false.
+    let past = t
+        .store()
+        .search(
+            &SearchRequest {
+                q: "paged".to_string(),
+                limit: Some(10),
+                offset: Some(max_results),
+                from: None,
+                to: None,
+                app: None,
+                kind: None,
+                mode: SearchMode::Text,
+                site: None,
+            },
+            &[],
+            max_results,
+            4096,
+        )
+        .expect("past");
+    assert_eq!(past.count, 0);
+    assert!(past.results.is_empty());
+    assert!(!past.has_more);
+
+    // parse_search offset validation.
+    let ok0 = br_core::CommandProcessor::parse_search(r#"{"q":"paged","offset":0}"#, 20, 50)
+        .expect("offset 0");
+    assert_eq!(ok0.offset, Some(0));
+    let ok_max = br_core::CommandProcessor::parse_search(r#"{"q":"paged","offset":10000}"#, 20, 50)
+        .expect("offset 10000");
+    assert_eq!(ok_max.offset, Some(10_000));
+    for bad in [
+        r#"{"q":"paged","offset":-1}"#,
+        r#"{"q":"paged","offset":10001}"#,
+        r#"{"q":"paged","offset":"5"}"#,
+        r#"{"q":"paged","offset":null}"#,
+    ] {
+        assert_eq!(
+            br_core::CommandProcessor::parse_search(bad, 20, 50).unwrap_err(),
+            "Invalid offset.",
+            "input: {bad}"
+        );
+    }
 }
 
 #[test]
@@ -681,6 +810,7 @@ fn site_is_stored_normalised_and_filters_text_and_vector_search() {
             &SearchRequest {
                 q: "review".to_string(),
                 limit: Some(50),
+                offset: None,
                 from: None,
                 to: None,
                 app: None,
@@ -703,6 +833,7 @@ fn site_is_stored_normalised_and_filters_text_and_vector_search() {
             &SearchRequest {
                 q: "x".to_string(),
                 limit: Some(50),
+                offset: None,
                 from: None,
                 to: None,
                 app: None,
@@ -724,6 +855,7 @@ fn site_is_stored_normalised_and_filters_text_and_vector_search() {
                 &SearchRequest {
                     q: "review".to_string(),
                     limit: Some(50),
+                    offset: None,
                     from: None,
                     to: None,
                     app: None,
@@ -747,6 +879,7 @@ fn site_is_stored_normalised_and_filters_text_and_vector_search() {
             &SearchRequest {
                 q: "x".to_string(),
                 limit: Some(50),
+                offset: None,
                 from: None,
                 to: None,
                 app: None,
@@ -931,6 +1064,7 @@ fn replay_frames_are_searchable_by_kind_and_carry_offset() {
             &SearchRequest {
                 q: "boss".to_string(),
                 limit: None,
+                offset: None,
                 from: None,
                 to: None,
                 app: None,
@@ -952,6 +1086,7 @@ fn replay_frames_are_searchable_by_kind_and_carry_offset() {
             &SearchRequest {
                 q: "boss".to_string(),
                 limit: None,
+                offset: None,
                 from: None,
                 to: None,
                 app: None,
@@ -973,6 +1108,7 @@ fn replay_frames_are_searchable_by_kind_and_carry_offset() {
             &SearchRequest {
                 q: "boss".to_string(),
                 limit: None,
+                offset: None,
                 from: None,
                 to: None,
                 app: None,
@@ -1247,6 +1383,7 @@ fn hybrid_search_without_text_hits_reports_the_cosine() {
             &SearchRequest {
                 q: "zzqqxx".to_string(),
                 limit: None,
+                offset: None,
                 from: None,
                 to: None,
                 app: None,
@@ -1272,6 +1409,7 @@ fn hybrid_search_without_text_hits_reports_the_cosine() {
             &SearchRequest {
                 q: "acme".to_string(),
                 limit: None,
+                offset: None,
                 from: None,
                 to: None,
                 app: None,

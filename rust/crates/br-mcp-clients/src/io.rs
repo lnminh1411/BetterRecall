@@ -64,16 +64,35 @@ pub(crate) fn read_text_file(path: &Path) -> Result<Option<TextFile>, ClientErro
     }))
 }
 
+/// Strips the Windows verbatim prefix (`\\?\` or `\\?\UNC\`) for human-readable paths.
+fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(unc) = s.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{unc}"))
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        path
+    }
+}
+
 /// Normalizes line endings in `body` to match `style`, re-attaches BOM if needed, creates a backup
-/// if `existed` is true, and atomically replaces `path` via a temp file in the same directory.
+/// if `existed` is true and no `.bak-betterrecall` exists yet, and atomically replaces the resolved
+/// target of `path` (writing through symlinks) via a temp file in the target's directory.
 pub(crate) fn write_text_file(
     path: &Path,
     body: &str,
     style: FileStyle,
     existed: bool,
 ) -> Result<Option<PathBuf>, ClientError> {
-    let parent = path.parent().ok_or_else(|| ClientError::Io {
-        path: path.to_path_buf(),
+    let target = if existed {
+        fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    } else {
+        path.to_path_buf()
+    };
+
+    let parent = target.parent().ok_or_else(|| ClientError::Io {
+        path: strip_verbatim_prefix(target.clone()),
         source: std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "config path has no parent directory",
@@ -81,17 +100,19 @@ pub(crate) fn write_text_file(
     })?;
 
     fs::create_dir_all(parent).map_err(|source| ClientError::Io {
-        path: parent.to_path_buf(),
+        path: strip_verbatim_prefix(parent.to_path_buf()),
         source,
     })?;
 
     let backup = if existed {
-        let bak = backup_path(path);
-        fs::copy(path, &bak).map_err(|source| ClientError::Io {
-            path: bak.clone(),
-            source,
-        })?;
-        Some(bak)
+        let bak = backup_path(&target);
+        if fs::symlink_metadata(&bak).is_err() {
+            fs::copy(&target, &bak).map_err(|source| ClientError::Io {
+                path: strip_verbatim_prefix(bak.clone()),
+                source,
+            })?;
+        }
+        Some(strip_verbatim_prefix(bak))
     } else {
         None
     };
@@ -109,17 +130,17 @@ pub(crate) fn write_text_file(
     if let Err(source) = write_res {
         let _ = fs::remove_file(&tmp_path);
         return Err(ClientError::Io {
-            path: tmp_path,
+            path: strip_verbatim_prefix(tmp_path),
             source,
         });
     }
 
     // On Windows, `std::fs::rename` replaces an existing destination file atomically on the same
     // volume (via SetFileInformationByHandle / MoveFileExW with REPLACE_EXISTING).
-    if let Err(source) = fs::rename(&tmp_path, path) {
+    if let Err(source) = fs::rename(&tmp_path, &target) {
         let _ = fs::remove_file(&tmp_path);
         return Err(ClientError::Io {
-            path: path.to_path_buf(),
+            path: strip_verbatim_prefix(target),
             source,
         });
     }

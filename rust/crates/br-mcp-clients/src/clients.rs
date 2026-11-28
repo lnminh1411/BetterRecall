@@ -164,7 +164,7 @@ pub(crate) const ALL_CLIENTS: &[ClientSpec] = &[
         id: "gemini-cli",
         name: "Gemini CLI",
         mode: ClientMode::Writable(WritableSpec {
-            format: ConfigFormat::Json,
+            format: ConfigFormat::Jsonc,
             servers_key: "mcpServers",
             extra_kv: None,
             needs_schema_version: false,
@@ -279,6 +279,7 @@ pub(crate) fn inspect_client(
     spec: &ClientSpec,
     env: &ClientEnv,
     relay_str: &str,
+    server_env: Option<(&str, &str)>,
 ) -> ClientStatus {
     match spec.mode {
         ClientMode::Writable(w) => {
@@ -294,8 +295,9 @@ pub(crate) fn inspect_client(
                             w.servers_key,
                             w.extra_kv,
                             relay_str,
+                            server_env,
                         ),
-                        ConfigFormat::Toml => inspect_toml(&file.body, relay_str),
+                        ConfigFormat::Toml => inspect_toml(&file.body, relay_str, server_env),
                     };
                     match parsed {
                         Ok(s) => s,
@@ -331,6 +333,7 @@ pub(crate) fn add_client(
     spec: &ClientSpec,
     env: &ClientEnv,
     relay_str: &str,
+    server_env: Option<(&str, &str)>,
 ) -> Result<Change, ClientError> {
     let ClientMode::Writable(w) = spec.mode else {
         return Err(ClientError::SnippetOnly(spec.id.to_string()));
@@ -355,8 +358,9 @@ pub(crate) fn add_client(
             w.extra_kv,
             w.needs_schema_version,
             relay_str,
+            server_env,
         ),
-        ConfigFormat::Toml => add_toml(body_opt, relay_str),
+        ConfigFormat::Toml => add_toml(body_opt, relay_str, server_env),
     }
     .map_err(|detail| ClientError::Malformed {
         path: path.clone(),
@@ -428,7 +432,12 @@ fn yaml_single_quoted(s: &str) -> String {
     out
 }
 
-pub(crate) fn build_snippet(spec: &ClientSpec, env: &ClientEnv, relay_str: &str) -> Snippet {
+pub(crate) fn build_snippet(
+    spec: &ClientSpec,
+    env: &ClientEnv,
+    relay_str: &str,
+    server_env: Option<(&str, &str)>,
+) -> Snippet {
     match spec.mode {
         ClientMode::Writable(w) => {
             let path = (w.path_fn)(env);
@@ -438,8 +447,9 @@ pub(crate) fn build_snippet(spec: &ClientSpec, env: &ClientEnv, relay_str: &str)
                     w.extra_kv,
                     w.needs_schema_version,
                     relay_str,
+                    server_env,
                 ),
-                ConfigFormat::Toml => render_new_toml(relay_str),
+                ConfigFormat::Toml => render_new_toml(relay_str, server_env),
             };
             Snippet {
                 text,
@@ -448,7 +458,12 @@ pub(crate) fn build_snippet(spec: &ClientSpec, env: &ClientEnv, relay_str: &str)
             }
         }
         ClientMode::Snippet(SnippetKind::ClaudeCode) => {
-            let cmd = format!("claude mcp add --scope user {SERVER_NAME} -- \"{relay_str}\"");
+            let cmd = match server_env {
+                Some((ek, ev)) => format!(
+                    "claude mcp add --scope user -e {ek}=\"{ev}\" {SERVER_NAME} -- \"{relay_str}\""
+                ),
+                None => format!("claude mcp add --scope user {SERVER_NAME} -- \"{relay_str}\""),
+            };
             let text = format!(
                 "Run this command in your terminal (Claude Code manages ~/.claude.json itself):\n\n{cmd}\n"
             );
@@ -466,6 +481,13 @@ pub(crate) fn build_snippet(spec: &ClientSpec, env: &ClientEnv, relay_str: &str)
                 .join("web")
                 .join("cordis.patch.yml");
             let cmd_yaml = yaml_single_quoted(relay_str);
+            let env_block = match server_env {
+                Some((ek, ev)) => format!(
+                    "        env:\n          {ek}: {}\n",
+                    yaml_single_quoted(ev)
+                ),
+                None => String::new(),
+            };
             let text = format!(
                 "# Merge this block into {} (do not replace the file), then restart DeepSeek Harness.\n\
                  - insert:\n\
@@ -474,7 +496,8 @@ pub(crate) fn build_snippet(spec: &ClientSpec, env: &ClientEnv, relay_str: &str)
                  \x20       serverName: {SERVER_NAME}\n\
                  \x20       transport: stdio\n\
                  \x20       command: {cmd_yaml}\n\
-                 \x20       args: []\n",
+                 \x20       args: []\n\
+                 {env_block}",
                 target.display()
             );
             Snippet {
@@ -485,9 +508,16 @@ pub(crate) fn build_snippet(spec: &ClientSpec, env: &ClientEnv, relay_str: &str)
         }
         ClientMode::Snippet(SnippetKind::Zed) => {
             let cmd_json = json_string_literal(relay_str);
-            let text = format!(
-                "\"context_servers\": {{\n  \"{SERVER_NAME}\": {{\n    \"command\": {cmd_json},\n    \"args\": []\n  }}\n}}\n"
-            );
+            let text = match server_env {
+                Some((ek, ev)) => format!(
+                    "\"context_servers\": {{\n  \"{SERVER_NAME}\": {{\n    \"command\": {cmd_json},\n    \"args\": [],\n    \"env\": {{\n      {}: {}\n    }}\n  }}\n}}\n",
+                    json_string_literal(ek),
+                    json_string_literal(ev)
+                ),
+                None => format!(
+                    "\"context_servers\": {{\n  \"{SERVER_NAME}\": {{\n    \"command\": {cmd_json},\n    \"args\": []\n  }}\n}}\n"
+                ),
+            };
             Snippet {
                 text,
                 command: None,
@@ -495,12 +525,12 @@ pub(crate) fn build_snippet(spec: &ClientSpec, env: &ClientEnv, relay_str: &str)
             }
         }
         ClientMode::Snippet(SnippetKind::Cline) => Snippet {
-            text: render_new_json("mcpServers", None, false, relay_str),
+            text: render_new_json("mcpServers", None, false, relay_str, server_env),
             command: None,
             target_hint: "Cline MCP settings (cline_mcp_settings.json)".to_string(),
         },
         ClientMode::Snippet(SnippetKind::Other) => Snippet {
-            text: render_new_json("mcpServers", None, false, relay_str),
+            text: render_new_json("mcpServers", None, false, relay_str, server_env),
             command: None,
             target_hint: "MCP client JSON configuration".to_string(),
         },
