@@ -33,6 +33,11 @@ fn blend_hsla(a: Hsla, b: Hsla, t: f32) -> Hsla {
     ))
 }
 
+fn hex(v: u32) -> Hsla {
+    let f = |sh: u32| ((v >> sh) & 0xFF) as f32 / 255.0;
+    rgb_to_hsla(Rgba::new(f(16), f(8), f(0), 1.0))
+}
+
 fn adjust_lightness(mut c: Hsla, delta: f32) -> Hsla {
     c.color.lightness = (c.color.lightness + delta).clamp(0.0, 1.0);
     c
@@ -93,11 +98,15 @@ fn apply_resolved(resolved: &ResolvedTheme, is_dark: bool, high_contrast: bool, 
     } else {
         blend_hsla(border, fg, 0.15)
     };
-    let sidebar_bg = if high_contrast {
-        bg
-    } else {
-        blend_hsla(bg, surface, 0.45)
+    let sidebar_bg = bg;
+    // native-theme's dark palette gave near-invisible control borders and a light grey pane;
+    // outside high contrast use the WinUI 3 neutral tokens (accent and fonts still come from the OS).
+    let (bg, card_bg, border, input_border) = match (high_contrast, is_dark) {
+        (true, _) => (bg, card_bg, border, input_border),
+        (false, true) => (hex(0x202020), hex(0x2B2B2B), hex(0x1D1D1D), hex(0x454545)),
+        (false, false) => (hex(0xF3F3F3), hex(0xFBFBFB), hex(0xE5E5E5), hex(0xC8C8C8)),
     };
+    let sidebar_bg = if high_contrast { sidebar_bg } else { bg };
 
     let font_family: SharedString = if d.font.family.is_empty() {
         "Segoe UI Variable".into()

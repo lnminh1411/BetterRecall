@@ -110,6 +110,10 @@ impl PlayerView {
         }
     }
 
+    pub fn focus_handle(&self) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+
     fn tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(ref player) = self.player else {
             return;

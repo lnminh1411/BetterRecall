@@ -2,7 +2,7 @@
 // Copyright (c) BetterRecall contributors
 
 use gpui::{
-    AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
+    AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement, ParentElement as _,
     Render, Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
@@ -19,6 +19,8 @@ pub struct MainShell {
     settings_view: Entity<SettingsDemoView>,
     player_view: Entity<PlayerView>,
     capturable: bool,
+    /// Keeps the window's focus path inside Root, so Tab / Shift+Tab reach the first tab stop.
+    focus_handle: FocusHandle,
 }
 
 impl MainShell {
@@ -27,12 +29,29 @@ impl MainShell {
         let player_view = cx.new(|cx| {
             PlayerView::new(args.video.clone(), args.offset_ms, args.stats, window, cx)
         });
+        let focus_handle = cx.focus_handle();
+        if args.page == Page::Player {
+            let h = player_view.read(cx).focus_handle();
+            window.focus(&h, cx);
+        } else {
+            window.focus(&focus_handle, cx);
+        }
         Self {
             active_page: args.page,
             settings_view,
             player_view,
             capturable: args.mock_capturable,
+            focus_handle,
         }
+    }
+
+    fn go(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
+        self.active_page = page;
+        if page == Page::Player {
+            let h = self.player_view.read(cx).focus_handle();
+            window.focus(&h, cx);
+        }
+        cx.notify();
     }
 
     fn render_home(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -95,18 +114,16 @@ impl MainShell {
                                 Button::new("home-open-settings")
                                     .primary()
                                     .label("Open Settings Demo")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.active_page = Page::Settings;
-                                        cx.notify();
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.go(Page::Settings, window, cx);
                                     })),
                             )
                             .child(
                                 Button::new("home-open-player")
                                     .secondary()
                                     .label("Open Replay Player")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.active_page = Page::Player;
-                                        cx.notify();
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.go(Page::Player, window, cx);
                                     })),
                             ),
                     ),
@@ -127,13 +144,14 @@ impl Render for MainShell {
                 .justify_start()
                 .when(is_active, |b| b.primary())
                 .when(!is_active, |b| b.ghost())
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.active_page = page;
-                    cx.notify();
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.go(page, window, cx);
                 }))
         };
 
         v_flex()
+            .id("shell-root")
+            .track_focus(&self.focus_handle)
             .size_full()
             .bg(theme.background)
             .text_color(theme.foreground)
