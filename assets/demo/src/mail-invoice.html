@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Acme invoice 4471 - Mail</title>
+<style>
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body {
+  width: 1280px; height: 720px; overflow: hidden;
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-size: 13px; line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+.mono { font-family: "Cascadia Mono", "Consolas", monospace; }
+.win-controls { display: flex; align-items: center; gap: 2px; margin-left: auto; }
+.win-btn {
+  width: 38px; height: 30px; display: flex; align-items: center; justify-content: center;
+  font-size: 11px; opacity: 0.78; user-select: none;
+}
+.win-btn.close:hover { background: #c42b1c; color: #fff; }
+
+
+body { background: #f3f5f8; color: #1f2328; display: flex; flex-direction: column; }
+.b-tabs {
+  height: 36px; background: #dee3ea; display: flex; align-items: flex-end;
+  padding: 0 0 0 10px; gap: 4px;
+}
+.b-tab {
+  height: 30px; min-width: 240px; max-width: 310px; background: #ffffff;
+  border-radius: 8px 8px 0 0; padding: 0 12px; display: flex; align-items: center; gap: 8px;
+  font-size: 12px; font-weight: 500; color: #1f2328;
+  box-shadow: 0 -1px 2px rgba(0,0,0,0.06);
+}
+.b-tab.inactive { background: transparent; box-shadow: none; color: #525c68; min-width: 150px; }
+.b-dot { width: 10px; height: 10px; border-radius: 50%; background: #d93025; flex-shrink: 0; }
+.b-tab-x { margin-left: auto; font-size: 10px; opacity: 0.55; }
+.b-bar {
+  height: 40px; background: #ffffff; border-bottom: 1px solid #dde2e8;
+  display: flex; align-items: center; padding: 0 14px; gap: 10px;
+}
+.b-nav { display: flex; gap: 10px; color: #5f6368; font-size: 14px; }
+.b-url {
+  flex: 1; height: 28px; background: #f1f3f4; border-radius: 14px;
+  display: flex; align-items: center; padding: 0 14px; gap: 8px;
+  font-size: 12.5px; color: #3c4043;
+}
+.b-lock { color: #188038; font-size: 11px; }
+.b-avatar {
+  width: 26px; height: 26px; border-radius: 50%; background: #d93025;
+  color: #fff; font-size: 11px; font-weight: 600;
+  display: flex; align-items: center; justify-content: center;
+}
+.b-body { flex: 1; display: flex; overflow: hidden; }
+
+.mail-nav {
+  width: 224px; background: #f6f8fc; border-right: 1px solid #e3e7ee;
+  padding: 14px 12px; display: flex; flex-direction: column; gap: 4px;
+}
+.mail-brand { font-size: 17px; font-weight: 700; color: #1f2937; padding: 2px 8px 10px; display: flex; align-items: center; gap: 8px; }
+.mail-logo { width: 22px; height: 22px; border-radius: 6px; background: #d93025; color: #fff; display: inline-flex; align-items: center; justify-content: center; font-size: 12px; }
+.compose-btn {
+  background: #c2e7ff; color: #001d35; font-weight: 600; border-radius: 14px;
+  padding: 10px 18px; margin-bottom: 10px; width: 132px; text-align: center;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.08);
+}
+.nav-item { padding: 7px 14px; border-radius: 16px; display: flex; justify-content: space-between; color: #374151; font-size: 13px; }
+.nav-item.active { background: #d3e3fd; color: #0b57d0; font-weight: 600; }
+.mail-main { flex: 1; background: #ffffff; display: flex; flex-direction: column; }
+.mail-top {
+  height: 52px; border-bottom: 1px solid #eaedf2; padding: 0 24px;
+  display: flex; align-items: center; gap: 16px;
+}
+.mail-search {
+  width: 480px; height: 34px; background: #eaf1fb; border-radius: 18px;
+  padding: 0 16px; display: flex; align-items: center; color: #5f6368; font-size: 13px;
+}
+.mail-content { padding: 22px 36px; overflow: hidden; }
+.mail-subject { font-size: 21px; font-weight: 600; color: #1f1f1f; margin-bottom: 14px; display: flex; align-items: center; gap: 10px; }
+.tag-inbox { font-size: 11px; background: #e8eaed; color: #3c4043; padding: 2px 8px; border-radius: 4px; font-weight: 500; }
+.sender-row { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; }
+.sender-av { width: 38px; height: 38px; border-radius: 50%; background: #1a73e8; color: #fff; font-weight: 700; display: flex; align-items: center; justify-content: center; font-size: 15px; }
+.sender-meta { flex: 1; }
+.sender-name { font-weight: 600; font-size: 14px; color: #1f1f1f; }
+.sender-addr { color: #5f6368; font-size: 12px; margin-left: 6px; font-weight: 400; }
+.sender-to { color: #5f6368; font-size: 12px; }
+.sender-date { color: #5f6368; font-size: 12px; }
+.inv-card {
+  border: 1px solid #dce1e8; border-radius: 10px; padding: 20px 24px;
+  background: #fbfcfe; max-width: 740px;
+}
+.inv-head { display: flex; justify-content: space-between; align-items: baseline; border-bottom: 1px solid #e4e8ef; padding-bottom: 12px; margin-bottom: 14px; }
+.inv-title { font-size: 18px; font-weight: 700; color: #111827; }
+.inv-badge { background: #fef3c7; color: #92400e; font-size: 11.5px; font-weight: 600; padding: 3px 10px; border-radius: 12px; }
+.inv-table { width: 100%; border-collapse: collapse; margin: 12px 0 16px; font-size: 13px; }
+.inv-table th { text-align: left; color: #6b7280; font-weight: 600; padding: 6px 8px; border-bottom: 1px solid #e5e7eb; }
+.inv-table td { padding: 8px; border-bottom: 1px solid #f0f2f5; }
+.inv-table td.num, .inv-table th.num { text-align: right; }
+.inv-summary { display: flex; justify-content: space-between; align-items: center; background: #eef4ff; padding: 12px 16px; border-radius: 8px; margin-top: 8px; }
+.inv-amount { font-size: 17px; font-weight: 700; color: #0b57d0; }
+.inv-pay { margin-top: 14px; font-size: 12.5px; color: #4b5563; display: flex; align-items: center; gap: 10px; }
+.pay-pill { background: #e5e7eb; color: #374151; padding: 3px 10px; border-radius: 4px; font-family: "Cascadia Mono", monospace; font-size: 12px; }
+.mail-actions { display: flex; gap: 10px; margin-top: 18px; }
+.btn-outline { border: 1px solid #c7ccd4; background: #fff; color: #374151; padding: 7px 18px; border-radius: 18px; font-weight: 500; font-size: 13px; }
+
+
+</style>
+</head>
+<body>
+
+<div class="b-tabs">
+  <div class="b-tab"><span class="b-dot"></span><span>Acme invoice 4471 - Mail</span><span class="b-tab-x">&#x2715;</span></div>
+  <div class="b-tab inactive"><span>New Tab</span><span class="b-tab-x">&#x2715;</span></div>
+  <div class="win-controls" style="color:#333333"><div class="win-btn">&#x2014;</div><div class="win-btn">&#x25A1;</div><div class="win-btn close">&#x2715;</div></div>
+</div>
+<div class="b-bar">
+  <div class="b-nav"><span>&#x2190;</span><span>&#x2192;</span><span>&#x21BB;</span></div>
+  <div class="b-url"><span class="b-lock">&#x1F512;</span><span>https://mail.google.com/mail/u/0/#inbox/FMfcgzQX4471</span></div>
+  <div class="b-avatar">U</div>
+</div>
+<div class="b-body">
+<div class="mail-nav">
+  <div class="mail-brand"><span class="mail-logo">&#x2709;</span><span>Mail</span></div>
+  <div class="compose-btn">&#x270E; Compose</div>
+  <div class="nav-item active"><span>Inbox</span><span>3</span></div>
+  <div class="nav-item"><span>Starred</span><span></span></div>
+  <div class="nav-item"><span>Sent</span><span></span></div>
+  <div class="nav-item"><span>Drafts</span><span>1</span></div>
+  <div class="nav-item"><span>Billing</span><span>12</span></div>
+  <div class="nav-item"><span>Archive</span><span></span></div>
+</div>
+<div class="mail-main">
+  <div class="mail-top">
+    <div class="mail-search">&#x1F50D;&nbsp;&nbsp;Search mail</div>
+  </div>
+  <div class="mail-content">
+    <div class="mail-subject">Acme invoice 4471 <span class="tag-inbox">Inbox</span></div>
+    <div class="sender-row">
+      <div class="sender-av">AB</div>
+      <div class="sender-meta">
+        <div><span class="sender-name">Acme Billing</span><span class="sender-addr">&lt;billing@acme.example&gt;</span></div>
+        <div class="sender-to">to finance@contoso.example</div>
+      </div>
+      <div class="sender-date">26 Nov 2026, 09:14</div>
+    </div>
+    <div class="inv-card">
+      <div class="inv-head">
+        <div>
+          <div class="inv-title">Acme Billing &mdash; Invoice 4471</div>
+          <div style="color:#6b7280;font-size:12px;margin-top:2px;">Billing period: 1 Nov 2026 &ndash; 30 Nov 2026</div>
+        </div>
+        <span class="inv-badge">Payment due</span>
+      </div>
+      <table class="inv-table">
+        <thead><tr><th>Description</th><th class="num">Qty</th><th class="num">Unit</th><th class="num">Total</th></tr></thead>
+        <tbody>
+          <tr><td>Managed compute cluster (EU-Central)</td><td class="num">1</td><td class="num">960.00 EUR</td><td class="num">960.00 EUR</td></tr>
+          <tr><td>Encrypted backup storage (2 TB)</td><td class="num">1</td><td class="num">180.00 EUR</td><td class="num">180.00 EUR</td></tr>
+          <tr><td>Priority support retainer</td><td class="num">1</td><td class="num">100.00 EUR</td><td class="num">100.00 EUR</td></tr>
+        </tbody>
+      </table>
+      <div class="inv-summary">
+        <div>
+          <div style="font-size:12px;color:#4b5563;">Due date: <strong>30 November 2026</strong></div>
+          <div style="font-size:12px;color:#4b5563;">Reference: ACME-2026-4471</div>
+        </div>
+        <div class="inv-amount">Amount due: 1,240.00 EUR</div>
+      </div>
+      <div class="inv-pay">
+        <span>Pay by card:</span>
+        <span class="pay-pill">[redacted]</span>
+        <span style="color:#6b7280;">or wire transfer using reference above.</span>
+      </div>
+    </div>
+    <div class="mail-actions">
+      <div class="btn-outline">&#x21A9; Reply</div>
+      <div class="btn-outline">&#x21AA; Forward</div>
+    </div>
+  </div>
+</div>
+</div>
+
+</body>
+</html>

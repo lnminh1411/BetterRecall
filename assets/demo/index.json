@@ -1,0 +1,20 @@
+{
+  "Acme invoice 4471 - Gmail": "mail-invoice.png",
+  "Quarterly planning - Google Docs": "docs-planning.png",
+  "NavigationView class - Microsoft Learn": "docs-navview.png",
+  "Flights Hanoi to Tokyo - Google Flights": "flights-han-nrt.png",
+  "Pull request #12: replay export - GitHub": "pr-replay-export.png",
+  "AgentClient.cs - BetterRecall - Visual Studio Code": "code-agentclient.png",
+  "settings.json - BetterRecall - Visual Studio Code": "code-settings.png",
+  "README.md - notes - Visual Studio Code": "code-readme.png",
+  "Daily standup | Microsoft Teams": "chat-standup.png",
+  "Chat | Design review | Microsoft Teams": "chat-design-review.png",
+  "Downloads - File Explorer": "explorer-downloads.png",
+  "Pictures - File Explorer": "explorer-pictures.png",
+  "Thesis draft v3.docx - Word": "word-thesis.png",
+  "Meeting notes 2026-11.docx - Word": "word-meeting-notes.png",
+  "Budget 2026.xlsx - Excel": "excel-budget.png",
+  "dotnet build - Windows Terminal": "term-dotnet-build.png",
+  "git log - Windows Terminal": "term-git-log.png",
+  "Spotify Premium": "music-player.png"
+}

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) BetterRecall contributors
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
@@ -33,6 +34,7 @@ public sealed record MockOptions(
 public sealed class MockAgent
 {
     private sealed record Row(CaptureMeta Meta, string Text);
+    private sealed record DemoImage(byte[] Bytes, int Width, int Height);
     private readonly List<HistoryEntry> _history = [];
 
     private readonly object _lock = new();
@@ -40,7 +42,7 @@ public sealed class MockAgent
     private readonly List<ReplayClip> _replays = [];
     private readonly List<AuditEntry> _audit = [];
     private readonly Dictionary<string, (PurgeScope? Scope, DateTimeOffset Expires)> _tokens = [];
-    private readonly Dictionary<string, byte[]> _imageCache = [];
+    private readonly Dictionary<string, DemoImage> _imageCache = [];
     private readonly TimeProvider _clock;
     private JsonObject _settings;
     private bool _locked;
@@ -373,7 +375,7 @@ public sealed class MockAgent
                         var textLine = $"[{refId}] {r.Meta.Ts.ToLocalTime():yyyy-MM-dd HH:mm zzz} | screen | app: {r.Meta.App}" +
                                        (string.IsNullOrEmpty(r.Meta.Site) ? "" : $" | site: {r.Meta.Site}") +
                                        $"\n  title: {r.Meta.Title}";
-                        byte[]? png = i < 2 ? Render(r.Meta, 160, 90) : null;
+                        byte[]? png = i < 2 ? Render(r.Meta, 160, 90).Bytes : null;
                         items.Add(new ChatApprovalItem(r.Meta.Id, r.Meta.Ts, CaptureKind.Screen, r.Meta.App, r.Meta.Title, r.Meta.Site, textLine, i < 2 ? "image/png" : null, png));
                     }
 
@@ -797,6 +799,50 @@ public sealed class MockAgent
         }
     }
 
+    private static readonly Lazy<Dictionary<string, string>> DemoIndex = new(LoadDemoIndex);
+    private static readonly ConcurrentDictionary<string, DemoImage?> DemoResourceCache = new(StringComparer.Ordinal);
+
+    private static Dictionary<string, string> LoadDemoIndex()
+    {
+        var map = new Dictionary<string, string>(StringComparer.Ordinal);
+        using var stream = typeof(MockAgent).Assembly.GetManifestResourceStream("demo/index.json");
+        if (stream is null) return map;
+        try
+        {
+            using var doc = JsonDocument.Parse(stream);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return map;
+            foreach (var prop in doc.RootElement.EnumerateObject())
+            {
+                if (prop.Value.ValueKind == JsonValueKind.String && prop.Value.GetString() is { Length: > 0 } file)
+                    map[prop.Name] = file;
+            }
+        }
+        catch (JsonException) { }
+        return map;
+    }
+
+    private static DemoImage? TryGetDemoImage(string title)
+    {
+        if (!DemoIndex.Value.TryGetValue(title, out var file)) return null;
+        return DemoResourceCache.GetOrAdd(file, LoadDemoResource);
+    }
+
+    private static DemoImage? LoadDemoResource(string file)
+    {
+        using var stream = typeof(MockAgent).Assembly.GetManifestResourceStream("demo/" + file);
+        if (stream is null) return null;
+        using var ms = new MemoryStream();
+        stream.CopyTo(ms);
+        var bytes = ms.ToArray();
+        int w = 960, h = 540;
+        if (bytes.Length >= 24 && bytes[0] == 0x89 && bytes[1] == (byte)'P' && bytes[2] == (byte)'N' && bytes[3] == (byte)'G')
+        {
+            w = (bytes[16] << 24) | (bytes[17] << 16) | (bytes[18] << 8) | bytes[19];
+            h = (bytes[20] << 24) | (bytes[21] << 16) | (bytes[22] << 8) | bytes[23];
+        }
+        return new DemoImage(bytes, w, h);
+    }
+
     private string Image(string id, int width)
     {
         Row? r;
@@ -804,22 +850,29 @@ public sealed class MockAgent
         if (r is null || !r.Meta.HasThumb) return Envelope.Error(AgentErrors.NotFound);
         int height = width * 9 / 16;
         var key = id + "@" + width;
-        byte[]? bytes;
-        lock (_lock) _imageCache.TryGetValue(key, out bytes);
-        if (bytes is null)
+        DemoImage? img;
+        lock (_lock) _imageCache.TryGetValue(key, out img);
+        if (img is null)
         {
-            bytes = Render(r.Meta, width, height);
+            img = Render(r.Meta, width, height);
             lock (_lock)
             {
                 if (_imageCache.Count > 400) _imageCache.Clear();
-                _imageCache[key] = bytes;
+                _imageCache[key] = img;
             }
         }
-        return Envelope.Ok(new ThumbData(id, "image/png", width, height, bytes), ContractsJson.Default.ThumbData);
+        return Envelope.Ok(new ThumbData(id, "image/png", img.Width, img.Height, img.Bytes), ContractsJson.Default.ThumbData);
+    }
+
+    /// <summary>Uses the embedded demo PNG when available, otherwise falls back to a flat drawn window picture.</summary>
+    private static DemoImage Render(CaptureMeta m, int w, int h)
+    {
+        if (TryGetDemoImage(m.Title) is { } demo) return demo;
+        return new DemoImage(RenderFallback(m, w, h), w, h);
     }
 
     /// <summary>A flat "window" picture: app colour, title bar, text lines that vary with the id.</summary>
-    private static byte[] Render(CaptureMeta m, int w, int h)
+    private static byte[] RenderFallback(CaptureMeta m, int w, int h)
     {
         int hash = StableHash(m.App);
         double hue = (hash & 0xFFFF) / 65535.0;
@@ -1013,14 +1066,14 @@ public sealed class MockAgent
                 Row? r;
                 lock (_lock) r = _rows.FirstOrDefault(x => x.Meta.Id == args[1]);
                 if (r is null || !r.Meta.HasThumb || r.Meta.Kind == CaptureKind.Audio) return Envelope.Error(AgentErrors.NoImage);
-                var bytes = Render(r.Meta, 960, 540);
+                var img = Render(r.Meta, 960, 540);
                 var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
                 lock (_lock)
                 {
                     session.DescribeTokens[token] = (r.Meta.Id, Now.AddSeconds(120));
                     Audit("describe preview", 1);
                 }
-                return Envelope.Ok(new DescribePreview(token, st.Provider, st.Model, st.Endpoint, "image/png", 960, 540, false, bytes), ContractsJson.Default.DescribePreview);
+                return Envelope.Ok(new DescribePreview(token, st.Provider, st.Model, st.Endpoint, "image/png", img.Width, img.Height, false, img.Bytes), ContractsJson.Default.DescribePreview);
             }
             case "send":
             {
@@ -1162,7 +1215,7 @@ public sealed class MockAgent
                 {
                     file = $"images/{row.Meta.Ts.ToLocalTime():yyyyMMdd-HHmmss-fff}_{row.Meta.Id}.png";
                     using var es = zip.CreateEntry(file).Open();
-                    es.Write(Render(row.Meta, 640, 360));
+                    es.Write(Render(row.Meta, 640, 360).Bytes);
                     written++;
                 }
                 entries.Add(new JsonObject

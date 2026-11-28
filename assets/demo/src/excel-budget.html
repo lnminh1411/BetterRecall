@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Budget 2026.xlsx - Spreadsheet</title>
+<style>
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body {
+  width: 1280px; height: 720px; overflow: hidden;
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-size: 13px; line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+.mono { font-family: "Cascadia Mono", "Consolas", monospace; }
+.win-controls { display: flex; align-items: center; gap: 2px; margin-left: auto; }
+.win-btn {
+  width: 38px; height: 30px; display: flex; align-items: center; justify-content: center;
+  font-size: 11px; opacity: 0.78; user-select: none;
+}
+.win-btn.close:hover { background: #c42b1c; color: #fff; }
+
+
+body { background: #ffffff; color: #1f2328; display: flex; flex-direction: column; }
+.xl-title {
+  height: 36px; background: #107c41; color: #ffffff;
+  display: flex; align-items: center; padding-left: 16px; gap: 14px; font-size: 12.5px;
+}
+.xl-tabs {
+  height: 30px; background: #f3f6f4; border-bottom: 1px solid #d9e2dc;
+  display: flex; align-items: center; padding: 0 16px; gap: 18px; font-size: 12px; color: #374151;
+}
+.xl-tabs .on { color: #107c41; font-weight: 700; border-bottom: 2px solid #107c41; padding: 5px 0; }
+.xl-fx {
+  height: 32px; background: #ffffff; border-bottom: 1px solid #d9dfe8;
+  display: flex; align-items: center; padding: 0 10px; gap: 10px; font-size: 12.5px;
+}
+.xl-cellref { width: 64px; border-right: 1px solid #dde2ea; text-align: center; font-weight: 600; color: #374151; }
+.xl-grid { flex: 1; overflow: hidden; }
+.xl-tbl { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 13px; }
+.xl-tbl th {
+  background: #f3f4f6; border: 1px solid #d4d8df; height: 26px;
+  font-weight: 600; color: #4b5563; font-size: 12px;
+}
+.xl-tbl td { border: 1px solid #e2e5ea; height: 32px; padding: 0 10px; }
+.xl-rn { width: 42px; background: #f3f4f6; text-align: center; color: #6b7280; font-size: 11.5px; }
+.num { text-align: right; font-variant-numeric: tabular-nums; }
+.hdr td { background: #e6f4ea; font-weight: 700; color: #0d532b; }
+.tot td { background: #f3f6f4; font-weight: 700; border-top: 2px solid #107c41; }
+.sel { outline: 2px solid #107c41; outline-offset: -2px; background: #f0fdf4; }
+.xl-sheets {
+  height: 30px; background: #f3f4f6; border-top: 1px solid #d4d8df;
+  display: flex; align-items: center; padding: 0 16px; gap: 6px; font-size: 12px;
+}
+.xl-sheet { padding: 4px 14px; border-radius: 4px 4px 0 0; color: #4b5563; }
+.xl-sheet.on { background: #fff; color: #107c41; font-weight: 700; border-bottom: 2px solid #107c41; }
+
+</style>
+</head>
+<body>
+
+<div class="xl-title">
+  <strong>Spreadsheet</strong>
+  <span style="margin:0 auto;font-weight:500;">Budget 2026.xlsx &mdash; Saved</span>
+  <div class="win-controls" style="color:#d4d4d4"><div class="win-btn">&#x2014;</div><div class="win-btn">&#x25A1;</div><div class="win-btn close">&#x2715;</div></div>
+</div>
+<div class="xl-tabs">
+  <span>File</span><span class="on">Home</span><span>Insert</span><span>Formulas</span><span>Data</span><span>View</span>
+</div>
+<div class="xl-fx">
+  <div class="xl-cellref">F9</div>
+  <div style="color:#6b7280;font-style:italic;">fx</div>
+  <div class="mono">=SUM(B9:E9)</div>
+</div>
+<div class="xl-grid">
+  <table class="xl-tbl">
+    <thead>
+      <tr><th style="width:42px;"></th><th style="width:240px;">A</th><th style="width:120px;">B</th><th style="width:120px;">C</th><th style="width:120px;">D</th><th style="width:120px;">E</th><th style="width:130px;">F</th><th>G</th></tr>
+    </thead>
+    <tbody><tr><td class="xl-rn">1</td><td style="font-weight:700;font-size:15px;color:#107c41;">Budget 2026</td><td class="num"></td><td class="num"></td><td class="num"></td><td class="num"></td><td class="num"></td><td></td></tr><tr class="hdr"><td class="xl-rn">2</td><td>Category</td><td class="num">Q1</td><td class="num">Q2</td><td class="num">Q3</td><td class="num">Q4</td><td class="num">Total</td><td></td></tr><tr><td class="xl-rn">3</td><td>Hosting</td><td class="num">1200</td><td class="num">1200</td><td class="num">1300</td><td class="num">1300</td><td class="num">5000</td><td></td></tr><tr><td class="xl-rn">4</td><td>Travel</td><td class="num">800</td><td class="num">400</td><td class="num">950</td><td class="num">600</td><td class="num">2750</td><td></td></tr><tr><td class="xl-rn">5</td><td>Software licenses</td><td class="num">650</td><td class="num">650</td><td class="num">700</td><td class="num">700</td><td class="num">2700</td><td></td></tr><tr><td class="xl-rn">6</td><td>Hardware & test rigs</td><td class="num">1500</td><td class="num">300</td><td class="num">450</td><td class="num">900</td><td class="num">3150</td><td></td></tr><tr><td class="xl-rn">7</td><td>Design & research</td><td class="num">500</td><td class="num">500</td><td class="num">600</td><td class="num">500</td><td class="num">2100</td><td></td></tr><tr><td class="xl-rn">8</td><td>Contingency</td><td class="num">300</td><td class="num">300</td><td class="num">300</td><td class="num">300</td><td class="num">1200</td><td></td></tr><tr class="tot"><td class="xl-rn">9</td><td>Total</td><td class="num">4950</td><td class="num">3350</td><td class="num">4300</td><td class="num">4300</td><td class="num sel">16900</td><td></td></tr><tr><td class="xl-rn">10</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr><tr><td class="xl-rn">11</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr><tr><td class="xl-rn">12</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr><tr><td class="xl-rn">13</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr><tr><td class="xl-rn">14</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr><tr><td class="xl-rn">15</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr><tr><td class="xl-rn">16</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr><tr><td class="xl-rn">17</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr></tbody>
+  </table>
+</div>
+<div class="xl-sheets">
+  <div class="xl-sheet on">Summary</div>
+  <div class="xl-sheet">Q1-Q2 Detail</div>
+  <div class="xl-sheet">Forecast</div>
+  <div style="margin-left:auto;color:#555;">Sum: 16,900 &nbsp;|&nbsp; Currency: USD</div>
+</div>
+
+</body>
+</html>
