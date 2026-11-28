@@ -9,9 +9,9 @@ use std::thread::{self, JoinHandle};
 
 use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
 use windows::Win32::Media::Audio::{
-    AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK, IAudioClient, IAudioClock,
-    IAudioRenderClient, IMMDeviceEnumerator, MMDeviceEnumerator, WAVEFORMATEX,
-    WAVEFORMATEXTENSIBLE, eConsole, eRender,
+    AUDCLNT_E_DEVICE_INVALIDATED, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+    IAudioClient, IAudioClock, IAudioRenderClient, IMMDeviceEnumerator, MMDeviceEnumerator,
+    WAVEFORMATEX, WAVEFORMATEXTENSIBLE, eConsole, eRender,
 };
 use windows::Win32::Media::KernelStreaming::WAVE_FORMAT_EXTENSIBLE;
 use windows::Win32::Media::Multimedia::{KSDATAFORMAT_SUBTYPE_IEEE_FLOAT, WAVE_FORMAT_IEEE_FLOAT};
@@ -47,6 +47,7 @@ struct SharedAudio {
     base_pts_ms: AtomicI64,
     played_frames: AtomicU64,
     sample_rate: u32,
+    failed: AtomicBool,
     stop: AtomicBool,
 }
 
@@ -110,6 +111,10 @@ impl WasapiPlayer {
         self.shared.clock_ms.load(Ordering::Relaxed)
     }
 
+    pub fn failed(&self) -> bool {
+        self.shared.failed.load(Ordering::Relaxed)
+    }
+
     pub fn set_playing(&self, playing: bool) {
         self.shared.playing.store(playing, Ordering::Relaxed);
         let _ = self
@@ -164,6 +169,14 @@ type WasapiSetup = (
     u32,
     windows::Win32::Foundation::HANDLE,
 );
+
+fn record_wasapi_error(err: &windows::core::Error, consecutive_errors: &mut u32) -> bool {
+    if err.code() == AUDCLNT_E_DEVICE_INVALIDATED {
+        return true;
+    }
+    *consecutive_errors += 1;
+    *consecutive_errors >= 3
+}
 
 fn run_wasapi_thread(
     init_tx: mpsc::Sender<Result<AudioMixFormat, String>>,
@@ -237,6 +250,7 @@ fn run_wasapi_thread(
         base_pts_ms: AtomicI64::new(0),
         played_frames: AtomicU64::new(0),
         sample_rate: format.sample_rate.max(1),
+        failed: AtomicBool::new(false),
         stop: AtomicBool::new(false),
     });
 
@@ -251,17 +265,27 @@ fn run_wasapi_thread(
         .filter(|&f| f > 0);
     let mut clock_offset_pos: u64 = 0;
     let mut started = false;
+    let mut consecutive_errors: u32 = 0;
 
-    while !shared.stop.load(Ordering::Relaxed) {
+    while !shared.stop.load(Ordering::Relaxed) && !shared.failed.load(Ordering::Relaxed) {
         while let Ok(cmd) = cmd_rx.try_recv() {
             match cmd {
                 AudioCmd::Play => {
                     if !started {
-                        if unsafe { client.Start() }.is_ok() {
-                            started = true;
-                        }
-                        unsafe {
-                            let _ = SetEvent(event);
+                        match unsafe { client.Start() } {
+                            Ok(()) => {
+                                started = true;
+                                consecutive_errors = 0;
+                                unsafe {
+                                    let _ = SetEvent(event);
+                                }
+                            }
+                            Err(e) => {
+                                if record_wasapi_error(&e, &mut consecutive_errors) {
+                                    shared.failed.store(true, Ordering::Relaxed);
+                                    break;
+                                }
+                            }
                         }
                     }
                 }
@@ -288,8 +312,16 @@ fn run_wasapi_thread(
                     shared.base_pts_ms.store(new_base, Ordering::Relaxed);
                     shared.played_frames.store(0, Ordering::Relaxed);
                     shared.clock_ms.store(new_base, Ordering::Relaxed);
-                    if was_started && unsafe { client.Start() }.is_ok() {
-                        started = true;
+                    if was_started {
+                        match unsafe { client.Start() } {
+                            Ok(()) => started = true,
+                            Err(e) => {
+                                if record_wasapi_error(&e, &mut consecutive_errors) {
+                                    shared.failed.store(true, Ordering::Relaxed);
+                                    break;
+                                }
+                            }
+                        }
                     }
                 }
                 AudioCmd::Stop => {
@@ -297,7 +329,7 @@ fn run_wasapi_thread(
                 }
             }
         }
-        if shared.stop.load(Ordering::Relaxed) {
+        if shared.stop.load(Ordering::Relaxed) || shared.failed.load(Ordering::Relaxed) {
             break;
         }
 
@@ -308,36 +340,69 @@ fn run_wasapi_thread(
         }
 
         if wait_res == WAIT_OBJECT_0 || started {
-            let padding = unsafe { client.GetCurrentPadding() }.unwrap_or(0);
-            let avail = buffer_frames.saturating_sub(padding);
-            if avail > 0
-                && let Ok(buf_ptr) = unsafe { render.GetBuffer(avail) }
-            {
-                let byte_count = avail as usize * format.block_align as usize;
-                let mut filled = 0usize;
-                if let Ok(mut q) = shared.pcm_queue.lock() {
-                    let take = byte_count.min(q.len());
-                    // Only copy whole frames.
-                    let aligned = take - (take % (format.block_align.max(1) as usize));
-                    if aligned > 0 {
-                        let dst = unsafe { std::slice::from_raw_parts_mut(buf_ptr, aligned) };
-                        for b in dst.iter_mut() {
-                            *b = q.pop_front().unwrap_or(0);
+            let mut loop_had_error = false;
+            match unsafe { client.GetCurrentPadding() } {
+                Ok(padding) => {
+                    let avail = buffer_frames.saturating_sub(padding);
+                    if avail > 0 {
+                        match unsafe { render.GetBuffer(avail) } {
+                            Ok(buf_ptr) => {
+                                let byte_count = avail as usize * format.block_align as usize;
+                                let mut filled = 0usize;
+                                if let Ok(mut q) = shared.pcm_queue.lock() {
+                                    let take = byte_count.min(q.len());
+                                    // Only copy whole frames.
+                                    let aligned =
+                                        take - (take % (format.block_align.max(1) as usize));
+                                    if aligned > 0 {
+                                        let dst = unsafe {
+                                            std::slice::from_raw_parts_mut(buf_ptr, aligned)
+                                        };
+                                        for b in dst.iter_mut() {
+                                            *b = q.pop_front().unwrap_or(0);
+                                        }
+                                        filled = aligned;
+                                    }
+                                }
+                                if filled < byte_count {
+                                    unsafe {
+                                        ptr::write_bytes(
+                                            buf_ptr.add(filled),
+                                            0,
+                                            byte_count - filled,
+                                        );
+                                    }
+                                }
+                                if let Err(e) = unsafe { render.ReleaseBuffer(avail, 0) } {
+                                    loop_had_error = true;
+                                    if record_wasapi_error(&e, &mut consecutive_errors) {
+                                        shared.failed.store(true, Ordering::Relaxed);
+                                        break;
+                                    }
+                                } else if filled > 0 {
+                                    let frames_written =
+                                        (filled / format.block_align.max(1) as usize) as u64;
+                                    shared
+                                        .played_frames
+                                        .fetch_add(frames_written, Ordering::Relaxed);
+                                }
+                            }
+                            Err(e) => {
+                                loop_had_error = true;
+                                if record_wasapi_error(&e, &mut consecutive_errors) {
+                                    shared.failed.store(true, Ordering::Relaxed);
+                                    break;
+                                }
+                            }
                         }
-                        filled = aligned;
                     }
                 }
-                if filled < byte_count {
-                    unsafe {
-                        ptr::write_bytes(buf_ptr.add(filled), 0, byte_count - filled);
+                Err(e) => {
+                    loop_had_error = true;
+                    if record_wasapi_error(&e, &mut consecutive_errors) {
+                        shared.failed.store(true, Ordering::Relaxed);
+                        break;
                     }
-                }
-                let _ = unsafe { render.ReleaseBuffer(avail, 0) };
-                if filled > 0 {
-                    let frames_written = (filled / format.block_align.max(1) as usize) as u64;
-                    shared
-                        .played_frames
-                        .fetch_add(frames_written, Ordering::Relaxed);
                 }
             }
 
@@ -345,17 +410,28 @@ fn run_wasapi_thread(
             let base = shared.base_pts_ms.load(Ordering::Relaxed);
             let elapsed_ms = if let (Some(c), Some(freq)) = (&clock, clock_freq) {
                 let mut pos = 0u64;
-                if unsafe { c.GetPosition(&mut pos, None) }.is_ok() {
-                    let rel = pos.saturating_sub(clock_offset_pos);
-                    ((rel as u128 * 1000) / (freq as u128)) as i64
-                } else {
-                    (shared.played_frames.load(Ordering::Relaxed) * 1000
-                        / u64::from(shared.sample_rate)) as i64
+                match unsafe { c.GetPosition(&mut pos, None) } {
+                    Ok(()) => {
+                        let rel = pos.saturating_sub(clock_offset_pos);
+                        ((rel as u128 * 1000) / (freq as u128)) as i64
+                    }
+                    Err(e) => {
+                        loop_had_error = true;
+                        if record_wasapi_error(&e, &mut consecutive_errors) {
+                            shared.failed.store(true, Ordering::Relaxed);
+                            break;
+                        }
+                        (shared.played_frames.load(Ordering::Relaxed) * 1000
+                            / u64::from(shared.sample_rate)) as i64
+                    }
                 }
             } else {
                 (shared.played_frames.load(Ordering::Relaxed) * 1000
                     / u64::from(shared.sample_rate)) as i64
             };
+            if !loop_had_error {
+                consecutive_errors = 0;
+            }
             shared.clock_ms.store(base + elapsed_ms, Ordering::Relaxed);
         }
     }

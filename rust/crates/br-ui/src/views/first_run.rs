@@ -52,7 +52,7 @@ impl Default for FirstRunChoices {
         Self {
             capture: true,
             replay: true,
-            speech: true,
+            speech: false,
             autostart: true,
             unlock: UnlockMethod::WindowsHello,
         }
@@ -263,12 +263,17 @@ impl FirstRunView {
                                 .child("Captured locally"),
                         )
                         .child(div().text_sm().text_color(muted_fg).child("• Screen keyframes"))
-                        .child(div().text_sm().text_color(muted_fg).child("• Speech"))
                         .child(
                             div()
                                 .text_sm()
                                 .text_color(muted_fg)
                                 .child("• Instant replay buffer"),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(muted_fg)
+                                .child("• Speech, only if you turn it on"),
                         ),
                 )
                 .child(
@@ -703,8 +708,19 @@ mod tests {
         assert!(!s.skipped);
         let json = s.to_done_json();
         assert!(json.contains("\"capture\":false"));
+        assert!(json.contains("\"speech\":false"));
         assert!(json.contains("\"unlock\":\"password\""));
         assert!(json.contains("\"skipped\":false"));
         assert!(json.contains("\"step\":6"));
+    }
+
+    #[test]
+    fn default_choices_speech_is_off() {
+        let s = FirstRunState::new();
+        assert!(s.choices.capture);
+        assert!(s.choices.replay);
+        assert!(!s.choices.speech);
+        assert!(s.choices.autostart);
+        assert!(s.to_done_json().contains("\"speech\":false"));
     }
 }

@@ -127,6 +127,7 @@ impl PlayerView {
         let mut changed = snap.position_ms != self.snapshot.position_ms
             || snap.duration_ms != self.snapshot.duration_ms
             || snap.playing != self.snapshot.playing
+            || snap.notice != self.snapshot.notice
             || snap.error != self.snapshot.error;
         self.snapshot = snap;
 
@@ -293,6 +294,12 @@ impl Render for PlayerView {
                             .child(format!("working set: {:.1} MB", ws_mb))
                     })),
             )
+            .children(self.snapshot.notice.clone().map(|notice| {
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(notice)
+            }))
             .child(
                 h_flex()
                     .p_3()

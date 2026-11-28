@@ -15,13 +15,14 @@ use smallvec::smallvec;
 use windows::Win32::Media::MediaFoundation::{
     IMFMediaType, IMFSourceReader, MF_MT_AUDIO_AVG_BYTES_PER_SECOND, MF_MT_AUDIO_BITS_PER_SAMPLE,
     MF_MT_AUDIO_BLOCK_ALIGNMENT, MF_MT_AUDIO_NUM_CHANNELS, MF_MT_AUDIO_SAMPLES_PER_SECOND,
-    MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_PD_DURATION,
-    MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS,
+    MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_MINIMUM_DISPLAY_APERTURE,
+    MF_MT_SUBTYPE, MF_PD_DURATION, MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS,
     MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_AUDIO_STREAM,
-    MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READERF_ENDOFSTREAM,
-    MF_SOURCE_READER_MEDIASOURCE, MF_VERSION, MFAudioFormat_Float, MFAudioFormat_PCM,
-    MFCreateAttributes, MFCreateMediaType, MFCreateSourceReaderFromURL, MFMediaType_Audio,
-    MFMediaType_Video, MFShutdown, MFStartup, MFSTARTUP_NOSOCKET, MFVideoFormat_RGB32,
+    MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READER_MEDIASOURCE,
+    MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED, MF_SOURCE_READERF_ENDOFSTREAM, MF_VERSION,
+    MFAudioFormat_Float, MFAudioFormat_PCM, MFCreateAttributes, MFCreateMediaType,
+    MFCreateSourceReaderFromURL, MFMediaType_Audio, MFMediaType_Video, MFShutdown, MFStartup,
+    MFSTARTUP_NOSOCKET, MFVideoArea, MFVideoFormat_RGB32,
 };
 use windows::Win32::System::Com::StructuredStorage::{
     PROPVARIANT, PROPVARIANT_0, PROPVARIANT_0_0, PROPVARIANT_0_0_0, PropVariantClear,
@@ -44,10 +45,12 @@ pub struct PlayerSnapshot {
     pub position_ms: i64,
     pub duration_ms: i64,
     pub playing: bool,
+    pub eof: bool,
     pub decoded_fps: f32,
     pub dropped_frames: u64,
     pub queue_len: usize,
     pub has_audio: bool,
+    pub notice: Option<String>,
     pub error: Option<String>,
 }
 
@@ -121,19 +124,19 @@ impl MediaPlayer {
 
     /// Pop the next frame due at or before the current master clock, dropping late frames.
     pub fn take_due_frame(&self) -> Option<DecodedFrame> {
-        let clock_ms = self
+        let (clock_ms, is_eof) = self
             .shared
             .snapshot
             .lock()
-            .map(|s| s.position_ms)
-            .unwrap_or(0);
+            .map(|s| (s.position_ms, s.eof))
+            .unwrap_or((0, false));
 
         let mut q = self.shared.frames.lock().ok()?;
         let mut chosen: Option<DecodedFrame> = None;
         let mut dropped = 0u64;
 
         while let Some(front) = q.front() {
-            if front.pts_ms <= clock_ms + 8 {
+            if is_eof || front.pts_ms <= clock_ms + 8 {
                 if chosen.is_some() {
                     dropped += 1;
                 }
@@ -228,7 +231,74 @@ fn create_source_reader(path: &Path) -> Result<IMFSourceReader, String> {
         .map_err(|e| format!("MFCreateSourceReaderFromURL({}): {e}", path.display()))
 }
 
-fn configure_video_stream(reader: &IMFSourceReader) -> Result<(u32, u32, i32), String> {
+#[derive(Debug, Clone, Copy)]
+struct VideoFormat {
+    width: u32,
+    height: u32,
+    stride: i32,
+    crop_x: u32,
+    crop_y: u32,
+    crop_w: u32,
+    crop_h: u32,
+}
+
+fn read_video_format(reader: &IMFSourceReader) -> Result<VideoFormat, String> {
+    let current = unsafe {
+        reader.GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32)
+    }
+    .map_err(|e| format!("GetCurrentMediaType(video): {e}"))?;
+
+    let frame_size = unsafe { current.GetUINT64(&MF_MT_FRAME_SIZE) }
+        .map_err(|e| format!("GetUINT64(MF_MT_FRAME_SIZE): {e}"))?;
+    let width = (frame_size >> 32) as u32;
+    let height = (frame_size & 0xFFFF_FFFF) as u32;
+    if width == 0 || height == 0 {
+        return Err("Video stream reported 0x0 frame size".into());
+    }
+
+    let stride = unsafe { current.GetUINT32(&MF_MT_DEFAULT_STRIDE) }
+        .map(|v| v as i32)
+        .unwrap_or((width * 4) as i32);
+
+    let (mut crop_x, mut crop_y, mut crop_w, mut crop_h) = (0u32, 0u32, width, height);
+    let mut area_bytes = [0u8; std::mem::size_of::<MFVideoArea>()];
+    let mut blob_len = 0u32;
+    if unsafe {
+        current.GetBlob(
+            &MF_MT_MINIMUM_DISPLAY_APERTURE,
+            &mut area_bytes,
+            Some(&mut blob_len),
+        )
+    }
+    .is_ok()
+        && blob_len as usize >= std::mem::size_of::<MFVideoArea>()
+    {
+        let area: MFVideoArea =
+            unsafe { std::ptr::read_unaligned(area_bytes.as_ptr().cast::<MFVideoArea>()) };
+        let ox = area.OffsetX.value.max(0) as u32;
+        let oy = area.OffsetY.value.max(0) as u32;
+        let aw = area.Area.cx.max(0) as u32;
+        let ah = area.Area.cy.max(0) as u32;
+        if aw > 0 && ah > 0 && ox.saturating_add(aw) <= width && oy.saturating_add(ah) <= height {
+            crop_x = ox;
+            crop_y = oy;
+            crop_w = aw;
+            crop_h = ah;
+        }
+    }
+
+    Ok(VideoFormat {
+        width,
+        height,
+        stride,
+        crop_x,
+        crop_y,
+        crop_w,
+        crop_h,
+    })
+}
+
+fn configure_video_stream(reader: &IMFSourceReader) -> Result<VideoFormat, String> {
     let out_type: IMFMediaType =
         unsafe { MFCreateMediaType() }.map_err(|e| format!("MFCreateMediaType(video): {e}"))?;
     unsafe {
@@ -251,24 +321,13 @@ fn configure_video_stream(reader: &IMFSourceReader) -> Result<(u32, u32, i32), S
             })?;
     }
 
-    let current = unsafe {
-        reader.GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32)
+    read_video_format(reader)
+}
+
+fn deselect_audio_stream(reader: &IMFSourceReader) {
+    unsafe {
+        let _ = reader.SetStreamSelection(MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32, false);
     }
-    .map_err(|e| format!("GetCurrentMediaType(video): {e}"))?;
-
-    let frame_size = unsafe { current.GetUINT64(&MF_MT_FRAME_SIZE) }
-        .map_err(|e| format!("GetUINT64(MF_MT_FRAME_SIZE): {e}"))?;
-    let width = (frame_size >> 32) as u32;
-    let height = (frame_size & 0xFFFF_FFFF) as u32;
-    if width == 0 || height == 0 {
-        return Err("Video stream reported 0x0 frame size".into());
-    }
-
-    let stride = unsafe { current.GetUINT32(&MF_MT_DEFAULT_STRIDE) }
-        .map(|v| v as i32)
-        .unwrap_or((width * 4) as i32);
-
-    Ok((width, height, stride))
 }
 
 fn configure_audio_stream(reader: &IMFSourceReader) -> Option<WasapiPlayer> {
@@ -354,22 +413,33 @@ fn seek_reader(reader: &IMFSourceReader, target_ms: i64) -> Result<(), String> {
         .map_err(|e| format!("SetCurrentPosition({target_ms}ms): {e}"))
 }
 
-fn rgb32_to_render_image(src: &[u8], width: u32, height: u32, stride: i32) -> Option<Arc<RenderImage>> {
-    let w = width as usize;
-    let h = height as usize;
-    let row_bytes = w * 4;
-    let abs_stride = stride.unsigned_abs() as usize;
-    if abs_stride < row_bytes || src.len() < abs_stride * h {
+fn rgb32_to_render_image(src: &[u8], fmt: VideoFormat) -> Option<Arc<RenderImage>> {
+    let full_w = fmt.width as usize;
+    let full_h = fmt.height as usize;
+    let full_row_bytes = full_w * 4;
+    let abs_stride = fmt.stride.unsigned_abs() as usize;
+    if abs_stride < full_row_bytes || src.len() < abs_stride * full_h {
         return None;
     }
 
-    let mut dst = vec![0u8; row_bytes * h];
-    let bottom_up = stride < 0;
+    let cx = fmt.crop_x as usize;
+    let cy = fmt.crop_y as usize;
+    let cw = fmt.crop_w as usize;
+    let ch = fmt.crop_h as usize;
+    if cw == 0 || ch == 0 || cx + cw > full_w || cy + ch > full_h {
+        return None;
+    }
 
-    for y in 0..h {
-        let src_y = if bottom_up { h - 1 - y } else { y };
-        let srow = &src[src_y * abs_stride..src_y * abs_stride + row_bytes];
-        let drow = &mut dst[y * row_bytes..(y + 1) * row_bytes];
+    let out_row_bytes = cw * 4;
+    let mut dst = vec![0u8; out_row_bytes * ch];
+    let bottom_up = fmt.stride < 0;
+
+    for y in 0..ch {
+        let frame_y = cy + y;
+        let src_y = if bottom_up { full_h - 1 - frame_y } else { frame_y };
+        let src_offset = src_y * abs_stride + cx * 4;
+        let srow = &src[src_offset..src_offset + out_row_bytes];
+        let drow = &mut dst[y * out_row_bytes..(y + 1) * out_row_bytes];
         drow.copy_from_slice(srow);
         // MFVideoFormat_RGB32 leaves the 4th byte as 0 (XRGB); force alpha = 0xFF for GPUI BGRA.
         for px in drow.as_chunks_mut::<4>().0 {
@@ -377,7 +447,7 @@ fn rgb32_to_render_image(src: &[u8], width: u32, height: u32, stride: i32) -> Op
         }
     }
 
-    let img_buf: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::from_raw(width, height, dst)?;
+    let img_buf: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::from_raw(fmt.crop_w, fmt.crop_h, dst)?;
     let frame = Frame::new(img_buf);
     Some(Arc::new(RenderImage::new(smallvec![frame])))
 }
@@ -389,13 +459,16 @@ fn decode_loop(
     cmd_rx: &mpsc::Receiver<DecodeCmd>,
 ) -> Result<(), String> {
     let reader = create_source_reader(path)?;
-    let (width, height, stride) = configure_video_stream(&reader)?;
+    let mut video_fmt = configure_video_stream(&reader)?;
     let duration_ms = read_duration_ms(&reader);
-    let audio = configure_audio_stream(&reader);
+    let mut audio = configure_audio_stream(&reader);
+    if audio.is_none() {
+        deselect_audio_stream(&reader);
+    }
 
     let mut playing = true;
     let mut eof = false;
-    let mut audio_eof = false;
+    let mut audio_eof = audio.is_none();
     let mut mono_base_ms = start_offset_ms.clamp(0, duration_ms.max(start_offset_ms));
     let mut mono_start = Instant::now();
 
@@ -411,13 +484,15 @@ fn decode_loop(
         snap.duration_ms = duration_ms;
         snap.position_ms = mono_base_ms;
         snap.playing = true;
+        snap.eof = false;
         snap.has_audio = audio.is_some();
+        snap.notice = None;
         snap.error = None;
     }
 
     let mut fps_window_start = Instant::now();
     let mut fps_decoded_count: u32 = 0;
-
+    let mut consecutive_convert_errors: u32 = 0;
 
     while !shared.stop.load(Ordering::Relaxed) {
         while let Ok(cmd) = cmd_rx.try_recv() {
@@ -431,11 +506,14 @@ fn decode_loop(
                         }
                         if eof {
                             eof = false;
-                            audio_eof = false;
+                            audio_eof = audio.is_none();
                             mono_base_ms = 0;
                             let _ = seek_reader(&reader, 0);
                             if let Some(ref a) = audio {
                                 a.flush(0);
+                            }
+                            if let Ok(mut snap) = shared.snapshot.lock() {
+                                snap.eof = false;
                             }
                         }
                     }
@@ -460,7 +538,7 @@ fn decode_loop(
                     }
                     let _ = seek_reader(&reader, clamped);
                     eof = false;
-                    audio_eof = false;
+                    audio_eof = audio.is_none();
                     mono_base_ms = clamped;
                     mono_start = Instant::now();
                     if let Some(ref a) = audio {
@@ -468,6 +546,7 @@ fn decode_loop(
                     }
                     if let Ok(mut snap) = shared.snapshot.lock() {
                         snap.position_ms = clamped;
+                        snap.eof = false;
                         snap.queue_len = 0;
                     }
                 }
@@ -480,6 +559,20 @@ fn decode_loop(
             break;
         }
 
+        if audio.as_ref().is_some_and(WasapiPlayer::failed) {
+            if let Some(ref a) = audio {
+                mono_base_ms = a.clock_ms();
+            }
+            mono_start = Instant::now();
+            audio = None;
+            audio_eof = true;
+            deselect_audio_stream(&reader);
+            if let Ok(mut snap) = shared.snapshot.lock() {
+                snap.has_audio = false;
+                snap.notice = Some("Audio device lost; playing without sound".into());
+            }
+        }
+
         let clock_ms = current_clock_ms(audio.as_ref(), mono_base_ms, mono_start, playing);
         if let Ok(mut snap) = shared.snapshot.lock() {
             snap.position_ms = if duration_ms > 0 {
@@ -488,6 +581,7 @@ fn decode_loop(
                 clock_ms
             };
             snap.playing = playing;
+            snap.eof = eof;
         }
 
         if !playing || eof {
@@ -536,15 +630,38 @@ fn decode_loop(
             return Err(format!("IMFSourceReader::ReadSample: {e}"));
         }
 
+        if is_video && (flags & (MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED.0 as u32)) != 0 {
+            video_fmt = read_video_format(&reader)?;
+        }
+
         if (flags & (MF_SOURCE_READERF_ENDOFSTREAM.0 as u32)) != 0 {
             if !is_video {
                 audio_eof = true;
                 continue;
             }
+            if audio.is_none() {
+                let end_ms = current_clock_ms(None, mono_base_ms, mono_start, true);
+                mono_base_ms = if duration_ms > 0 {
+                    end_ms.min(duration_ms)
+                } else {
+                    end_ms
+                };
+            }
             eof = true;
             playing = false;
             if let Some(ref a) = audio {
                 a.set_playing(false);
+            }
+            if let Ok(mut snap) = shared.snapshot.lock() {
+                snap.eof = true;
+                snap.playing = false;
+                let end_clock_ms =
+                    current_clock_ms(audio.as_ref(), mono_base_ms, mono_start, false);
+                snap.position_ms = if duration_ms > 0 {
+                    end_clock_ms.min(duration_ms)
+                } else {
+                    end_clock_ms
+                };
             }
             continue;
         }
@@ -588,24 +705,32 @@ fn decode_loop(
                 continue;
             }
 
-            let rendered = rgb32_to_render_image(bytes, width, height, stride);
+            let rendered = rgb32_to_render_image(bytes, video_fmt);
             unsafe {
                 let _ = buffer.Unlock();
             }
 
-            if let Some(image) = rendered
-                && let Ok(mut q) = shared.frames.lock()
-            {
-                while q.len() >= MAX_QUEUED_FRAMES {
-                    q.pop_front();
+            if let Some(image) = rendered {
+                consecutive_convert_errors = 0;
+                if let Ok(mut q) = shared.frames.lock() {
+                    while q.len() >= MAX_QUEUED_FRAMES {
+                        q.pop_front();
+                        if let Ok(mut snap) = shared.snapshot.lock() {
+                            snap.dropped_frames += 1;
+                        }
+                    }
+                    q.push_back(DecodedFrame { image, pts_ms });
+                    let qlen = q.len();
                     if let Ok(mut snap) = shared.snapshot.lock() {
-                        snap.dropped_frames += 1;
+                        snap.queue_len = qlen;
                     }
                 }
-                q.push_back(DecodedFrame { image, pts_ms });
-                let qlen = q.len();
-                if let Ok(mut snap) = shared.snapshot.lock() {
-                    snap.queue_len = qlen;
+            } else {
+                consecutive_convert_errors += 1;
+                if consecutive_convert_errors >= 30 {
+                    return Err(format!(
+                        "Video frame conversion failed {consecutive_convert_errors} times in a row"
+                    ));
                 }
             }
         } else {
