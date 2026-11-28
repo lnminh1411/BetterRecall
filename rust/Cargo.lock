@@ -156,7 +156,7 @@ dependencies = [
 
 [[package]]
 name = "br-agent"
-version = "0.3.0-dev"
+version = "0.4.0-dev"
 dependencies = [
  "br-contracts",
  "br-core",
@@ -178,17 +178,19 @@ dependencies = [
 
 [[package]]
 name = "br-cli"
-version = "0.3.0-dev"
+version = "0.4.0-dev"
 dependencies = [
  "br-contracts",
  "br-core",
  "br-integrity",
+ "br-mcp-clients",
+ "tempfile",
  "windows",
 ]
 
 [[package]]
 name = "br-contracts"
-version = "0.3.0-dev"
+version = "0.4.0-dev"
 dependencies = [
  "chrono",
  "serde",
@@ -200,7 +202,7 @@ dependencies = [
 
 [[package]]
 name = "br-core"
-version = "0.3.0-dev"
+version = "0.4.0-dev"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -221,7 +223,7 @@ dependencies = [
 
 [[package]]
 name = "br-fetch"
-version = "0.3.0-dev"
+version = "0.4.0-dev"
 dependencies = [
  "serde",
  "serde_json",
@@ -233,7 +235,7 @@ dependencies = [
 
 [[package]]
 name = "br-installer"
-version = "0.3.0-dev"
+version = "0.4.0-dev"
 dependencies = [
  "br-contracts",
  "br-fetch",
@@ -250,7 +252,7 @@ dependencies = [
 
 [[package]]
 name = "br-integrity"
-version = "0.3.0-dev"
+version = "0.4.0-dev"
 dependencies = [
  "br-contracts",
  "p256",
@@ -264,7 +266,7 @@ dependencies = [
 
 [[package]]
 name = "br-mcp"
-version = "0.3.0-dev"
+version = "0.4.0-dev"
 dependencies = [
  "br-contracts",
  "br-core",
@@ -275,8 +277,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "br-mcp-clients"
+version = "0.4.0-dev"
+dependencies = [
+ "jsonc-parser",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "toml_edit",
+]
+
+[[package]]
 name = "br-sign"
-version = "0.3.0-dev"
+version = "0.4.0-dev"
 dependencies = [
  "br-contracts",
  "br-installer",
@@ -290,7 +303,7 @@ dependencies = [
 
 [[package]]
 name = "br-worker"
-version = "0.3.0-dev"
+version = "0.4.0-dev"
 dependencies = [
  "br-contracts",
  "br-integrity",
@@ -864,6 +877,12 @@ dependencies = [
  "futures-util",
  "wasm-bindgen",
 ]
+
+[[package]]
+name = "jsonc-parser"
+version = "0.26.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d6d80e6d70e7911a29f3cf3f44f452df85d06f73572b494ca99a2cad3fcf8f4"
 
 [[package]]
 name = "libc"
@@ -1526,6 +1545,43 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 
 [[package]]
+name = "toml_datetime"
+version = "0.7.5+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92e1cfed4a3038bc5a127e35a2d360f145e1f4b971b551a2ba5fd7aedf7e1347"
+dependencies = [
+ "serde_core",
+]
+
+[[package]]
+name = "toml_edit"
+version = "0.23.10+spec-1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "84c8b9f757e028cee9fa244aea147aab2a9ec09d5325a9b01e0a49730c2b5269"
+dependencies = [
+ "indexmap",
+ "toml_datetime",
+ "toml_parser",
+ "toml_writer",
+ "winnow 0.7.15",
+]
+
+[[package]]
+name = "toml_parser"
+version = "1.1.7+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0bb28d6e049a9766c3bd91a8326e6179f5b132dec87906bb97018ef7a2f3431a"
+dependencies = [
+ "winnow 1.0.5",
+]
+
+[[package]]
+name = "toml_writer"
+version = "1.2.0+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "009dbb7700f11c55ef83aebbe4c0e9cf1f1ac0844bd8d6f00dc38f302026e13a"
+
+[[package]]
 name = "tracing"
 version = "0.1.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1799,6 +1855,21 @@ checksum = "3949bd5b99cafdf1c7ca86b43ca564028dfe27d66958f2470940f73d86d75b37"
 dependencies = [
  "windows-link",
 ]
+
+[[package]]
+name = "winnow"
+version = "0.7.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
+name = "winnow"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8c3b93199df0ab874cdf0c6a94f0a0dc3423fe41f1cafb62b8bd7b1deb277aef"
 
 [[package]]
 name = "zerocopy"

@@ -2,13 +2,16 @@
 // Copyright (c) BetterRecall contributors
 
 use std::collections::VecDeque;
+use std::fs;
 use std::io;
 use std::marker::PhantomData;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use br_cli::{CliConnection, CliEnv, ERR_NOT_TRUSTED, USAGE, run_cli};
+use br_cli::{CliConnection, CliEnv, ERR_NOT_TRUSTED, USAGE, run_cli, run_mcp_cli};
 use br_contracts::LineError;
 use br_core::{AgentPresence, CliPurge, PipeConnectResult};
+use br_mcp_clients::ClientEnv;
 
 struct FakeConn {
     sent: Arc<Mutex<Vec<String>>>,
@@ -377,4 +380,111 @@ fn purge_with_yes_and_interactive_prompt_flow() {
     assert_eq!(code, 1);
     assert!(String::from_utf8(err).unwrap().contains(CliPurge::HINT_YES));
     assert_eq!(*sent.lock().unwrap(), vec!["purge app chrome.exe".to_string()]);
+}
+
+fn test_tmp_root() -> PathBuf {
+    if let Some(t) = std::env::var_os("BR_TEST_TMP")
+        && !t.is_empty()
+    {
+        return PathBuf::from(t);
+    }
+    if let Some(t) = std::env::var_os("CARGO_TARGET_DIR")
+        && !t.is_empty()
+    {
+        return PathBuf::from(t).join("test-tmp");
+    }
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().and_then(|d| d.parent()).map(|d| d.join("test-tmp")))
+        .expect("unable to determine cargo target dir for test temp folder")
+}
+
+#[test]
+fn mcp_clients_add_remove_snippet_and_unknown_id() {
+    let base = test_tmp_root();
+    fs::create_dir_all(&base).expect("create BR_TEST_TMP root");
+    let tmp = tempfile::Builder::new()
+        .prefix("br-cli-mcp-")
+        .tempdir_in(&base)
+        .expect("create tempdir");
+
+    let client_env = ClientEnv {
+        home: tmp.path().join("home"),
+        appdata: tmp.path().join("appdata"),
+        xdg_config_home: None,
+        codex_home: None,
+    };
+    fs::create_dir_all(client_env.home.join(".cursor")).unwrap();
+    let relay = tmp.path().join("app").join("bin").join("betterrecall-mcp.exe");
+
+    // mcp clients
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let code = run_mcp_cli(&s(&["clients"]), &client_env, &relay, &mut out, &mut err);
+    assert_eq!(code, 0);
+    assert!(err.is_empty());
+    let listing = String::from_utf8(out).unwrap();
+    assert!(listing.contains("cursor\tCursor\tdetected=yes\tstate=absent"));
+    assert!(listing.contains("claude-code\tClaude Code\tdetected=no\tstate=snippet\tsnippet"));
+
+    // mcp add cursor
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let code = run_mcp_cli(&s(&["add", "cursor"]), &client_env, &relay, &mut out, &mut err);
+    assert_eq!(code, 0);
+    assert!(err.is_empty());
+    assert!(String::from_utf8(out).unwrap().contains("cursor: added"));
+    assert!(client_env.home.join(".cursor").join("mcp.json").is_file());
+
+    // mcp snippet claude-code
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let code = run_mcp_cli(
+        &s(&["snippet", "claude-code"]),
+        &client_env,
+        &relay,
+        &mut out,
+        &mut err,
+    );
+    assert_eq!(code, 0);
+    assert!(err.is_empty());
+    let snip_out = String::from_utf8(out).unwrap();
+    assert!(snip_out.contains("Command: claude mcp add --scope user betterrecall --"));
+    assert!(snip_out.contains(&relay.to_string_lossy().into_owned()));
+
+    // mcp remove cursor
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let code = run_mcp_cli(
+        &s(&["remove", "cursor"]),
+        &client_env,
+        &relay,
+        &mut out,
+        &mut err,
+    );
+    assert_eq!(code, 0);
+    assert!(err.is_empty());
+    assert!(String::from_utf8(out).unwrap().contains("cursor: removed"));
+
+    // unknown id -> exit 1 with error on stderr
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let code = run_mcp_cli(
+        &s(&["add", "does-not-exist"]),
+        &client_env,
+        &relay,
+        &mut out,
+        &mut err,
+    );
+    assert_eq!(code, 1);
+    assert!(out.is_empty());
+    assert!(String::from_utf8(err).unwrap().contains("unknown MCP client"));
+
+    // bad mcp subcommand -> exit 1 with USAGE on stderr
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let code = run_mcp_cli(&s(&[]), &client_env, &relay, &mut out, &mut err);
+    assert_eq!(code, 1);
+    assert!(out.is_empty());
+    assert_eq!(String::from_utf8(err).unwrap().trim(), USAGE);
 }

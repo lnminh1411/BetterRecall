@@ -10,6 +10,7 @@ members = [
     "crates/br-sign",
     "crates/br-cli",
     "crates/br-mcp",
+    "crates/br-mcp-clients",
 ]
 resolver = "3"
 
