@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: AGPL-3.0-only
 # Builds avif.dll and jxl*.dll with vcpkg (static deps, static CRT, release only) into K:/cache/br-codecs.
 # Needs about 6 GB free on K: (sources + tools). Copy installed/x64-windows-br/bin/{avif,jxl,jxl_cms,jxl_threads}.dll
 # to src/BetterRecall.Agent/Native/ and rebuild codecs.LICENSE.txt from installed/x64-windows-br/share/<port>/copyright.

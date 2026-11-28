@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) BetterRecall contributors
 
 //! Wire types, pipe framing (line and binary), full settings schema and validation,

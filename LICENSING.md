@@ -1,17 +1,10 @@
 # Licensing
 
-BetterRecall uses two licences. Every source file starts with an `SPDX-License-Identifier` line that names its licence.
+BetterRecall is published by its contributors and licensed under the GNU Affero General Public License, version 3 only (AGPL-3.0-only). The full text is in `LICENSE` and `LICENSES/AGPL-3.0.txt`. Every source file starts with an `SPDX-License-Identifier: AGPL-3.0-only` line.
 
-| Part | Folders | Licence | Text |
-|---|---|---|---|
-| Client side: WinUI app and the shared contracts it links | `src/BetterRecall.UI`, `src/BetterRecall.Contracts`, `tests/BetterRecall.UI.Tests` | MIT | `LICENSES/MIT.txt` |
-| Backend: agent, worker, core, CLI, MCP server, their tests, scripts | everything else | AGPL-3.0-only | `LICENSE`, `LICENSES/AGPL-3.0.txt` |
+This covers all of the code: the agent, worker, core, CLI, MCP server, installer, the user interface, the shared contracts, the tests and the scripts. If you change BetterRecall and let people use it over a network, you must offer them your source.
 
-`BetterRecall.Contracts` holds the IPC records, settings and pipe names. It is MIT because the UI compiles it in. The backend links it too, which MIT allows.
-
-`tests/BetterRecall.UI.Tests` references no backend project. The seam tests that run the UI's own pipe client against the real agent are in `tests/BetterRecall.Agent.Conformance`, which compiles the MIT UI client code into an AGPL test project; MIT allows that.
-
-The UI talks to the agent only over a named pipe, so the two run as separate programs. You can reuse the UI and contracts under MIT terms. The backend stays under AGPL-3.0: if you change it and let people use it over a network, you must offer them your source.
+Until version 0.3, the WinUI app (`src/BetterRecall.UI`), the shared contracts (`src/BetterRecall.Contracts`, `rust/crates/br-contracts`) and the UI tests were MIT. From 0.4.0-dev they are AGPL-3.0-only like the rest. Copies of those parts taken from earlier commits keep the MIT terms they were published under.
 
 ## Models
 
