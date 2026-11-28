@@ -1,10 +1,16 @@
 **[AI Content Warning: AI Agents was used to assist with coding]**
 
-<p align="center"><img src="docs/images/banner.png" alt="BetterRecall: search everything you have seen and heard" /></p>
+<p align="center"><img src="docs/images/banner.png" alt="BetterRecall" /></p>
 
-BetterRecall is a local alternative to Windows Recall. It keeps an encrypted history of your screen, and of speech it hears, and lets you search it in your own words: "the invoice from Acme", "that flight to Tokyo", "what was said in standup". Images and text are embedded on your NPU or GPU with EmbeddingGemma 2. The history stays on your PC, encrypted with a key held by the TPM behind Windows Hello. BetterRecall makes no network connections while cloud describe is off, which is the default. Turning cloud describe on ends that guarantee: a confirmation says so, and from then on BetterRecall can send a single image you have previewed to the AI provider you configured, only when you click Send. It also enables Ask, a chat that searches your history for you and answers with sources; each chat shows exactly which captures it would send, with sensitive details redacted, and sends them only after you allow it. Turn it off to restore the guarantee.
+<p align="center">
+  <a href="https://github.com/lnminh1411/BetterRecall/releases">Download</a> ·
+  <a href="docs/user-guide.md">User guide</a> ·
+  <a href="#mcp-use-your-history-from-ai-tools">MCP</a> ·
+  <a href="https://github.com/lnminh1411/BetterRecall/issues">Report a problem</a> ·
+  BetterRecall contributors
+</p>
 
-It also keeps an instant replay buffer, so you can save the last minutes of your screen as a video. It skips private browser windows, apps you exclude and explicit images.
+BetterRecall is a local alternative to Windows Recall, made by BetterRecall contributors. It keeps an encrypted history of your screen, and of speech it hears, and lets you search it in your own words: "the invoice from Acme", "that flight to Tokyo", "what was said in standup". It also keeps an instant replay buffer, so you can save the last minutes of your screen as a video.
 
 <p align="center">
   <img src="docs/images/search-dark.png" width="49%" alt="Search window" />
@@ -17,11 +23,55 @@ It also keeps an instant replay buffer, so you can save the last minutes of your
 
 Screenshots show the real app running on demo data (`--mock`).
 
-**Status:** early development, Windows 11 x64. There is no installer yet; build from source and download the models from [Hugging Face](https://huggingface.co/lnminh1411/BetterRecall-models). **Docs:** [`docs/`](docs/documentations_summary.md). **Licences:** the WinUI app and contracts are MIT, the rest is AGPL-3.0 ([`LICENSING.md`](LICENSING.md)); models keep their own licences.
+**Status:** early development (0.4.0-dev), Windows 11 x64 only. Linux is planned; macOS is not.
+
+## Privacy
+
+- Everything stays on your PC. Images and text are embedded on your NPU or GPU with EmbeddingGemma 2; nothing is uploaded for search.
+- The history is encrypted with a key held by the TPM behind Windows Hello (DPAPI or a passphrase without a TPM).
+- It skips private browser windows, apps you exclude and explicit images, and removes card numbers and similar details from stored text.
+- BetterRecall makes no network connections while cloud describe is off, which is the default. Turning cloud describe on ends that guarantee: a confirmation says so, and from then on BetterRecall can send a single image you have previewed to the AI provider you configured, only when you click Send. It also enables Ask, a chat that searches your history and answers with sources; each chat shows exactly which captures it would send, with sensitive details redacted, and sends them only after you allow it. Turn it off to restore the guarantee.
+- The only other network use is the update check (GitHub Releases) and model downloads (Hugging Face); automatic update checks can be turned off.
+
+## Install
+
+1. Download `BetterRecall-Setup.exe` from [Releases](https://github.com/lnminh1411/BetterRecall/releases).
+2. Run it. It installs for your user only (no admin rights) and asks how to get the models: all of them now (about 4 to 6 GB), the minimum set, or later from the Models page. Downloads resume where they stopped.
+3. BetterRecall starts after install and on every sign-in (you can turn that off). Open search with `Ctrl+Alt+Space`.
+
+Updates are checked against GitHub Releases and verified with the release signature before they install. Uninstall from Windows Settings > Apps; you choose whether your history is kept.
+
+## First steps
+
+- `Ctrl+Alt+Space` opens search, `Ctrl+Alt+P` pauses capture, `Ctrl+Alt+R` saves the replay, `Ctrl+Alt+Shift+X` is the panic key: it stops capture, locks the history and deletes the last few minutes. All can be changed on the Shortcuts page.
+- The Home page shows what is running and turns features on and off.
+- Timeline browses your day; Replays holds saved clips.
+- The [user guide](docs/user-guide.md) walks through the rest.
+
+## MCP: use your history from AI tools
+
+BetterRecall includes an MCP server, so AI tools on your PC can search your history when you ask them to. It is off by default; turn it on in Settings > MCP. The tools are read-only (`search_history`, `get_capture`, `recall_status`) and return text, never images. Results go only to the tool that asked.
+
+Set up a client from the command line (an in-app page follows in 0.4):
+
+```powershell
+betterrecall mcp clients
+betterrecall mcp add cursor
+```
+
+`add` writes a `betterrecall` entry into the client's own config file, leaves every other entry alone and keeps a backup next to it. `betterrecall mcp snippet <client>` prints the config to paste by hand instead.
+
+| Client | Setup |
+|---|---|
+| Claude Desktop, Cursor, Windsurf, VS Code (Copilot), Antigravity, Gemini CLI, Codex CLI, Muse Code | `betterrecall mcp add <client>` |
+| Claude Code | `betterrecall mcp snippet claude-code` prints the `claude mcp add` command |
+| DeepSeek Harness, Zed, Cline, others | `betterrecall mcp snippet <client>` |
+
+The server command is `%LOCALAPPDATA%\BetterRecall\app\bin\betterrecall-mcp.exe` with no arguments, for any other client.
 
 ## System requirements
 
-Estimates for 0.3.0-dev, from the code's defaults and the dev PC's measurements. The first run's benchmark adjusts settings to the machine; the reasons below say what it changes.
+Estimates for 0.4.0-dev, from the code's defaults and the dev PC's measurements. The first run's benchmark adjusts settings to the machine; the reasons below say what it changes.
 
 **Minimum**
 
@@ -55,3 +105,19 @@ Requirements on Windows x64:
 
 Build the solution with `dotnet build BetterRecall.slnx`, or build a full layout into `artifacts\dev\` with `python Scripts/dev_build.py` (add `--test` to run `cargo test` and the `.NET` test suites first). See `Scripts/models/prepare_all.py` or download the exported models from [Hugging Face](https://huggingface.co/lnminh1411/BetterRecall-models).
 
+## Feedback and support
+
+- Bugs and ideas: [GitHub Issues](https://github.com/lnminh1411/BetterRecall/issues). Please paste logs only after reading them; they never contain captured text, but may contain app names.
+- Security problems: report them privately through [GitHub security advisories](https://github.com/lnminh1411/BetterRecall/security/advisories/new), not in public issues.
+- If BetterRecall is useful to you, you can [buy me a coffee](https://buymeacoffee.com/TODO). <!-- TODO(links): Buy Me A Coffee page -->
+
+## Links
+
+- Source: [GitHub](https://github.com/lnminh1411/BetterRecall)
+- Source: [github.com/lnminh1411/BetterRecall](https://github.com/lnminh1411/BetterRecall)
+- Models: [huggingface.co/lnminh1411/BetterRecall-models](https://huggingface.co/lnminh1411/BetterRecall-models)
+- Docs: [`docs/`](docs/documentations_summary.md)
+
+## Licence
+
+BetterRecall is published by its contributors under AGPL-3.0-only ([`LICENSING.md`](LICENSING.md)). The models keep their own licences.
