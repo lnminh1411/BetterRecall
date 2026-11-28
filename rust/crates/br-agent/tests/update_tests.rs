@@ -1015,17 +1015,17 @@ fn state_json_without_new_c1_fields_loads_successfully() {
     let legacy_json = r#"{
         "lastCheck": "2026-11-22T10:00:00Z",
         "latest": {
-            "version": "0.3.0",
+            "version": "9.0.0",
             "installerBytes": 1024
         },
-        "downloaded": "0.3.0"
+        "downloaded": "9.0.0"
     }"#;
     fs::write(&state_path, legacy_json).unwrap();
 
     let host = make_test_host(&dir);
     let status = host.update_status().unwrap();
     assert_eq!(status.state, "ready");
-    assert_eq!(status.downloaded_version.as_deref(), Some("0.3.0"));
+    assert_eq!(status.downloaded_version.as_deref(), Some("9.0.0"));
 }
 
 // C1: apply refuses with an InvalidOperation while state is applying.
