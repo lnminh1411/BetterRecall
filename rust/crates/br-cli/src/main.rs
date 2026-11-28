@@ -3,15 +3,16 @@
 
 //! `betterrecall.exe`: CLI client for BetterRecall's public IPC pipe.
 
-use std::io::{self, BufRead, IsTerminal};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use br_cli::{CliEnv, PipeCliConnection, run_cli};
+use br_cli::{CliEnv, PipeCliConnection, run_cli, run_mcp_cli};
 use br_contracts::{DataPaths, InstallLayout, PipeNames};
 use br_core::{AgentPresence, CancelSource, PipeClient, SettingsStore};
 use br_integrity::{ProgramKind, enforce_or_exit};
+use br_mcp_clients::ClientEnv;
 use windows::Win32::System::Console::SetConsoleCtrlHandler;
 use windows::core::BOOL;
 
@@ -39,6 +40,19 @@ fn main() {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let home = DataPaths::home();
+
+    if args.first().is_some_and(|a| a.eq_ignore_ascii_case("mcp")) {
+        let mut stdout = io::stdout().lock();
+        let mut stderr = io::stderr().lock();
+        let Some(client_env) = ClientEnv::from_system() else {
+            let _ = writeln!(stderr, "could not determine USERPROFILE or APPDATA");
+            std::process::exit(1);
+        };
+        let relay = DataPaths::mcp_relay(&home);
+        let code = run_mcp_cli(&args[1..], &client_env, &relay, &mut stdout, &mut stderr);
+        std::process::exit(code);
+    }
+
     let settings = SettingsStore::read_only(&home);
     let sid = PipeNames::user_sid().unwrap_or_default();
     let pipe = PipeNames::public(&settings.ipc.pipe_name, &sid, &home);
